@@ -156,7 +156,7 @@ public:
     CcMap *Ccm()
     {
         LruEntry *lru_entry_ = reinterpret_cast<LruEntry *>(cce_addr_.CcePtr());
-        return lru_entry_->parent_map_;
+        return lru_entry_->GetCcMap();
     }
 
     bool Execute(CcShard &ccs) override
@@ -381,18 +381,6 @@ public:
     void Reset(std::unique_ptr<CcMessage> input_msg);
     bool ValidTermCheck() override;
 
-    uint64_t handler_addr()
-    {
-        if (input_msg_)
-        {
-            return input_msg_->handler_addr();
-        }
-        else
-        {
-            return 0;
-        }
-    }
-
     int64_t TxTerm()
     {
         return tx_term_;
@@ -454,16 +442,11 @@ private:
     CcStreamSender *hd_{nullptr};
 
     CcEntryAddr prior_cce_addr_;
-    ScanDirection direct_{ScanDirection::Forward};
     RemoteScanCache scan_cache_;
-    bool is_ckpt_delta_{false};
     // The address of the CC map of the blocked core.
     CcHandlerResult<Void> cc_res_{nullptr};
     int64_t tx_term_{0};
-    bool is_for_write_{false};
-    bool is_covering_keys_{false};
     uint64_t snapshot_ts_{0};
-    bool is_wait_for_post_write_{false};
 
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
@@ -471,8 +454,15 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
+
+    ScanDirection direct_{ScanDirection::Forward};
+    bool is_ckpt_delta_{false};
+    bool is_for_write_{false};
+    bool is_covering_keys_{false};
+    bool is_wait_for_post_write_{false};
     // scan type for above cce_ptr_
     ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
+    TableType tbl_type_;
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;

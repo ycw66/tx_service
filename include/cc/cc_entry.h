@@ -6,14 +6,11 @@
 #include <atomic>
 #include <cassert>
 #include <list>
-#include <map>
-#include <memory>  // std::make_unique, make_shared, shared_ptr
-#include <unordered_set>
+#include <memory>   // std::make_unique, make_shared, shared_ptr
 #include <utility>  // std::move
 #include <vector>
 
 #include "cc_req_base.h"
-#include "circular_queue.h"
 #include "non_blocking_lock.h"
 #include "tx_id.h"
 #include "tx_key.h"
@@ -27,6 +24,7 @@
 namespace txservice
 {
 class CcMap;
+class CcShard;
 
 template <typename KeyT, typename ValueT>
 class TemplateCcMap;
@@ -38,34 +36,6 @@ struct CcEntry;
 
 template <typename KeyT, typename ValueT>
 struct CcPage;
-
-struct UntypedInsertEntry
-{
-public:
-    virtual ~UntypedInsertEntry() = default;
-    virtual const LruEntry &Parent() const = 0;
-};
-
-template <typename KeyT, typename ValueT>
-struct InsertEntry : public UntypedInsertEntry
-{
-public:
-    InsertEntry(const KeyT &key,
-                TxNumber txn,
-                CcEntry<KeyT, ValueT> *parent_entry)
-        : key_(key), txn_(txn), parent_entry_(parent_entry)
-    {
-    }
-
-    const LruEntry &Parent() const override
-    {
-        return *parent_entry_;
-    }
-
-    const KeyT key_;  // owner of key_
-    TxNumber txn_;
-    CcEntry<KeyT, ValueT> *parent_entry_;
-};
 
 struct FlushRecord
 {
@@ -279,33 +249,41 @@ public:
 struct LruEntry
 {
 public:
-    LruEntry() = delete;
-    virtual ~LruEntry();
-
-    LruEntry(CcMap *parent);
+    LruEntry() = default;
+    virtual ~LruEntry() = default;
 
     /**
      * @brief Get key lock from lock array if it is null.
      *
      */
-    NonBlockingLock &GetKeyLock();
+    NonBlockingLock &GetOrCreateKeyLock(CcShard *ccs,
+                                        CcMap *ccm,
+                                        LruPage *page);
 
-    /**
-     * @brief Get gap lock from lock array if it is null.
-     *
-     */
-    NonBlockingLock &GetGapLock();
+    NonBlockingLock *GetKeyLock() const;
+
+    NonBlockingLock *GetGapLock() const;
 
     /**
      * @brief When release a lock, ccentry should call TryResetKeyLock to try to
      * recycle the lock ptr to lock array if lock set is empty.
      *
      */
-    void RecycleKeyLock();
+    void RecycleKeyLock(CcShard &ccs);
 
-    void RecycleGapLock();
+    /**
+     * @brief Forces to clear the locks on the cc entry. This is called when a
+     * node fails over and its in-memory cc maps are cleared.
+     *
+     * @param ccs
+     */
+    void ClearLocks(CcShard &ccs, NodeGroupId ng_id);
 
-    virtual const TxKey *Key() const = 0;
+    CcMap *GetCcMap() const;
+
+    LruPage *GetCcPage() const;
+
+    void UpdateCcPage(LruPage *page);
 
     /**
      * @brief check whether the entry can be kicked out from ccmap, iff no key
@@ -316,28 +294,11 @@ public:
      */
     bool IsFree();
 
-    // todo: remove parent_map_ of LruEntry
-    CcMap *const parent_map_;
+private:
+    KeyGapLock *cc_lock_{nullptr};
 
-    NonBlockingLock *key_lock_ptr_{nullptr};
-    NonBlockingLock *gap_lock_ptr_{nullptr};
-
+public:
     uint64_t commit_ts_{1};
-    // "last_read_ts_" is updated in two cases:
-    // (1) Read under MVCC+SnapshotIsolation: it will be updated to
-    // max{read_ts, last_read_ts_} if latest version of ccentry less than
-    // read timestamp, which pushes future transactions' commit
-    // timestamps larger than the read timestamp of the current read
-    // transaction;
-    // (2) PostRead under OCC/LOCKING+RepeatableRead: it will be updated to
-    // max{commit_ts,last_read_ts_} after releasing read intent/lock, which
-    // pushes future transactions' commit timestamps larger than the largest
-    // commit timestamp of all read transactions that have released the read
-    // lock on the key;
-    uint64_t last_read_ts_{1};
-
-    uint64_t gap_commit_ts_{1};
-    uint64_t gap_last_read_ts_{1};
 
     // The commit timestamp of the latest checkpoint version record. Unlike
     // other fields that are read/modified via a single thread, this field is
@@ -353,6 +314,7 @@ public:
      * in KV storage.
      */
     std::atomic<int32_t> data_store_size_{INT32_MAX};
+    RecordStatus payload_status_{RecordStatus::Unknown};
 };
 
 /**
@@ -474,22 +436,7 @@ public:
      *
      * @param parent Pointer of the cc map to which the cc entry belongs
      */
-    CcEntry(CcMap *parent)
-        : LruEntry(parent),
-          payload_status_(RecordStatus::Unknown),
-          payload_(nullptr),
-          archives_()
-    {
-    }
-
-    CcEntry(CcMap *parent_map, CcPage<KeyT, ValueT> *parent_page)
-        : LruEntry(parent_map),
-          payload_status_(RecordStatus::Unknown),
-          payload_(nullptr),
-          archives_(),
-          parent_page_(parent_page)
-    {
-    }
+    CcEntry() = default;
 
     ~CcEntry() = default;
 
@@ -497,9 +444,9 @@ public:
     {
         size_t mem_usage = basic_mem_overhead_;
         mem_usage += PayloadMemUsage();
+#ifndef ON_KEY_OBJECT
         mem_usage += GetArchiveMemUsage();
-        // TODO size of insert_intention_set_, not used yet
-
+#endif
         return mem_usage;
     }
 
@@ -525,32 +472,23 @@ public:
         return payload_ == nullptr ? 0 : payload_->SerializedLength();
     }
 
-    RecordStatus payload_status_;
-#ifndef ON_KEY_OBJECT
-    std::shared_ptr<ValueT> payload_;
-#else
-    std::unique_ptr<ValueT> payload_;
+#ifdef ON_KEY_OBJECT
+    std::unique_ptr<ValueT> payload_{nullptr};
     std::unique_ptr<TxCommand> pending_cmd_;
     std::unique_ptr<ReplayTxnCmdList> replay_cmd_list_;
     // temporary object to process subsequent commands in the same txn
     std::unique_ptr<ValueT> dirty_payload_;
     // status of temporary object
     RecordStatus dirty_payload_status_{RecordStatus::NonExistent};
-#endif
-
-    std::map<const KeyT *,
-             std::unique_ptr<InsertEntry<KeyT, ValueT>>,
-             PtrLessThan<KeyT>>
-        insert_intention_set_;
-
+#else
+    std::shared_ptr<ValueT> payload_{nullptr};
     // save versions exclude the current version.(descending order,eg.[4,3,2,1])
-    std::unique_ptr<std::list<VersionRecord<ValueT>>> archives_;
-
-    // parent CcPage
-    CcPage<KeyT, ValueT> *parent_page_{nullptr};
+    std::unique_ptr<std::list<VersionRecord<ValueT>>> archives_{nullptr};
+#endif
 
     inline static size_t basic_mem_overhead_ = sizeof(CcEntry<KeyT, ValueT>);
 
+#ifndef ON_KEY_OBJECT
     /**
      * @brief Move(not copy) the current version (payload, payload_status,
      * commit_ts) to the archives_.
@@ -638,14 +576,9 @@ public:
         return mem_usage;
     }
 
-    size_t AddArchiveRecord(
-#ifdef ON_KEY_OBJECT
-        std::unique_ptr<TxRecord> payload_uptr,
-#else
-        std::shared_ptr<ValueT> payload_ptr,
-#endif
-        RecordStatus payload_status,
-        uint64_t commit_ts)
+    size_t AddArchiveRecord(std::shared_ptr<ValueT> payload_ptr,
+                            RecordStatus payload_status,
+                            uint64_t commit_ts)
     {
         if (commit_ts == 1U && payload_status == RecordStatus::Deleted)
         {
@@ -671,11 +604,7 @@ public:
             it = archives_->emplace(it);
             it->commit_ts_ = commit_ts;
             it->payload_status_ = payload_status;
-#ifdef ON_KEY_OBJECT
-            it->payload_.reset(static_cast<ValueT *>(payload_uptr.release()));
-#else
             it->payload_ = payload_ptr;
-#endif
             mem_usage += it->MemUsage();
         }
 
@@ -756,6 +685,7 @@ public:
      */
     void MvccGet(uint64_t ts,
                  TableType tbl_type,
+                 uint64_t &last_read_ts,
                  VersionResultRecord<ValueT> &rec)
     {
         if (payload_status_ == RecordStatus::Unknown)
@@ -770,14 +700,10 @@ public:
             // writer's commit_ts must be higher than MVCC reader's ts. Or it
             // will break the REPEATABLE READ since the next MVCC read in the
             // same transaction will read the new updated ccentry.
-            last_read_ts_ = std::max(ts, last_read_ts_);
+            last_read_ts = std::max(ts, last_read_ts);
             if (payload_status_ == RecordStatus::Normal)
             {
-#ifdef ON_KEY_OBJECT
-                rec.payload_ptr_ = payload_.get();
-#else
                 rec.payload_ptr_ = payload_;
-#endif
             }
             rec.commit_ts_ = commit_ts_;
             rec.payload_status_ = payload_status_;
@@ -795,19 +721,11 @@ public:
                     {
                         if (tbl_type == TableType::Secondary)
                         {
-#ifdef ON_KEY_OBJECT
-                            rec.payload_ptr_ = payload_.get();
-#else
                             rec.payload_ptr_ = payload_;
-#endif
                         }
                         else
                         {
-#ifdef ON_KEY_OBJECT
-                            rec.payload_ptr_ = it->payload_.get();
-#else
                             rec.payload_ptr_ = it->payload_;
-#endif
                         }
                     }
                     rec.commit_ts_ = it->commit_ts_;
@@ -851,6 +769,7 @@ public:
         }
         return false;
     }
+#endif
 
     /**
      * @brief Export version records to flush into KvStore when mvcc is enabled.
@@ -934,6 +853,7 @@ public:
             return exported_count;
         }
 
+#ifndef ON_KEY_OBJECT
         if (archives_ != nullptr && archives_->size() > 0)
         {
             for (auto it = archives_->begin(); it != archives_->end(); it++)
@@ -964,20 +884,12 @@ public:
                                 {
                                     if (tbl_type != TableType::Secondary)
                                     {
-#ifndef ON_KEY_OBJECT
                                         ref.SetPayload(
                                             it->payload_);  // pk, unique_sk
-#else
-                                        ref.SetPayload(it->payload_.get());
-#endif
                                     }
                                     else
                                     {
-#ifndef ON_KEY_OBJECT
                                         ref.SetPayload(payload_);  // sk
-#else
-                                        ref.SetPayload(payload_.get());
-#endif
                                     }
                                 }
                                 ref.payload_status_ = it->payload_status_;
@@ -1002,20 +914,12 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
-#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(
                                         it->payload_);  // pk, unique_sk
-#else
-                                    ref.SetPayload(it->payload_.get());
-#endif
                                 }
                                 else
                                 {
-#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(payload_);  // sk
-#else
-                                    ref.SetPayload(payload_.get());
-#endif
                                 }
                             }
                             ref.payload_status_ = it->payload_status_;
@@ -1052,20 +956,12 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
-#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(
                                         it->payload_);  // pk, unique_sk
-#else
-                                    ref.SetPayload(it->payload_.get());
-#endif
                                 }
                                 else
                                 {
-#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(payload_);  // sk
-#else
-                                    ref.SetPayload(payload_.get());
-#endif
                                 }
                             }
                             ref.payload_status_ = it->payload_status_;
@@ -1100,20 +996,12 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
-#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(
                                         it->payload_);  // pk, unique_sk
-#else
-                                    ref.SetPayload(it->payload_.get());
-#endif
                                 }
                                 else
                                 {
-#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(payload_);  // sk
-#else
-                                    ref.SetPayload(payload_.get());
-#endif
                                 }
                             }
                             ref.payload_status_ = it->payload_status_;
@@ -1143,9 +1031,12 @@ public:
             // into "mvcc_archives table".
             mv_base_vec.push_back(ckpt_idx);
         }
+#endif
+
         return exported_count;
     }
 
+#ifndef ON_KEY_OBJECT
     size_t ArchiveRecordsCount() const
     {
         if (archives_ == nullptr)
@@ -1162,6 +1053,7 @@ public:
             archives_.reset(nullptr);
         }
     }
+#endif
 
     bool NeedCkpt()
     {
@@ -1169,8 +1061,6 @@ public:
                (payload_status_ == RecordStatus::Normal ||
                 payload_status_ == RecordStatus::Deleted);
     }
-
-    const TxKey *Key() const override;
 };
 
 struct LruPage
@@ -1185,6 +1075,8 @@ struct LruPage
     LruPage *lru_next_{nullptr};
 
     CcMap *parent_map_{nullptr};
+
+    uint64_t last_access_ts_{0};
 };
 
 template <typename KeyT, typename ValueT>
@@ -1241,10 +1133,6 @@ struct CcPage : public LruPage
           prev_page_(prev_page),
           next_page_(next_page)
     {
-        for (auto &entry_ptr : entries_)
-        {
-            entry_ptr->parent_page_ = this;
-        }
         if (prev_page_ != nullptr)
         {
             prev_page_->next_page_ = this;
@@ -1356,8 +1244,7 @@ struct CcPage : public LruPage
                 idxs_in_page[i] = keys_.size();
 
                 keys_.push_back(std::move(new_keys[i]));
-                entries_.push_back(
-                    std::make_unique<CcEntry<KeyT, ValueT>>(parent_map_, this));
+                entries_.push_back(std::make_unique<CcEntry<KeyT, ValueT>>());
 
                 size_t key_mem_increased =
                     keys_.back().MemUsage() - sizeof(KeyT);
@@ -1383,7 +1270,7 @@ struct CcPage : public LruPage
             {
                 keys_[res_index - 1] = std::move(new_keys[new_index - 1]);
                 entries_[res_index - 1] =
-                    std::make_unique<CcEntry<KeyT, ValueT>>(parent_map_, this);
+                    std::make_unique<CcEntry<KeyT, ValueT>>();
                 idxs_in_page[new_index - 1] = res_index - 1;
 
                 size_t key_mem_increased =
@@ -1408,8 +1295,7 @@ struct CcPage : public LruPage
         for (; new_index > 0; --new_index, --res_index)
         {
             keys_[res_index - 1] = std::move(new_keys[new_index - 1]);
-            entries_[res_index - 1] =
-                std::make_unique<CcEntry<KeyT, ValueT>>(parent_map_, this);
+            entries_[res_index - 1] = std::make_unique<CcEntry<KeyT, ValueT>>();
 
             idxs_in_page[new_index - 1] = res_index - 1;
 
@@ -1432,9 +1318,9 @@ struct CcPage : public LruPage
 
         size_t insert_pos = insert_it - keys_.begin();
         auto key_it = keys_.emplace(insert_it, key);
-        auto entry_ptr_it = entries_.emplace(
-            entries_.begin() + insert_pos,
-            std::make_unique<CcEntry<KeyT, ValueT>>(parent_map_, this));
+        auto entry_ptr_it =
+            entries_.emplace(entries_.begin() + insert_pos,
+                             std::make_unique<CcEntry<KeyT, ValueT>>());
 
         size_t key_mem_increased = key_it->MemUsage() - sizeof(KeyT);
         size_t entry_mem_increased = (*entry_ptr_it)->GetCcEntryMemUsage();
@@ -1499,7 +1385,6 @@ struct CcPage : public LruPage
      */
     size_t FindEntry(const CcEntry<KeyT, ValueT> *cce) const
     {
-        assert(cce->parent_page_ == this);
         auto it = entries_.begin();
         while (it->get() != cce && it != entries_.end())
         {
@@ -1609,18 +1494,6 @@ struct CcPage : public LruPage
         return keys_.size();
     }
 
-    uint64_t LastReadTs() const
-    {
-        // todo: consider maintain last_read_ts_ of page
-        uint64_t last_read_ts = 0;
-        for (auto entry_it = entries_.begin(); entry_it != entries_.end();
-             entry_it++)
-        {
-            last_read_ts = std::max(last_read_ts, (*entry_it)->last_read_ts_);
-        }
-        return last_read_ts;
-    }
-
     void DebugPrint() const
     {
         LOG(INFO) << "page addr: " << this << ", keys_ size: " << keys_.size()
@@ -1662,12 +1535,6 @@ struct CcPage : public LruPage
         sizeof(std::unique_ptr<CcEntry<KeyT, ValueT>>) * split_threshold_ +
         sizeof(uint64_t);
 };
-
-template <typename KeyT, typename ValueT>
-const TxKey *CcEntry<KeyT, ValueT>::Key() const
-{
-    return parent_page_->KeyOfEntry(this);
-}
 
 struct CcEntryAddr
 {

@@ -1601,6 +1601,11 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
     }
 }
 
+void txservice::LocalCcHandler::VerifyOrphanLock(TxNumber txn)
+{
+    cc_shards_.GetCcShard(thd_id_)->VerifyOrphanLock(cc_shards_.NodeId(), txn);
+}
+
 /*
  * Get the node id which runs the current transaction.
  */

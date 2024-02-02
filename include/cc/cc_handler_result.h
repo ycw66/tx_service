@@ -2,14 +2,9 @@
 
 #include <atomic>
 #include <cassert>
-#include <chrono>
-#include <condition_variable>
 #include <functional>
-#include <mutex>
 #include <string>
-#include <system_error>
 #include <utility>
-#include <variant>
 
 #include "error_messages.h"  // CcErrorCode
 
@@ -42,19 +37,7 @@ public:
     CcHandlerResultBase(const CcHandlerResultBase &) = delete;
     CcHandlerResultBase &operator=(const CcHandlerResultBase &) = delete;
 
-    CcHandlerResultBase(CcHandlerResultBase &&rhs)
-        : is_finished_(rhs.is_finished_.load(std::memory_order_acquire)),
-          error_code_(rhs.error_code_.load(std::memory_order_acquire)),
-          ref_cnted_(rhs.ref_cnted_),
-          ref_cnt_(rhs.ref_cnt_.load(std::memory_order_acquire)),
-          remote_ref_cnt_(rhs.remote_ref_cnt_.load(std::memory_order_acquire)),
-          txm_(rhs.txm_)
-#ifdef EXT_TX_PROC_ENABLED
-          ,
-          is_blocking_(rhs.is_blocking_)
-#endif
-    {
-    }
+    CcHandlerResultBase(CcHandlerResultBase &&rhs) = delete;
 
     virtual ~CcHandlerResultBase() = default;
     virtual void SetError(CcErrorCode err_code) = 0;
@@ -227,10 +210,18 @@ public:
     CcHandlerResult(const CcHandlerResult &rhs) = delete;
 
     CcHandlerResult(CcHandlerResult &&rhs) noexcept
-        : CcHandlerResultBase(std::move(rhs)),
+        : CcHandlerResultBase(rhs.txm_),
           result_(std::move(rhs.result_)),
           post_lambda_(std::move(rhs.post_lambda_))
     {
+        is_finished_ = rhs.is_finished_.load(std::memory_order_relaxed);
+        error_code_ = rhs.error_code_.load(std::memory_order_relaxed);
+        ref_cnted_ = rhs.ref_cnted_;
+        ref_cnt_ = rhs.ref_cnt_.load(std::memory_order_relaxed);
+        remote_ref_cnt_ = rhs.remote_ref_cnt_.load(std::memory_order_relaxed);
+#ifdef EXT_TX_PROC_ENABLED
+        is_blocking_ = rhs.is_blocking_;
+#endif
     }
 
     CcHandlerResult &operator=(const CcHandlerResult &rhs) = delete;

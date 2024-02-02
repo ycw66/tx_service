@@ -125,6 +125,7 @@ public:
 
     // Fetch record from datastore asynchronously.
     virtual void FetchRecord(const TableName &table_name,
+                             const TxKey *key,
                              FetchRecordCc *fetch_cc)
     {
         assert(false);

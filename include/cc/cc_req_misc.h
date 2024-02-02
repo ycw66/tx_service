@@ -621,7 +621,10 @@ struct FetchRecordCc : public FetchCc
 {
 public:
     FetchRecordCc() = delete;
-    FetchRecordCc(LruEntry *cce,
+    FetchRecordCc(const TableName *tbl_name,
+                  const TableSchema *tbl_schema,
+                  LruEntry *cce,
+                  CcMap *ccm,
                   CcShard &ccs,
                   NodeGroupId cc_ng_id,
                   int64_t cc_ng_term);
@@ -634,6 +637,7 @@ public:
     const TableName *table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
     LruEntry *cce_{nullptr};
+    CcMap *ccm_;
     uint64_t rec_ts_{0};
     RecordStatus rec_status_{RecordStatus::Unknown};
     std::unique_ptr<TxRecord> rec_{nullptr};

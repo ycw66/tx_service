@@ -379,6 +379,8 @@ public:
                      const TxKey *start_key = nullptr,
                      const TxKey *end_key = nullptr) override;
 
+    void VerifyOrphanLock(TxNumber txn) override;
+
 private:
     /// <summary>
     /// Thread Id is the local offset of the core to which the handler is

@@ -1,23 +1,16 @@
 #pragma once
 
-#include <chrono>
 #include <memory>
-#include <stack>
-#include <string>
 #include <tuple>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "catalog_key_record.h"
 #include "cc/cc_handler.h"
 #include "cc/ccm_scanner.h"
 #include "cc_protocol.h"
-#include "log_closure.h"
 #include "metrics.h"
 #include "read_write_set.h"
-#include "readerwriterqueue.h"
 #include "spinlock.h"
 #include "tx_index_operation.h"
 #include "tx_operation.h"

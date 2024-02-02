@@ -1,13 +1,16 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "catalog_factory.h"
+#include "cc_entry.h"
 #include "cc_map.h"
+#include "non_blocking_lock.h"
 #include "template_cc_map.h"
 #include "tx_record.h"
 
@@ -81,7 +84,7 @@ public:
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
         bool &cmd_success = obj_result.cmd_success_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
-        bool resume = false;
+        CcPage<KeyT, ValueT> *ccp = nullptr;
         const KeyT *look_key = nullptr;
         KeyT decoded_key;
 
@@ -133,7 +136,6 @@ public:
         if (req.CcePtr() != nullptr)
         {
             // the request was blocked and is now unblocked and lock acquired
-            resume = true;
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
 
             // For ON_KEY_OBJECT, we add lock regardless of whether the record
@@ -169,7 +171,9 @@ public:
             }
 
 #ifdef RANGE_PARTITION_ENABLED
-            cce = Find(*look_key).second;
+            Iterator it = Find(*look_key);
+            cce = it->second;
+            ccp = it.GetPage();
 
             // collect metrics: slice cache hits
             if (metrics::enable_cache_hit_rate)
@@ -218,6 +222,7 @@ public:
                         {
                             auto it = FindEmplace(*look_key);
                             cce = it->second;
+                            ccp = it.GetPage();
                             if (cce == nullptr)
                             {
                                 hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
@@ -240,7 +245,9 @@ public:
                         else
                         {
                             assert(cc_op == CcOperation::Read);
-                            cce = Find(*look_key).second;
+                            Iterator it = Find(*look_key);
+                            cce = it->second;
+                            ccp = it.GetPage();
 
                             if (cce == nullptr)
                             {
@@ -300,6 +307,7 @@ public:
                     assert(Type() == TableType::Catalog);
                     auto it = FindEmplace(*look_key);
                     cce = it->second;
+                    ccp = it.GetPage();
                     if (cce == nullptr)
                     {
                         hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
@@ -310,6 +318,7 @@ public:
 #else
             auto it = FindEmplace(*look_key);
             cce = it->second;
+            ccp = it.GetPage();
 
             if (cce == nullptr)
             {
@@ -328,7 +337,6 @@ public:
             {
                 cce->payload_status_ = RecordStatus::Deleted;
                 cce->commit_ts_ = 1U;
-                cce->gap_commit_ts_ = 1U;
                 cce->ckpt_ts_.store(1U);
             }
 #endif
@@ -342,6 +350,7 @@ public:
             // is deleted, so just pass RecordStatus::Normal.
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(cce,
+                                  ccp,
                                   RecordStatus::Normal,
                                   &req,
                                   req.NodeGroupId(),
@@ -400,7 +409,14 @@ public:
             }
             else
             {
-                shard_->FetchRecord(table_name_, cce, cc_ng_id_, ng_term, &req);
+                shard_->FetchRecord(table_name_,
+                                    table_schema_,
+                                    look_key,
+                                    cce,
+                                    this,
+                                    cc_ng_id_,
+                                    ng_term,
+                                    &req);
                 return false;
             }
         }
@@ -441,7 +457,7 @@ public:
                 if (req.apply_and_commit_)
                 {
                     ReleaseCceLock(
-                        cce->key_lock_ptr_, cce, txn, ng_id, acquired_lock);
+                        cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
                     obj_result.lock_acquired_ = LockType::NoLock;
                 }
 
@@ -469,7 +485,7 @@ public:
                 if (req.apply_and_commit_)
                 {
                     ReleaseCceLock(
-                        cce->key_lock_ptr_, cce, txn, ng_id, acquired_lock);
+                        cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
                     obj_result.lock_acquired_ = LockType::NoLock;
                 }
 
@@ -549,14 +565,14 @@ public:
             {
                 last_dirty_commit_ts_ = cce->commit_ts_;
             }
-            if (cce->commit_ts_ > cce->parent_page_->last_dirty_commit_ts_)
+            if (cce->commit_ts_ > ccp->last_dirty_commit_ts_)
             {
-                cce->parent_page_->last_dirty_commit_ts_ = cce->commit_ts_;
+                ccp->last_dirty_commit_ts_ = cce->commit_ts_;
             }
 
             shard_->mem_usage_ += cce->PayloadMemUsage();
 
-            ReleaseCceLock(cce->key_lock_ptr_, cce, txn, ng_id, acquired_lock);
+            ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
         }
 
@@ -571,7 +587,7 @@ public:
         if (!req.IsReadOnly())
         {
             obj_result.last_vali_ts_ =
-                std::max(cce->last_read_ts_, shard_->Now());
+                std::max(shard_->LastReadTs(), shard_->Now());
         }
 
         obj_result.commit_ts_ = cce->commit_ts_;
@@ -606,9 +622,8 @@ public:
             reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr->CcePtr());
 
         // check that this txn is lock owner
-        if (cce->key_lock_ptr_ == nullptr ||
-            !cce->key_lock_ptr_->HasWriteLock() ||
-            cce->key_lock_ptr_->WriteLockTx() != txn)
+        NonBlockingLock *lk = cce->GetKeyLock();
+        if (lk == nullptr || !lk->HasWriteLock() || lk->WriteLockTx() != txn)
         {
             req.Result()->SetFinished();
             return true;
@@ -649,9 +664,13 @@ public:
             {
                 last_dirty_commit_ts_ = commit_ts;
             }
-            if (cce->commit_ts_ > cce->parent_page_->last_dirty_commit_ts_)
+
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+            assert(ccp != nullptr);
+            if (cce->commit_ts_ > ccp->last_dirty_commit_ts_)
             {
-                cce->parent_page_->last_dirty_commit_ts_ = cce->commit_ts_;
+                ccp->last_dirty_commit_ts_ = cce->commit_ts_;
             }
         }
 
@@ -662,11 +681,7 @@ public:
 
         shard_->mem_usage_ += cce->PayloadMemUsage();
 
-        ReleaseCceLock(cce->key_lock_ptr_,
-                       cce,
-                       txn,
-                       req.NodeGroupId(),
-                       LockType::WriteLock);
+        ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
         req.Result()->SetFinished();
         return true;
     }
@@ -733,6 +748,7 @@ public:
 
             auto it = FindEmplace(key);
             CcEntry<KeyT, ValueT> *cce = it->second;
+            CcPage<KeyT, ValueT> *ccp = it.GetPage();
 
             if (cce == nullptr)
             {
@@ -837,7 +853,14 @@ public:
 #else
 
                 // load payload asynchronously
-                shard_->FetchRecord(table_name_, cce, cc_ng_id_, ng_term, &req);
+                shard_->FetchRecord(table_name_,
+                                    table_schema_,
+                                    &key,
+                                    cce,
+                                    this,
+                                    cc_ng_id_,
+                                    ng_term,
+                                    &req);
                 return false;
 #endif
             }
@@ -875,13 +898,13 @@ public:
             {
                 last_dirty_commit_ts_ = cce->commit_ts_;
             }
-            if (cce->commit_ts_ > cce->parent_page_->last_dirty_commit_ts_)
+            if (cce->commit_ts_ > ccp->last_dirty_commit_ts_)
             {
-                cce->parent_page_->last_dirty_commit_ts_ = cce->commit_ts_;
+                ccp->last_dirty_commit_ts_ = cce->commit_ts_;
             }
 
-            if (cce->key_lock_ptr_ != nullptr &&
-                cce->key_lock_ptr_->HasWriteLock())
+            NonBlockingLock *lk = cce->GetKeyLock();
+            if (lk != nullptr && lk->HasWriteLock())
             {
                 // If the record in the log has a commit ts greater than
                 // that of the cc entry and the cc entry has a write
@@ -889,12 +912,9 @@ public:
                 // the log record.
                 // TODO: it is safer if we ship the tx ID with the
                 // recovering message and match it against the lock holder.
-                TxNumber txn = cce->key_lock_ptr_->WriteLockTx();
-                ReleaseCceLock(cce->key_lock_ptr_,
-                               cce,
-                               txn,
-                               req.NodeGroupId(),
-                               LockType::WriteLock);
+                TxNumber txn = lk->WriteLockTx();
+                ReleaseCceLock(
+                    lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
             }
         }
 
@@ -1059,7 +1079,7 @@ private:
 
         if (include_gap)
         {
-            tuple->set_gap_ts(cce->gap_commit_ts_);
+            tuple->set_gap_ts(0);
         }
         else
         {

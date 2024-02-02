@@ -4,7 +4,6 @@
 
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
-#include "cc/ccm_scanner.h"
 #include "cc/cluster_config_cc_map.h"
 #include "cc/non_blocking_lock.h"  // lock_vec_
 #include "cc/range_bucket_cc_map.h"
@@ -68,7 +67,7 @@ CcShard::CcShard(uint16_t core_id,
     lock_vec_.reserve(LOCK_ARRAY_INIT_SIZE);
     for (uint32_t idx = 0; idx < LOCK_ARRAY_INIT_SIZE; ++idx)
     {
-        lock_vec_.emplace_back(std::make_unique<NonBlockingLock>());
+        lock_vec_.emplace_back(std::make_unique<KeyGapLock>());
     }
 
     head_ccp_.lru_prev_ = nullptr;
@@ -121,6 +120,8 @@ CcShard::CcShard(uint16_t core_id,
     {
         meter_->Collect(MEMORY_LIMIT_NAME_, memory_limit_);
     }
+
+    last_read_ts_ = Now();
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
@@ -372,15 +373,15 @@ TEntry &CcShard::NewTx(NodeGroupId tx_ng_id,
     return tentry;
 }
 
-NonBlockingLock *CcShard::NewLock()
+KeyGapLock *CcShard::NewLock(CcMap *ccm, LruPage *page)
 {
     // Cicurlar iteration to find an available lock.
     size_t cnt = 0;
     while (cnt < lock_vec_.size())
     {
-        NonBlockingLock *lentry = lock_vec_[next_lock_idx_].get();
+        KeyGapLock *lk = lock_vec_[next_lock_idx_].get();
 
-        if (lentry->GetUsedStatus() == false)
+        if (lk->GetUsedStatus() == false)
         {
             break;
         }
@@ -404,20 +405,21 @@ NonBlockingLock *CcShard::NewLock()
 
         for (uint32_t idx = old_size; idx < new_size; ++idx)
         {
-            lock_vec_.emplace_back(std::make_unique<NonBlockingLock>());
+            lock_vec_.emplace_back(std::make_unique<KeyGapLock>());
         }
 
         // position old_size must be an available slot.
         next_lock_idx_ = old_size;
     }
 
-    NonBlockingLock *lentry = lock_vec_.at(next_lock_idx_).get();
-    lentry->Reset();
-    lentry->SetUsedStatus(true);
+    KeyGapLock *lk = lock_vec_.at(next_lock_idx_).get();
+    assert(!lk->GetUsedStatus());
+    lk->Reset(ccm, page);
+    lk->SetUsedStatus(true);
     used_lock_count_++;
     ++next_lock_idx_;
     next_lock_idx_ = next_lock_idx_ == lock_vec_.size() ? 0 : next_lock_idx_;
-    return lentry;
+    return lk;
 }
 
 TEntry *CcShard::LocateTx(const TxId &tx_id)
@@ -479,6 +481,8 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
     // page already at the tail, do nothing
     if (page->lru_next_ == &tail_ccp_ && tail_ccp_.lru_prev_ == page)
     {
+        ++access_counter_;
+        page->last_access_ts_ = access_counter_;
         return;
     }
     // Removes the page from the list, if it's already in the list. This is
@@ -494,6 +498,9 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
     tail_ccp_.lru_prev_ = page;
     page->lru_next_ = &tail_ccp_;
     page->lru_prev_ = second_tail;
+
+    ++access_counter_;
+    page->last_access_ts_ = access_counter_;
 
     // If the update is a emplace update, these new loaded data might be
     // kickable from cc map. Usually if the clean_start_page is at tail we're
@@ -609,7 +616,11 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
 
             for (const auto &lru : lk_info.cce_list_)
             {
-                LOG(INFO) << "table: " << lru->parent_map_->table_name_.Trace();
+                CcMap *ccm = lru->GetCcMap();
+                if (ccm != nullptr)
+                {
+                    LOG(INFO) << "table: " << ccm->table_name_.Trace();
+                }
             }
             // no need to check and recover local txn, it must be ongoing
             return;
@@ -642,10 +653,11 @@ void CcShard::ClearTx(TxNumber txn)
         TxLockInfo &lk_info = tx_it->second;
         for (auto &lru_ptr : lk_info.cce_list_)
         {
-            if (lru_ptr->key_lock_ptr_ != nullptr)
+            NonBlockingLock *lock = lru_ptr->GetKeyLock();
+            if (lock != nullptr)
             {
-                lru_ptr->key_lock_ptr_->ClearTx(txn, this);
-                lru_ptr->RecycleKeyLock();
+                lock->ClearTx(txn, this);
+                lru_ptr->RecycleKeyLock(*this);
             }
         }
         ng_pair.second.erase(tx_it);
@@ -699,7 +711,8 @@ size_t CcShard::Clean()
  * @brief Flush Entry to KvStore. Now, only used for test.
  *
  */
-bool CcShard::FlushEntryForTest(LruEntry *entry,
+bool CcShard::FlushEntryForTest(const TableName &tbl_name,
+                                const TableSchema *tbl_schema,
                                 std::vector<FlushRecord> &ckpt_vec,
                                 std::vector<FlushRecord> &archives,
                                 bool only_archives)
@@ -707,12 +720,12 @@ bool CcShard::FlushEntryForTest(LruEntry *entry,
     // TODO(lzx): Now, only flush archives synchronously for test.
     if (only_archives)
     {
-        return ckpter_->FlushArchiveForTest(entry, archives);
+        return ckpter_->FlushArchiveForTest(tbl_name, tbl_schema, archives);
     }
     else
     {
-        return (ckpter_->CkptEntryForTest(entry, ckpt_vec)) &&
-               (ckpter_->FlushArchiveForTest(entry, archives));
+        return (ckpter_->CkptEntryForTest(tbl_name, tbl_schema, ckpt_vec)) &&
+               (ckpter_->FlushArchiveForTest(tbl_name, tbl_schema, archives));
     }
 }
 
@@ -1068,19 +1081,22 @@ void CcShard::RemoveFetchRequest(const TableName &table_name)
 }
 
 void CcShard::FetchRecord(const TableName &table_name,
+                          const TableSchema *tbl_schema,
+                          const TxKey *key,
                           LruEntry *cce,
+                          CcMap *ccm,
                           NodeGroupId cc_ng_id,
                           int64_t cc_ng_term,
                           CcRequestBase *requester)
 {
-    auto tab_it =
-        fetch_record_reqs_.try_emplace(cce, cce, *this, cc_ng_id, cc_ng_term);
+    auto tab_it = fetch_record_reqs_.try_emplace(
+        cce, &table_name, tbl_schema, cce, ccm, *this, cc_ng_id, cc_ng_term);
     FetchRecordCc *fetch_req = &(tab_it.first->second);
 
     fetch_req->AddRequester(requester);
     if (fetch_req->RequesterCount() == 1)
     {
-        local_shards_.store_hd_->FetchRecord(table_name, fetch_req);
+        local_shards_.store_hd_->FetchRecord(table_name, key, fetch_req);
     }
 }
 
@@ -1626,10 +1642,18 @@ void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)
                  itset != iter->second.cce_list_.end();
                  itset++)
             {
-                std::vector<uint64_t> vct =
-                    (*itset)->GetKeyLock().GetBlockTxIds(iter->first);
-                if (vct.size() == 0)
+                NonBlockingLock *key_lock = (*itset)->GetKeyLock();
+                if (key_lock == nullptr)
+                {
                     continue;
+                }
+
+                std::vector<uint64_t> vct =
+                    key_lock->GetBlockTxIds(iter->first);
+                if (vct.size() == 0)
+                {
+                    continue;
+                }
 
                 auto itet =
                     entry_lock_info_map.try_emplace((uint64_t) (*itset));

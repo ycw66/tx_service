@@ -139,13 +139,14 @@ public:
             }
         }
 
-        CcEntry<CatalogKey, CatalogRecord> *cce_ptr =
-            TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key).second;
+        Iterator it =
+            TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key);
+        CcEntry<CatalogKey, CatalogRecord> *cce_ptr = it->second;
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
-        if (cce_ptr == nullptr || cce_ptr->key_lock_ptr_ == nullptr ||
-            !cce_ptr->key_lock_ptr_->HasWriteLockOrWriteIntent(req.Txn()))
+        if (cce_ptr == nullptr || cce_ptr->GetKeyLock() == nullptr ||
+            !cce_ptr->GetKeyLock()->HasWriteLockOrWriteIntent(req.Txn()))
         {
             // When the catalog entry is null in the post-write-all
             // phase, it means that (1) the cc req is a resend request and
@@ -1120,6 +1121,7 @@ public:
         CatalogKey table_key(table_name);
         Iterator it = FindEmplace(table_key);
         CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+        CcPage<CatalogKey, CatalogRecord> *ccp = it.GetPage();
 
         if (cce == nullptr)
         {
@@ -1190,6 +1192,7 @@ public:
         if (lock_type == LockType::WriteIntent)
         {
             auto lock_pair = AcquireCceKeyLock(cce,
+                                               ccp,
                                                cce->payload_status_,
                                                &req,
                                                req.NodeGroupId(),
@@ -1206,6 +1209,7 @@ public:
         else if (lock_type == LockType::WriteLock)
         {
             auto lock_pair = AcquireCceKeyLock(cce,
+                                               ccp,
                                                cce->payload_status_,
                                                &req,
                                                req.NodeGroupId(),

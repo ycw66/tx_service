@@ -2521,6 +2521,17 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             ForceToFinish(txm);
         }
 
+        // The tx's modification of the schema has finished. If the tx has
+        // previously read the same schema and keeps a pointer in the read set
+        // to the cc entry of the schema, removes it from the read set. As a
+        // result, the tx will not try to release the read lock of the schema
+        // when committing.
+        const CcEntryAddr &schema_entry_addr =
+            acquire_all_intent_op_.hd_results_[txm->TxCcNodeId()]
+                .Value()
+                .local_cce_addr_;
+        txm->rw_set_.DedupRead(schema_entry_addr);
+
         if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
             0)
         {
@@ -2570,16 +2581,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             {
                 assert(post_all_lock_op_.write_type_ !=
                        PostWriteType::DowngradeLock);
-                // The tx's modification of the schema has succeeded. If the tx
-                // has previously read the same schema and keeps a pointer in
-                // the read set to the cc entry of the schema, removes it from
-                // the read set. As a result, the tx will not try to release the
-                // read lock of the schema when committing.
-                const CcEntryAddr &schema_entry_addr =
-                    acquire_all_lock_op_.hd_results_[txm->TxCcNodeId()]
-                        .Value()
-                        .local_cce_addr_;
-                txm->rw_set_.DedupRead(schema_entry_addr);
             }
             else
             {
@@ -5140,7 +5141,7 @@ void MultiObjectCommandOp::Reset(const TableName *table_name,
                 }
             };
 
-            vct_hd_result_.push_back(std::move(hr));
+            vct_hd_result_.emplace_back(std::move(hr));
         }
     }
 

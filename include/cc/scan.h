@@ -9,19 +9,19 @@
 
 namespace txservice
 {
-enum class ScanDirection
+enum class ScanDirection : uint8_t
 {
     Forward,
     Backward
 };
 
-enum class ScanIndexType
+enum class ScanIndexType : uint8_t
 {
     Primary,
     Secondary
 };
 
-enum class InclusiveType
+enum class InclusiveType : uint8_t
 {
     Open,
     Close

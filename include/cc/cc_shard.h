@@ -21,7 +21,6 @@
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
 #include "error_messages.h"
-#include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
 #include "meter.h"
 #include "metrics.h"
 #include "moodycamelqueue.h"
@@ -201,7 +200,7 @@ public:
      * @brief Find an available NonBlockingLock in lock array and initialize it.
      *
      */
-    NonBlockingLock *NewLock();
+    KeyGapLock *NewLock(CcMap *ccm, LruPage *page);
 
     TEntry *LocateTx(const TxId &tx_id);
 
@@ -216,7 +215,8 @@ public:
 
     size_t Clean();
 
-    bool FlushEntryForTest(LruEntry *entry,
+    bool FlushEntryForTest(const TableName &tbl_name,
+                           const TableSchema *tbl_schema,
                            std::vector<FlushRecord> &ckpt_vec,
                            std::vector<FlushRecord> &archives,
                            bool only_archives);
@@ -287,6 +287,23 @@ public:
     void DropLockHoldingTxs(NodeGroupId cc_ng_id)
     {
         lock_holding_txs_.erase(cc_ng_id);
+    }
+
+    void VerifyOrphanLock(NodeGroupId cc_ng_id, TxNumber txn)
+    {
+        auto locks_it = lock_holding_txs_.find(cc_ng_id);
+        if (locks_it == lock_holding_txs_.end())
+        {
+            return;
+        }
+
+        auto tx_it = locks_it->second.find(txn);
+        if (tx_it != locks_it->second.end())
+        {
+            LOG(ERROR) << "txn #" << txn
+                       << " has orphan lock(s) after finishing.";
+            assert("Orphan lock detected.");
+        }
     }
 
     /**
@@ -516,7 +533,10 @@ public:
     void RemoveFetchRequest(const TableName &table_name);
 
     void FetchRecord(const TableName &table_name,
+                     const TableSchema *tbl_schema,
+                     const TxKey *key,
                      LruEntry *cce,
+                     CcMap *ccm,
                      NodeGroupId cc_ng_id,
                      int64_t cc_ng_term,
                      CcRequestBase *requester);
@@ -663,6 +683,16 @@ public:
         return system_handler_;
     }
 
+    uint64_t &LastReadTs()
+    {
+        return last_read_ts_;
+    }
+
+    void UpdateLastReadTs(uint64_t read_ts)
+    {
+        last_read_ts_ = std::max(last_read_ts_, read_ts);
+    }
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
@@ -675,7 +705,7 @@ private:
 
     // all the lock acquire/release on this ccshard. It used to reduce the cost
     // of allocation/dellocation of memory.
-    std::vector<NonBlockingLock::Uptr> lock_vec_;
+    std::vector<KeyGapLock::uptr> lock_vec_;
     // pointer to the next slot in lock array.
     uint32_t next_lock_idx_;
     uint32_t used_lock_count_;
@@ -721,6 +751,15 @@ private:
     // Reserved head and tail for the double-linked list of cc entries, which
     // simplifies handling of empty and one-element lists.
     LruPage head_ccp_, tail_ccp_;
+    /**
+     * @brief Each time a page is accessed and moved to the tail of the LRU
+     * list, the counter is incremented and assigned to the page. Since in a
+     * double-linked list there is no way to determine the relative order of two
+     * pages, we use the number to indicate if a page precedes or succeeds the
+     * other in the list.
+     *
+     */
+    uint64_t access_counter_{0};
 
     // Page to start looking for cc entries to kick out on LRU chain.
     LruPage *clean_start_ccp_;
@@ -757,6 +796,19 @@ private:
     // track the lock sparse number and reduce lock array size if threshold
     // reached.
     uint8_t lock_sparse_num_{0};
+
+    /**
+     * @brief The variable bookkeeps the latest time when any record in this
+     * shard is accessed by read tx's. It is used to coordinate with write tx's
+     * such that a write tx's commit timestamp is greater than all read tx's
+     * that happen before the write tx. To coordinate, the variable is updated
+     * in two cases: (1) when a snapshot read is performed with a read ts, the
+     * variable is set to max{read_ts, last_read_ts_}, and (2) when PostRead is
+     * performed to release read locks or validate version stability, the
+     * variable is set to max{commit_ts, last_read_ts_}.
+     *
+     */
+    uint64_t last_read_ts_{0};
 
     friend class LocalCcHandler;
     friend class LocalCcShards;

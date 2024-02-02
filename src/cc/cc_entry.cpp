@@ -4,135 +4,104 @@
 
 namespace txservice
 {
-LruEntry::~LruEntry()
-{
-    if (key_lock_ptr_ != nullptr && parent_map_)
-    {
-        CcShard *ccshard = parent_map_->shard_;
-
-        // Deletes the write lock/intent.
-        auto [w_tx, w_type] = key_lock_ptr_->WriteTx();
-        if (w_type != NonBlockingLock::WriteLockType::NoWritelock)
-        {
-            ccshard->DeleteLockHoldingTx(w_tx, this, parent_map_->cc_ng_id_);
-        }
-
-        // Deletes key read locks.
-        const std::unordered_set<TxNumber> &key_read_locks =
-            key_lock_ptr_->ReadLocks();
-        for (const TxNumber &txn : key_read_locks)
-        {
-            ccshard->DeleteLockHoldingTx(txn, this, parent_map_->cc_ng_id_);
-        }
-
-        for (const TxNumber &txn : key_lock_ptr_->ReadIntents())
-        {
-            ccshard->DeleteLockHoldingTx(txn, this, parent_map_->cc_ng_id_);
-        }
-
-        // reset lock entry in ccshard lock array to make it reusable.
-        key_lock_ptr_->SetUsedStatus(false);
-        key_lock_ptr_ = nullptr;
-        ccshard->DecreaseLockCount();
-    }
-
-    if (gap_lock_ptr_ != nullptr && parent_map_)
-    {
-        CcShard *ccshard = parent_map_->shard_;
-
-        // Deletes the gap's write lock/intent.
-        auto [w_tx, w_type] = gap_lock_ptr_->WriteTx();
-        if (w_type != NonBlockingLock::WriteLockType::NoWritelock)
-        {
-            ccshard->DeleteLockHoldingTx(w_tx, this, parent_map_->cc_ng_id_);
-        }
-
-        // Deletes gap read locks.
-        const std::unordered_set<TxNumber> &gap_read_locks =
-            gap_lock_ptr_->ReadLocks();
-        for (const TxNumber &txn : gap_read_locks)
-        {
-            ccshard->DeleteLockHoldingTx(txn, this, parent_map_->cc_ng_id_);
-        }
-
-        for (const TxNumber &txn : gap_lock_ptr_->ReadIntents())
-        {
-            ccshard->DeleteLockHoldingTx(txn, this, parent_map_->cc_ng_id_);
-        }
-
-        // reset lock entry in ccshard lock array to make it reusable.
-        gap_lock_ptr_->SetUsedStatus(false);
-        gap_lock_ptr_ = nullptr;
-        ccshard->DecreaseLockCount();
-    }
-}
-
-LruEntry::LruEntry(CcMap *parent) : parent_map_(parent)
-{
-    // ccshard head_cce and tail_cce's parent ccmaps are null.
-    if (parent != nullptr)
-    {
-        uint64_t now_ts = parent->shard_->Now();
-        last_read_ts_ = now_ts;
-        gap_last_read_ts_ = now_ts;
-    }
-    else
-    {
-        last_read_ts_ = 1;
-        gap_last_read_ts_ = 1;
-    }
-}
-
 bool LruEntry::IsFree()
 {
-    return (key_lock_ptr_ == nullptr || key_lock_ptr_->IsEmpty()) &&
-           (gap_lock_ptr_ == nullptr || gap_lock_ptr_->IsEmpty()) &&
+    // As long as all locks are released, the lock associated with this cc entry
+    // should be recycled.
+    assert(cc_lock_ == nullptr || !cc_lock_->KeyLock()->IsEmpty());
+
+    return cc_lock_ == nullptr &&
            commit_ts_ <= ckpt_ts_.load(std::memory_order_acquire);
 }
 
-NonBlockingLock &LruEntry::GetKeyLock()
+NonBlockingLock &LruEntry::GetOrCreateKeyLock(CcShard *ccs,
+                                              CcMap *ccm,
+                                              LruPage *page)
 {
-    // key lock
-    if (key_lock_ptr_ == nullptr)
+    if (cc_lock_ == nullptr)
     {
-        key_lock_ptr_ = parent_map_->shard_->NewLock();
+        cc_lock_ = ccs->NewLock(ccm, page);
     }
-    return *key_lock_ptr_;
+
+    assert(cc_lock_->GetCcMap() == ccm);
+    // For cc entries of the bucket cc map, the input page may be null.
+    assert(page == nullptr || cc_lock_->GetCcPage() == nullptr ||
+           cc_lock_->GetCcPage() == page);
+    return *cc_lock_->KeyLock();
 }
 
-NonBlockingLock &LruEntry::GetGapLock()
+NonBlockingLock *LruEntry::GetKeyLock() const
 {
-    // gap lock
-    if (gap_lock_ptr_ == nullptr)
-    {
-        gap_lock_ptr_ = parent_map_->shard_->NewLock();
-    }
-    return *gap_lock_ptr_;
+    return cc_lock_ == nullptr ? nullptr : cc_lock_->KeyLock();
 }
 
-void LruEntry::RecycleKeyLock()
+NonBlockingLock *LruEntry::GetGapLock() const
 {
-    // key lock
-    if (key_lock_ptr_ != nullptr && key_lock_ptr_->IsEmpty())
+    assert("Gap lock unsupported.");
+    return nullptr;
+}
+
+void LruEntry::RecycleKeyLock(CcShard &ccs)
+{
+    if (cc_lock_ != nullptr && cc_lock_->KeyLock()->IsEmpty())
     {
         // recycle key lock if all the locks in lock entry are released.
-        key_lock_ptr_->SetUsedStatus(false);
-        parent_map_->shard_->DecreaseLockCount();
-        key_lock_ptr_ = nullptr;
+        cc_lock_->SetUsedStatus(false);
+        ccs.DecreaseLockCount();
+        cc_lock_ = nullptr;
     }
 }
 
-void LruEntry::RecycleGapLock()
+void LruEntry::ClearLocks(CcShard &ccs, NodeGroupId ng_id)
 {
-    // key lock
-    if (gap_lock_ptr_ != nullptr && gap_lock_ptr_->IsEmpty())
+    if (cc_lock_ == nullptr)
     {
-        // recycle key lock if all the locks in lock entry are released.
-        gap_lock_ptr_->SetUsedStatus(false);
-        parent_map_->shard_->DecreaseLockCount();
-        gap_lock_ptr_ = nullptr;
+        return;
     }
-    return;
+
+    NonBlockingLock *key_lock = cc_lock_->KeyLock();
+
+    // Deletes the write lock/intent.
+    auto [w_tx, w_type] = key_lock->WriteTx();
+    if (w_type != NonBlockingLock::WriteLockType::NoWritelock)
+    {
+        ccs.DeleteLockHoldingTx(w_tx, this, ng_id);
+    }
+
+    // Deletes key read locks.
+    const std::unordered_set<TxNumber> &key_read_locks = key_lock->ReadLocks();
+    for (const TxNumber &txn : key_read_locks)
+    {
+        ccs.DeleteLockHoldingTx(txn, this, ng_id);
+    }
+
+    for (const TxNumber &txn : key_lock->ReadIntents())
+    {
+        ccs.DeleteLockHoldingTx(txn, this, ng_id);
+    }
+
+    // reset lock entry in ccshard lock array to make it reusable.
+    cc_lock_->SetUsedStatus(false);
+    cc_lock_ = nullptr;
+    ccs.DecreaseLockCount();
+}
+
+CcMap *LruEntry::GetCcMap() const
+{
+    return cc_lock_ != nullptr ? cc_lock_->GetCcMap() : nullptr;
+}
+
+LruPage *LruEntry::GetCcPage() const
+{
+    return cc_lock_ != nullptr ? cc_lock_->GetCcPage() : nullptr;
+}
+
+void LruEntry::UpdateCcPage(LruPage *page)
+{
+    if (cc_lock_ != nullptr)
+    {
+        cc_lock_->UpdateCcPage(page);
+    }
 }
 
 const TxKey *FlushRecord::Key() const

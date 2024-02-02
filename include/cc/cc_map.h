@@ -48,7 +48,7 @@ struct GetPostCkptSlice;
 struct KickoutCcEntryCc;
 struct ApplyCc;
 
-enum struct ScanType
+enum struct ScanType : uint8_t
 {
     ScanKey = 0,
     ScanGap,
@@ -140,7 +140,6 @@ public:
 
     virtual size_t size() const = 0;
 
-    virtual void Clean(LruEntry *remove_entry) = 0;
     virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *page,
         CleanType clean_type = CleanType::CleanForFree,
@@ -228,6 +227,7 @@ protected:
      */
     std::pair<LockType, CcErrorCode> AcquireCceKeyLock(
         LruEntry *cce,
+        LruPage *page,
         RecordStatus cce_payload_status,
         CcRequestBase *req,
         uint32_t ng_id,
@@ -237,7 +237,8 @@ protected:
         IsolationLevel iso_level,
         CcProtocol protocol,
         uint64_t read_ts,
-        bool is_covering_keys);
+        bool is_covering_keys,
+        CcMap *ccm = nullptr);
 
     /**
      * @brief do check after request is resumed from lock blocking queue.

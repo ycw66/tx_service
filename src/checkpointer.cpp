@@ -278,31 +278,25 @@ void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
     log_agent_->UpdateCheckpointTs(node_group, term, ckpt_ts);
 }
 
-bool Checkpointer::CkptEntryForTest(LruEntry *entry,
+bool Checkpointer::CkptEntryForTest(const TableName &tbl_name,
+                                    const TableSchema *tbl_schema,
                                     std::vector<FlushRecord> &ckpt_vec)
 {
     bool ckpt_ret = false;
-    CcMap *ccm = entry->parent_map_;
-    TableName table_name{ccm->table_name_.StringView(),
-                         ccm->table_name_.Type()};
     uint32_t ng = Sharder::Instance().NodeId();
-    ckpt_ret = store_hd_->PutAll(
-        ckpt_vec, ccm->table_name_, ccm->GetTableSchema(), ng);
+    ckpt_ret = store_hd_->PutAll(ckpt_vec, tbl_name, tbl_schema, ng);
 
     return ckpt_ret;
 }
 
-bool Checkpointer::FlushArchiveForTest(LruEntry *entry,
+bool Checkpointer::FlushArchiveForTest(const TableName &tbl_name,
+                                       const TableSchema *tbl_schema,
                                        std::vector<FlushRecord> &archives)
 {
     bool ckpt_ret = false;
-    CcMap *ccm = entry->parent_map_;
     uint32_t ng = Sharder::Instance().NodeId();
-    ckpt_ret =
-        store_hd_->PutArchivesAll(ng,
-                                  ccm->table_name_,
-                                  ccm->GetTableSchema()->GetKVCatalogInfo(),
-                                  archives);
+    ckpt_ret = store_hd_->PutArchivesAll(
+        ng, tbl_name, tbl_schema->GetKVCatalogInfo(), archives);
     return ckpt_ret;
 }
 }  // namespace txservice

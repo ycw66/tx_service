@@ -53,6 +53,7 @@ public:
     using TemplateCcMap<KeyT, RangeRecord>::shard_;
     using TemplateCcMap<KeyT, RangeRecord>::Floor;
     using TemplateCcMap<KeyT, RangeRecord>::neg_inf_;
+    using TemplateCcMap<KeyT, RangeRecord>::neg_inf_page_;
     using TemplateCcMap<KeyT, RangeRecord>::pos_inf_;
     using TemplateCcMap<KeyT, RangeRecord>::table_schema_;
     using TemplateCcMap<KeyT, RangeRecord>::KeySchema;
@@ -86,7 +87,7 @@ public:
         neg_inf_.payload_ = std::make_unique<RangeRecord>();
         pos_inf_.payload_ = std::make_unique<RangeRecord>();
 #endif
-        auto bucket_map = static_cast<RangeBucketCcMap *>(
+        bucket_ccm_ = static_cast<RangeBucketCcMap *>(
             shard->GetCcm(range_bucket_ccm_name, ng_id));
 
         for (auto &[key, table_range] : *ranges)
@@ -99,7 +100,7 @@ public:
                 neg_inf_.commit_ts_ = range_info->version_ts_;
                 neg_inf_.payload_status_ = RecordStatus::Normal;
                 neg_inf_.payload_->range_owner_rec_ =
-                    bucket_map->GetBucketRecord(Sharder::MapRangeIdToBucketId(
+                    bucket_ccm_->GetBucketRecord(Sharder::MapRangeIdToBucketId(
                         range_info->PartitionId()));
             }
             else
@@ -115,7 +116,7 @@ public:
                 cce->payload_ = std::make_unique<RangeRecord>();
 #endif
                 cce->payload_->range_info_ = range_info;
-                cce->payload_->range_owner_rec_ = bucket_map->GetBucketRecord(
+                cce->payload_->range_owner_rec_ = bucket_ccm_->GetBucketRecord(
                     Sharder::MapRangeIdToBucketId(range_info->PartitionId()));
                 cce->payload_status_ = RecordStatus::Normal;
                 shard_->mem_usage_ += cce->PayloadMemUsage();
@@ -133,15 +134,15 @@ public:
         for (auto it = Begin(); it != End(); it++)
         {
             auto range_cce = it->second;
-            if (range_cce->key_lock_ptr_ != nullptr &&
-                !range_cce->key_lock_ptr_->ReadLocks().empty())
+            NonBlockingLock *lock = range_cce->GetKeyLock();
+            if (lock != nullptr && !lock->ReadLocks().empty())
             {
-                for (TxNumber txn : range_cce->key_lock_ptr_->ReadLocks())
+                for (TxNumber txn : lock->ReadLocks())
                 {
                     auto bucket_cce = static_cast<
                         CcEntry<RangeBucketKey, RangeBucketRecord> *>(
                         range_cce->payload_->range_owner_rec_);
-                    ReleaseCceLock(bucket_cce->key_lock_ptr_,
+                    ReleaseCceLock(bucket_cce->GetKeyLock(),
                                    bucket_cce,
                                    txn,
                                    this->cc_ng_id_,
@@ -225,6 +226,7 @@ public:
         const KeyT *look_key = static_cast<const KeyT *>(req.Key());
         auto it = Floor(*look_key);
         CcEntry<KeyT, RangeRecord> *floor_cce = it->second;
+        CcPage<KeyT, RangeRecord> *range_page = it.GetPage();
 
         // When we're acquiring bucket lock and range lock, always acquire
         // bucket lock before range lock to avoid internal dead lock.
@@ -237,6 +239,7 @@ public:
         // Acquire bucket read lock
         std::tie(acquired_lock, err_code) =
             AcquireCceKeyLock(bucket_cce,
+                              nullptr,
                               bucket_cce->payload_status_,
                               &req,
                               req.NodeGroupId(),
@@ -246,11 +249,12 @@ public:
                               IsolationLevel::RepeatableRead,
                               CcProtocol::Locking,
                               req.ReadTimestamp(),
-                              false);
+                              false,
+                              bucket_ccm_);
         if (err_code != CcErrorCode::NO_ERROR)
         {
             assert(err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED);
-            bucket_cce->key_lock_ptr_->AbortQueueRequest(
+            bucket_cce->GetKeyLock()->AbortQueueRequest(
                 req.Txn(),
                 CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
             return true;
@@ -260,6 +264,7 @@ public:
             req.IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
         std::tie(acquired_lock, err_code) =
             AcquireCceKeyLock(floor_cce,
+                              range_page,
                               floor_cce->payload_status_,
                               &req,
                               req.NodeGroupId(),
@@ -290,12 +295,12 @@ public:
         {
             assert(err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED);
             // Release the acquired bucket read lock before aborting.
-            ReleaseCceLock(bucket_cce->key_lock_ptr_,
+            ReleaseCceLock(bucket_cce->GetKeyLock(),
                            bucket_cce,
                            req.Txn(),
                            this->cc_ng_id_,
                            LockType::ReadLock);
-            floor_cce->key_lock_ptr_->AbortQueueRequest(
+            floor_cce->GetKeyLock()->AbortQueueRequest(
                 req.Txn(),
                 CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
             return true;
@@ -316,17 +321,15 @@ public:
         auto bucket_cce =
             static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
                 cc_entry.payload_->range_owner_rec_);
-        bucket_cce->last_read_ts_ =
-            std::max(bucket_cce->last_read_ts_, req.CommitTs());
-        ReleaseCceLock(bucket_cce->key_lock_ptr_,
+        shard_->UpdateLastReadTs(req.CommitTs());
+        ReleaseCceLock(bucket_cce->GetKeyLock(),
                        bucket_cce,
                        req.Txn(),
                        req.NodeGroupId(),
                        LockType::ReadLock);
 
-        cc_entry.last_read_ts_ =
-            std::max(cc_entry.last_read_ts_, req.CommitTs());
-        ReleaseCceLock(cc_entry.key_lock_ptr_,
+        shard_->UpdateLastReadTs(req.CommitTs());
+        ReleaseCceLock(cc_entry.GetKeyLock(),
                        &cc_entry,
                        req.Txn(),
                        req.NodeGroupId(),
@@ -422,12 +425,12 @@ public:
             req.SetDecodedPayload(std::move(decoded_rec));
         }
 
-        CcEntry<KeyT, RangeRecord> *target_cce = Find(*target_key).second;
+        CcEntry<KeyT, RangeRecord> *target_cce = Find(*target_key)->second;
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
-        if (target_cce == nullptr || target_cce->key_lock_ptr_ == nullptr ||
-            !target_cce->key_lock_ptr_->HasWriteLock(req.Txn()))
+        if (target_cce == nullptr || target_cce->GetKeyLock() == nullptr ||
+            !target_cce->GetKeyLock()->HasWriteLock(req.Txn()))
         {
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {
@@ -548,7 +551,7 @@ public:
                     CcEntry<KeyT, RangeRecord> *next_cce =
                         Find(*static_cast<const KeyT *>(
                                  upload_range_rec->range_info_->end_key_))
-                            .second;
+                            ->second;
                     assert(next_cce != nullptr);
                     old_end_key =
                         next_cce->payload_->range_info_->start_key_.get();
@@ -839,17 +842,20 @@ public:
         TableRangeEntry *old_table_range_entry = nullptr;
         const TxKey *old_end_key = nullptr;
         CcEntry<KeyT, RangeRecord> *old_range_cce = nullptr;
+        CcPage<KeyT, RangeRecord> *old_range_page = nullptr;
 
         if (ds_split_range_op_msg.range_key_case() ==
             txlog::SplitRangeOpMessage::RangeKeyCase::kRangeKeyNegInf)
         {
             old_range_cce = &neg_inf_;
+            old_range_page = &neg_inf_page_;
         }
         else
         {
             auto it = Find(*old_range_key_ptr);
-            assert(it.first);
-            old_range_cce = it.second;
+            assert(it->first);
+            old_range_cce = it->second;
+            old_range_page = it.GetPage();
         }
 
         // Restore range end key
@@ -1138,6 +1144,7 @@ public:
             // stage, we need to acquire write lock on range no matter
             // what.
             auto lock_pair = AcquireCceKeyLock(old_range_cce,
+                                               old_range_page,
                                                old_range_cce->payload_status_,
                                                &req,
                                                req.NodeGroupId(),
@@ -1260,7 +1267,7 @@ private:
         {
             KeyT end_key;
             end_key.Deserialize(buf, offset, nullptr);
-            CcEntry<KeyT, RangeRecord> *cce = Find(end_key).second;
+            CcEntry<KeyT, RangeRecord> *cce = Find(end_key)->second;
             assert(cce != nullptr);
             range_info->end_key_ = cce->payload_->range_info_->start_key_.get();
             assert(range_info->end_key_ != nullptr);
@@ -1287,5 +1294,7 @@ private:
                 shard_, this->cc_ng_id_, table_or_index_name, old_info);
         }
     }
+
+    RangeBucketCcMap *bucket_ccm_{nullptr};
 };
 }  // namespace txservice

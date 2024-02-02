@@ -585,14 +585,18 @@ bool GetPostCkptSlice::Execute(CcShard &ccs)
     return ccm->Execute(*this);
 }
 
-FetchRecordCc::FetchRecordCc(LruEntry *cce,
+FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
+                             const TableSchema *tbl_schema,
+                             LruEntry *cce,
+                             CcMap *ccm,
                              CcShard &ccs,
                              NodeGroupId cc_ng_id,
                              int64_t cc_ng_term)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
-      table_name_(&(cce->parent_map_->table_name_)),
-      table_schema_(cce->parent_map_->GetTableSchema()),
-      cce_(cce)
+      table_name_(tbl_name),
+      table_schema_(tbl_schema),
+      cce_(cce),
+      ccm_(ccm)
 {
 }
 
@@ -606,8 +610,7 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 
         if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
         {
-            cce_->parent_map_->BackFill(
-                cce_, rec_ts_, rec_status_, std::move(rec_));
+            ccm_->BackFill(cce_, rec_ts_, rec_status_, std::move(rec_));
 
             for (CcRequestBase *req : requesters_)
             {

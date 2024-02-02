@@ -2,7 +2,6 @@
 
 #include <algorithm>  // std::max
 #include <cassert>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -30,7 +29,6 @@
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "table_statistics.h"
-#include "tx_execution.h"
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_trace.h"
@@ -66,16 +64,14 @@ public:
                 table_schema,
                 schema_ts,
                 ccm_has_full_entries),
-          pg_ng_inf_(this),
-          pg_ps_inf_(this),
-          neg_inf_(this, &pg_ng_inf_),
-          pos_inf_(this, &pg_ps_inf_),
+          neg_inf_page_(this),
+          pos_inf_page_(this),
           sample_pool_(nullptr)
     {
-        pg_ng_inf_.prev_page_ = nullptr;
-        pg_ng_inf_.next_page_ = &pg_ps_inf_;
-        pg_ps_inf_.prev_page_ = &pg_ng_inf_;
-        pg_ps_inf_.next_page_ = nullptr;
+        neg_inf_page_.prev_page_ = nullptr;
+        neg_inf_page_.next_page_ = &pos_inf_page_;
+        pos_inf_page_.prev_page_ = &neg_inf_page_;
+        pos_inf_page_.next_page_ = nullptr;
 
 #ifndef ON_KEY_OBJECT
         if (table_schema && (table_name.Type() == TableType::Primary ||
@@ -129,6 +125,7 @@ public:
     virtual ~TemplateCcMap()
     {
         Clean();
+        neg_inf_.ClearLocks(*shard_, cc_ng_id_);
     }
 
     bool Execute(AcquireCc &req) override
@@ -152,6 +149,7 @@ public:
                           : hd_res->Value()[0];
         CcEntryAddr &cce_addr = acquire_key_result.cce_addr_;
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
+        CcPage<KeyT, ValueT> *ccp = nullptr;
         bool resume = false;
         const KeyT *target_key = nullptr;
         KeyT decoded_key;
@@ -213,6 +211,7 @@ public:
                 Iterator it = Floor(*target_key);
                 const KeyT *key_ptr = it->first;
                 cce_ptr = it->second;
+                ccp = it.GetPage();
 
                 if (cce_ptr != &neg_inf_ && *key_ptr == *target_key)
                 {
@@ -240,6 +239,7 @@ public:
             {
                 Iterator it = FindEmplace(*target_key);
                 cce_ptr = it->second;
+                ccp = it.GetPage();
 
                 if (cce_ptr == nullptr)
                 {
@@ -269,45 +269,7 @@ public:
 
         if (cce_addr.CcePtr() == 0)
         {
-            if (table_name_.Type() == TableType::Secondary ||
-                table_name_.Type() == TableType::UniqueSecondary)
-            {
-                // TODO: Sk Insert branch needs rethinking, currently useless.
-                assert(false);
-            }
-
-            // This is an insert. The new insert results in an insert entry in
-            // the intention set of the preceding key's gap.
-
-            auto ins_it = cc_entry.insert_intention_set_.find(target_key);
-            if (ins_it != cc_entry.insert_intention_set_.end())
-            {
-                InsertEntry<KeyT, ValueT> &insert_entry = *ins_it->second;
-                if (!(insert_entry.txn_ == req.Txn()))
-                {
-                    // If the same key is already in the insert intention set,
-                    // and its tx ID does not matches the request's, this is a
-                    // duplicate insert. Aborts the tx.
-                    hd_res->SetError(CcErrorCode::DUPLICATE_INSERT_ERR);
-                    return true;
-                }
-            }
-
-            std::unique_ptr<InsertEntry<KeyT, ValueT>> insert_entry =
-                std::make_unique<InsertEntry<KeyT, ValueT>>(
-                    *target_key, req.Txn(), cce_ptr);
-            cce_addr.SetInsert(reinterpret_cast<uint64_t>(insert_entry.get()),
-                               ng_term,
-                               req.NodeGroupId(),
-                               shard_->LocalCoreId());
-
-            cc_entry.insert_intention_set_.emplace(&insert_entry->key_,
-                                                   std::move(insert_entry));
-            // Cc entry address has been updated. Only reset the result's last
-            // validation ts.
-            acquire_key_result.last_vali_ts_ = cc_entry.gap_last_read_ts_;
-            acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
-            hd_res->SetFinished();
+            assert("Unsupported insert for phantom reads.");
         }
         else
         {
@@ -315,6 +277,7 @@ public:
             {
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(&cc_entry,
+                                      ccp,
                                       cc_entry.payload_status_,
                                       &req,
                                       req.NodeGroupId(),
@@ -332,7 +295,7 @@ public:
                 assert(acquired_lock == LockType::WriteLock);
                 // for mvcc
                 uint64_t lock_ts = std::max(req.Ts(), shard_->Now());
-                cc_entry.key_lock_ptr_->SetWLockTs(lock_ts);
+                cc_entry.GetKeyLock()->SetWLockTs(lock_ts);
 
                 // Updates last_vali_ts after successfully acquiring the write
                 // lock such that it is no smaller than the current time of
@@ -343,7 +306,7 @@ public:
                 // relies on this property to avoid picking a checkpoint ts in
                 // this shard that may overlap with the ongoing tx.
                 acquire_key_result.last_vali_ts_ =
-                    std::max(cc_entry.last_read_ts_, lock_ts);
+                    std::max(shard_->LastReadTs(), lock_ts);
                 acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
 
                 hd_res->SetFinished();
@@ -430,131 +393,16 @@ public:
 
         if (!is_upload && cce_addr->InsertPtr() != 0)
         {
-            // DEAD BRANCH FOR NOW
-            if (table_name_.Type() == TableType::Secondary ||
-                table_name_.Type() == TableType::UniqueSecondary)
-            {
-                // TODO: Sk Insert branch needs rethinking, currently useless.
-                assert(false);
-                return true;
-            }
-
-            // insert branch.
-            assert(is_del == false);
-
-            InsertEntry<KeyT, ValueT> &insert_entry =
-                *reinterpret_cast<InsertEntry<KeyT, ValueT> *>(
-                    cce_addr->InsertPtr());
-            CcEntry<KeyT, ValueT> &prior_cce = *insert_entry.parent_entry_;
-
-            if (commit_ts == 0)
-            {
-                // When the commit ts is 0, this request has a sole purpose:
-                // undoes any effects left by the write operation. This is used
-                // when the tx receives the abort command before entering the
-                // commit phase. For an insert, in addition to removing the
-                // write lock, the undo operation also includes removing the
-                // temporary insert entry in the gap.
-                CcEntry<KeyT, ValueT> &parent_entry =
-                    *insert_entry.parent_entry_;
-                parent_entry.insert_intention_set_.erase(&insert_entry.key_);
-            }
-            else
-            {
-                Iterator insert_it = Emplace(insert_entry.key_);
-                const KeyT *key_ptr = insert_it->first;
-                CcEntry<KeyT, ValueT> *new_cce = insert_it->second;
-
-                if (new_cce == nullptr)
-                {
-                    // The cc map has reached the maximal capacity.
-#ifdef RANGE_PARTITION_ENABLED
-                    req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
-#else
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
-#endif
-                }
-
-                auto ite =
-                    prior_cce.insert_intention_set_.find(&insert_entry.key_);
-                assert(ite != prior_cce.insert_intention_set_.end());
-                assert(ite->second->txn_ == txn);
-
-                shard_->DecrementMemory(new_cce->PayloadMemUsage());
-                if (payload_str == nullptr)
-                {
-#ifndef ON_KEY_OBJECT
-                    new_cce->payload_ = std::make_shared<ValueT>(*commit_val);
-#else
-                    assert(false);
-                    new_cce->payload_ = std::make_unique<ValueT>(*commit_val);
-#endif
-                }
-                else
-                {
-                    size_t offset = 0;
-#ifndef ON_KEY_OBJECT
-                    new_cce->payload_ = std::make_shared<ValueT>();
-#else
-                    assert(false);
-                    new_cce->payload_ = std::make_unique<ValueT>();
-#endif
-                    new_cce->payload_->Deserialize(payload_str->data(), offset);
-                }
-                shard_->mem_usage_ += new_cce->PayloadMemUsage();
-                new_cce->payload_status_ = RecordStatus::Normal;
-
-                ++ite;
-                for (auto it = ite; it != prior_cce.insert_intention_set_.end();
-                     ++it)
-                {
-                    InsertEntry<KeyT, ValueT> &insert_entry = *it->second.get();
-                    insert_entry.parent_entry_ = new_cce;
-                    new_cce->insert_intention_set_.emplace(
-                        it->first, std::move(it->second));
-                }
-
-                new_cce->gap_commit_ts_ = commit_ts;
-                new_cce->commit_ts_ = commit_ts;
-                new_cce->gap_last_read_ts_ = prior_cce.gap_last_read_ts_;
-                if (ccm_has_full_entries_ || req.IsInitialInsert())
-                {
-                    new_cce->ckpt_ts_.store(1U);
-                }
-
-                prior_cce.gap_commit_ts_ = commit_ts;
-                prior_cce.insert_intention_set_.erase(
-                    --ite, prior_cce.insert_intention_set_.end());
-
-                if (shard_->realtime_sampling_ && sample_pool_)
-                {
-                    sample_pool_->OnInsert(*key_ptr, table_schema_);
-                }
-                if (commit_ts > last_dirty_commit_ts_)
-                {
-                    last_dirty_commit_ts_ = commit_ts;
-                }
-                if (commit_ts > new_cce->parent_page_->last_dirty_commit_ts_)
-                {
-                    new_cce->parent_page_->last_dirty_commit_ts_ = commit_ts;
-                }
-            }
-
-            // The insert places a write lock on the prior cc entry's gap.
-            ReleaseCceLock(prior_cce.gap_lock_ptr_,
-                           &prior_cce,
-                           txn,
-                           req.NodeGroupId(),
-                           LockType::WriteLock);
-            req.Result()->SetFinished();
+            assert("Unsupported insert for phantom reads.");
             return true;
         }
         else
         {
             // upsert and delete branch.
             CcEntry<KeyT, ValueT> *cce;
+            const KeyT *write_key = nullptr;
+            CcPage<KeyT, ValueT> *cc_page = nullptr;
+
             if (is_upload)
             {
                 // Find the cce location first
@@ -583,6 +431,7 @@ public:
                 // be Upsert.
                 Iterator it = FindEmplace(*key);
                 cce = it->second;
+                cc_page = it.GetPage();
                 if (cce == nullptr)
                 {
                     LOG(WARNING)
@@ -600,6 +449,7 @@ public:
                     req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
                     return true;
                 }
+                write_key = it->first;
 
                 // Since this is a forward req, we assume this entry is not
                 // visible on this ng yet so no need to check for lock.
@@ -616,13 +466,17 @@ public:
                 cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
                     cce_addr->CcePtr());
 
-                if (cce->key_lock_ptr_ == nullptr ||
-                    !cce->key_lock_ptr_->HasWriteLock() ||
-                    cce->key_lock_ptr_->WriteLockTx() != txn)
+                NonBlockingLock *lk = cce->GetKeyLock();
+                if (lk == nullptr || !lk->HasWriteLock() ||
+                    lk->WriteLockTx() != txn)
                 {
                     req.Result()->SetFinished();
                     return true;
                 }
+
+                cc_page = static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+                assert(cc_page != nullptr);
+                write_key = cc_page->KeyOfEntry(cce);
             }
 
             if (commit_ts > 0)
@@ -638,6 +492,7 @@ public:
                 }
 #endif
 
+#ifndef ON_KEY_OBJECT
                 // for mvcc
                 if (shard_->EnableMvcc())
                 {
@@ -652,6 +507,7 @@ public:
                     size_t added_mem_usage = cce->ArchiveBeforeUpdate(Type());
                     shard_->mem_usage_ += added_mem_usage;
                 }
+#endif
 
                 if (commit_ts < cce->commit_ts_)
                 {
@@ -737,32 +593,30 @@ public:
                 {
                     last_dirty_commit_ts_ = commit_ts;
                 }
-                if (commit_ts > cce->parent_page_->last_dirty_commit_ts_)
+                if (commit_ts > cc_page->last_dirty_commit_ts_)
                 {
-                    cce->parent_page_->last_dirty_commit_ts_ = commit_ts;
+                    cc_page->last_dirty_commit_ts_ = commit_ts;
                 }
                 if (shard_->realtime_sampling_ && sample_pool_)
                 {
+                    assert(write_key != nullptr);
+
                     if (op_type == OperationType::Insert ||
                         op_type == OperationType::Upsert)
                     {
-                        sample_pool_->OnInsert(
-                            static_cast<const KeyT &>(*cce->Key()),
-                            table_schema_);
+                        sample_pool_->OnInsert(*write_key, table_schema_);
                     }
                     else if (op_type == OperationType::Delete)
                     {
                         if (cce_old_status == RecordStatus::Normal)
                         {
-                            sample_pool_->OnDelete(
-                                static_cast<const KeyT &>(*cce->Key()),
-                                table_schema_);
+                            sample_pool_->OnDelete(*write_key, table_schema_);
                         }
                     }
                 }
             }
 
-            ReleaseCceLock(cce->key_lock_ptr_,
+            ReleaseCceLock(cce->GetKeyLock(),
                            cce,
                            txn,
                            req.NodeGroupId(),
@@ -797,6 +651,7 @@ public:
         CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
         AcquireAllResult &acquire_all_result = hd_res->Value();
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
+        CcPage<KeyT, ValueT> *ccp = nullptr;
         bool resume = false;
         const KeyT *target_key = nullptr;
         bool will_insert = false;
@@ -880,6 +735,7 @@ public:
                 Iterator it = Floor(*target_key);
                 const KeyT *key_ptr = it->first;
                 cce_ptr = it->second;
+                ccp = it.GetPage();
 
                 if (cce_ptr != &neg_inf_ && *key_ptr == *target_key)
                 {
@@ -915,6 +771,7 @@ public:
             {
                 Iterator it = FindEmplace(*target_key);
                 cce_ptr = it->second;
+                ccp = it.GetPage();
 
                 if (cce_ptr == nullptr)
                 {
@@ -937,41 +794,10 @@ public:
         // Cce ptr either points to the cc entry whose gap will accommodate the
         // new insert, or the cc entry whose key will be updated/deleted.
         CcEntry<KeyT, ValueT> &cc_entry = *cce_ptr;
-        TxNumber txn = req.Txn();
 
         if (will_insert)
         {
-            // This is an insert. The new insert results in an insert entry in
-            // the intention set of the preceding key's gap.
-
-            auto ins_it = cc_entry.insert_intention_set_.find(target_key);
-            if (ins_it != cc_entry.insert_intention_set_.end())
-            {
-                InsertEntry<KeyT, ValueT> &insert_entry = *ins_it->second;
-                if (!(insert_entry.txn_ == txn))
-                {
-                    // If the same key is already in the insert intention set,
-                    // and its tx ID does not matches the request's, this is a
-                    // duplicate insert. Aborts the tx.
-                    hd_res->SetError(CcErrorCode::DUPLICATE_INSERT_ERR);
-                    return true;
-                }
-            }
-
-            std::unique_ptr<InsertEntry<KeyT, ValueT>> insert_entry =
-                std::make_unique<InsertEntry<KeyT, ValueT>>(
-                    *target_key, txn, cce_ptr);
-
-            cc_entry.insert_intention_set_.emplace(&insert_entry->key_,
-                                                   std::move(insert_entry));
-            // Cc entry address has been updated. Only reset the result's last
-            // validation ts.
-            acquire_all_result.last_vali_ts_ = std::max(
-                cc_entry.gap_last_read_ts_, acquire_all_result.last_vali_ts_);
-            acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
-            acquire_all_result.node_term_ = ng_term;
-
-            hd_res->SetFinished();
+            assert("Unsupported insert for phantom reads.");
         }
         else
         {
@@ -986,6 +812,7 @@ public:
             {
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(&cc_entry,
+                                      ccp,
                                       cc_entry.payload_status_,
                                       &req,
                                       req.NodeGroupId(),
@@ -1013,13 +840,12 @@ public:
                 // (2) the local time.
                 if (shard_->core_id_ == 0)
                 {
-                    acquire_all_result.last_vali_ts_ = cc_entry.last_read_ts_;
+                    acquire_all_result.last_vali_ts_ = shard_->LastReadTs();
                 }
                 else
                 {
-                    acquire_all_result.last_vali_ts_ =
-                        std::max(cc_entry.last_read_ts_,
-                                 acquire_all_result.last_vali_ts_);
+                    acquire_all_result.last_vali_ts_ = std::max(
+                        shard_->LastReadTs(), acquire_all_result.last_vali_ts_);
                 }
 
                 if (shard_->core_id_ == tx_core_id)
@@ -1195,102 +1021,15 @@ public:
 
         if (req.OpType() == OperationType::Insert && *key_ptr != *target_key)
         {
-            assert(req.CommitType() != PostWriteType::DowngradeLock);
-
-            auto insert_it = cce_ptr->insert_intention_set_.find(target_key);
-            if (insert_it != cce_ptr->insert_intention_set_.end() &&
-                insert_it->second->txn_ == txn)
-            {
-                if (commit_ts == 0)
-                {
-                    // When the commit ts is 0, this request has a sole purpose:
-                    // undoes any effects left by the write operation. This is
-                    // used when the tx receives the abort command before
-                    // entering the commit phase. For an insert, in addition to
-                    // removing the write lock, the undo operation also includes
-                    // removing the temporary insert entry in the gap.
-                    cce_ptr->insert_intention_set_.erase(insert_it);
-                }
-                else
-                {
-                    Iterator iterator = Emplace(insert_it->second->key_);
-                    CcEntry<KeyT, ValueT> *new_cce = iterator->second;
-
-                    if (new_cce == nullptr)
-                    {
-                        // The cc map has reached the maximal capacity.
-#ifdef RANGE_PARTITION_ENABLED
-                        req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                        return true;
-#else
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        return false;
-#endif
-                    }
-
-                    shard_->DecrementMemory(new_cce->PayloadMemUsage());
-#ifndef ON_KEY_OBJECT
-                    new_cce->payload_ = std::make_shared<ValueT>(*payload);
-#else
-                    assert(false);
-                    new_cce->payload_ = std::make_unique<ValueT>(*payload);
-#endif
-                    new_cce->payload_status_ = RecordStatus::Normal;
-                    shard_->mem_usage_ += new_cce->PayloadMemUsage();
-
-                    // Splits the gap.
-                    ++insert_it;
-                    for (auto it = insert_it;
-                         it != cce_ptr->insert_intention_set_.end();
-                         ++it)
-                    {
-                        InsertEntry<KeyT, ValueT> &insert_entry =
-                            *it->second.get();
-                        insert_entry.parent_entry_ = new_cce;
-                        new_cce->insert_intention_set_.emplace(
-                            it->first, std::move(it->second));
-                    }
-
-                    new_cce->gap_commit_ts_ = commit_ts;
-                    new_cce->commit_ts_ = commit_ts;
-                    new_cce->gap_last_read_ts_ = cce_ptr->gap_last_read_ts_;
-
-                    cce_ptr->gap_commit_ts_ = commit_ts;
-                    cce_ptr->insert_intention_set_.erase(
-                        --insert_it, cce_ptr->insert_intention_set_.end());
-                }
-            }
-
-            if (req.CommitType() != PostWriteType::PrepareCommit)
-            {
-                // The insert places a write lock on the prior cc entry's gap.
-                ReleaseCceLock(cce_ptr->gap_lock_ptr_,
-                               cce_ptr,
-                               txn,
-                               req.NodeGroupId(),
-                               LockType::WriteLock);
-            }
-
-            if (shard_->core_id_ == shard_->core_cnt_ - 1)
-            {
-                req.Result()->SetFinished();
-                req.SetDecodedPayload(nullptr);
-                return true;
-            }
-            else
-            {
-                req.ResetCcm();
-                MoveRequest(&req, shard_->core_id_ + 1);
-                return false;
-            }
+            assert("Unsupported insert for phantom reads.");
         }
         else
         {
             LockType lk_type = LockType::NoLock;
-            if (cce_ptr->key_lock_ptr_ != nullptr)
+            if (cce_ptr->GetKeyLock() != nullptr)
             {
                 // AcquireAllCc only acquire WriteIntent or WriteLock
-                auto [w_tx, w_type] = cce_ptr->key_lock_ptr_->WriteTx();
+                auto [w_tx, w_type] = cce_ptr->GetKeyLock()->WriteTx();
 
                 if (w_tx == txn)
                 {
@@ -1359,26 +1098,26 @@ public:
 
                     // For PostCommit or Commit, the post-write-all request
                     // releases the write lock.
-                    ReleaseCceLock(cce_ptr->key_lock_ptr_,
+                    ReleaseCceLock(cce_ptr->GetKeyLock(),
                                    cce_ptr,
                                    txn,
                                    req.NodeGroupId(),
                                    lk_type);
                 }
             }
+        }
 
-            if (shard_->core_id_ == shard_->core_cnt_ - 1)
-            {
-                req.Result()->SetFinished();
-                req.SetDecodedPayload(nullptr);
-                return true;
-            }
-            else
-            {
-                req.ResetCcm();
-                MoveRequest(&req, shard_->core_id_ + 1);
-                return false;
-            }
+        if (shard_->core_id_ == shard_->core_cnt_ - 1)
+        {
+            req.Result()->SetFinished();
+            req.SetDecodedPayload(nullptr);
+            return true;
+        }
+        else
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+            return false;
         }
     }
 
@@ -1443,12 +1182,11 @@ public:
         // FIXME(lzx): Now, we don't backfill for "Unkown" entry when scanning.
         // So, Validate operation fails if another tx backfilled it. Temporary
         // fix is that we don't validate for "Unkown" status results.
-        if (cc_entry.payload_status_ != RecordStatus::Unknown &&
-            ((key_ts > 0 && key_ts != cc_entry.commit_ts_) ||
-             (gap_ts > 0 && gap_ts != cc_entry.gap_commit_ts_)))
+        if (cc_entry.payload_status_ != RecordStatus::Unknown && key_ts > 0 &&
+            key_ts != cc_entry.commit_ts_)
         {
             ReleaseCceLock(
-                cc_entry.key_lock_ptr_, &cc_entry, txn, req.NodeGroupId());
+                cc_entry.GetKeyLock(), &cc_entry, txn, req.NodeGroupId());
             // broken repeatable read, set error.
             hd_res->SetError(
                 CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH);
@@ -1457,9 +1195,7 @@ public:
                 << " ,payload_status: "
                 << static_cast<int>(cc_entry.payload_status_)
                 << " ,key_ts: " << key_ts
-                << " ,cc_entry.commit_ts_: " << cc_entry.commit_ts_
-                << " ,gap_ts: " << gap_ts
-                << " ,cc_entry.gap_commit_ts_: " << cc_entry.gap_commit_ts_;
+                << " ,cc_entry.commit_ts_: " << cc_entry.commit_ts_;
         }
         else
         {
@@ -1478,50 +1214,32 @@ public:
 
             if (gap_ts > 0)
             {
-                cc_entry.gap_last_read_ts_ =
-                    std::max(cc_entry.gap_last_read_ts_, commit_ts);
-
-                for (auto it = cc_entry.insert_intention_set_.begin();
-                     it != cc_entry.insert_intention_set_.end();
-                     ++it)
-                {
-                    conflicting_txs.AddConflictingTx(it->second->txn_);
-
-                    DLOG_IF(INFO, TRACE_OCC_ERR)
-                        << "PostReadCc, occ_err, txn:" << txn
-                        << " ,cce: " << &cc_entry
-                        << " ,gap conflict tx: " << it->second->txn_;
-                }
+                assert("Unsupported phantom reads.");
             }
 
+            NonBlockingLock *key_lock = cc_entry.GetKeyLock();
             if (key_ts > 0)
             {
-                cc_entry.last_read_ts_ =
-                    std::max(cc_entry.last_read_ts_, commit_ts);
+                shard_->UpdateLastReadTs(commit_ts);
 
                 // Using locking protocol, this never happens.
-                if (cc_entry.key_lock_ptr_ != nullptr &&
-                    cc_entry.key_lock_ptr_->HasWriteLock() &&
-                    cc_entry.key_lock_ptr_->WriteLockTx() != txn)
+                if (key_lock != nullptr && key_lock->HasWriteLock() &&
+                    key_lock->WriteLockTx() != txn)
                 {
                     int64_t ng_term =
                         Sharder::Instance().LeaderTerm(req.NodeGroupId());
                     shard_->CheckRecoverTx(
-                        cc_entry.key_lock_ptr_->WriteLockTx(),
-                        req.NodeGroupId(),
-                        ng_term);
-                    conflicting_txs.AddConflictingTx(
-                        cc_entry.key_lock_ptr_->WriteLockTx());
+                        key_lock->WriteLockTx(), req.NodeGroupId(), ng_term);
+                    conflicting_txs.AddConflictingTx(key_lock->WriteLockTx());
 
                     DLOG_IF(INFO, TRACE_OCC_ERR)
                         << "PostReadCc, occ_err, txn:" << txn
-                        << " ,cce: " << &cc_entry << " ,key conflict tx: "
-                        << cc_entry.key_lock_ptr_->WriteLockTx();
+                        << " ,cce: " << &cc_entry
+                        << " ,key conflict tx: " << key_lock->WriteLockTx();
                 }
             }
 
-            ReleaseCceLock(
-                cc_entry.key_lock_ptr_, &cc_entry, txn, req.NodeGroupId());
+            ReleaseCceLock(key_lock, &cc_entry, txn, req.NodeGroupId());
 
             if (conflicting_txs.Size() > 0)
             {
@@ -1631,6 +1349,7 @@ public:
 
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
+        CcPage<KeyT, ValueT> *ccp = nullptr;
 
         if (req.Type() == ReadType::Inside)
         {
@@ -1651,7 +1370,7 @@ public:
                     // request is put into the blocking queue with ReadLock.
                     // After PostWrite finished, this ReadLock should be
                     // released.
-                    cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
+                    cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
                     acquired_lock = LockType::NoLock;
                     err_code = CcErrorCode::NO_ERROR;
                 }
@@ -1690,7 +1409,9 @@ public:
                 }
 
 #ifdef RANGE_PARTITION_ENABLED
-                cce = Find(*look_key).second;
+                Iterator it = Find(*look_key);
+                cce = it->second;
+                ccp = it.GetPage();
 
                 // collect metrics: slice cache hits
                 if (metrics::enable_cache_hit_rate)
@@ -1739,6 +1460,7 @@ public:
                             {
                                 Iterator it = FindEmplace(*look_key);
                                 cce = it->second;
+                                ccp = it.GetPage();
                                 if (cce == nullptr)
                                 {
                                     hd_res->SetError(
@@ -1752,7 +1474,6 @@ public:
                                     cce->payload_status_ =
                                         RecordStatus::Deleted;
                                     cce->commit_ts_ = 1U;
-                                    cce->gap_commit_ts_ = 1U;
                                     cce->ckpt_ts_.store(
                                         1U, std::memory_order_relaxed);
                                 }
@@ -1763,7 +1484,10 @@ public:
                             }
                             else
                             {
-                                cce = Find(*look_key).second;
+                                it = Find(*look_key);
+                                cce = it->second;
+                                ccp = it.GetPage();
+
                                 if (cce == nullptr)
                                 {
                                     hd_res->Value().ts_ = 1;
@@ -1812,6 +1536,7 @@ public:
                         assert(Type() == TableType::Catalog);
                         Iterator it = FindEmplace(*look_key);
                         cce = it->second;
+                        ccp = it.GetPage();
                         if (cce == nullptr)
                         {
                             hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
@@ -1822,6 +1547,7 @@ public:
 #else
                 Iterator it = FindEmplace(*look_key);
                 cce = it->second;
+                ccp = it.GetPage();
 
                 // The read request accesses a new key not in the cc map. But
                 // the cc map is full and cannot allocates a new entry.
@@ -1839,7 +1565,6 @@ public:
                 {
                     cce->payload_status_ = RecordStatus::Deleted;
                     cce->commit_ts_ = 1U;
-                    cce->gap_commit_ts_ = 1U;
                     cce->ckpt_ts_.store(1U);
                 }
 #endif
@@ -1865,6 +1590,7 @@ public:
                 // Try to acquire lock
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
+                                      ccp,
                                       cce->payload_status_,
                                       &req,
                                       ng_id,
@@ -1964,6 +1690,7 @@ public:
                 cce->ckpt_ts_.compare_exchange_strong(tmp_ts,
                                                       req.ReadTimestamp());
             }
+#ifndef ON_KEY_OBJECT
             else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 0U &&
                      cce->commit_ts_ > req.ReadTimestamp())
             {
@@ -1989,14 +1716,17 @@ public:
                 shard_->mem_usage_ +=
                     cce->AddArchiveRecords(*req.ArchivesPtr());
             }
+#endif
         }
 
         if (is_read_snapshot)
         {
+#ifndef ON_KEY_OBJECT
             assert(req.Type() == ReadType::Inside);
 
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(req.ReadTimestamp(), Type(), v_rec);
+            cce->MvccGet(
+                req.ReadTimestamp(), Type(), shard_->LastReadTs(), v_rec);
             if (v_rec.payload_status_ == RecordStatus::Normal)
             {
                 if (req.Record() != nullptr)
@@ -2014,6 +1744,7 @@ public:
             hd_res->Value().rec_status_ = v_rec.payload_status_;
             hd_res->SetFinished();
             return true;
+#endif
         }
         else if (cce->payload_status_ == RecordStatus::Normal &&
                  (req.Type() == ReadType::Inside || cce->commit_ts_ > 1))
@@ -2033,10 +1764,10 @@ public:
             // The commit_ts of sk data generated from pk data during add index
             // txm is the commit_ts of add index txm, so those cce's commit_ts
             // also large than corresponding pk's commit_ts.
+            NonBlockingLock *key_lock = cce->GetKeyLock();
             bool wait_for_post_write =
-                (cce->key_lock_ptr_ != nullptr &&
-                 cce->key_lock_ptr_->HasWriteLock() &&
-                 cce->key_lock_ptr_->WriteLockTx() != req.Txn());
+                (key_lock != nullptr && key_lock->HasWriteLock() &&
+                 key_lock->WriteLockTx() != req.Txn());
             if (req.Isolation() == IsolationLevel::ReadCommitted &&
                 cce->commit_ts_ > 0 && cce->commit_ts_ < req.ReadTimestamp() &&
                 wait_for_post_write)
@@ -2052,10 +1783,8 @@ public:
                 // Put the request to top of key lock's blocking queue with
                 // acquring readlock. And then should release the readlock
                 // before handling this requst when PostWriteCc finished.
-                cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                        LockType::ReadLock);
-                shard_->CheckRecoverTx(
-                    cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                key_lock->InsertBlockingQueue(&req, LockType::ReadLock);
+                shard_->CheckRecoverTx(key_lock->WriteLockTx(), ng_id, ng_term);
 
                 // After inserting to blocking queue, the execution of current
                 // ReadCc request should stop.
@@ -2144,6 +1873,7 @@ public:
             uint64_t tmp_ts = 0U;
             cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs());
         }
+#ifndef ON_KEY_OBJECT
         else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 0U &&
                  cce->commit_ts_ > req.CommitTs())
         {
@@ -2186,6 +1916,7 @@ public:
                 shard_->mem_usage_ += cce->AddArchiveRecords(archives);
             }
         }
+#endif
 
         req.Finish();
         return true;
@@ -2311,11 +2042,15 @@ public:
 
         const KeyT *key_ptr = nullptr;
         CcEntry<KeyT, ValueT> *cce = nullptr;
+        CcPage<KeyT, ValueT> *ccp = nullptr;
 
         if (req.CcePtr() != nullptr)
         {
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+            assert(ccp != nullptr);
+            scan_ccm_it = Iterator(cce, ccp, &neg_inf_);
             key_ptr = scan_ccm_it->first;
             ScanType scan_type = req.CcePtrScanType();
 
@@ -2325,7 +2060,7 @@ public:
             if (req.IsWaitForPostWrite())
             {
                 req.SetIsWaitForPostWrite(false);
-                cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
+                cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
             }
             else
             {
@@ -2374,6 +2109,7 @@ public:
             scan_ccm_it = start_pair.first;
             key_ptr = scan_ccm_it->first;
             cce = scan_ccm_it->second;
+            ccp = scan_ccm_it.GetPage();
             ScanType scan_type = start_pair.second;
 
             req.SetCcePtr(cce);
@@ -2382,6 +2118,7 @@ public:
             if (scan_type != ScanType::ScanGap)
             {
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   ccp,
                                                    cce->payload_status_,
                                                    &req,
                                                    ng_id,
@@ -2440,6 +2177,7 @@ public:
             {
                 key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
+                ccp = scan_ccm_it.GetPage();
 #ifdef ON_KEY_OBJECT
                 if (cce->payload_status_ == RecordStatus::Deleted &&
                     (!cce->NeedCkpt() || FLAGS_skip_kv))
@@ -2451,6 +2189,7 @@ public:
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   ccp,
                                                    cce->payload_status_,
                                                    &req,
                                                    ng_id,
@@ -2506,6 +2245,7 @@ public:
             {
                 key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
+                ccp = scan_ccm_it.GetPage();
 #ifdef ON_KEY_OBJECT
                 if (cce->payload_status_ == RecordStatus::Deleted &&
                     (!cce->NeedCkpt() || FLAGS_skip_kv))
@@ -2517,6 +2257,7 @@ public:
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   ccp,
                                                    cce->payload_status_,
                                                    &req,
                                                    ng_id,
@@ -2620,7 +2361,10 @@ public:
         {
             CcEntry<KeyT, ValueT> *prior_cce =
                 static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            scan_ccm_it = Iterator(prior_cce, &neg_inf_, &pos_inf_);
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
+            assert(ccp != nullptr);
+            scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             const KeyT *prior_cce_key = scan_ccm_it->first;
             ScanType scan_type = req.CcePtrScanType();
 
@@ -2630,7 +2374,7 @@ public:
             if (req.IsWaitForPostWrite())
             {
                 req.SetIsWaitForPostWrite(false);
-                prior_cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
+                prior_cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
             }
             else
             {
@@ -2672,7 +2416,10 @@ public:
             CcEntry<KeyT, ValueT> *prior_cce =
                 reinterpret_cast<CcEntry<KeyT, ValueT> *>(
                     typed_cache->Last()->cce_addr_.CcePtr());
-            scan_ccm_it = Iterator(prior_cce, &neg_inf_, &pos_inf_);
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
+            assert(ccp != nullptr);
+            scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             typed_cache->Reset();
         }
 
@@ -2686,6 +2433,8 @@ public:
             {
                 const KeyT *key = scan_ccm_it->first;
                 CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
                         cce->ckpt_ts_.load(std::memory_order_acquire))
@@ -2706,6 +2455,7 @@ public:
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   ccp,
                                                    cce->payload_status_,
                                                    &req,
                                                    ng_id,
@@ -2759,6 +2509,7 @@ public:
             {
                 const KeyT *key = scan_ccm_it->first;
                 CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
                 if (scan_ccm_it == neg_inf_it)
                 {
                     req.SetCcePtr(cce);
@@ -2790,6 +2541,7 @@ public:
 #endif
 
                     auto lock_pair = AcquireCceKeyLock(cce,
+                                                       ccp,
                                                        cce->payload_status_,
                                                        &req,
                                                        ng_id,
@@ -3014,12 +2766,16 @@ public:
         Iterator scan_ccm_it;
         const KeyT *key_ptr = nullptr;
         CcEntry<KeyT, ValueT> *cce = nullptr;
+        CcPage<KeyT, ValueT> *ccp = nullptr;
 
         if (req.CcePtr(shard_->LocalCoreId()) != nullptr)
         {
             cce = static_cast<CcEntry<KeyT, ValueT> *>(
                 req.CcePtr(shard_->LocalCoreId()));
-            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+            assert(ccp != nullptr);
+            scan_ccm_it = Iterator(cce, ccp, &neg_inf_);
             key_ptr = scan_ccm_it->first;
             ScanType scan_type = req.CcePtrScanType(shard_->LocalCoreId());
 
@@ -3029,7 +2785,7 @@ public:
             if (req.IsWaitForPostWrite(shard_->LocalCoreId()))
             {
                 req.SetIsWaitForPostWrite(false, shard_->LocalCoreId());
-                cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
+                cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
             }
             else
             {
@@ -3063,7 +2819,6 @@ public:
                             req.ReadTimestamp(),
                             is_read_snapshot,
                             req.is_ckpt_delta_);
-            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
         }
         else
         {
@@ -3076,6 +2831,7 @@ public:
             ScanType scan_type = start_pair.second;
             key_ptr = scan_ccm_it->first;
             cce = scan_ccm_it->second;
+            ccp = scan_ccm_it.GetPage();
 
             req.SetCcePtr(cce, shard_->LocalCoreId());
             req.SetCcePtrScanType(scan_type, shard_->LocalCoreId());
@@ -3083,6 +2839,7 @@ public:
             if (scan_type != ScanType::ScanGap)
             {
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   ccp,
                                                    cce->payload_status_,
                                                    &req,
                                                    ng_id,
@@ -3143,6 +2900,8 @@ public:
             {
                 key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
+                ccp = scan_ccm_it.GetPage();
+
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
                         cce->ckpt_ts_.load(std::memory_order_acquire))
@@ -3156,6 +2915,7 @@ public:
                                       shard_->LocalCoreId());
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   ccp,
                                                    cce->payload_status_,
                                                    &req,
                                                    ng_id,
@@ -3211,6 +2971,8 @@ public:
             {
                 key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
+                ccp = scan_ccm_it.GetPage();
+
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
                         cce->ckpt_ts_.load(std::memory_order_acquire))
@@ -3224,6 +2986,7 @@ public:
                                       shard_->LocalCoreId());
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   ccp,
                                                    cce->payload_status_,
                                                    &req,
                                                    ng_id,
@@ -3266,7 +3029,6 @@ public:
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
-                scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
             }
         }
 
@@ -3324,7 +3086,10 @@ public:
         {
             prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
             ScanType scan_type = req.CcePtrScanType();
-            scan_ccm_it = Iterator(prior_cce, &neg_inf_, &pos_inf_);
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
+            assert(ccp != nullptr);
+            scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             const KeyT *prior_cce_key = scan_ccm_it->first;
 
             req.SetCcePtr(nullptr);
@@ -3333,7 +3098,7 @@ public:
             if (req.IsWaitForPostWrite())
             {
                 req.SetIsWaitForPostWrite(false);
-                prior_cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
+                prior_cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
             }
             else
             {
@@ -3373,7 +3138,10 @@ public:
         {
             prior_cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
                 req.PriorCceAddr().CcePtr());
-            scan_ccm_it = Iterator(prior_cce, &neg_inf_, &pos_inf_);
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
+            assert(ccp != nullptr);
+            scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
         }
 
         if (direction == ScanDirection::Forward)
@@ -3386,6 +3154,7 @@ public:
             {
                 const KeyT *key = scan_ccm_it->first;
                 CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
@@ -3398,6 +3167,7 @@ public:
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   ccp,
                                                    cce->payload_status_,
                                                    &req,
                                                    ng_id,
@@ -3451,6 +3221,8 @@ public:
             {
                 const KeyT *key = scan_ccm_it->first;
                 CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+
                 if (scan_ccm_it == neg_inf_it)
                 {
                     req.SetCcePtr(cce);
@@ -3473,6 +3245,7 @@ public:
                     req.SetCcePtrScanType(ScanType::ScanBoth);
 
                     auto lock_pair = AcquireCceKeyLock(cce,
+                                                       ccp,
                                                        cce->payload_status_,
                                                        &req,
                                                        ng_id,
@@ -3751,9 +3524,11 @@ public:
             [&, this](
                 const KeyT *cce_key,
                 CcEntry<KeyT, ValueT> *cce,
+                CcPage<KeyT, ValueT> *ccp,
                 ScanType scan_type) -> std::pair<ScanReturnType, CcErrorCode>
         {
             auto lock_pair = AcquireCceKeyLock(cce,
+                                               ccp,
                                                cce->payload_status_,
                                                &req,
                                                ng_id,
@@ -3832,7 +3607,10 @@ public:
         if (cce != nullptr)
         {
             auto [blocking_type, scan_type] = req.BlockingPair(core_id);
-            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+            assert(ccp != nullptr);
+            scan_ccm_it = Iterator(cce, ccp, &neg_inf_);
             cce_key = scan_ccm_it->first;
 
             if (blocking_type == ScanSliceCc::ScanBlockingType::NoBlocking)
@@ -3848,7 +3626,7 @@ public:
                                                  req.IsCoveringKeys()) ==
                     LockType::NoLock)
                 {
-                    ReleaseCceLock(cce->key_lock_ptr_,
+                    ReleaseCceLock(cce->GetKeyLock(),
                                    cce,
                                    req.Txn(),
                                    ng_id,
@@ -3864,7 +3642,7 @@ public:
                 {
                     // The scan was blocked because it intends to scan a key's
                     // version that has not been committed.
-                    cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
+                    cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
                 }
                 else
                 {
@@ -4062,6 +3840,7 @@ public:
                 Iterator pos_inf_it = End();
                 const KeyT *cce_key = scan_ccm_it->first;
                 CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 
                 auto is_cache_full =
                     [&req, scan_cache, remote_scan_cache]() -> bool {
@@ -4075,7 +3854,7 @@ public:
                         (inclusive && *cce_key == *end_key)))
                 {
                     auto [scan_ret, err_code] =
-                        scan_tuple_func(cce_key, cce, ScanType::ScanBoth);
+                        scan_tuple_func(cce_key, cce, ccp, ScanType::ScanBoth);
 
                     if (scan_ret != ScanReturnType::Success)
                     {
@@ -4085,6 +3864,7 @@ public:
                     ++scan_ccm_it;
                     cce_key = scan_ccm_it->first;
                     cce = scan_ccm_it->second;
+                    ccp = scan_ccm_it.GetPage();
                 }
 
                 return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
@@ -4201,6 +3981,8 @@ public:
                     {
                         while (scan_cache->Size() > 0)
                         {
+                            --scan_ccm_it;
+
                             const KeyT *last_key =
                                 &scan_cache->Last()->KeyObj();
                             if (*end_key < *last_key ||
@@ -4211,6 +3993,10 @@ public:
                             }
                             else
                             {
+                                // Reset iterator to the key after the last
+                                // scanned tuple since we might need to continue
+                                // scanning if trailing_cnt == 0.
+                                ++scan_ccm_it;
                                 break;
                             }
                         }
@@ -4283,6 +4069,9 @@ public:
                     }
                 }
             }
+            // Sets the iterator to the last cce, which may need to be pinned to
+            // resume the next scan batch.
+            --scan_ccm_it;
         }
         else
         {
@@ -4364,6 +4153,7 @@ public:
                 Iterator neg_inf_it = Begin();
                 const KeyT *cce_key = scan_ccm_it->first;
                 CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 
                 auto is_cache_full =
                     [&req, scan_cache, remote_scan_cache]() -> bool {
@@ -4377,7 +4167,7 @@ public:
                         (inclusive && *end_key == *cce_key)))
                 {
                     auto [scan_ret, err_code] =
-                        scan_tuple_func(cce_key, cce, ScanType::ScanBoth);
+                        scan_tuple_func(cce_key, cce, ccp, ScanType::ScanBoth);
 
                     if (scan_ret != ScanReturnType::Success)
                     {
@@ -4387,6 +4177,7 @@ public:
                     --scan_ccm_it;
                     cce_key = scan_ccm_it->first;
                     cce = scan_ccm_it->second;
+                    ccp = scan_ccm_it.GetPage();
                 }
 
                 return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
@@ -4504,6 +4295,8 @@ public:
                     {
                         while (scan_cache->Size() > 0)
                         {
+                            ++scan_ccm_it;
+
                             const KeyT *last_key =
                                 &scan_cache->Last()->KeyObj();
                             if (*last_key < *end_key ||
@@ -4514,6 +4307,10 @@ public:
                             }
                             else
                             {
+                                // Reset iterator to the key after the last
+                                // scanned tuple since we might need to continue
+                                // scanning if trailing_cnt == 0.
+                                --scan_ccm_it;
                                 break;
                             }
                         }
@@ -4586,6 +4383,10 @@ public:
                     }
                 }
             }
+
+            // Sets the iterator to the last cce, which may need to be pinned to
+            // resume the next scan batch.
+            ++scan_ccm_it;
         }
 
         if (slice_result.slice_position_ == SlicePosition::Middle)
@@ -4597,8 +4398,10 @@ public:
             CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache();
             if (last_cce != nullptr)
             {
+                CcPage<KeyT, ValueT> *last_ccp = scan_ccm_it.GetPage();
                 bool add_intent =
-                    last_cce->GetKeyLock().AcquireReadIntent(req.Txn());
+                    last_cce->GetOrCreateKeyLock(shard_, this, last_ccp)
+                        .AcquireReadIntent(req.Txn());
                 if (add_intent)
                 {
                     shard_->UpsertLockHoldingTx(req.Txn(),
@@ -4873,15 +4676,16 @@ public:
         {
             if (end_it_next_page_it != End())
             {
-                assert(end_it_next_page_it->second->parent_page_ != nullptr);
-                if (end_it->second->parent_page_->next_page_ == PagePosInf())
+                CcPage<KeyT, ValueT> *ccp = end_it_next_page_it.GetPage();
+                assert(ccp != nullptr);
+                if (ccp->next_page_ == PagePosInf())
                 {
                     end_it_next_page_it = End();
                 }
                 else
                 {
-                    end_it_next_page_it = Iterator(
-                        end_it->second->parent_page_->next_page_, 0, &neg_inf_);
+                    end_it_next_page_it =
+                        Iterator(ccp->next_page_, 0, &neg_inf_);
                 }
             }
         }
@@ -4891,8 +4695,6 @@ public:
         {
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
-
-        std::vector<LruEntry *> remove_entries;
 
         // Only scan for updates after given from ts. previous_ckpt_ts_ is
         // used during regular ckpt, and previous_scan_ts_ is used during range
@@ -4912,30 +4714,32 @@ public:
         {
             const KeyT *key = it->first;
             CcEntry<KeyT, ValueT> *cce = it->second;
-            assert(cce->parent_page_);
+            CcPage<KeyT, ValueT> *ccp = it.GetPage();
+            assert(ccp);
 
             if (!req.include_flushed_rec_)
             {
-                if (cce->parent_page_->last_dirty_commit_ts_ <= from_ts)
+                if (ccp->last_dirty_commit_ts_ <= from_ts)
                 {
                     // Skip the pages that have no updates since last data sync.
-                    if (cce->parent_page_->next_page_ == PagePosInf())
+                    if (ccp->next_page_ == PagePosInf())
                     {
                         it = End();
                     }
                     else
                     {
-                        it = Iterator(
-                            cce->parent_page_->next_page_, 0, &neg_inf_);
+                        it = Iterator(ccp->next_page_, 0, &neg_inf_);
                     }
                     continue;
                 }
             }
 
+#ifndef ON_KEY_OBJECT
             if (shard_->EnableMvcc())
             {
                 shard_->DecrementMemory(cce->KickOutArchiveRecords(recycle_ts));
             }
+#endif
 
             if (cce->NeedCkpt())
             {
@@ -4990,6 +4794,7 @@ public:
                     }
                     else if (pin_status == RangeSliceOpStatus::NotOwner)
                     {
+                        assert("Dead branch");
                         // The recovered cc entry does not belong to this ng
                         // anymore. This will happen if ng failover after a
                         // range split just finished but before checkpointer is
@@ -4997,7 +4802,6 @@ public:
                         // records of the data that now falls on another ng will
                         // still be replayed on the old ng on recover. Skip the
                         // cc entry and remove it at the end.
-                        remove_entries.push_back(cce);
                         need_export = false;
                     }
                     else
@@ -5177,11 +4981,6 @@ public:
         if (!no_more_data)
         {
             next_pause_key = it->first->Clone();
-        }
-
-        for (LruEntry *cce : remove_entries)
-        {
-            Clean(cce);
         }
 
         if (no_more_data)
@@ -5613,6 +5412,7 @@ public:
 
             Iterator it = FindEmplace(key);
             CcEntry<KeyT, ValueT> *cce = it->second;
+            CcPage<KeyT, ValueT> *ccp = it.GetPage();
 
             if (cce == nullptr)
             {
@@ -5633,6 +5433,7 @@ public:
                 // record.
                 if (shard_->EnableMvcc())
                 {
+#ifndef ON_KEY_OBJECT
                     auto rec_ptr = std::make_unique<ValueT>();
                     RecordStatus rec_status = RecordStatus::Normal;
                     if (op_type == OperationType::Insert ||
@@ -5646,6 +5447,7 @@ public:
                     }
                     shard_->mem_usage_ += cce->AddArchiveRecord(
                         std::move(rec_ptr), rec_status, req.CommitTs());
+#endif
                 }
                 else if (op_type == OperationType::Insert ||
                          op_type == OperationType::Update)
@@ -5655,10 +5457,12 @@ public:
             }
             else
             {
+#ifndef ON_KEY_OBJECT
                 if (shard_->EnableMvcc())
                 {
                     shard_->mem_usage_ += cce->ArchiveBeforeUpdate(Type());
                 }
+#endif
                 if (op_type == OperationType::Insert ||
                     op_type == OperationType::Update)
                 {
@@ -5689,9 +5493,9 @@ public:
                 {
                     last_dirty_commit_ts_ = cce->commit_ts_;
                 }
-                if (cce->commit_ts_ > cce->parent_page_->last_dirty_commit_ts_)
+                if (cce->commit_ts_ > ccp->last_dirty_commit_ts_)
                 {
-                    cce->parent_page_->last_dirty_commit_ts_ = cce->commit_ts_;
+                    ccp->last_dirty_commit_ts_ = cce->commit_ts_;
                 }
                 if (shard_->realtime_sampling_ && sample_pool_)
                 {
@@ -5705,8 +5509,8 @@ public:
                     }
                 }
 
-                if (cce->key_lock_ptr_ != nullptr &&
-                    cce->key_lock_ptr_->HasWriteLock())
+                NonBlockingLock *key_lock = cce->GetKeyLock();
+                if (key_lock != nullptr && key_lock->HasWriteLock())
                 {
                     // If the record in the log has a commit ts greater than
                     // that of the cc entry and the cc entry has a write
@@ -5714,8 +5518,8 @@ public:
                     // the log record.
                     // TODO: it is safer if we ship the tx ID with the
                     // recovering message and match it against the lock holder.
-                    TxNumber txn = cce->key_lock_ptr_->WriteLockTx();
-                    ReleaseCceLock(cce->key_lock_ptr_,
+                    TxNumber txn = key_lock->WriteLockTx();
+                    ReleaseCceLock(key_lock,
                                    cce,
                                    txn,
                                    req.NodeGroupId(),
@@ -5749,7 +5553,9 @@ public:
             // find cc entry
             const KeyT *typed_key_ptr = dynamic_cast<const KeyT *>(key_ptr);
             const KeyT &key = *typed_key_ptr;
-            auto [cce_key, cce] = Find(key);
+            Iterator it = Find(key);
+            const KeyT *cce_key = it->first;
+            CcEntry<KeyT, ValueT> *cce = it->second;
 
             if (cce != nullptr)
             {
@@ -5790,18 +5596,23 @@ public:
                         tmp_mv_base_key_vec.emplace_back(key_raw_ptr);
                     }
 
-                    bool res = shard_->FlushEntryForTest(
-                        cce, tmp_ckpt_vec, tmp_akv_vec, only_archives);
+                    bool res = shard_->FlushEntryForTest(table_name_,
+                                                         table_schema_,
+                                                         tmp_ckpt_vec,
+                                                         tmp_akv_vec,
+                                                         only_archives);
                     assert(res == true);
                 }
                 if (only_archives)
                 {
+#ifndef ON_KEY_OBJECT
                     cce->ClearArchives();
+#endif
                 }
                 else
                 {
                     ccm_has_full_entries_ = false;
-                    Clean(cce);
+                    // Clean(cce);
                 }
             }
         }
@@ -6008,24 +5819,24 @@ public:
             const KeyT *resume_key =
                 static_cast<const KeyT *>(req.ResumeKey(shard_->core_id_));
             Iterator it = Floor(*resume_key);
-            lru_page = it->second->parent_page_;
+            lru_page = it.GetPage();
         }
         else
         {
             if (req.StartKey() == nullptr)
             {
-                lru_page = pg_ng_inf_.next_page_;
+                lru_page = neg_inf_page_.next_page_;
             }
             else
             {
                 Iterator it = Floor(*start_key);
                 if (it->first == NegativeInfinity<KeyT>::Instance())
                 {
-                    lru_page = pg_ng_inf_.next_page_;
+                    lru_page = neg_inf_page_.next_page_;
                 }
                 else
                 {
-                    lru_page = it->second->parent_page_;
+                    lru_page = it.GetPage();
                 }
             }
         }
@@ -6039,7 +5850,7 @@ public:
         bool is_success = true;
         while (scan_page_cnt < KickoutCcEntryCc::KickoutPageBatchSize &&
                (end_key == nullptr || ccp->FirstKey() < *end_key) &&
-               ccp != &pg_ps_inf_)
+               ccp != &pos_inf_page_)
         {
             auto [freed_cnt, next_page] =
                 CleanPageAndReBalance(ccp, clean_type, &req, &is_success);
@@ -6055,7 +5866,7 @@ public:
             }
         }
 
-        if (ccp == &pg_ps_inf_ ||
+        if (ccp == &pos_inf_page_ ||
             (end_key != nullptr && !(ccp->FirstKey() < *end_key)))
         {
             return req.SetFinish(shard_->core_id_);
@@ -6077,44 +5888,6 @@ public:
     size_t size() const override
     {
         return size_;
-    }
-
-    void Clean(LruEntry *remove_entry) override
-    {
-        CcEntry<KeyT, ValueT> *cc_entry =
-            static_cast<CcEntry<KeyT, ValueT> *>(remove_entry);
-
-#ifdef RANGE_PARTITION_ENABLED
-        bool kick_ret = shard_->local_shards_.KickoutKeyInSlice(
-            table_name_, cc_ng_id_, *cc_entry->Key());
-        if (!kick_ret)
-        {
-            return;
-        }
-#endif
-
-        // remove entry and decrement memory usage
-        CcPage<KeyT, ValueT> *page = cc_entry->parent_page_;
-        const KeyT old_page_key(page->FirstKey());
-        size_t mem_decreased = page->Remove(cc_entry);
-        if (page->Empty())
-        {
-            mem_decreased += page->MemUsage();
-            if (page->lru_next_ != nullptr)
-            {
-                shard_->DetachLru(page);
-            }
-            ccmp_.erase(old_page_key);
-        }
-        else if (page->FirstKey() != old_page_key)
-        {
-            auto page_it = ccmp_.find(old_page_key);
-            assert(page_it != ccmp_.end());
-            TryUpdatePageKey(page_it);
-        }
-        shard_->mem_usage_ -= mem_decreased;
-        assert(size_ > 0);
-        size_--;
     }
 
     /**
@@ -6160,7 +5933,7 @@ public:
         CcPage<KeyT, ValueT> *page =
             static_cast<CcPage<KeyT, ValueT> *>(lru_page);
         const KeyT old_page_key(page->FirstKey());
-        auto [success, last_read_ts] =
+        bool success =
             CleanPage(page, mem_decreased, free_cnt, clean_type, kickout_cc);
 
         // Output the operation result if the caller care it.
@@ -6202,19 +5975,19 @@ public:
             CcPage<KeyT, ValueT> *prev = page->prev_page_;
             CcPage<KeyT, ValueT> *next = page->next_page_;
             bool can_borrow_from_prev =
-                prev != &pg_ng_inf_ &&
+                prev != &neg_inf_page_ &&
                 page->Size() + prev->Size() >
                     CcPage<KeyT, ValueT>::split_threshold_;
             bool can_borrow_from_next =
-                next != &pg_ps_inf_ &&
+                next != &pos_inf_page_ &&
                 page->Size() + next->Size() >
                     CcPage<KeyT, ValueT>::split_threshold_;
             bool can_merge_with_prev =
-                prev != &pg_ng_inf_ &&
+                prev != &neg_inf_page_ &&
                 page->Size() + prev->Size() <=
                     CcPage<KeyT, ValueT>::split_threshold_;
             bool can_merge_with_next =
-                next != &pg_ps_inf_ &&
+                next != &pos_inf_page_ &&
                 page->Size() + next->Size() <=
                     CcPage<KeyT, ValueT>::split_threshold_;
             if (can_borrow_from_prev || can_borrow_from_next)
@@ -6226,25 +5999,18 @@ public:
                 // key
                 auto page1_it = page_it;
                 auto page2_it = page_it;
-                // decide the relative order in LRU list of the two pages by
-                // comparing their last_read_ts
-                uint64_t page1_last_read_ts = last_read_ts;
-                uint64_t page2_last_read_ts = last_read_ts;
                 if (can_borrow_from_prev)
                 {
                     // borrow entries from previous page
                     page1_it--;
-                    page1_last_read_ts = page1_it->second.LastReadTs();
                 }
                 else if (can_borrow_from_next)
                 {
                     // borrow entries from next page
                     page2_it++;
-                    page2_last_read_ts = page2_it->second.LastReadTs();
                 }
 
-                RedistributeBetweenPages(
-                    page1_it, page2_it, page1_last_read_ts, page2_last_read_ts);
+                RedistributeBetweenPages(page1_it, page2_it);
 
                 if (kickout_cc != nullptr &&
                     ((success && page == &page1_it->second) || !success))
@@ -6268,10 +6034,6 @@ public:
                 // page1 is the page with smaller key
                 auto page1_it = page_it;
                 auto page2_it = page_it;
-                // decide the relative order in LRU list of the two pages by
-                // comparing their last_read_ts
-                uint64_t page1_last_read_ts = last_read_ts;
-                uint64_t page2_last_read_ts = last_read_ts;
 
                 bool real_merge_with_prev = false;
                 if (can_merge_with_prev)
@@ -6279,13 +6041,11 @@ public:
                     real_merge_with_prev = true;
                     // merge `page` with its previous page
                     page1_it--;
-                    page1_last_read_ts = page1_it->second.LastReadTs();
                 }
                 else if (can_merge_with_next)
                 {
                     // merge `page` with its next page
                     page2_it++;
-                    page2_last_read_ts = page2_it->second.LastReadTs();
                 }
 
                 CcPage<KeyT, ValueT> *merged_page = &page1_it->second;
@@ -6306,12 +6066,7 @@ public:
                 }
 
                 // merge page1 and page2
-                MergePages(page1_it,
-                           page2_it,
-                           page1_last_read_ts,
-                           page2_last_read_ts,
-                           page,
-                           mem_decreased);
+                MergePages(page1_it, page2_it, page, mem_decreased);
 
                 if (kickout_cc != nullptr)
                 {
@@ -6347,13 +6102,17 @@ public:
         size_t mem_decreased = 0;
         for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
-            //            const CcPage<KeyT, ValueT> &page = it->second;
             CcPage<KeyT, ValueT> &page = it->second;
             if (page.lru_next_ != nullptr)
             {
                 shard_->DetachLru(&page);
             }
             mem_decreased += page.TotalMemUsage();
+
+            for (auto &cce : page.entries_)
+            {
+                cce->ClearLocks(*shard_, cc_ng_id_);
+            }
         }
 
         shard_->DecrementMemory(mem_decreased);
@@ -6399,7 +6158,7 @@ public:
     size_t VerifyOrdering() override
     {
         // verify page order in map
-        CcPage<KeyT, ValueT> *prev_page = &pg_ng_inf_;
+        CcPage<KeyT, ValueT> *prev_page = &neg_inf_page_;
         for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
             const KeyT &page_key = it->first;
@@ -6409,8 +6168,8 @@ public:
                    prev_page->next_page_ == page);
             prev_page = page;
         }
-        assert(prev_page->next_page_ == &pg_ps_inf_ &&
-               pg_ps_inf_.prev_page_ == prev_page);
+        assert(prev_page->next_page_ == &pos_inf_page_ &&
+               pos_inf_page_.prev_page_ == prev_page);
 
         // verify key order in all pages
         Iterator ccm_it = Begin();
@@ -6445,12 +6204,13 @@ public:
                 return false;
             }
             CcEntry<KeyT, ValueT> *cce = it->second;
+            CcPage<KeyT, ValueT> *ccp = it.GetPage();
             cce->payload_status_ = RecordStatus::Normal;
             // randomly set ckpt_ts and commit_ts
             cce->ckpt_ts_ = distribution(generator);
             cce->commit_ts_ = distribution(generator);
-            cce->parent_page_->last_dirty_commit_ts_ = std::max(
-                cce->commit_ts_, cce->parent_page_->last_dirty_commit_ts_);
+            ccp->last_dirty_commit_ts_ =
+                std::max(cce->commit_ts_, ccp->last_dirty_commit_ts_);
         }
         return true;
     }
@@ -6482,14 +6242,10 @@ protected:
             LOG(INFO) << "neg_inf key: " << NegativeInfinity<KeyT>::Instance()
                       << ", pos_inf key: " << PositiveInfinity<KeyT>::Instance()
                       << ", neg_inf cce: " << neg_inf_cce_;
-            LOG(INFO) << "pg_ng_inf_: " << neg_inf_cce_->parent_page_
-                      << ", pg_ps_inf_: "
-                      << &(neg_inf_cce_->parent_page_->parent_map_->pg_ps_inf_);
             if (!is_neg_inf && !is_pos_inf)
             {
-                LOG(INFO) << ", cce parent_page_: "
-                          << current_.second->parent_page_;
-                current_.second->parent_page_->DebugPrint();
+                LOG(INFO) << ", cce parent page: " << current_page_;
+                current_page_->DebugPrint();
             }
         }
 
@@ -6503,36 +6259,28 @@ protected:
         }
 
         Iterator(CcEntry<KeyT, ValueT> *cce,
-                 CcEntry<KeyT, ValueT> *neg_inf_cce,
-                 CcEntry<KeyT, ValueT> *pos_inf_cce = nullptr)
+                 CcPage<KeyT, ValueT> *cc_page,
+                 CcEntry<KeyT, ValueT> *neg_inf_cce)
             : neg_inf_cce_(neg_inf_cce)
         {
-            if (cce == neg_inf_cce)
+            if (cc_page->IsNegInf())
             {
                 current_.first = NegativeInfinity<KeyT>::Instance();
                 current_.second = neg_inf_cce_;
-                current_page_ = nullptr;
+                current_page_ = cc_page;
             }
-            else if (cce == pos_inf_cce)
+            else if (cc_page->IsPosInf())
             {
                 current_.first = PositiveInfinity<KeyT>::Instance();
                 current_.second = nullptr;
-                current_page_ = nullptr;
+                current_page_ = cc_page;
             }
             else
             {
-                current_page_ = cce->parent_page_;
+                current_page_ = cc_page;
                 idx_in_page_ = current_page_->FindEntry(cce);
                 UpdateCurrent();
             }
-        }
-
-        Iterator(CcPage<KeyT, ValueT> *page, CcEntry<KeyT, ValueT> *cce)
-        {
-        }
-
-        Iterator(CcPage<KeyT, ValueT> *page, size_t idx_in_page)
-        {
         }
 
         Iterator(Iterator &&rhs)
@@ -6578,25 +6326,21 @@ protected:
                 // The iterator points to negative infinity. Increments the
                 // iterator to the first page in the map, if the map is not
                 // empty.
-                std::map<KeyT, CcPage<KeyT, ValueT>> &internal_map =
-                    static_cast<TemplateCcMap<KeyT, ValueT> *>(
-                        neg_inf_cce_->parent_page_->parent_map_)
-                        ->ccmp_;
-
-                auto map_it = internal_map.begin();
-                if (map_it != internal_map.end())
+                CcPage<KeyT, ValueT> *next_page = current_page_->next_page_;
+                if (next_page->IsPosInf())
                 {
-                    // pages in cc_map should never be empty
-                    current_page_ = &map_it->second;
-                    idx_in_page_ = 0;
-                    UpdateCurrent();
+                    // If the next page is the positive infinity page, the map
+                    // is empty. The advanced iterator points to positive
+                    // infinity.
+                    current_.first = PositiveInfinity<KeyT>::Instance();
+                    current_.second = nullptr;
+                    current_page_ = next_page;
                 }
                 else
                 {
-                    // The map is empty. The next entry of negative infinity
-                    // is positive infinity.
-                    current_.first = PositiveInfinity<KeyT>::Instance();
-                    current_.second = nullptr;
+                    current_page_ = next_page;
+                    idx_in_page_ = 0;
+                    UpdateCurrent();
                 }
             }
             else if (current_.first != PositiveInfinity<KeyT>::Instance())
@@ -6622,7 +6366,7 @@ protected:
                     UpdateCurrent();
                 }
             }
-            // If the current points to positive infinity, keeps the iterator
+            // If the iterator points to positive infinity, keeps the iterator
             // unchanged.
 
             return *this;
@@ -6636,25 +6380,21 @@ protected:
                 // The iterator points to positive infinity. Decrements the
                 // iterator to the last entry in the map, if the map is not
                 // empty.
-                std::map<KeyT, CcPage<KeyT, ValueT>> &internal_map =
-                    static_cast<TemplateCcMap<KeyT, ValueT> *>(
-                        neg_inf_cce_->parent_page_->parent_map_)
-                        ->ccmp_;
-                auto map_it = internal_map.end();
-                if (map_it != internal_map.begin())
+                CcPage<KeyT, ValueT> *prev_page = current_page_->prev_page_;
+                if (prev_page->IsNegInf())
                 {
-                    --map_it;
-                    current_page_ = &map_it->second;
-                    idx_in_page_ = current_page_->Size() - 1;
-                    UpdateCurrent();
+                    // If the previous page is the negative infinity page, the
+                    // map is empty. The advanced iterator points to negative
+                    // infinity.
+                    current_.first = NegativeInfinity<KeyT>::Instance();
+                    current_.second = neg_inf_cce_;
+                    current_page_ = prev_page;
                 }
                 else
                 {
-                    // The map is empty. The prior entry of positive
-                    // infinity is negative infinity.
-                    current_.first = NegativeInfinity<KeyT>::Instance();
-                    current_.second = neg_inf_cce_;
-                    current_page_ = nullptr;
+                    current_page_ = prev_page;
+                    idx_in_page_ = current_page_->Size() - 1;
+                    UpdateCurrent();
                 }
             }
             else if (current_.first != NegativeInfinity<KeyT>::Instance())
@@ -6715,6 +6455,11 @@ protected:
             return lhs.current_.second != rhs.current_.second;
         };
 
+        CcPage<KeyT, ValueT> *GetPage() const
+        {
+            return current_page_;
+        }
+
     private:
         void UpdateCurrent()
         {
@@ -6741,7 +6486,7 @@ protected:
      */
     Iterator Begin()
     {
-        return Iterator(&neg_inf_, &neg_inf_, &pos_inf_);
+        return Iterator(&neg_inf_, &neg_inf_page_, &neg_inf_);
     }
 
     /**
@@ -6751,27 +6496,27 @@ protected:
      */
     Iterator End()
     {
-        return Iterator(&pos_inf_, &neg_inf_, &pos_inf_);
+        return Iterator(&pos_inf_, &pos_inf_page_, &neg_inf_);
     }
 
-    std::pair<const KeyT *, CcEntry<KeyT, ValueT> *> Find(const KeyT &key)
+    Iterator Find(const KeyT &key)
     {
         if (&key == NegativeInfinity<KeyT>::Instance())
         {
-            return {NegativeInfinity<KeyT>::Instance(), &neg_inf_};
+            return Begin();
         }
 
         Iterator lb_it = LowerBound(key);
         if (lb_it != End() && *lb_it->first == key)
         {
-            CcEntry<KeyT, ValueT> *cce = lb_it->second;
-            shard_->UpdateLruList(cce->parent_page_, false);
-            return {lb_it->first, cce};
+            CcPage<KeyT, ValueT> *ccp = lb_it.GetPage();
+            shard_->UpdateLruList(ccp, false);
+            return lb_it;
         }
         else
         {
             // The input key does not exist.
-            return {nullptr, nullptr};
+            return End();
         }
     }
 
@@ -6838,13 +6583,6 @@ protected:
                         data_item.is_deleted_ ? RecordStatus::Deleted
                                               : RecordStatus::Normal,
                         data_item.version_ts_);
-#else
-                    assert(false);
-                    cce->AddArchiveRecord(data_item.record_->Clone(),
-                                          data_item.is_deleted_
-                                              ? RecordStatus::Deleted
-                                              : RecordStatus::Normal,
-                                          data_item.version_ts_);
 #endif
                 }
 
@@ -6892,8 +6630,8 @@ protected:
             std::tie(target_iter, inserted) = ccmp_.try_emplace(
                 static_cast<const KeyT &>(*slice_items[first_index].key_),
                 this,
-                &pg_ng_inf_,
-                &pg_ps_inf_);
+                &neg_inf_page_,
+                &pos_inf_page_);
             assert(inserted);
             shard_->mem_usage_ += target_iter->second.MemUsage();
         }
@@ -7056,6 +6794,11 @@ protected:
                     new_page->last_dirty_commit_ts_ = new_last_commit_ts;
                     shard_->mem_usage_ += new_page->MemUsage();
 
+                    for (auto &cce : new_page->entries_)
+                    {
+                        cce->UpdateCcPage(new_page);
+                    }
+
                     // insert new page into lru list right after old
                     // page
                     if (target_page->lru_next_ != nullptr)
@@ -7065,6 +6808,8 @@ protected:
                         next->lru_prev_ = new_page;
                         target_page->lru_next_ = new_page;
                         new_page->lru_prev_ = target_page;
+                        new_page->last_access_ts_ =
+                            target_page->last_access_ts_;
                     }
 
                     if (new_page->FirstKey() <= *target_key)
@@ -7151,7 +6896,7 @@ protected:
         {
             // ccmap is empty, insert a page
             auto [it, inserted] =
-                ccmp_.try_emplace(key, this, &pg_ng_inf_, &pg_ps_inf_);
+                ccmp_.try_emplace(key, this, &neg_inf_page_, &pos_inf_page_);
             assert(inserted);
             mem_increased += it->second.MemUsage();
         }
@@ -7169,9 +6914,8 @@ protected:
         if (idx_in_page < target_page->Size())
         {
             // found, return Iterator
+            shard_->UpdateLruList(target_page, false);
             Iterator iterator(target_page, idx_in_page, &neg_inf_);
-            CcEntry<KeyT, ValueT> *cce_ptr = iterator->second;
-            shard_->UpdateLruList(cce_ptr->parent_page_, false);
             return iterator;
         }
 
@@ -7213,6 +6957,11 @@ protected:
             new_page->last_dirty_commit_ts_ = new_last_commit_ts;
             mem_increased += new_page->MemUsage();
 
+            for (auto &cce : new_page->entries_)
+            {
+                cce->UpdateCcPage(new_page);
+            }
+
             // insert new page into lru list right after old
             // page
             if (target_page->lru_next_ != nullptr)
@@ -7222,6 +6971,7 @@ protected:
                 next->lru_prev_ = new_page;
                 target_page->lru_next_ = new_page;
                 new_page->lru_prev_ = target_page;
+                new_page->last_access_ts_ = target_page->last_access_ts_;
             }
 
             if (new_page->FirstKey() <= key)
@@ -7559,8 +7309,9 @@ protected:
 
         if (is_read_snapshot)
         {
+#ifndef ON_KEY_OBJECT
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, Type(), v_rec);
+            cce->MvccGet(read_ts, Type(), shard_->LastReadTs(), v_rec);
 
 #ifdef RANGE_PARTITION_ENABLED
             // For snapshot reads, only if the visible version's record status
@@ -7589,17 +7340,14 @@ protected:
             {
                 if (v_rec.payload_ptr_ != nullptr)
                 {
-#ifndef ON_KEY_OBJECT
                     tuple->SetRecord(v_rec.payload_ptr_);
-#else
-                    assert(false);
-#endif
                     // We're only copying the shared_ptr here so we exclude the
                     // actual payload size.
                 }
             }
             tuple->key_ts_ = v_rec.commit_ts_;
             tuple->rec_status_ = v_rec.payload_status_;
+#endif
         }
         else
         {
@@ -7638,7 +7386,7 @@ protected:
             tuple->key_ts_ = cce->commit_ts_;
         }
 
-        tuple->gap_ts_ = include_gap ? cce->gap_commit_ts_ : 0;
+        tuple->gap_ts_ = 0;
         tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce),
                                 ng_term,
                                 ng_id,
@@ -7661,8 +7409,9 @@ protected:
 
         if (is_read_snapshot)
         {
+#ifndef ON_KEY_OBJECT
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, Type(), v_rec);
+            cce->MvccGet(read_ts, Type(), shard_->LastReadTs(), v_rec);
 
             // For snapshot reads, only if the visible version's record status
             // is deleted and no lock has been put on it, should the record be
@@ -7691,6 +7440,7 @@ protected:
                 remote::ToRemoteType::ConvertRecordStatus(
                     v_rec.payload_status_));
             remote_cache->key_ts_.push_back(v_rec.commit_ts_);
+#endif
         }
         else
         {
@@ -7721,7 +7471,8 @@ protected:
 
         if (include_gap)
         {
-            remote_cache->gap_ts_.push_back(cce->gap_commit_ts_);
+            // Gap timestamps are not used at the moment.
+            remote_cache->gap_ts_.push_back(0);
         }
         else
         {
@@ -7751,8 +7502,9 @@ protected:
 
         if (is_read_snapshot)
         {
+#ifndef ON_KEY_OBJECT
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, Type(), v_rec);
+            cce->MvccGet(read_ts, Type(), shard_->LastReadTs(), v_rec);
 
 #ifdef RANGE_PARTITION_ENABLED
             // For snapshot reads, only if the visible version's record status
@@ -7789,6 +7541,7 @@ protected:
             tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
                 v_rec.payload_status_));
             tuple->set_key_ts(v_rec.commit_ts_);
+#endif
         }
         else
         {
@@ -7826,7 +7579,8 @@ protected:
 
         if (include_gap)
         {
-            tuple->set_gap_ts(cce->gap_commit_ts_);
+            // Gap timestamps are not used at the moment.
+            tuple->set_gap_ts(0);
         }
         else
         {
@@ -7849,7 +7603,7 @@ protected:
                  int64_t ng_term) const
     {
         tuple->key_ts_ = 0;
-        tuple->gap_ts_ = cce->gap_commit_ts_;
+        tuple->gap_ts_ = 0;
         tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce),
                                 ng_term,
                                 ng_id,
@@ -7862,7 +7616,7 @@ protected:
                  int64_t ng_term) const
     {
         tuple->set_key_ts(0);
-        tuple->set_gap_ts(cce->gap_commit_ts_);
+        tuple->set_gap_ts(0);
 
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
@@ -7878,7 +7632,7 @@ protected:
                  int64_t ng_term) const
     {
         cache->key_ts_.push_back(0);
-        cache->gap_ts_.push_back(cce->gap_commit_ts_);
+        cache->gap_ts_.push_back(0);
 
         cache->cce_ptr_.push_back(reinterpret_cast<uint64_t>(cce));
         cache->term_.push_back(ng_term);
@@ -7942,13 +7696,12 @@ protected:
      * the kickout request. Currently, only when clean_type is
      * CleanForSplitRange and CleanForAlterTable care this status.
      */
-    std::pair<bool, uint64_t> CleanPage(CcPage<KeyT, ValueT> *page,
-                                        size_t &mem_decreased,
-                                        size_t &free_cnt,
-                                        CleanType clean_type,
-                                        KickoutCcEntryCc *kickout_cc = nullptr)
+    bool CleanPage(CcPage<KeyT, ValueT> *page,
+                   size_t &mem_decreased,
+                   size_t &free_cnt,
+                   CleanType clean_type,
+                   KickoutCcEntryCc *kickout_cc = nullptr)
     {
-        uint64_t last_read_ts = 0;
         std::vector<KeyT> &keys = page->keys_;
         std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &entries =
             page->entries_;
@@ -7970,7 +7723,6 @@ protected:
         for (; key_it != keys.end(); key_it++, entry_it++)
         {
             CcEntry<KeyT, ValueT> *cce = entry_it->get();
-            last_read_ts = std::max(last_read_ts, cce->last_read_ts_);
 
             bool can_be_clean = false;
             switch (clean_type)
@@ -8068,7 +7820,7 @@ protected:
         page->last_dirty_commit_ts_ =
             std::min(last_commit_ts, page->last_dirty_commit_ts_);
 
-        return {clean_success, last_read_ts};
+        return clean_success;
     }
 
     /**
@@ -8084,9 +7836,7 @@ protected:
      */
     void RedistributeBetweenPages(
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
-        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page2_it,
-        uint64_t page1_last_read_ts,
-        uint64_t page2_last_read_ts)
+        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page2_it)
     {
         CcPage<KeyT, ValueT> &page1 = page1_it->second;
         CcPage<KeyT, ValueT> &page2 = page2_it->second;
@@ -8101,13 +7851,15 @@ protected:
                 std::make_move_iterator(page1.keys_.end()));
             page1.keys_.erase(page1.keys_.begin() + move_pos,
                               page1.keys_.end());
-            // update parent page of entries to be moved
-            for (auto entry_ptr_it = page1.entries_.begin() + move_pos;
-                 entry_ptr_it != page1.entries_.end();
-                 entry_ptr_it++)
+
+            // Updates the parent page of the locks of the to-be-moved entries.
+            for (auto page1_it = page1.entries_.begin() + move_pos;
+                 page1_it != page1.entries_.end();
+                 ++page1_it)
             {
-                (*entry_ptr_it)->parent_page_ = &page2;
+                (*page1_it)->UpdateCcPage(&page2);
             }
+
             page2.entries_.insert(
                 page2.entries_.begin(),
                 std::make_move_iterator(page1.entries_.begin() + move_pos),
@@ -8127,13 +7879,15 @@ protected:
                 std::make_move_iterator(page2.keys_.begin() + move_idx));
             page2.keys_.erase(page2.keys_.begin(),
                               page2.keys_.begin() + move_idx);
-            // update parent page of entries to be moved
-            for (auto entry_ptr_it = page2.entries_.begin();
-                 entry_ptr_it != page2.entries_.begin() + move_idx;
-                 entry_ptr_it++)
+
+            // Updates the parent page of the locks of the to-be-moved entries.
+            for (auto page2_it = page2.entries_.begin();
+                 page2_it != page2.entries_.begin() + move_idx;
+                 ++page2_it)
             {
-                (*entry_ptr_it)->parent_page_ = &page1;
+                (*page2_it)->UpdateCcPage(&page1);
             }
+
             page1.entries_.insert(
                 page1.entries_.end(),
                 std::make_move_iterator(page2.entries_.begin()),
@@ -8144,6 +7898,36 @@ protected:
                                                    page2.last_dirty_commit_ts_);
         }
 
+        // The locks of cc entries of a page should point to the same page.
+        assert(
+            [&]()
+            {
+                for (const auto &cce : page1.entries_)
+                {
+                    if (cce->GetCcPage() != nullptr &&
+                        cce->GetCcPage() != &page1)
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }());
+
+        assert(
+            [&]()
+            {
+                for (const auto &cce : page2.entries_)
+                {
+                    if (cce->GetCcPage() != nullptr &&
+                        cce->GetCcPage() != &page2)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }());
+
         // update page key in the map
         TryUpdatePageKey(page1_it);
         TryUpdatePageKey(page2_it);
@@ -8152,10 +7936,18 @@ protected:
         // after redistribution, the two pages should be seen as one in the LRU
         // list, insert the less recently used page after the more recently used
         // one
-        LruPage *less_recently_used =
-            page1_last_read_ts > page2_last_read_ts ? &page1 : &page2;
-        LruPage *more_recently_used =
-            page1_last_read_ts > page2_last_read_ts ? &page2 : &page1;
+        LruPage *less_recently_used = nullptr, *more_recently_used = nullptr;
+        if (page1.last_access_ts_ > page2.last_access_ts_)
+        {
+            more_recently_used = &page1;
+            less_recently_used = &page2;
+        }
+        else
+        {
+            more_recently_used = &page2;
+            less_recently_used = &page1;
+        }
+
         if (less_recently_used->lru_next_ != nullptr)
         {
             shard_->DetachLru(less_recently_used);
@@ -8165,6 +7957,8 @@ protected:
         next->lru_prev_ = less_recently_used;
         less_recently_used->lru_prev_ = more_recently_used;
         more_recently_used->lru_next_ = less_recently_used;
+        less_recently_used->last_access_ts_ =
+            more_recently_used->last_access_ts_;
     }
 
     /**
@@ -8180,8 +7974,6 @@ protected:
     void MergePages(
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page2_it,
-        uint64_t page1_last_read_ts,
-        uint64_t page2_last_read_ts,
         CcPage<KeyT, ValueT> *page,
         size_t &mem_decreased)
     {
@@ -8202,16 +7994,32 @@ protected:
                            std::make_move_iterator(page2->keys_.end()));
         std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> merged_entries =
             std::move(page1->entries_);
+
+        for (auto it = page2->entries_.begin(); it != page2->entries_.end();
+             ++it)
+        {
+            (*it)->UpdateCcPage(merged_page);
+        }
+
         merged_entries.insert(merged_entries.end(),
                               std::make_move_iterator(page2->entries_.begin()),
                               std::make_move_iterator(page2->entries_.end()));
-        // update entry parent_page_
-        for (auto &entry_ptr : merged_entries)
-        {
-            entry_ptr->parent_page_ = merged_page;
-        }
         merged_page->keys_ = std::move(merged_keys);
         merged_page->entries_ = std::move(merged_entries);
+
+        assert(
+            [&]()
+            {
+                for (const auto &cce : merged_page->entries_)
+                {
+                    if (cce->GetCcPage() != nullptr &&
+                        cce->GetCcPage() != merged_page)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }());
 
         // Update the page order list.
         CcPage<KeyT, ValueT> *map_prev = page1->prev_page_;
@@ -8235,12 +8043,20 @@ protected:
         }
         else
         {
-            LruPage *lru_prev = page1_last_read_ts > page2_last_read_ts
-                                    ? page1->lru_prev_
-                                    : page2->lru_prev_;
-            LruPage *lru_next = page1_last_read_ts > page2_last_read_ts
-                                    ? page1->lru_next_
-                                    : page2->lru_next_;
+            LruPage *lru_prev = nullptr, *lru_next = nullptr;
+            uint64_t merge_last_access_ts;
+            if (page1->last_access_ts_ > page2->last_access_ts_)
+            {
+                lru_prev = page1->lru_prev_;
+                lru_next = page1->lru_next_;
+                merge_last_access_ts = page1->last_access_ts_;
+            }
+            else
+            {
+                lru_prev = page2->lru_prev_;
+                lru_next = page2->lru_next_;
+                merge_last_access_ts = page2->last_access_ts_;
+            }
 
             if (merged_page->lru_next_ != nullptr)
             {
@@ -8255,6 +8071,7 @@ protected:
             merged_page->lru_next_ = lru_next;
             lru_prev->lru_next_ = merged_page;
             lru_next->lru_prev_ = merged_page;
+            merged_page->last_access_ts_ = merge_last_access_ts;
         }
 
         // last_dirty_commit_ts_ of merged page will inherit the larger one.
@@ -8273,16 +8090,16 @@ protected:
 
     CcPage<KeyT, ValueT> *PageNegInf()
     {
-        return &pg_ng_inf_;
+        return &neg_inf_page_;
     }
 
     CcPage<KeyT, ValueT> *PagePosInf()
     {
-        return &pg_ps_inf_;
+        return &pos_inf_page_;
     }
 
     std::map<KeyT, CcPage<KeyT, ValueT>> ccmp_;
-    CcPage<KeyT, ValueT> pg_ng_inf_, pg_ps_inf_;
+    CcPage<KeyT, ValueT> neg_inf_page_, pos_inf_page_;
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
     size_t size_{};
 

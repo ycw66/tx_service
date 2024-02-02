@@ -11,7 +11,7 @@
 
 namespace txservice
 {
-enum struct RecordStatus
+enum struct RecordStatus : uint8_t
 {
     /// <summary>
     /// The record returned from the cc map is the newest committed value.

@@ -41,12 +41,8 @@ public:
     {
         for (const auto &ref : batch)
         {
-            CcEntry<CompositeKey<int>, CompositeRecord<int>> *cce =
-                static_cast<CcEntry<CompositeKey<int>, CompositeRecord<int>> *>(
-                    ref.cce_);
-
             const CompositeKey<int> &key =
-                *dynamic_cast<const CompositeKey<int> *>(cce->Key());
+                *dynamic_cast<const CompositeKey<int> *>(ref.Key());
             const CompositeRecord<int> &rec = *ref.Payload();
 
             int key_val = std::get<0>(key.Tuple());

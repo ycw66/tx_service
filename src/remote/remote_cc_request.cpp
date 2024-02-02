@@ -854,14 +854,11 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
         {
             CcOperation cc_op;
 
-            const LruEntry *prior_lru_entry =
-                reinterpret_cast<const LruEntry *>(prior_cce_addr_.CcePtr());
-            if (prior_lru_entry->parent_map_->Type() == TableType::Secondary)
+            if (tbl_type_ == TableType::Secondary)
             {
                 cc_op = CcOperation::ReadSkIndex;
             }
-            else if (prior_lru_entry->parent_map_->Type() ==
-                     TableType::UniqueSecondary)
+            else if (tbl_type_ == TableType::UniqueSecondary)
             {
                 cc_op = IsForWrite() ? CcOperation::ReadForWrite
                                      : CcOperation::ReadSkIndex;
@@ -901,7 +898,9 @@ bool txservice::remote::RemoteScanNextBatch::ValidTermCheck()
 
     const LruEntry *lru_entry =
         reinterpret_cast<const LruEntry *>(prior_cce_addr_.CcePtr());
-    ccm_ = lru_entry->parent_map_;
+    ccm_ = lru_entry->GetCcMap();
+    assert(ccm_ != nullptr);
+    tbl_type_ = ccm_->Type();
     return true;
 }
 
@@ -1537,8 +1536,11 @@ bool txservice::remote::RemoteAbortTransactionCc::Execute(CcShard &ccs)
             it_info->second.cce_list_.find(lru_entry) !=
                 it_info->second.cce_list_.end())
         {
-            NonBlockingLock *key_lock = lru_entry->key_lock_ptr_;
-            key_lock->AbortQueueRequest(tx_id_wait_);
+            NonBlockingLock *key_lock = lru_entry->GetKeyLock();
+            if (key_lock != nullptr)
+            {
+                key_lock->AbortQueueRequest(tx_id_wait_);
+            }
             err = 0;
         }
     }
@@ -1598,9 +1600,12 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
             lru_entry = reinterpret_cast<LruEntry *>(caddr.cce_ptr());
         }
 
-        NonBlockingLock &block = lru_entry->GetKeyLock();
-        bool b = block.FindQueueRequest(input_msg_->tx_number());
-        status = (b ? AckStatus::BlockQueue : AckStatus::Finished);
+        NonBlockingLock *lock = lru_entry->GetKeyLock();
+        if (lock != nullptr)
+        {
+            bool b = lock->FindQueueRequest(input_msg_->tx_number());
+            status = (b ? AckStatus::BlockQueue : AckStatus::Finished);
+        }
     }
 
     CODE_FAULT_INJECTOR("block_req_term_changed", {

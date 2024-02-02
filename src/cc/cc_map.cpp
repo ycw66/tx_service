@@ -1,8 +1,7 @@
 
 #include "cc/cc_map.h"
 
-#include <type_traits>  // std::is_same_v
-#include <utility>      // std::pair
+#include <utility>  // std::pair
 
 #include "cc/local_cc_shards.h"
 #include "cc_entry.h"
@@ -18,6 +17,7 @@ void CcMap::MoveRequest(CcRequestBase *cc_req, uint32_t target_core_id)
 
 std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     LruEntry *cce,
+    LruPage *page,
     RecordStatus cce_payload_status,
     CcRequestBase *req,
     uint32_t ng_id,
@@ -27,7 +27,8 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     IsolationLevel iso_level,
     CcProtocol protocol,
     uint64_t read_ts,
-    bool is_covering_keys)
+    bool is_covering_keys,
+    CcMap *ccm)
 {
     if (iso_level == IsolationLevel::Snapshot)
     {
@@ -50,9 +51,10 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
         else if (cc_op == CcOperation::Read ||
                  cc_op == CcOperation::ReadSkIndex)
         {
-            if (cce->key_lock_ptr_ != nullptr &&
-                cce->key_lock_ptr_->HasWriteLock() &&
-                cce->key_lock_ptr_->WLockTs() < read_ts)
+            NonBlockingLock *lock = cce->GetKeyLock();
+
+            if (lock != nullptr && lock->HasWriteLock() &&
+                lock->WLockTs() < read_ts)
             {
                 // Having a write lock means the entry will be updated soon. If
                 // wlock_ts_ is less than the read timestamp, this read may be
@@ -63,10 +65,8 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
                 // write lock is released and when this request is re-enqueued
                 // and processed. The read lock is released when the request is
                 // re-processed.
-                cce->key_lock_ptr_->InsertBlockingQueue(req,
-                                                        LockType::ReadLock);
-                shard_->CheckRecoverTx(
-                    cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                lock->InsertBlockingQueue(req, LockType::ReadLock);
+                shard_->CheckRecoverTx(lock->WriteLockTx(), ng_id, ng_term);
 
                 return std::pair<LockType, CcErrorCode>(
                     LockType::NoLock, CcErrorCode::MVCC_READ_MUST_WAIT_WRITE);
@@ -81,6 +81,7 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     TxNumber tx_number = req->Txn();
     LockOpStatus lock_op_status = LockOpStatus::Successful;
     CcErrorCode err_code = CcErrorCode::NO_ERROR;
+    NonBlockingLock *lock = nullptr;
 
     if (lock_type != LockType::NoLock)
     {
@@ -88,12 +89,18 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
             lock_type == LockType::WriteIntent ||
             cce_payload_status != RecordStatus::Deleted)
         {
-            lock_op_status =
-                cce->GetKeyLock().AcquireLock(req, protocol, lock_type);
+            // When a range is locked, the bucket to which the range is mapped
+            // is also locked. The request of locking the bucket comes from the
+            // range cc map, so "this" does not refer to the bucket cc map. We
+            // need to pass the bucket cc map via the input parameter.
+            CcMap *lock_ccm = ccm == nullptr ? this : ccm;
+            lock = &cce->GetOrCreateKeyLock(shard_, lock_ccm, page);
+            lock_op_status = lock->AcquireLock(req, protocol, lock_type);
         }
         else
         {
             lock_type = LockType::NoLock;
+            lock = cce->GetKeyLock();
         }
     }
 
@@ -109,12 +116,10 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
                                         table_name_.Type());
         }
 
-        if (cce->key_lock_ptr_ != nullptr &&
-            cce->key_lock_ptr_->HasWriteLock() &&
-            cce->key_lock_ptr_->WriteLockTx() != tx_number)
+        if (lock != nullptr && lock->HasWriteLock() &&
+            lock->WriteLockTx() != tx_number)
         {
-            shard_->CheckRecoverTx(
-                cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+            shard_->CheckRecoverTx(lock->WriteLockTx(), ng_id, ng_term);
         }
         TX_TRACE_ACTION_WITH_CONTEXT(
             req,
@@ -138,8 +143,9 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     else if (lock_op_status == LockOpStatus::Failed)
     {
         // check and recover conflicted transactions.
-        RecoverTxForLockConfilct(cce->GetKeyLock(), lock_type, ng_id, ng_term);
-        auto [w_tx, w_lk_type] = cce->GetKeyLock().WriteTx();
+        assert(lock != nullptr);
+        RecoverTxForLockConfilct(*lock, lock_type, ng_id, ng_term);
+        auto [w_tx, w_lk_type] = lock->WriteTx();
         if (lock_type == LockType::WriteLock &&
             w_lk_type == NonBlockingLock::WriteLockType::NoWritelock)
         {
@@ -191,8 +197,8 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
                 }));
 
         // check and recover conflicted transactions.
-        RecoverTxForLockConfilct(
-            *(cce->key_lock_ptr_), lock_type, ng_id, ng_term);
+        assert(lock != nullptr);
+        RecoverTxForLockConfilct(*lock, lock_type, ng_id, ng_term);
         err_code = CcErrorCode::ACQUIRE_LOCK_BLOCKED;
     }
 
@@ -216,14 +222,16 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
     LockType acquired_lock = LockTypeUtil::DeduceLockType(
         cc_op, iso_level, protocol, is_covering_keys);
     CcErrorCode err_code = CcErrorCode::NO_ERROR;
+    NonBlockingLock *lock = cce->GetKeyLock();
+    assert(lock != nullptr);
 
     if (acquired_lock == LockType::ReadLock &&
         cce_payload_status == RecordStatus::Deleted)
     {
         // The read lock has been acquired. But if the key has been deleted by
         // the prior tx, there is no point of keeping the lock.
-        cce->key_lock_ptr_->ReleaseReadLock(tx_number, shard_);
-        cce->RecycleKeyLock();
+        lock->ReleaseReadLock(tx_number, shard_);
+        cce->RecycleKeyLock(*shard_);
         acquired_lock = LockType::NoLock;
 
         // DeleteLockHoldingTx is required. Because this may be a retried
@@ -245,8 +253,8 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
                      << req->Txn();
 
         err_code = CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT;
-        cce->key_lock_ptr_->ReleaseWriteIntent(tx_number, shard_);
-        cce->RecycleKeyLock();
+        lock->ReleaseWriteIntent(tx_number, shard_);
+        cce->RecycleKeyLock(*shard_);
         acquired_lock = LockType::NoLock;
 
         // DeleteLockHoldingTx is required. Because this may be a retried
@@ -331,7 +339,11 @@ void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,
 
 void CcMap::DowngradeCceKeyWriteLock(LruEntry *cce, TxNumber tx_number)
 {
-    cce->key_lock_ptr_->DowngradeWriteLock(tx_number, shard_);
+    NonBlockingLock *lock = cce->GetKeyLock();
+    if (lock != nullptr)
+    {
+        lock->DowngradeWriteLock(tx_number, shard_);
+    }
 }
 
 void CcMap::ReleaseCceLock(NonBlockingLock *lock,
@@ -388,7 +400,7 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
         }
 
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
-        cce->RecycleKeyLock();
+        cce->RecycleKeyLock(*shard_);
     }
     else
     {

@@ -9,20 +9,16 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include "../../log_service/include/fault_inject.h"
@@ -37,13 +33,10 @@
 #include "dead_lock_check.h"
 #include "error_messages.h"  // CcErrorCode
 #include "fault/fault_inject.h"
-#include "log_closure.h"
 #include "proto/cc_request.pb.h"
 #include "raft_log.pb.h"
 #include "random_pairing.h"
-#include "range_bucket_key_record.h"
 #include "range_slice.h"
-#include "read_write_set.h"
 #include "remote/cc_stream_receiver.h"
 #include "remote/remote_type.h"
 #include "scan.h"
@@ -53,7 +46,6 @@
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "type.h"
-#include "util.h"
 
 namespace txservice
 {
@@ -586,16 +578,16 @@ public:
 
             if (cce_addr_->InsertPtr() != 0)
             {
-                const UntypedInsertEntry *ins_ptr =
-                    reinterpret_cast<const UntypedInsertEntry *>(
-                        cce_addr_->InsertPtr());
-                ccm_ = ins_ptr->Parent().parent_map_;
+                const LruEntry *lru_entry =
+                    reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+                ccm_ = lru_entry->GetCcMap();
             }
             else if (cce_addr_->CcePtr() != 0)
             {
                 const LruEntry *lru_entry =
                     reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
-                ccm_ = lru_entry->parent_map_;
+                ccm_ = lru_entry->GetCcMap();
+                assert(ccm_ != nullptr);
             }
 
             return true;
@@ -998,7 +990,8 @@ public:
 
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
-        ccm_ = lru_entry->parent_map_;
+        ccm_ = lru_entry->GetCcMap();
+        assert(ccm_ != nullptr);
         return true;
     }
 
@@ -1087,7 +1080,8 @@ public:
 
             const LruEntry *lru_entry =
                 reinterpret_cast<const LruEntry *>(tmp_cce_addr.CcePtr());
-            ccm_ = lru_entry->parent_map_;
+            ccm_ = lru_entry->GetCcMap();
+            assert(ccm_ != nullptr);
         }
         else
         {
@@ -1490,7 +1484,8 @@ public:
 
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
-        ccm_ = lru_entry->parent_map_;
+        ccm_ = lru_entry->GetCcMap();
+        assert(ccm_ != nullptr);
         return true;
     }
 
@@ -3662,8 +3657,11 @@ public:
                 it_info->second.cce_list_.find(lru_entry) !=
                     it_info->second.cce_list_.end())
             {
-                NonBlockingLock *key_lock = lru_entry->key_lock_ptr_;
-                key_lock->AbortQueueRequest(tx_id_wait_);
+                NonBlockingLock *key_lock = lru_entry->GetKeyLock();
+                if (key_lock != nullptr)
+                {
+                    key_lock->AbortQueueRequest(tx_id_wait_);
+                }
             }
         }
 

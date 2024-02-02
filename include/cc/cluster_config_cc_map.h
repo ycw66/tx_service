@@ -93,6 +93,7 @@ public:
             CcOperation cc_op = req.CcOp();
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(&cc_entry,
+                                  &neg_inf_page_,
                                   cc_entry.payload_status_,
                                   &req,
                                   req.NodeGroupId(),
@@ -112,7 +113,7 @@ public:
             // Updates last_vali_ts such that it is no smaller than (1) all
             // read transactions that have read the item in all shards, and
             // (2) the local time.
-            acquire_all_result.last_vali_ts_ = cc_entry.last_read_ts_;
+            acquire_all_result.last_vali_ts_ = shard_->LastReadTs();
             acquire_all_result.local_cce_addr_.SetCce(
                 reinterpret_cast<uint64_t>(cce_ptr),
                 ng_term,
@@ -161,13 +162,14 @@ public:
             return true;
         }
 
+        // The cluster config cc map has a single cc entry, which coordinates
+        // cluster reconfiguration and all other operations.
+        NonBlockingLock *lock = neg_inf_.GetKeyLock();
+
         if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
         {
             // transaction failed before prepare log. Release lock and return.
-            ReleaseCceLock(neg_inf_.key_lock_ptr_,
-                           &neg_inf_,
-                           req.Txn(),
-                           req.NodeGroupId());
+            ReleaseCceLock(lock, &neg_inf_, req.Txn(), req.NodeGroupId());
             req.Result()->SetFinished();
             return true;
         }
@@ -220,11 +222,10 @@ public:
         // cluster config cc map since it is always empty.
         LockType lk_type = LockType::NoLock;
         TxNumber txn = req.Txn();
-        if (neg_inf_.key_lock_ptr_ != nullptr)
+        if (lock != nullptr)
         {
             // AcquireAllCc only acquire WriteIntent or WriteLock
-            auto [write_lk_txn, write_lk_type] =
-                neg_inf_.key_lock_ptr_->WriteTx();
+            auto [write_lk_txn, write_lk_type] = lock->WriteTx();
 
             if (write_lk_type != NonBlockingLock::WriteLockType::NoWritelock &&
                 write_lk_txn == txn)
@@ -239,8 +240,7 @@ public:
         if (lk_type != LockType::NoLock)
         {
             neg_inf_.commit_ts_ = req.CommitTs();
-            ReleaseCceLock(
-                neg_inf_.key_lock_ptr_, &neg_inf_, txn, req.NodeGroupId());
+            ReleaseCceLock(lock, &neg_inf_, txn, req.NodeGroupId());
         }
 
         // No need to move the request to next core since this map is only
@@ -361,6 +361,7 @@ public:
         if (locked)
         {
             auto lock_pair = AcquireCceKeyLock(&neg_inf_,
+                                               &neg_inf_page_,
                                                RecordStatus::Normal,
                                                &req,
                                                req.NodeGroupId(),

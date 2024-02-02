@@ -78,9 +78,10 @@ public:
         const RangeBucketKey *bucket_key =
             static_cast<const RangeBucketKey *>(req.Key());
 
-        CcEntry<RangeBucketKey, RangeBucketRecord> *cce =
-            Find(*bucket_key).second;
-        assert(cce != nullptr);
+        Iterator it = Find(*bucket_key);
+        CcEntry<RangeBucketKey, RangeBucketRecord> *cce = it->second;
+        CcPage<RangeBucketKey, RangeBucketRecord> *ccp = it.GetPage();
+        assert(cce != nullptr && ccp != nullptr);
         auto hd_result = req.Result();
         LockType acquired_lock;
         CcErrorCode err_code;
@@ -115,6 +116,7 @@ public:
                                                  : CcOperation::Read;
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(cce,
+                                  ccp,
                                   cce->payload_status_,
                                   &req,
                                   ng_id,
@@ -200,14 +202,14 @@ public:
             req.SetDecodedPayload(std::move(decoded_rec));
         }
 
-        CcEntry<RangeBucketKey, RangeBucketRecord> *cce =
-            Find(*target_key).second;
+        Iterator it = Find(*target_key);
+        CcEntry<RangeBucketKey, RangeBucketRecord> *cce = it->second;
         assert(cce != nullptr);
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
-        if (cce->key_lock_ptr_ == nullptr ||
-            !cce->key_lock_ptr_->HasWriteLockOrWriteIntent(req.Txn()))
+        NonBlockingLock *lock = cce->GetKeyLock();
+        if (lock == nullptr || !lock->HasWriteLock(req.Txn()))
         {
             // Check if the tx still has lock on this cce. If this
             // is a duplicate post write all req or this ng has already
@@ -462,14 +464,18 @@ public:
                 if (lock_type == LockType::WriteLock)
                 {
                     RangeBucketKey key(bucket_process.bucket_id());
-                    auto bucket_cce = Find(key).second;
-                    assert(bucket_cce != nullptr);
+                    Iterator it = Find(key);
+                    auto bucket_cce = it->second;
+                    CcPage<RangeBucketKey, RangeBucketRecord> *bucket_ccp =
+                        it.GetPage();
+                    assert(bucket_cce != nullptr && bucket_ccp != nullptr);
                     // We need to set the req txn to the data migrate txn so
                     // that the acquired lock records the correct lock owner tx.
                     req.ResetTxn(bucket_process.migration_txn());
                     assert(bucket_process.migration_txn() != 0);
                     auto lock_pair =
                         AcquireCceKeyLock(bucket_cce,
+                                          bucket_ccp,
                                           RecordStatus::Normal,
                                           &req,
                                           req.NodeGroupId(),
@@ -602,7 +608,7 @@ public:
     LruEntry *GetBucketRecord(uint16_t bucket_id)
     {
         RangeBucketKey bucket_key(bucket_id);
-        return Find(bucket_key).second;
+        return Find(bucket_key)->second;
     }
 };
 }  // namespace txservice

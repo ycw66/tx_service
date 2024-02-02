@@ -493,6 +493,8 @@ public:
                              CleanType clean_type,
                              const TxKey *start_key = nullptr,
                              const TxKey *end_key = nullptr) = 0;
+
+    virtual void VerifyOrphanLock(TxNumber txn) = 0;
 };
 
 }  // namespace txservice

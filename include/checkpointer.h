@@ -36,8 +36,12 @@ public:
      * @brief Checkpoint one Entry to KvStore synchronously.
      * Now, only used for test.
      */
-    bool CkptEntryForTest(LruEntry *entry, std::vector<FlushRecord> &ckpt_vec);
-    bool FlushArchiveForTest(LruEntry *entry,
+    bool CkptEntryForTest(const TableName &tbl_name,
+                          const TableSchema *tbl_schema,
+                          std::vector<FlushRecord> &ckpt_vec);
+
+    bool FlushArchiveForTest(const TableName &tbl_name,
+                             const TableSchema *tbl_schema,
                              std::vector<FlushRecord> &archives);
 
     void Run();

@@ -12,12 +12,14 @@
 #include "circular_queue.h"
 #include "error_messages.h"
 #include "tx_id.h"
-#include "type.h"
 
 namespace txservice
 {
 template <typename KeyT, typename ValueT>
 struct CcEntry;
+
+class CcMap;
+struct LruPage;
 
 class NonBlockingLock
 {
@@ -40,30 +42,8 @@ public:
     }
 
     NonBlockingLock(const NonBlockingLock &rhs) = delete;
-
-    NonBlockingLock(NonBlockingLock &&rhs)
-    {
-        read_intentions_ = std::move(rhs.read_intentions_);
-        read_locks_ = std::move(rhs.read_locks_);
-        write_lk_type_ = rhs.write_lk_type_;
-        write_txn_ = rhs.write_txn_;
-        blocking_queue_ = std::move(rhs.blocking_queue_);
-        is_used_ = rhs.is_used_;
-    }
-
-    NonBlockingLock &operator=(NonBlockingLock &&rhs)
-    {
-        if (this != &rhs)
-        {
-            read_intentions_ = std::move(rhs.read_intentions_);
-            read_locks_ = std::move(rhs.read_locks_);
-            write_lk_type_ = rhs.write_lk_type_;
-            write_txn_ = rhs.write_txn_;
-            blocking_queue_ = std::move(rhs.blocking_queue_);
-            is_used_ = rhs.is_used_;
-        }
-        return *this;
-    }
+    NonBlockingLock(NonBlockingLock &&rhs) = delete;
+    NonBlockingLock &operator=(NonBlockingLock &&rhs) = delete;
 
     void Reset()
     {
@@ -71,19 +51,8 @@ public:
         read_locks_.clear();
         write_lk_type_ = WriteLockType::NoWritelock;
         write_txn_ = 0;
-        is_used_ = false;
         blocking_queue_.Reset();
         wlock_ts_ = 0;
-    }
-
-    void SetUsedStatus(bool is_used)
-    {
-        is_used_ = is_used;
-    }
-
-    bool GetUsedStatus()
-    {
-        return is_used_;
     }
 
     /**
@@ -183,24 +152,6 @@ public:
     void SetWLockTs(uint64_t ts)
     {
         wlock_ts_ = ts;
-    }
-
-    size_t MemUsage() const
-    {
-        size_t mem_size_ = 0;
-
-        mem_size_ += sizeof(read_intentions_) +
-                     read_intentions_.size() * sizeof(TxNumber);
-        mem_size_ +=
-            sizeof(read_locks_) + read_locks_.size() * sizeof(TxNumber);
-        mem_size_ += sizeof(write_lk_type_);
-        mem_size_ += sizeof(write_txn_);
-        mem_size_ += blocking_queue_.MemUsage() +
-                     blocking_queue_.Capacity() * sizeof(LockQueueEntry);
-        mem_size_ += sizeof(is_used_);
-        mem_size_ += sizeof(wlock_ts_);
-
-        return mem_size_;
     }
 
     std::string DebugInfo()
@@ -328,7 +279,6 @@ private:
     WriteLockType write_lk_type_;
     TxNumber write_txn_{0};
 
-    bool is_used_{false};
     // The time when a write tx acquires the write lock on this lock.
     uint64_t wlock_ts_;
 
@@ -349,6 +299,54 @@ private:
 
     template <typename KeyT, typename ValueT>
     friend struct CcEntry;
+};
+
+class KeyGapLock
+{
+public:
+    using uptr = std::unique_ptr<KeyGapLock>;
+
+    KeyGapLock() = default;
+
+    void Reset(CcMap *ccm, LruPage *page)
+    {
+        key_lock_.Reset();
+        ccm_ = ccm;
+        page_ = page;
+    }
+
+    void SetUsedStatus(bool is_used);
+
+    bool GetUsedStatus() const
+    {
+        return in_use_;
+    }
+
+    NonBlockingLock *KeyLock()
+    {
+        return &key_lock_;
+    }
+
+    CcMap *GetCcMap() const
+    {
+        return ccm_;
+    }
+
+    LruPage *GetCcPage() const
+    {
+        return page_;
+    }
+
+    void UpdateCcPage(LruPage *new_page)
+    {
+        page_ = new_page;
+    }
+
+private:
+    NonBlockingLock key_lock_;
+    bool in_use_{false};
+    CcMap *ccm_{nullptr};
+    LruPage *page_{nullptr};
 };
 
 }  // namespace txservice

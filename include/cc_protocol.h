@@ -1,8 +1,7 @@
 #pragma once
 
 #include <cassert>  // assert
-
-#include "tx_record.h"  // RecordStatus
+#include <cstdint>
 
 namespace txservice
 {
@@ -51,7 +50,7 @@ enum class IsolationLevel
     Serializable
 };
 
-enum class LockType
+enum class LockType : uint8_t
 {
     NoLock = 0,
     ReadIntent,

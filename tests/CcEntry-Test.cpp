@@ -12,7 +12,7 @@ namespace txservice
 
 TEST_CASE("CcEntry Init", "[cc-entry]")
 {
-    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
+    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry;
 
     REQUIRE(entry.commit_ts_ == 1);
     REQUIRE(entry.payload_status_ == RecordStatus::Unknown);
@@ -21,7 +21,7 @@ TEST_CASE("CcEntry Init", "[cc-entry]")
 
 TEST_CASE("CcEntry ArchiveBeforeUpdate", "[cc-entry]")
 {
-    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
+    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry;
 
     entry.commit_ts_ = 1U;
     entry.payload_ = std::make_unique<CompositeRecord<int>>(1);
@@ -52,7 +52,7 @@ TEST_CASE("CcEntry ArchiveBeforeUpdate", "[cc-entry]")
 
 TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
 {
-    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
+    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry;
 
     // [6,5,3]->...=>[6,5,3]
     std::vector<VersionTxRecord> records;  // desc order
@@ -182,7 +182,7 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
 
 TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
 {
-    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
+    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry;
     entry.commit_ts_ = 12U;
     entry.payload_status_ = RecordStatus::Deleted;
 
@@ -306,7 +306,8 @@ TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
 
 TEST_CASE("CcEntry MvccGet", "[cc-entry]")
 {
-    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
+    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry;
+    uint64_t last_read_ts = 1;
     //== CcEntry has not been filled
 
     // (read_ts: 5)->... => Unknown
@@ -314,7 +315,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, rec);
+        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
     }
 
@@ -328,7 +329,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, rec);
+        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
     }
 
@@ -338,7 +339,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, rec);
+        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::BaseVersionMiss);
     }
 
@@ -348,7 +349,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, rec);
+        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
     }
 
@@ -358,7 +359,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 12;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, rec);
+        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_ptr_ == nullptr);
         REQUIRE(rec.payload_status_ == RecordStatus::Deleted);
@@ -383,7 +384,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 1;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, rec);
+        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
     }
@@ -394,7 +395,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 2;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, rec);
+        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
                 static_cast<int>(target));
@@ -407,7 +408,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 6;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, rec);
+        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
                 static_cast<int>(target));
@@ -420,7 +421,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 12;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, rec);
+        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_ptr_ == nullptr);
         REQUIRE(rec.payload_status_ == RecordStatus::Deleted);
