@@ -892,10 +892,10 @@ public:
               metrics::MetricsRegistry *metrics_registry = nullptr,
               metrics::CommonLabels common_labels = {})
         : local_cc_shards_(node_id,
-                           conf.find("core_num")->second,
-                           conf.find("node_memory_limit_mb")->second,
-                           conf.find("node_log_limit_mb")->second,
-                           conf.find("realtime_sampling")->second,
+                           conf.at("core_num"),
+                           conf.at("node_memory_limit_mb"),
+                           conf.at("node_log_limit_mb"),
+                           conf.at("realtime_sampling"),
                            catalog_factory,
                            system_handler,
                            ng_configs,
@@ -908,11 +908,11 @@ public:
                            common_labels),
           ckpt_(local_cc_shards_,
                 store_hd,
-                conf.find("checkpointer_interval")->second,
+                conf.at("checkpointer_interval"),
                 log_hd.get(),
-                conf.find("checkpointer_delay_seconds")->second)
+                conf.at("checkpointer_delay_seconds"))
     {
-        uint32_t core_cnt = conf.find("core_num")->second;
+        uint32_t core_cnt = conf.at("core_num");
         pool_.reserve(core_cnt);
         thd_pool_.reserve(core_cnt);
 
@@ -935,7 +935,7 @@ public:
             }
         }
 
-        uint16_t ng_rep_cnt = (uint16_t) conf.find("rep_group_cnt")->second;
+        uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
         Sharder::Instance().Init(node_id,
                                  ng_configs,
                                  cluster_config_version,
@@ -947,7 +947,7 @@ public:
                                  ng_rep_cnt);
         TxStartTsCollector::Instance().Init(
             &local_cc_shards_,
-            conf.find("collect_active_tx_ts_interval_seconds")->second);
+            conf.at("collect_active_tx_ts_interval_seconds"));
         DeadLockCheck::Init(local_cc_shards_);
         txservice_skip_redo_log = skip_redo_log;
     }
