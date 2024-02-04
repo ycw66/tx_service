@@ -61,12 +61,14 @@ public:
 
     void SetRemoteFinished()
     {
+        result_status_.fetch_sub(1, std::memory_order_acquire);
         remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
         SetFinished();
     }
 
     void SetRemoteError(CcErrorCode err_code)
     {
+        result_status_.fetch_sub(1, std::memory_order_acquire);
         remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
         SetError(err_code);
     }
@@ -215,6 +217,7 @@ public:
           post_lambda_(std::move(rhs.post_lambda_))
     {
         is_finished_ = rhs.is_finished_.load(std::memory_order_relaxed);
+        result_status_ = rhs.result_status_.load(std::memory_order_relaxed);
         error_code_ = rhs.error_code_.load(std::memory_order_relaxed);
         ref_cnted_ = rhs.ref_cnted_;
         ref_cnt_ = rhs.ref_cnt_.load(std::memory_order_relaxed);
@@ -275,7 +278,7 @@ public:
 
     void DecreaseCurrentHandlingResponse()
     {
-        uint32_t res = result_status_.fetch_sub(1, std::memory_order_acquire);
+        uint32_t res = result_status_.fetch_sub(1, std::memory_order_release);
         assert(res > 0);
     }
 
