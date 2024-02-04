@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mimalloc-2.1/mimalloc.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -118,6 +120,26 @@ public:
         return mem_usage_ >= memory_limit_;
     }
 
+    void InitializeShardHeap()
+    {
+        if (!shard_heap_)
+        {
+            shard_heap_thread_id_ = mi_thread_id();
+            shard_heap_ = mi_heap_new();
+            mi_heap_set_default(shard_heap_);
+        }
+    }
+
+    mi_threadid_t GetShardHeapThreadId()
+    {
+        return shard_heap_thread_id_;
+    }
+
+    mi_heap_t *GetShardHeap()
+    {
+        return shard_heap_;
+    }
+
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
      *
@@ -154,7 +176,7 @@ public:
         {
             if (memory_usage_round_ == metrics::memory_usage_sample_round)
             {
-                meter_->Collect(MEMORY_USAGE_NAME_, mem_usage_);
+                meter_->Collect(MEMORY_USAGE_NAME_, mem_usage_ * core_cnt_);
                 memory_usage_round_ = 1;
             }
             else
@@ -702,6 +724,9 @@ private:
     }
 
     size_t memory_usage_round_ = 1;
+
+    mi_heap_t *shard_heap_{nullptr};
+    mi_threadid_t shard_heap_thread_id_ = 0;
 
     // all the lock acquire/release on this ccshard. It used to reduce the cost
     // of allocation/dellocation of memory.

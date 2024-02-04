@@ -1,6 +1,7 @@
 #include "cc/cc_shard.h"
 
 #include <chrono>  // std::chrono
+#include <cstdint>
 
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
@@ -53,7 +54,12 @@ CcShard::CcShard(uint16_t core_id,
 
 {
     // memory_limit_ and log_limit_ are calculated at shard level.
+#ifdef RANGE_PARTITION_ENABLED
+    // reserve 5% for range slice info
+    memory_limit_ = (uint64_t) MB(node_memory_limit_mb) * 0.95;
+#else
     memory_limit_ = (uint64_t) MB(node_memory_limit_mb);
+#endif
     memory_limit_ /= core_cnt_;
     log_limit_ = (uint64_t) MB(node_log_limit_mb);
     log_limit_ /= core_cnt_;
@@ -118,7 +124,13 @@ CcShard::CcShard(uint16_t core_id,
     // collect metrics: memory limit
     if (metrics::enable_collect_metrics)
     {
-        meter_->Collect(MEMORY_LIMIT_NAME_, memory_limit_);
+#ifdef RANGE_PARTITION_ENABLED
+        meter_->Collect(MEMORY_LIMIT_NAME_,
+                        (uint64_t) MB(node_memory_limit_mb) * 0.95);
+#else
+        meter_->Collect(MEMORY_LIMIT_NAME_,
+                        (uint64_t) MB(node_memory_limit_mb));
+#endif
     }
 
     last_read_ts_ = Now();

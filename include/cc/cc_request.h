@@ -3,9 +3,11 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 #include <butil/iobuf.h>
+#include <mimalloc-2.1/mimalloc.h>
 
 #include <algorithm>  // std::min
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -4185,4 +4187,33 @@ struct RequestAborterCc : public CcRequestBase
     CcErrorCode err_code_;
 };
 
+struct CollectMemStatsCc : public CcRequestBase
+{
+    explicit CollectMemStatsCc(HeapMemStats *stats) : stats_(stats)
+    {
+    }
+
+    ~CollectMemStatsCc() = default;
+
+    bool Execute(CcShard &ccs) override
+    {
+        mi_thread_stats(&stats_->allocated_, &stats_->committed_);
+        std::lock_guard<std::mutex> lk(mux_);
+        finished_ = true;
+        cv_.notify_one();
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return finished_ == true; });
+    }
+
+private:
+    HeapMemStats *stats_;
+    std::mutex mux_;
+    std::condition_variable cv_;
+    bool finished_{false};
+};
 }  // namespace txservice

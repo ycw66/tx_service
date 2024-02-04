@@ -240,7 +240,7 @@ struct SliceDataItem
     SliceDataItem() = delete;
 
     SliceDataItem(txservice::TxKey::Uptr &&key,
-                  std::shared_ptr<txservice::TxRecord> &&rec,
+                  std::unique_ptr<txservice::TxRecord> &&rec,
                   uint64_t version_ts,
                   bool is_deleted)
         : key_(std::move(key)),
@@ -251,7 +251,7 @@ struct SliceDataItem
     }
 
     txservice::TxKey::Uptr key_;
-    std::shared_ptr<txservice::TxRecord> record_;
+    std::unique_ptr<txservice::TxRecord> record_;
     uint64_t version_ts_;
     bool is_deleted_;
 };
@@ -293,7 +293,7 @@ public:
     }
 
     void AddDataItem(txservice::TxKey::Uptr &&key,
-                     std::shared_ptr<txservice::TxRecord> &&record,
+                     std::unique_ptr<txservice::TxRecord> &&record,
                      uint64_t version_ts,
                      bool is_deleted)
     {
@@ -412,7 +412,7 @@ public:
     }
 
     void AddDataItem(txservice::TxKey::Uptr &&key,
-                     std::shared_ptr<txservice::TxRecord> &&record,
+                     std::unique_ptr<txservice::TxRecord> &&record,
                      uint64_t version_ts,
                      bool is_deleted);
 

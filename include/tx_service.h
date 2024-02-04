@@ -1,10 +1,12 @@
 #pragma once
 
 #include <butil/macros.h>
+#include <mimalloc-2.1/mimalloc.h>
 #include <pthread.h>
 
 #include <algorithm>  // std::min
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <list>
 #include <map>
@@ -141,8 +143,22 @@ public:
         }
         else
         {
+            // acquire shard ownership before switching heap since heap
+            // allocation with mimalloc must be thread exclusive.
+#ifdef EXT_TX_PROC_ENABLED
+            OccupyTxShard();
+            mi_override_thread(
+                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
+            auto prev_heap = mi_heap_set_default(
+                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
+#endif
             tx = std::make_unique<TransactionExecution>(
                 cc_hd_.get(), txlog_hd_, this);
+#ifdef EXT_TX_PROC_ENABLED
+            mi_heap_set_default(prev_heap);
+            mi_restore_default_thread_id();
+            ReleaseTxShardOwnership();
+#endif
         }
 
         TransactionExecution *tx_ptr = tx.get();
@@ -192,16 +208,25 @@ public:
         }
         else
         {
+            // acquire shard ownership before switching heap since heap
+            // allocation with mimalloc must be thread exclusive.
+            OccupyTxShard();
+            mi_override_thread(
+                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
+            auto prev_heap = mi_heap_set_default(
+                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
             tx = std::make_unique<TransactionExecution>(
                 cc_hd_.get(), txlog_hd_, this, true);
+
+            mi_heap_set_default(prev_heap);
+            mi_restore_default_thread_id();
+            ReleaseTxShardOwnership();
         }
 
         TransactionExecution *tx_ptr = tx.get();
-
         active_tx_lock_.Lock();
-        active_tx_map_.try_emplace(tx_ptr, std::move(tx));
+        active_tx_map_.try_emplace(tx.get(), std::move(tx));
         active_tx_lock_.Unlock();
-
         return tx_ptr;
     }
 #endif
@@ -227,7 +252,14 @@ public:
             yield = true;
             return;
         }
-
+        mi_heap_t *prev_heap = nullptr;
+        if (is_ext_proc)
+        {
+            mi_override_thread(
+                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
+            prev_heap = mi_heap_set_default(
+                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
+        }
         one_round_cnt_.fetch_add(1, std::memory_order_relaxed);
 #endif
 
@@ -388,6 +420,12 @@ public:
 
 #ifdef EXT_TX_PROC_ENABLED
         shard_status.store(TxShardStatus::Free, std::memory_order_release);
+        if (is_ext_proc)
+        {
+            assert(prev_heap != nullptr);
+            mi_heap_set_default(prev_heap);
+            mi_restore_default_thread_id();
+        }
 #endif
 
         if (metrics::enable_collect_metrics)
@@ -417,12 +455,21 @@ public:
         auto tstart = std::chrono::steady_clock::now();
 
         size_t idle_rnd = 0;
+        local_cc_shards_.GetCcShard(thd_id_)->InitializeShardHeap();
         local_cc_shards_.SetTxProcNotifier(
             thd_id_, &tx_proc_status_, coordi_.get());
 
 #ifdef EXT_TX_PROC_ENABLED
         size_t local_round_cnt = one_round_cnt_.load(std::memory_order_relaxed);
 #endif
+
+        // Allocate some free txms.
+        for (uint i = 0; i < 50; i++)
+        {
+            free_txs_.enqueue(free_prod_token_,
+                              std::make_unique<TransactionExecution>(
+                                  cc_hd_.get(), txlog_hd_, this));
+        }
 
         while (!terminated_.load(std::memory_order_relaxed))
         {
@@ -613,6 +660,11 @@ public:
         {
             return false;
         }
+        // Override default heap since we're accessing txm in cc shard.
+        mi_override_thread(
+            local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
+        mi_heap_t *prev_heap = mi_heap_set_default(
+            local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
 
         TxmStatus txm_status = txm->Forward();
         if (txm_status == TxmStatus::Finished)
@@ -633,9 +685,9 @@ public:
                 active_tx_lock_.Unlock();
             }
         }
-
-        coordi_->shard_status_.store(TxShardStatus::Free,
-                                     std::memory_order_release);
+        mi_heap_set_default(prev_heap);
+        mi_restore_default_thread_id();
+        ReleaseTxShardOwnership();
         return true;
     }
 
@@ -677,6 +729,32 @@ public:
             tx_it.first->second.cmd_id_ = cmd_id;
             tx_it.first->second.wait_clock_ts_ = clock_ts;
         }
+    }
+
+    void OccupyTxShard()
+    {
+        TxShardStatus expected = TxShardStatus::Free;
+        while (!coordi_->shard_status_.compare_exchange_weak(
+            expected, TxShardStatus::Occupied, std::memory_order_acquire))
+        {
+            // Issue X86 PAUSE or ARM YIELD instruction to
+            // reduce contention
+            // between hyper-threads
+            expected = TxShardStatus::Free;
+#if defined(__x86_64__)
+            __builtin_ia32_pause();
+#elif defined(__aarch64__)
+            __asm__ __volatile__("yield");
+#endif
+        }
+    }
+
+    void ReleaseTxShardOwnership()
+    {
+        assert(coordi_->shard_status_.load(std::memory_order_relaxed) ==
+               TxShardStatus::Occupied);
+        coordi_->shard_status_.store(TxShardStatus::Free,
+                                     std::memory_order_release);
     }
 #endif
 

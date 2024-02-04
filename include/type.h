@@ -15,9 +15,9 @@
 
 namespace txservice
 {
-#define KB(x) ((size_t) (x) << 10);
-#define MB(x) ((size_t) (x) << 20);
-#define GB(x) ((size_t) (x) << 30);
+#define KB(x) ((size_t) (x) << 10)
+#define MB(x) ((size_t) (x) << 20)
+#define GB(x) ((size_t) (x) << 30)
 
 struct Void
 {
@@ -700,4 +700,12 @@ struct AlterTableInfo
     std::unordered_map<txservice::TableName, std::string> index_add_names_;
     std::unordered_map<txservice::TableName, std::string> index_drop_names_;
 };
+
+struct HeapMemStats
+{
+    HeapMemStats() = default;
+    int64_t allocated_{0};
+    int64_t committed_{0};
+};
+
 }  // namespace txservice

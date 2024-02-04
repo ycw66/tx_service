@@ -39,6 +39,7 @@ endif()
 find_package(Protobuf REQUIRED)
 find_package(GFLAGS REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(MIMALLOC REQUIRED)
 
 message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
 
@@ -114,6 +115,7 @@ set(INCLUDE_DIR
 
 if ( CMAKE_COMPILER_IS_GNUCC )
     set(INCLUDE_DIR ${INCLUDE_DIR}
+        ${MIMALLOC_INCLUDE_PATH}
         ${BRPC_INCLUDE_PATH}
         ${BRAFT_INCLUDE_PATH}
         ${GLOG_INCLUDE_PATH}
@@ -124,6 +126,7 @@ set(LINK_LIB ${LINK_LIB} ${PROTOBUF_LIBRARY})
 
 if ( CMAKE_COMPILER_IS_GNUCC )
    set(LINK_LIB ${LINK_LIB}
+       ${MIMALLOC_LIB}
        ${GFLAGS_LIBRARY}
        ${LEVELDB_LIB}
        ${BRAFT_LIB}

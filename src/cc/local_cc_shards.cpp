@@ -1,5 +1,7 @@
 #include "cc/local_cc_shards.h"
 
+#include <sys/stat.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -8,6 +10,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include "cc_request.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "store/data_store_handler.h"
@@ -15,6 +18,7 @@
 #include "tx_key.h"
 #include "tx_service.h"
 #include "tx_util.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -36,7 +40,7 @@ LocalCcShards::LocalCcShards(
     bool enable_mvcc,
     metrics::MetricsRegistry *metrics_registry,
     std::unordered_map<std::string, std::string> common_labels)
-    : range_slice_memory_limit_((((uint64_t) memory_limit_mb) << 20) / 20),
+    : range_slice_memory_limit_(((uint64_t) MB(memory_limit_mb)) / 20),
       store_hd_(store_hd),
       metrics_registry_(metrics_registry),
       common_labels_(common_labels),
@@ -49,24 +53,16 @@ LocalCcShards::LocalCcShards(
       enable_mvcc_(enable_mvcc),
       realtime_sampling_(realtime_sampling),
 #ifdef EXT_TX_PROC_ENABLED
-      data_sync_worker_num_(core_cnt >= 2 ? (core_cnt / 2) : 1),
+      data_sync_worker_ctx_(core_cnt >= 2 ? (core_cnt / 2) : 1),
+      slice_update_worker_ctx_(core_cnt),
+      flush_data_worker_ctx_(core_cnt >= 2 ? std::min(core_cnt / 2, 10) : 1),
 #else
-      data_sync_worker_num_(core_cnt),
+      data_sync_worker_ctx_(core_cnt),
+      slice_update_worker_ctx_(core_cnt * 2),
+      flush_data_worker_ctx_(std::min((int) core_cnt, 10)),
 #endif
-      data_sync_worker_status_(WorkerStatus::Active),
-#ifdef EXT_TX_PROC_ENABLED
-      slice_worker_num_(core_cnt),
-#else
-      slice_worker_num_(core_cnt * 2),
-#endif
-      slice_thd_status_(WorkerStatus::Active),
-#ifdef EXT_TX_PROC_ENABLED
-      flush_worker_num_(core_cnt >= 2 ? std::min(core_cnt / 2, 10) : 1),
-#else
-      flush_worker_num_(std::min((int) core_cnt, 10)),
-#endif
-      flush_worker_thd_status_(WorkerStatus::Active),
-      statistics_thd_status_(WorkerStatus::Active)
+      statistics_worker_ctx_(1),
+      defragment_worker_ctx_(1)
 {
     using namespace std::chrono_literals;
     uint64_t ts_base = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -81,42 +77,46 @@ LocalCcShards::LocalCcShards(
 
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
-        cc_shards_.emplace_back(
-            std::make_unique<CcShard>(thd_idx,
-                                      core_cnt,
-                                      memory_limit_mb * 0.95,
-                                      log_limit_mb,
-                                      realtime_sampling,
-                                      node_id,
-                                      *this,
-                                      catalog_factory_,
-                                      system_handler));
+        cc_shards_.emplace_back(std::make_unique<CcShard>(thd_idx,
+                                                          core_cnt,
+                                                          memory_limit_mb,
+                                                          log_limit_mb,
+                                                          realtime_sampling,
+                                                          node_id,
+                                                          *this,
+                                                          catalog_factory_,
+                                                          system_handler));
     }
 
     // Starts flush worker threads firstly.
-    for (int id = 0; id < flush_worker_num_; id++)
+    for (int id = 0; id < flush_data_worker_ctx_.worker_num_; id++)
     {
-        flush_worker_thds_.push_back(
+        flush_data_worker_ctx_.worker_thd_.push_back(
             std::thread([this] { FlushDataWorker(); }));
     }
 
-    for (int id = 0; id < slice_worker_num_; id++)
+    // Starts slice update worker threads.
+    for (int id = 0; id < slice_update_worker_ctx_.worker_num_; id++)
     {
-        update_slice_spec_thds_.push_back(
+        slice_update_worker_ctx_.worker_thd_.push_back(
             std::thread([this] { UpdateSliceSpecWorker(); }));
     }
 
     // Starts datasync worker threads.
-    for (int id = 0; id < data_sync_worker_num_; id++)
+    for (int id = 0; id < data_sync_worker_ctx_.worker_num_; id++)
     {
-        data_sync_worker_thds_.push_back(
+        data_sync_worker_ctx_.worker_thd_.push_back(
             std::thread([this] { DataSyncWorker(); }));
     }
 
     if (realtime_sampling)
     {
-        statistics_thd_ = std::thread([this] { SyncTableStatisticsWorker(); });
+        statistics_worker_ctx_.worker_thd_.push_back(
+            std::thread([this] { SyncTableStatisticsWorker(); }));
     }
+
+    defragment_worker_ctx_.worker_thd_.push_back(
+        std::thread([this] { DefragmentWorker(); }));
 }
 
 LocalCcShards::~LocalCcShards()
@@ -1368,7 +1368,7 @@ void LocalCcShards::FlushData(const TableName &table_name,
                               CcHandlerResult<Void> &hres,
                               bool delay_update_ckpt_ts)
 {
-    std::unique_lock<std::mutex> flush_worker_lk(flush_worker_mux_);
+    std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     pending_flush_work_.emplace_back(node_group,
                                      term,
                                      data_sync_ts,
@@ -1379,7 +1379,7 @@ void LocalCcShards::FlushData(const TableName &table_name,
                                      mv_vec,
                                      &hres,
                                      delay_update_ckpt_ts);
-    flush_worker_cv_.notify_one();
+    flush_data_worker_ctx_.cv_.notify_one();
 }
 
 void LocalCcShards::DropCatalogs(NodeGroupId cc_ng_id)
@@ -1900,10 +1900,10 @@ bool LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
             is_dirty,
             [this](std::shared_ptr<DataSyncTask> task)
             {
-                std::lock_guard<std::mutex> lk(task_worker_mux_);
+                std::lock_guard<std::mutex> lk(data_sync_worker_ctx_.mux_);
                 data_sync_task_queue_.push_back(task);
                 // Notify the data sync workers.
-                task_worker_cv_.notify_one();
+                data_sync_worker_ctx_.cv_.notify_one();
             },
             hres));
         return true;
@@ -1954,7 +1954,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
     std::shared_ptr<DataSyncStatus> status,
     CcHandlerResult<Void> *hres)
 {
-    std::lock_guard<std::mutex> task_worker_lk(task_worker_mux_);
+    std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
 
 #ifndef RANGE_PARTITION_ENABLED
@@ -1970,10 +1970,10 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         is_dirty,
         [this](std::shared_ptr<DataSyncTask> task)
         {
-            std::lock_guard<std::mutex> lk(task_worker_mux_);
+            std::lock_guard<std::mutex> lk(data_sync_worker_ctx_.mux_);
             data_sync_task_queue_.push_back(task);
             // Notify the data sync workers.
-            task_worker_cv_.notify_one();
+            data_sync_worker_ctx_.cv_.notify_one();
         },
         hres));
 
@@ -1988,7 +1988,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         }
     }
 
-    task_worker_cv_.notify_all();
+    data_sync_worker_ctx_.cv_.notify_all();
     return;
 #endif
 
@@ -2034,7 +2034,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         }
     }
 
-    task_worker_cv_.notify_all();
+    data_sync_worker_ctx_.cv_.notify_all();
 }
 
 void LocalCcShards::EnqueueDataSyncTaskForBucket(
@@ -2045,7 +2045,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     uint64_t data_sync_ts,
     CcHandlerResult<Void> *hres)
 {
-    std::lock_guard<std::mutex> task_worker_lk(task_worker_mux_);
+    std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>();
     for (auto &[range_table_name, range_ids] : ranges_in_bucket_snapshot)
@@ -2089,81 +2089,49 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
         hres->SetFinished();
         return;
     }
-    task_worker_cv_.notify_all();
+    data_sync_worker_ctx_.cv_.notify_all();
 }
 
 void LocalCcShards::Terminate()
 {
     // Terminate the data sync task worker thds.
-    {
-        std::unique_lock<std::mutex> task_worker_lk(task_worker_mux_);
-        assert(data_sync_worker_status_ == WorkerStatus::Active);
-        data_sync_worker_status_ = WorkerStatus::Terminated;
-        task_worker_cv_.notify_all();
-    }
-
-    for (int idx = 0; idx < data_sync_worker_num_; ++idx)
-    {
-        data_sync_worker_thds_.at(idx).join();
-    }
+    data_sync_worker_ctx_.Terminate();
 
     // Terminate the flush worker thds.
-    {
-        std::unique_lock<std::mutex> flush_worker_lk(flush_worker_mux_);
-        assert(flush_worker_thd_status_ == WorkerStatus::Active);
-        flush_worker_thd_status_ = WorkerStatus::Terminated;
-        flush_worker_cv_.notify_all();
-    }
+    flush_data_worker_ctx_.Terminate();
 
-    for (int idx = 0; idx < flush_worker_num_; ++idx)
-    {
-        flush_worker_thds_.at(idx).join();
-    }
-
-    {
-        std::unique_lock<std::mutex> worker_lk(slice_update_mux_);
-        slice_thd_status_ = WorkerStatus::Terminated;
-        slice_update_cv_.notify_all();
-    }
-
-    for (int id = 0; id < slice_worker_num_; id++)
-    {
-        update_slice_spec_thds_.at(id).join();
-    }
+    // Terminate the slice update worker thds.
+    slice_update_worker_ctx_.Terminate();
 
     if (realtime_sampling_)
     {
-        {
-            std::unique_lock<std::mutex> lk(statistics_mux_);
-            statistics_thd_status_ = WorkerStatus::Terminated;
-            statistics_cv_.notify_one();
-        }
-
-        statistics_thd_.join();
+        statistics_worker_ctx_.Terminate();
     }
+
+    defragment_worker_ctx_.Terminate();
 }
 
 void LocalCcShards::DataSyncWorker()
 {
-    std::unique_lock<std::mutex> task_worker_lk(task_worker_mux_);
+    std::unique_lock<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
 
-    while (data_sync_worker_status_ == WorkerStatus::Active)
+    while (data_sync_worker_ctx_.status_ == WorkerStatus::Active)
     {
         if (data_sync_task_queue_.empty() &&
-            data_sync_worker_status_ == WorkerStatus::Active)
+            data_sync_worker_ctx_.status_ == WorkerStatus::Active)
         {
             // Notify checkpointer to start new round
             // of checkpoint since we've finished all
             // previous tasks.
             NotifyCheckPointer(false);
         }
-        task_worker_cv_.wait(task_worker_lk,
-                             [this]
-                             {
-                                 return !data_sync_task_queue_.empty() ||
-                                        data_sync_worker_status_ !=
-                                            WorkerStatus::Active;
-                             });
+        data_sync_worker_ctx_.cv_.wait(
+            task_worker_lk,
+            [this]
+            {
+                return !data_sync_task_queue_.empty() ||
+                       data_sync_worker_ctx_.status_ != WorkerStatus::Active;
+            });
 
         if (data_sync_task_queue_.empty())
         {
@@ -2725,7 +2693,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 #endif
         // 4.2 Flush records into data store if the range in which the
         // records locate need't to split.
-        std::unique_lock<std::mutex> worker_lk(flush_worker_mux_);
+        std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
         pending_flush_work_.emplace_back(data_sync_task,
                                          table_schema,
                                          std::move(data_sync_vec),
@@ -2733,7 +2701,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                                          std::move(mv_base_vec),
                                          data_sync_txm,
                                          false);
-        flush_worker_cv_.notify_one();
+        flush_data_worker_ctx_.cv_.notify_one();
     }
     else
     {
@@ -2806,7 +2774,8 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
             // to the next slice.
             slice_load_cnt++;
             {
-                std::unique_lock<std::mutex> worker_lk(slice_update_mux_);
+                std::unique_lock<std::mutex> worker_lk(
+                    slice_update_worker_ctx_.mux_);
                 pending_slice_work_.emplace_back(node_group_id,
                                                  node_group_term,
                                                  data_sync_ts,
@@ -2821,7 +2790,7 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
                                                  work_sender_cv,
                                                  slice_update_done,
                                                  fail);
-                slice_update_cv_.notify_one();
+                slice_update_worker_ctx_.cv_.notify_one();
             }
         }
         batch_it = slice_end_it;
@@ -3214,16 +3183,17 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
 void LocalCcShards::FlushDataWorker()
 {
-    std::unique_lock<std::mutex> flush_worker_lk(flush_worker_mux_);
-    while (flush_worker_thd_status_ == WorkerStatus::Active)
+    std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
+    while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
-        flush_worker_cv_.wait(flush_worker_lk,
-                              [this]
-                              {
-                                  return !pending_flush_work_.empty() ||
-                                         flush_worker_thd_status_ ==
-                                             WorkerStatus::Terminated;
-                              });
+        flush_data_worker_ctx_.cv_.wait(
+            flush_worker_lk,
+            [this]
+            {
+                return !pending_flush_work_.empty() ||
+                       flush_data_worker_ctx_.status_ ==
+                           WorkerStatus::Terminated;
+            });
 
         if (pending_flush_work_.empty())
         {
@@ -3241,16 +3211,17 @@ void LocalCcShards::FlushDataWorker()
 
 void LocalCcShards::UpdateSliceSpecWorker()
 {
-    std::unique_lock<std::mutex> worker_lk(slice_update_mux_);
-    while (slice_thd_status_ == WorkerStatus::Active)
+    std::unique_lock<std::mutex> worker_lk(slice_update_worker_ctx_.mux_);
+    while (slice_update_worker_ctx_.status_ == WorkerStatus::Active)
     {
-        slice_update_cv_.wait(worker_lk,
-                              [this]
-                              {
-                                  return !pending_slice_work_.empty() ||
-                                         slice_thd_status_ ==
-                                             WorkerStatus::Terminated;
-                              });
+        slice_update_worker_ctx_.cv_.wait(
+            worker_lk,
+            [this]
+            {
+                return !pending_slice_work_.empty() ||
+                       slice_update_worker_ctx_.status_ ==
+                           WorkerStatus::Terminated;
+            });
 
         if (pending_slice_work_.empty())
         {
@@ -3384,18 +3355,20 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
 
 void LocalCcShards::SyncTableStatisticsWorker()
 {
-    std::unique_lock<std::mutex> worker_lk(statistics_mux_);
+    std::unique_lock<std::mutex> worker_lk(statistics_worker_ctx_.mux_);
     std::unordered_map<NodeGroupId, uint64_t> ng_sync_ts;
-    while (statistics_thd_status_ == WorkerStatus::Active)
+    while (statistics_worker_ctx_.status_ == WorkerStatus::Active)
     {
         // Wake up every 10s to sync table statistics with other nodes.
-        statistics_cv_.wait_for(
+        statistics_worker_ctx_.cv_.wait_for(
             worker_lk,
             10s,
-            [this]
-            { return statistics_thd_status_ == WorkerStatus::Terminated; });
+            [this] {
+                return statistics_worker_ctx_.status_ ==
+                       WorkerStatus::Terminated;
+            });
 
-        if (statistics_thd_status_ == WorkerStatus::Terminated)
+        if (statistics_worker_ctx_.status_ == WorkerStatus::Terminated)
         {
             break;
         }
@@ -3545,6 +3518,54 @@ void LocalCcShards::SyncTableStatisticsWorker()
             // and clear its ccmaps and catalogs if it is no longer leader
             Sharder::Instance().UnpinNodeGroupData(node_group);
         }
+        worker_lk.lock();
+    }
+}
+
+void LocalCcShards::DefragmentWorker()
+{
+    std::unique_lock<std::mutex> worker_lk(defragment_worker_ctx_.mux_);
+    while (defragment_worker_ctx_.status_ == WorkerStatus::Active)
+    {
+        defragment_worker_ctx_.cv_.wait_for(
+            worker_lk,
+            10s,
+            [this] {
+                return defragment_worker_ctx_.status_ ==
+                       WorkerStatus::Terminated;
+            });
+        if (defragment_worker_ctx_.status_ == WorkerStatus::Terminated)
+        {
+            break;
+        }
+
+        worker_lk.unlock();
+        for (auto &ccs : cc_shards_)
+        {
+            auto heap = ccs->GetShardHeap();
+            if (heap == nullptr)
+            {
+                continue;
+            }
+
+            HeapMemStats stats;
+            CollectMemStatsCc cc(&stats);
+            ccs->Enqueue(&cc);
+            cc.Wait();
+
+            LOG(INFO) << "ccs " << ccs->core_id_
+                      << " memory usage report, committed " << stats.committed_
+                      << ", allocated " << stats.allocated_;
+            if (stats.committed_ > ccs->memory_limit_ * 0.7 &&
+                stats.allocated_ < stats.committed_ * 0.8)
+            {
+                LOG(INFO) << "Found memory fragementation in ccs "
+                          << ccs->core_id_
+                          << ", total comitted memory: " << stats.committed_
+                          << ", actual used memory " << stats.allocated_;
+            }
+        }
+
         worker_lk.lock();
     }
 }

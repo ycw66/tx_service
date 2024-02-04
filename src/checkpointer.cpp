@@ -1,11 +1,10 @@
 #include "checkpointer.h"
 
-#include "proto/cc_request.pb.h"
+#include "cc_request.h"
 #include "range_slice.h"
-#include "remote/cc_stream_sender.h"
 #include "sharder.h"
 #include "statistics.h"
-#include "tx_service.h"
+#include "tx_start_ts_collector.h"
 
 namespace txservice
 {
@@ -186,7 +185,7 @@ void Checkpointer::Run()
         while (!ckpt_cv_.wait_for(
             lk,
             std::chrono::seconds(checkpoint_interval_),
-            [this, &lk]
+            [this]
             {
                 if (ckpt_thd_status_ != Status::Active)
                 {

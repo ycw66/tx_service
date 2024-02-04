@@ -6576,13 +6576,12 @@ protected:
                 if (shard->EnableMvcc() && cce->ckpt_ts_ == 0)
                 {
                     cce->ckpt_ts_ = data_item.version_ts_;
-
 #ifndef ON_KEY_OBJECT
-                    cce->AddArchiveRecord(
-                        std::static_pointer_cast<ValueT>(data_item.record_),
-                        data_item.is_deleted_ ? RecordStatus::Deleted
+                    cce->AddArchiveRecord(std::make_shared<ValueT>(*record),
+                                          data_item.is_deleted_
+                                              ? RecordStatus::Deleted
                                               : RecordStatus::Normal,
-                        data_item.version_ts_);
+                                          data_item.version_ts_);
 #endif
                 }
 

@@ -461,7 +461,7 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
 
 void FillStoreSliceCc::AddDataItem(
     txservice::TxKey::Uptr &&key,
-    std::shared_ptr<txservice::TxRecord> &&record,
+    std::unique_ptr<txservice::TxRecord> &&record,
     uint64_t version_ts,
     bool is_deleted)
 {

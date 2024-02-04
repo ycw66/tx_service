@@ -486,7 +486,7 @@ void StoreRange::BatchUnpinSlices(StoreSlice *start_slice,
         {
             slice_idx--;
         }
-        assert(slice_idx < slices_.size() && slice_idx >= 0);
+        assert(slice_idx < slices_.size());
         slice = slices_[slice_idx].get();
     }
     UnpinSlice(slice, false);

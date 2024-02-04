@@ -2,13 +2,14 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -611,7 +612,7 @@ public:
 
     bool IsDataSyncQueueEmpty()
     {
-        std::unique_lock<std::mutex> lk(task_worker_mux_);
+        std::unique_lock<std::mutex> lk(data_sync_worker_ctx_.mux_);
         return data_sync_task_queue_.empty();
     }
 
@@ -946,13 +947,37 @@ private:
         Terminated
     };
 
-    // Protect data_sync_task_queue_ and tables_sync_status_
-    std::mutex task_worker_mux_;
-    std::condition_variable task_worker_cv_;
+    struct WorkerThreadContext
+    {
+        WorkerThreadContext(int worker_num)
+            : worker_num_(worker_num), status_(WorkerStatus::Active)
+        {
+        }
+
+        void Terminate()
+        {
+            {
+                std::unique_lock<std::mutex> lk(mux_);
+                assert(status_ == WorkerStatus::Active);
+                status_ = WorkerStatus::Terminated;
+                cv_.notify_all();
+            }
+
+            // loop over worker threads and join them
+            for (int i = 0; i < worker_num_; i++)
+            {
+                worker_thd_[i].join();
+            }
+        }
+        const int worker_num_;
+        std::vector<std::thread> worker_thd_;
+        std::mutex mux_;
+        std::condition_variable cv_;
+        WorkerStatus status_;
+    };
+
+    WorkerThreadContext data_sync_worker_ctx_;
     std::deque<std::shared_ptr<DataSyncTask>> data_sync_task_queue_;
-    std::vector<std::thread> data_sync_worker_thds_;
-    const int data_sync_worker_num_;
-    WorkerStatus data_sync_worker_status_;
 
     void DataSyncWorker();
 
@@ -1053,12 +1078,8 @@ private:
     // spec would cause potential data store read, we launched
     // workers so we can have some degree of parallelism, but
     // not to the degree where it slows down regular read from data store.
-    std::mutex slice_update_mux_;
-    std::condition_variable slice_update_cv_;
+    WorkerThreadContext slice_update_worker_ctx_;
     std::vector<UpdateSliceSpecWork> pending_slice_work_;
-    std::vector<std::thread> update_slice_spec_thds_;
-    const int slice_worker_num_;
-    WorkerStatus slice_thd_status_;
 
     void UpdateSliceSpecWorker();
 
@@ -1145,22 +1166,18 @@ private:
         CcHandlerResult<Void> *hand_res_{nullptr};
     };
     // For flush data work
-    std::mutex flush_worker_mux_;
-    std::condition_variable flush_worker_cv_;
+    WorkerThreadContext flush_data_worker_ctx_;
     // Flush work from data sync, and split range
     std::vector<FlushDataWork> pending_flush_work_;
-    std::vector<std::thread> flush_worker_thds_;
-    const int flush_worker_num_;
-    WorkerStatus flush_worker_thd_status_;
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
 
-    WorkerStatus statistics_thd_status_;
-    std::mutex statistics_mux_;
-    std::condition_variable statistics_cv_;
-    std::thread statistics_thd_;
+    WorkerThreadContext statistics_worker_ctx_;
     void SyncTableStatisticsWorker();
+
+    WorkerThreadContext defragment_worker_ctx_;
+    void DefragmentWorker();
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
