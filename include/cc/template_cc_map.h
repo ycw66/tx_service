@@ -7375,7 +7375,10 @@ protected:
 #ifndef ON_KEY_OBJECT
                     tuple->SetRecord(cce->payload_);
 #else
-                    assert(false);
+                    // Redis KEYS command doesn't need value. But ObjectCcMap
+                    // doesn't override ScanKey() on local ccmap. Thus,
+                    // TemplateCcMap::ScanKey() on local ccmp may be called, and
+                    // it need not set record.
 #endif
                     // We're only copying the shared_ptr here so we exclude the
                     // actual payload size.
