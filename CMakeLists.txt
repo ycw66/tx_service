@@ -175,7 +175,7 @@ add_library(txservice STATIC ${TxService_SOURCES} )
 
 target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
 
-target_link_libraries(txservice PRIVATE ${LINK_LIB} logservice)
+target_link_libraries(txservice PRIVATE mimalloc-static ${LINK_LIB} logservice)
 
 #add_executable(hello ${CMAKE_SOURCE_DIR}/hello.cpp)
 #target_link_libraries(hello PRIVATE txservice ${CMAKE_THREAD_LIBS_INIT})
