@@ -282,7 +282,6 @@ int Sharder::Init(
     // StartCcStreamReceiver().
 
 #ifdef ON_KEY_OBJECT
-    brpc::Server server;
     brpc::ServerOptions server_options;
     // server_options.num_threads at least 4
     server_options.num_threads = 4;
@@ -1074,7 +1073,6 @@ void Sharder::StartCcStreamReceiver()
     // The cc_stream_receiver_ object has been add to this server during
     // Sharder::Init().
 #ifdef ON_KEY_OBJECT
-    brpc::Server server;
     brpc::ServerOptions server_options;
     // server_options.num_threads at least 4
     server_options.num_threads = 4;
