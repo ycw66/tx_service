@@ -3765,11 +3765,11 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
         (*shard_logs)[ng_id] = std::string{};
         std::string &log_ng_blob = shard_logs->at(ng_id);
 
-        for (auto cmd_entry : cmd_entry_vec)
+        for (const CmdSetEntry *cmd_entry : cmd_entry_vec)
         {
             const std::string &key_str = cmd_entry->obj_key_str_;
             uint64_t obj_version = cmd_entry->object_version_;
-            const std::vector<std::string> cmd_str_list =
+            const std::vector<std::string> &cmd_str_list =
                 cmd_entry->cmd_str_list_;
 
             // The start position of the 4-byte integer for the length of
@@ -5242,7 +5242,8 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                 return;
             }
         }
-        else if (lock_acquired != LockType::NoLock)
+        else if (lock_acquired != LockType::NoLock &&
+                 !rw_set_.FindObjectCommand(*table_name, cce_addr))
         {
             // Read lock is acquired under locking protocol. Add the cce to
             // read set for later PostRead.
@@ -5467,7 +5468,9 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         return;
                     }
                 }
-                else if (lock_acquired != LockType::NoLock)
+                else if (lock_acquired != LockType::NoLock &&
+                         !rw_set_.FindObjectCommand(*obj_cmd_op.table_name_,
+                                                    cmd_res.cce_addr_))
                 {
                     LOG(INFO)
                         << "txm acquired readlock, ReadIntent or WriteIntent";

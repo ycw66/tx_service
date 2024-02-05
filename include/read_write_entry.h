@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "scan.h"
+#include "tx_command.h"
 #include "tx_container.h"
 #include "tx_key.h"
 #include "tx_record.h"

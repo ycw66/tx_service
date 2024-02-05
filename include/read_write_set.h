@@ -9,6 +9,7 @@
 
 #include "cc_entry.h"
 #include "read_write_entry.h"
+#include "tx_command.h"
 
 namespace txservice
 {
@@ -564,6 +565,25 @@ public:
             entry.AddCommand(cmd);
         }
 #endif
+    }
+
+    const CmdSetEntry *FindObjectCommand(const TableName &table_name,
+                                         const CcEntryAddr &cce_addr) const
+    {
+        const CmdSetEntry *obj_cmd_entry = nullptr;
+#ifdef ON_KEY_OBJECT
+        const auto iter = cmd_set_.find(table_name);
+        if (iter != cmd_set_.end())
+        {
+            const auto &[table_name, obj_cmd_set] = *iter;
+            const auto it = obj_cmd_set.find(cce_addr);
+            if (it != obj_cmd_set.end())
+            {
+                obj_cmd_entry = &it->second;
+            }
+        }
+#endif
+        return obj_cmd_entry;
     }
 
     const std::unordered_map<TableName,
