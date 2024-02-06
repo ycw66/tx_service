@@ -1054,7 +1054,6 @@ public:
 #ifndef ON_KEY_OBJECT
                     cce_ptr->payload_ = std::make_shared<ValueT>(*payload);
 #else
-                    assert(false);
                     cce_ptr->payload_ = std::make_unique<ValueT>(*payload);
 #endif
                     shard_->mem_usage_ += cce_ptr->PayloadMemUsage();
