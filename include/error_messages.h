@@ -58,6 +58,8 @@ enum struct TxErrorCode
     //-- NotifyStartMigrationOp
     DUPLICATE_MIGRATION_TX_ERROR,
 
+    DATA_NOT_ON_LOCAL_NODE,
+
     // Execute TxRequest on a committed/aborted txn
     TX_REQUEST_TO_COMMITTED_ABORTED_TX
 };
@@ -182,6 +184,9 @@ enum struct CcErrorCode
     // Error when call system handler, like ReloadCacheCc.
     SYSTEM_HANDLER_ERR,
 
+    // For Redis, if key not on local node, return this error.
+    DATA_NOT_ON_LOCAL_NODE,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 
@@ -242,6 +247,8 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
 
     // Error when call system handler, like ReloadCacheCc.
     {CcErrorCode::SYSTEM_HANDLER_ERR, "SYSTEM_HANDLER_ERR"},
+
+    {CcErrorCode::DATA_NOT_ON_LOCAL_NODE, "DATA_NOT_ON_LOCAL_NODE"},
 
     // NOTICE: please keep this variable at tail.
     {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},

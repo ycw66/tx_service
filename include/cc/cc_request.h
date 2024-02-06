@@ -4018,6 +4018,7 @@ public:
         apply_and_commit_ = commit;
     }
 
+    // for remote
     void Reset(const TableName *table_name,
                const std::string *key_str,
                const uint32_t key_shard_code,

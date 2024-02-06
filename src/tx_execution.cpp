@@ -277,6 +277,9 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
     case CcErrorCode::ACQUIRE_LEADER_TERM_ERR:
         return TxErrorCode::ACQUIRE_LEADER_TERM_FAIL;
 
+    case CcErrorCode::DATA_NOT_ON_LOCAL_NODE:
+        return TxErrorCode::DATA_NOT_ON_LOCAL_NODE;
+
     case CcErrorCode::UNDEFINED_ERR:
     default:
         return TxErrorCode::UNDEFINED_ERR;

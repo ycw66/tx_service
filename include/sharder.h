@@ -151,20 +151,33 @@ public:
         // Uses the lower 10 bits to shard the key across CPU cores in a node.
         uint32_t residual = hash_code & 0x3FF;
         // Uses the higher bits to shard across nodes.
-#ifdef RANGE_PARTITION_ENABLED
+
+#ifdef ON_KEY_OBJECT
+        // Redis use the slot id as shard code mapping to node group.
+        uint16_t slot_id = hash_code & 0x3FFF;
+        auto ng_count = NodeGroupCount();
+        uint16_t slot_count_per_ng = (16384 + ng_count - 1) / ng_count;
+        uint32_t node_group_id = slot_id / slot_count_per_ng;
+
+#elif defined(RANGE_PARTITION_ENABLED)
         uint32_t node_group_id = hash_code >> 10;
 #else
         uint32_t node_group_id = (hash_code >> 10) % NodeGroupCount();
 #endif
+
         return (node_group_id << 10) | residual;
     }
 
     uint32_t ShardToCcNodeGroup(uint32_t sharding_code)
     {
+#ifdef ON_KEY_OBJECT
+        return sharding_code >> 10;
+#else
 #ifdef RANGE_PARTITION_ENABLED
         return sharding_code >> 10;
 #else
         return (sharding_code >> 10) % NodeGroupCount();
+#endif
 #endif
     }
 

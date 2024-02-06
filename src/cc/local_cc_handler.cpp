@@ -16,6 +16,10 @@
 #include "tx_worker_pool.h"
 #include "type.h"
 
+#ifdef ON_KEY_OBJECT
+DECLARE_bool(auto_redirect);
+#endif
+
 txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
                                           LocalCcShards &shards)
     : thd_id_(thd_id),
@@ -1486,6 +1490,15 @@ void txservice::LocalCcHandler::ObjectCommand(
     }
     else
     {
+#ifdef ON_KEY_OBJECT
+        if (!FLAGS_auto_redirect)
+        {
+            DLOG(WARNING) << "!!! DATA_NOT_ON_LOCAL_NODE !!";
+            hres.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
+            return;
+        }
+#endif
+        DLOG(WARNING) << "!!!Route to remote node!!";
         // set "cmd_result_" for deserializing the command result returned from
         // remote node.
         hres.Value().cmd_result_ = obj_cmd.GetResult();
