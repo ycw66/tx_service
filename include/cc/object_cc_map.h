@@ -538,7 +538,6 @@ public:
         {
             // Skipping writing log, do the PostWrite and release the lock.
             assert(acquired_lock == LockType::WriteLock);
-            shard_->DecrementMemory(cce->PayloadMemUsage());
             if (cce->dirty_payload_status_ == RecordStatus::Normal ||
                 cce->dirty_payload_status_ == RecordStatus::Deleted)
             {
@@ -629,7 +628,6 @@ public:
             return true;
         }
 
-        shard_->DecrementMemory(cce->PayloadMemUsage());
         if (commit_ts > 0)
         {
             // The txn commits. Upload the change.

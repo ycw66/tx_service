@@ -2183,7 +2183,9 @@ public:
     {
         std::unique_lock<std::mutex> lk(mux_);
         ckpt_ts_ = std::min(ckpt_ts_, ccs.ActiveTxMinTs(cc_ng_id_));
-        memory_usage_kb_vec_[ccs.LocalCoreId()] = ccs.mem_usage_ / 1000;
+        int64_t allocated, committed;
+        mi_thread_stats(&allocated, &committed);
+        memory_usage_kb_vec_[ccs.LocalCoreId()] = allocated / 1000;
 
         assert(finish_cnt_ < shard_cnt_);
         ++finish_cnt_;

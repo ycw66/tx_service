@@ -1217,7 +1217,6 @@ struct CcPage : public LruPage
     // Use two-way merge algrothim to bulk emplace keys to reduce data moving
     // overhead. Note: new_keys are not exist in keys_
     void EmplaceKeys(std::vector<KeyT> &new_keys,
-                     size_t &mem_increased,
                      std::vector<size_t> &idxs_in_page)
     {
         if (new_keys.empty())
@@ -1232,7 +1231,7 @@ struct CcPage : public LruPage
 
         if (new_keys.size() == 1)
         {
-            size_t idx_in_page = Emplace(new_keys.front(), mem_increased);
+            size_t idx_in_page = Emplace(new_keys.front());
             idxs_in_page[0] = idx_in_page;
             return;
         }
@@ -1245,12 +1244,6 @@ struct CcPage : public LruPage
 
                 keys_.push_back(std::move(new_keys[i]));
                 entries_.push_back(std::make_unique<CcEntry<KeyT, ValueT>>());
-
-                size_t key_mem_increased =
-                    keys_.back().MemUsage() - sizeof(KeyT);
-                size_t entry_mem_increased =
-                    entries_.back()->GetCcEntryMemUsage();
-                mem_increased += key_mem_increased + entry_mem_increased;
             }
 
             return;
@@ -1272,13 +1265,6 @@ struct CcPage : public LruPage
                 entries_[res_index - 1] =
                     std::make_unique<CcEntry<KeyT, ValueT>>();
                 idxs_in_page[new_index - 1] = res_index - 1;
-
-                size_t key_mem_increased =
-                    keys_[res_index - 1].MemUsage() - sizeof(KeyT);
-                size_t entry_mem_increased =
-                    entries_[res_index - 1]->GetCcEntryMemUsage();
-                mem_increased += key_mem_increased + entry_mem_increased;
-
                 new_index--;
             }
             else
@@ -1298,16 +1284,10 @@ struct CcPage : public LruPage
             entries_[res_index - 1] = std::make_unique<CcEntry<KeyT, ValueT>>();
 
             idxs_in_page[new_index - 1] = res_index - 1;
-
-            size_t key_mem_increased =
-                keys_[res_index - 1].MemUsage() - sizeof(KeyT);
-            size_t entry_mem_increased =
-                entries_[res_index - 1]->GetCcEntryMemUsage();
-            mem_increased += key_mem_increased + entry_mem_increased;
         }
     }
 
-    size_t Emplace(const KeyT &key, size_t &mem_increased)
+    size_t Emplace(const KeyT &key)
     {
         // append check
         auto insert_it =
@@ -1317,14 +1297,9 @@ struct CcPage : public LruPage
         assert(insert_it == keys_.end() || *insert_it != key);
 
         size_t insert_pos = insert_it - keys_.begin();
-        auto key_it = keys_.emplace(insert_it, key);
-        auto entry_ptr_it =
-            entries_.emplace(entries_.begin() + insert_pos,
-                             std::make_unique<CcEntry<KeyT, ValueT>>());
-
-        size_t key_mem_increased = key_it->MemUsage() - sizeof(KeyT);
-        size_t entry_mem_increased = (*entry_ptr_it)->GetCcEntryMemUsage();
-        mem_increased += key_mem_increased + entry_mem_increased;
+        keys_.emplace(insert_it, key);
+        entries_.emplace(entries_.begin() + insert_pos,
+                         std::make_unique<CcEntry<KeyT, ValueT>>());
         return insert_pos;
     }
 

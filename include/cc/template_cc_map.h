@@ -502,10 +502,8 @@ public:
                     // checkpoint.
                     uint64_t recycle_ts = std::min(
                         shard_->GlobalMinSiTxStartTs(), cce->ckpt_ts_.load());
-                    shard_->DecrementMemory(
-                        cce->KickOutArchiveRecords(recycle_ts));
-                    size_t added_mem_usage = cce->ArchiveBeforeUpdate(Type());
-                    shard_->mem_usage_ += added_mem_usage;
+                    cce->KickOutArchiveRecords(recycle_ts);
+                    cce->ArchiveBeforeUpdate(Type());
                 }
 #endif
 
@@ -540,7 +538,6 @@ public:
                 // payload of secondary key ccentry if it is not null.
                 if (Type() != TableType::Secondary || cce->payload_ == nullptr)
                 {
-                    shard_->DecrementMemory(cce->PayloadMemUsage());
                     if (is_del)
                     {
                         cce->payload_ = nullptr;
@@ -579,7 +576,6 @@ public:
 #endif
                         cce->payload_->Deserialize(payload_str->data(), offset);
                     }
-                    shard_->mem_usage_ += cce->PayloadMemUsage();
                 }
 
                 RecordStatus cce_old_status = cce->payload_status_;
@@ -1050,14 +1046,11 @@ public:
                 if (commit_ts > 0 &&
                     req.CommitType() != PostWriteType::DowngradeLock)
                 {
-                    shard_->DecrementMemory(cce_ptr->PayloadMemUsage());
 #ifndef ON_KEY_OBJECT
                     cce_ptr->payload_ = std::make_shared<ValueT>(*payload);
 #else
                     cce_ptr->payload_ = std::make_unique<ValueT>(*payload);
 #endif
-                    shard_->mem_usage_ += cce_ptr->PayloadMemUsage();
-
                     // A prepare commit request only installs the dirty value,
                     // and does not change the record status and commit_ts.
                     if (req.CommitType() != PostWriteType::PrepareCommit)
@@ -1679,10 +1672,8 @@ public:
 
             if (cce->payload_status_ == RecordStatus::Unknown)
             {
-                shard_->DecrementMemory(cce->PayloadMemUsage());
                 cce->payload_ = std::move(tmp_payload);
                 cce->payload_status_ = tmp_payload_status;
-                shard_->mem_usage_ += cce->PayloadMemUsage();
                 cce->commit_ts_ = req.ReadTimestamp();
                 // set "ckpt_ts_" to identify the entry is refilled
                 uint64_t tmp_ts = 0U;
@@ -1696,10 +1687,9 @@ public:
                 // Trying to insert the record to backfill into archives is
                 // needed, because the entry may be created when executing
                 // "ReplayLogCc".
-                shard_->mem_usage_ +=
-                    cce->AddArchiveRecord(std::move(tmp_payload),
-                                          tmp_payload_status,
-                                          req.ReadTimestamp());
+                cce->AddArchiveRecord(std::move(tmp_payload),
+                                      tmp_payload_status,
+                                      req.ReadTimestamp());
                 // set "ckpt_ts_" to identify the entry is refilled
                 uint64_t tmp_ts = 0U;
                 cce->ckpt_ts_.compare_exchange_strong(tmp_ts,
@@ -1712,8 +1702,7 @@ public:
                  req.Type() == ReadType::OutsideDeleted) &&
                 req.ArchivesPtr() != nullptr && req.ArchivesPtr()->size() > 0)
             {
-                shard_->mem_usage_ +=
-                    cce->AddArchiveRecords(*req.ArchivesPtr());
+                cce->AddArchiveRecords(*req.ArchivesPtr());
             }
 #endif
         }
@@ -1855,7 +1844,6 @@ public:
             if (req.RecordStatus() == RecordStatus::Normal)
             {
                 size_t offset = 0;
-                shard_->DecrementMemory(cce->PayloadMemUsage());
 #ifndef ON_KEY_OBJECT
                 cce->payload_ = std::make_shared<ValueT>();
 #else
@@ -1863,7 +1851,6 @@ public:
                 cce->payload_ = std::make_unique<ValueT>();
 #endif
                 cce->payload_->Deserialize(req.rec_str_->data(), offset);
-                shard_->mem_usage_ += cce->PayloadMemUsage();
             }
             cce->commit_ts_ = req.CommitTs();
             cce->payload_status_ = req.RecordStatus();
@@ -1884,7 +1871,7 @@ public:
                 size_t offset = 0;
                 tmp_payload->Deserialize(req.rec_str_->data(), offset);
             }
-            shard_->mem_usage_ += cce->AddArchiveRecord(
+            cce->AddArchiveRecord(
                 std::move(tmp_payload), req.RecordStatus(), req.CommitTs());
 
             // set "ckpt_ts_" to identify the entry is refilled
@@ -1912,7 +1899,7 @@ public:
                     v_rec.record_->Deserialize(vrec_msg.record().data(),
                                                offset);
                 }
-                shard_->mem_usage_ += cce->AddArchiveRecords(archives);
+                cce->AddArchiveRecords(archives);
             }
         }
 #endif
@@ -4736,7 +4723,7 @@ public:
 #ifndef ON_KEY_OBJECT
             if (shard_->EnableMvcc())
             {
-                shard_->DecrementMemory(cce->KickOutArchiveRecords(recycle_ts));
+                cce->KickOutArchiveRecords(recycle_ts);
             }
 #endif
 
@@ -5444,7 +5431,7 @@ public:
                     {
                         rec_status = RecordStatus::Deleted;
                     }
-                    shard_->mem_usage_ += cce->AddArchiveRecord(
+                    cce->AddArchiveRecord(
                         std::move(rec_ptr), rec_status, req.CommitTs());
 #endif
                 }
@@ -5459,13 +5446,12 @@ public:
 #ifndef ON_KEY_OBJECT
                 if (shard_->EnableMvcc())
                 {
-                    shard_->mem_usage_ += cce->ArchiveBeforeUpdate(Type());
+                    cce->ArchiveBeforeUpdate(Type());
                 }
 #endif
                 if (op_type == OperationType::Insert ||
                     op_type == OperationType::Update)
                 {
-                    shard_->DecrementMemory(cce->PayloadMemUsage());
 #ifndef ON_KEY_OBJECT
                     if (cce->payload_.use_count() != 1)
                     {
@@ -5477,7 +5463,6 @@ public:
 #endif
                     cce->payload_->Deserialize(log_blob.data(), offset);
                     cce->payload_status_ = RecordStatus::Normal;
-                    shard_->mem_usage_ += cce->PayloadMemUsage();
                 }
                 else
                 {
@@ -5926,14 +5911,12 @@ public:
             // go along with the lru list.
             next_page = lru_page->lru_next_;
         }
-        size_t mem_decreased = 0;
 
         // clean page
         CcPage<KeyT, ValueT> *page =
             static_cast<CcPage<KeyT, ValueT> *>(lru_page);
         const KeyT old_page_key(page->FirstKey());
-        bool success =
-            CleanPage(page, mem_decreased, free_cnt, clean_type, kickout_cc);
+        bool success = CleanPage(page, free_cnt, clean_type, kickout_cc);
 
         // Output the operation result if the caller care it.
         if (is_success != nullptr)
@@ -5943,7 +5926,6 @@ public:
 
         if (page->Empty())  // remove page if empty
         {
-            mem_decreased += page->MemUsage();
             if (page->lru_next_ != nullptr)
             {
                 shard_->DetachLru(page);
@@ -6065,7 +6047,7 @@ public:
                 }
 
                 // merge page1 and page2
-                MergePages(page1_it, page2_it, page, mem_decreased);
+                MergePages(page1_it, page2_it, page);
 
                 if (kickout_cc != nullptr)
                 {
@@ -6086,7 +6068,6 @@ public:
             }
         }
 
-        shard_->DecrementMemory(mem_decreased);
         size_ -= free_cnt;
         if (free_cnt > 0)
         {
@@ -6098,7 +6079,6 @@ public:
 
     void Clean() override
     {
-        size_t mem_decreased = 0;
         for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
             CcPage<KeyT, ValueT> &page = it->second;
@@ -6106,7 +6086,6 @@ public:
             {
                 shard_->DetachLru(&page);
             }
-            mem_decreased += page.TotalMemUsage();
 
             for (auto &cce : page.entries_)
             {
@@ -6114,7 +6093,6 @@ public:
             }
         }
 
-        shard_->DecrementMemory(mem_decreased);
         size_ = 0;
         ccmp_.clear();
     }
@@ -6590,8 +6568,6 @@ protected:
                 return;
             }
 
-            shard->DecrementMemory(cce->PayloadMemUsage());
-
 #ifndef ON_KEY_OBJECT
             if (cce->payload_.use_count() == 1)
             {
@@ -6614,8 +6590,6 @@ protected:
                                                          : RecordStatus::Normal;
             cce->data_store_size_.store(rec_store_size,
                                         std::memory_order_relaxed);
-
-            shard->mem_usage_ += cce->PayloadMemUsage();
         };
 
         typename decltype(ccmp_)::iterator target_iter;
@@ -6631,7 +6605,6 @@ protected:
                 &neg_inf_page_,
                 &pos_inf_page_);
             assert(inserted);
-            shard_->mem_usage_ += target_iter->second.MemUsage();
         }
         else
         {
@@ -6677,8 +6650,7 @@ protected:
                     // Batch emplace new keys into this target page.
                     if (!new_keys.empty())
                     {
-                        target_page->EmplaceKeys(
-                            new_keys, shard_->mem_usage_, entry_indexs);
+                        target_page->EmplaceKeys(new_keys, entry_indexs);
 
                         assert(new_keys.size() == entry_indexs.size());
                         assert(new_key_item_idxs.size() == entry_indexs.size());
@@ -6708,7 +6680,6 @@ protected:
                                               this,
                                               target_page,
                                               target_page->next_page_);
-                        shard_->mem_usage_ += target_iter->second.MemUsage();
                     }
                     target_page = &target_iter->second;
                     continue;
@@ -6721,8 +6692,7 @@ protected:
                     // Batch emplace new keys into this target page.
                     if (!new_keys.empty())
                     {
-                        target_page->EmplaceKeys(
-                            new_keys, shard_->mem_usage_, entry_indexs);
+                        target_page->EmplaceKeys(new_keys, entry_indexs);
 
                         assert(new_keys.size() == entry_indexs.size());
                         assert(new_key_item_idxs.size() == entry_indexs.size());
@@ -6761,7 +6731,6 @@ protected:
                                               this,
                                               target_page,
                                               target_page->next_page_);
-                        shard_->mem_usage_ += target_iter->second.MemUsage();
                     }
                     target_page = &target_iter->second;
                 }
@@ -6790,7 +6759,6 @@ protected:
                                           target_page->next_page_);
                     CcPage<KeyT, ValueT> *new_page = &new_page_it->second;
                     new_page->last_dirty_commit_ts_ = new_last_commit_ts;
-                    shard_->mem_usage_ += new_page->MemUsage();
 
                     for (auto &cce : new_page->entries_)
                     {
@@ -6831,8 +6799,7 @@ protected:
 
         if (!new_keys.empty())
         {
-            target_page->EmplaceKeys(
-                new_keys, shard_->mem_usage_, entry_indexs);
+            target_page->EmplaceKeys(new_keys, entry_indexs);
 
             assert(new_keys.size() == entry_indexs.size());
             assert(new_key_item_idxs.size() == entry_indexs.size());
@@ -6889,14 +6856,12 @@ protected:
             }
         }
 
-        size_t mem_increased = 0;
         if (ccmp_.begin() == ccmp_.end())
         {
             // ccmap is empty, insert a page
             auto [it, inserted] =
                 ccmp_.try_emplace(key, this, &neg_inf_page_, &pos_inf_page_);
             assert(inserted);
-            mem_increased += it->second.MemUsage();
         }
 
         // First locate target page, then find or emplace `key` in the page.
@@ -6928,7 +6893,6 @@ protected:
                 // create a new page
                 target_it = ccmp_.try_emplace(
                     target_it, key, this, target_page, target_page->next_page_);
-                mem_increased += target_it->second.MemUsage();
             }
             target_page = &target_it->second;
         }
@@ -6953,7 +6917,6 @@ protected:
                                                  target_page->next_page_);
             CcPage<KeyT, ValueT> *new_page = &new_page_it->second;
             new_page->last_dirty_commit_ts_ = new_last_commit_ts;
-            mem_increased += new_page->MemUsage();
 
             for (auto &cce : new_page->entries_)
             {
@@ -6979,14 +6942,13 @@ protected:
             }
         }
 
-        idx_in_page = target_page->Emplace(key, mem_increased);
+        idx_in_page = target_page->Emplace(key);
         emplace = true;
         // modify page key in the map if it changed
         TryUpdatePageKey(target_it);
 
         // update lru list
         shard_->UpdateLruList(target_page, true);
-        shard_->mem_usage_ += mem_increased;
         size_++;
 
         return Iterator(target_page, idx_in_page, &neg_inf_);
@@ -7689,7 +7651,6 @@ protected:
      * Clean page and return the last_read_ts of page.
      *
      * @param page
-     * @param mem_decreased
      * @param free_cnt
      * @param clean_type
      * @return The bool value stand for the clean status, if return false, it
@@ -7698,7 +7659,6 @@ protected:
      * CleanForSplitRange and CleanForAlterTable care this status.
      */
     bool CleanPage(CcPage<KeyT, ValueT> *page,
-                   size_t &mem_decreased,
                    size_t &free_cnt,
                    CleanType clean_type,
                    KickoutCcEntryCc *kickout_cc = nullptr)
@@ -7779,8 +7739,6 @@ protected:
                 else
                 {
                     // free entries will be erased
-                    mem_decreased += cce->GetCcEntryMemUsage() +
-                                     key_it->MemUsage() - sizeof(KeyT);
                     free_cnt++;
                 }
 #else
@@ -7975,8 +7933,7 @@ protected:
     void MergePages(
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page2_it,
-        CcPage<KeyT, ValueT> *page,
-        size_t &mem_decreased)
+        CcPage<KeyT, ValueT> *page)
     {
         CcPage<KeyT, ValueT> *page1 = &page1_it->second;
         CcPage<KeyT, ValueT> *page2 = &page2_it->second;
@@ -7985,8 +7942,6 @@ protected:
         auto discarded_page_it = page2_it;
         CcPage<KeyT, ValueT> *merged_page = &merged_page_it->second;
         CcPage<KeyT, ValueT> *discarded_page = &discarded_page_it->second;
-
-        mem_decreased += discarded_page->MemUsage();
 
         // merge the key vector and entry vector
         std::vector<KeyT> merged_keys = std::move(page1->keys_);

@@ -1412,18 +1412,6 @@ void CcShard::CreateOrUpdateRangeCcMap(const TableName &table_name,
     }
 }
 
-void CcShard::DecrementMemory(size_t mem_size)
-{
-    if (mem_usage_ >= mem_size)
-    {
-        mem_usage_ -= mem_size;
-    }
-    else
-    {
-        mem_usage_ = 0;
-    }
-}
-
 bool CcShard::EnableMvcc() const
 {
     return local_shards_.EnableMvcc();

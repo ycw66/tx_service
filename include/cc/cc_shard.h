@@ -117,7 +117,20 @@ public:
 
     bool Full() const
     {
-        return mem_usage_ >= memory_limit_;
+        if (shard_heap_ != nullptr)
+        {
+            // TODO{liunyl}: fix allocated might be < 0 bug and change it to
+            // size_t type.
+            //
+            int64_t allocated, committed;
+            mi_thread_stats(&allocated, &committed);
+            return allocated >= (int64_t) memory_limit_ ||
+                   committed > (memory_limit_ * 1.1);
+        }
+        else
+        {
+            return false;
+        }
     }
 
     void InitializeShardHeap()
@@ -176,7 +189,9 @@ public:
         {
             if (memory_usage_round_ == metrics::memory_usage_sample_round)
             {
-                meter_->Collect(MEMORY_USAGE_NAME_, mem_usage_ * core_cnt_);
+                int64_t allocated, committed;
+                mi_thread_stats(&allocated, &committed);
+                meter_->Collect(MEMORY_USAGE_NAME_, allocated * core_cnt_);
                 memory_usage_round_ = 1;
             }
             else
@@ -612,8 +627,6 @@ public:
                                   uint64_t schema_ts,
                                   bool is_create = true);
 
-    void DecrementMemory(size_t mem_size);
-
     void DecreaseLockCount();
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
@@ -659,9 +672,6 @@ public:
     const uint16_t core_id_;
     const uint16_t core_cnt_;
     LocalCcShards &local_shards_;
-
-    // Memory usage of this CcShard.
-    size_t mem_usage_{0};
 
     bool EnableMvcc() const;
     void AddActiveSiTx(TxNumber txn, uint64_t start_ts);

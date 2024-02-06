@@ -119,7 +119,6 @@ public:
                 cce->payload_->range_owner_rec_ = bucket_ccm_->GetBucketRecord(
                     Sharder::MapRangeIdToBucketId(range_info->PartitionId()));
                 cce->payload_status_ = RecordStatus::Normal;
-                shard_->mem_usage_ += cce->PayloadMemUsage();
             }
         }
     }
@@ -743,7 +742,6 @@ public:
 
                 // update previous cce's end key
                 cce->payload_status_ = RecordStatus::Normal;
-                shard_->mem_usage_ += cce->PayloadMemUsage();
             }
             // range_owner_rec_ needs to be reset on each core since they point
             // to bucket records on different cores.
@@ -1127,7 +1125,6 @@ public:
                     bucket_map->GetBucketRecord(Sharder::MapRangeIdToBucketId(
                         new_range_info->PartitionId()));
                 cce->payload_status_ = RecordStatus::Normal;
-                shard_->mem_usage_ += cce->PayloadMemUsage();
             }
         }
 

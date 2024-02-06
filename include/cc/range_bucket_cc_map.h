@@ -42,7 +42,6 @@ public:
             cce->payload_ =
                 std::make_unique<RangeBucketRecord>(bucket.second.get());
 #endif
-            shard_->mem_usage_ += cce->PayloadMemUsage();
         }
     }
 
