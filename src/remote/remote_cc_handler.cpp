@@ -298,7 +298,8 @@ void txservice::remote::RemoteCcHandler::PostRead(
     uint64_t gap_ts,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    CcHandlerResult<PostProcessResult> &hres)
+    CcHandlerResult<PostProcessResult> &hres,
+    bool need_remote_resp)
 {
     CcMessage send_msg;
 
@@ -319,6 +320,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
     vali->set_commit_ts(commit_ts);
     vali->set_key_ts(key_ts);
     vali->set_gap_ts(gap_ts);
+    vali->set_need_resp(need_remote_resp);
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }

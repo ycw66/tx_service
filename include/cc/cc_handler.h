@@ -186,7 +186,8 @@ public:
                           uint64_t commit_ts,
                           const CcEntryAddr &ccentry_addr,
                           CcHandlerResult<PostProcessResult> &hres,
-                          bool is_local = false) = 0;
+                          bool is_local = false,
+                          bool need_remote_resp = true) = 0;
 
     /**
      * @brief Reads the input key and returns the key's record. The request puts

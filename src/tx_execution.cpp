@@ -5004,7 +5004,9 @@ void TransactionExecution::Process(ReleaseScanExtraLockOp &unlock_op)
                               0,
                               commit_ts_,
                               addr_pair.first,
-                              unlock_op.hd_result_);
+                              unlock_op.hd_result_,
+                              false,
+                              false);
     }
 
     StartTiming();

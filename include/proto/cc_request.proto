@@ -290,6 +290,7 @@ message ValidateRequest {
     uint64 commit_ts = 5;
     uint64 key_ts = 6;
     uint64 gap_ts = 7;
+    bool need_resp = 8;
 }
 
 message ValidateResponse {

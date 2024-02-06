@@ -396,8 +396,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 msg_vec);
 
             local_shards_.EnqueueCcRequest(0, cc_req);
+            uint64_t msg_cnt = 1;
             WaitAndClearRequests(
-                stream_id, 1, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, msg_cnt, mux, cv, finish_log_cnt, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -419,8 +420,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 msg_vec);
 
             local_shards_.EnqueueCcRequest(0, cc_req);
+            msg_cnt = 1;
             WaitAndClearRequests(
-                stream_id, 1, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, msg_cnt, mux, cv, finish_log_cnt, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -453,8 +455,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
             // wait for this schema operation to be recovered at all shards
             // before processing next
+            uint64_t msg_cnt = 1;
             WaitAndClearRequests(
-                stream_id, 1, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, msg_cnt, mux, cv, finish_log_cnt, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -508,8 +511,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             local_shards_.EnqueueCcRequest(0, cc_req);
             // wait for this range split operation to be recovered at all shards
             // before processing next
+            uint64_t msg_cnt = 1;
             WaitAndClearRequests(
-                stream_id, 1, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, msg_cnt, mux, cv, finish_log_cnt, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -736,6 +740,24 @@ void ReplayService::on_closed(brpc::StreamId id)
     // Besides, the stream might be closed by LogShippingAgent intentionally.
     // There is no way to tell the difference. So, just do nothing.
 
+    // Wait for all reqs from this stream is done before erasing it from inbound
+    // conns since those cc reqs have pointers to ConnectionInfo. If everything
+    // goes right, all reqs should have been finished at this point since we
+    // waited once on the last msg. But if the stream is closed on error, the
+    // reqs might not be all finished. We need to make sure there's no more
+    // reference to ConnectionInfo here.
+    ConnectionInfo *info;
+    {
+        std::lock_guard<std::mutex> lk(inbound_mux_);
+        info = &inbound_connections_.find(id)->second;
+    }
+    WaitAndClearRequests(id,
+                         info->total_log_msg_cnt_,
+                         info->mux_,
+                         info->cv_,
+                         info->finished_cnt_,
+                         info->recovery_error_);
+
     std::unique_lock<std::mutex> lk(inbound_mux_);
     active_stream_cnt_--;
     inbound_connections_.erase(id);
@@ -748,7 +770,7 @@ void ReplayService::on_closed(brpc::StreamId id)
 }
 
 void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
-                                         uint64_t total_cnt,
+                                         uint64_t &total_cnt,
                                          std::mutex &mux,
                                          std::condition_variable &cv,
                                          uint64_t &finish_log_cnt,
@@ -756,6 +778,10 @@ void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
                                          bool wait_for_all_finished)
 {
     std::unique_lock<std::mutex> lk(mux);
+    if (total_cnt == 0)
+    {
+        return;
+    }
     cv.wait(lk,
             [&finish_log_cnt, &total_cnt, &wait_for_all_finished]
             {

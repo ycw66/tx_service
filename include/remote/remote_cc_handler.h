@@ -95,7 +95,8 @@ public:
                   uint64_t gap_ts,
                   uint64_t commit_ts,
                   const CcEntryAddr &cce_addr,
-                  CcHandlerResult<PostProcessResult> &hres);
+                  CcHandlerResult<PostProcessResult> &hres,
+                  bool need_remote_resp = true);
 
     void Read(uint32_t src_node_id,
               NodeGroupId dest_ng_id,

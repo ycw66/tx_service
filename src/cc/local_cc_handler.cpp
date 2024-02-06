@@ -351,7 +351,8 @@ void txservice::LocalCcHandler::PostRead(
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     CcHandlerResult<PostProcessResult> &hres,
-    bool is_local)
+    bool is_local,
+    bool need_remote_resp)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -391,7 +392,8 @@ void txservice::LocalCcHandler::PostRead(
                             gap_ts,
                             commit_ts,
                             cce_addr,
-                            hres);
+                            hres,
+                            need_remote_resp);
     }
 }
 

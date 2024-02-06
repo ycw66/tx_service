@@ -179,7 +179,7 @@ private:
     std::condition_variable inbound_cv_;
 
     void WaitAndClearRequests(brpc::StreamId stream_id,
-                              uint64_t total_cnt,
+                              uint64_t &total_cnt,
                               std::mutex &mux,
                               std::condition_variable &cv,
                               uint64_t &finish_log_cnt,

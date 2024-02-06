@@ -108,6 +108,7 @@ private:
 
     CcEntryAddr cce_addr_;
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
+    bool need_resp_{true};
 };
 
 struct RemoteRead : public ReadCc

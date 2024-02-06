@@ -249,29 +249,32 @@ txservice::remote::RemotePostRead::RemotePostRead()
 
     cc_res_.post_lambda_ = [this](CcHandlerResult<PostProcessResult> *res)
     {
-        output_msg_.set_tx_number(input_msg_->tx_number());
-        output_msg_.set_handler_addr(input_msg_->handler_addr());
-        output_msg_.set_tx_term(input_msg_->tx_term());
-        output_msg_.set_command_id(input_msg_->command_id());
-
-        ValidateResponse *resp = output_msg_.mutable_validate_resp();
-        resp->set_error_code(
-            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
-
-        if (res->IsError())
+        if (need_resp_)
         {
-            // RemotePostRead at the remote node accesses one key, which locates
-            // in a single shard. Hence, there are no concurrent modifications
-            // of PostReadResult. It is safe to access the result's array
-            // without the mutex protection.
-            for (TxNumber &txn : res->Value().conflicting_txs_)
-            {
-                resp->add_txs(txn);
-            }
-        }
+            output_msg_.set_tx_number(input_msg_->tx_number());
+            output_msg_.set_handler_addr(input_msg_->handler_addr());
+            output_msg_.set_tx_term(input_msg_->tx_term());
+            output_msg_.set_command_id(input_msg_->command_id());
 
-        const ValidateRequest &req = input_msg_->validate_req();
-        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+            ValidateResponse *resp = output_msg_.mutable_validate_resp();
+            resp->set_error_code(
+                ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
+
+            if (res->IsError())
+            {
+                // RemotePostRead at the remote node accesses one key, which
+                // locates in a single shard. Hence, there are no concurrent
+                // modifications of PostReadResult. It is safe to access the
+                // result's array without the mutex protection.
+                for (TxNumber &txn : res->Value().conflicting_txs_)
+                {
+                    resp->add_txs(txn);
+                }
+            }
+
+            const ValidateRequest &req = input_msg_->validate_req();
+            hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        }
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -290,6 +293,7 @@ void txservice::remote::RemotePostRead::Reset(
     const ValidateRequest &req = input_msg->validate_req();
     const CceAddr_msg &cce_addr = req.cce_addr();
 
+    need_resp_ = req.need_resp();
     cce_addr_.SetCce(cce_addr.cce_ptr(),
                      cce_addr.term(),
                      req.node_group_id(),
