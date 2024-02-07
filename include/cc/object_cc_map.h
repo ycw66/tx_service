@@ -137,36 +137,21 @@ public:
         {
             // the request was blocked and is now unblocked and lock acquired
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            ccp = static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
-            if (cc_op == CcOperation::Read &&
-                req.Isolation() == IsolationLevel::ReadCommitted)
-            {
-                // Unpin CcEntry: release ReadIntent that added before backfill.
-                assert(cce->GetKeyLock() != nullptr &&
-                       cce->GetKeyLock()->ReadIntents().count(req.Txn()) == 1);
-                ReleaseCceLock(cce->GetKeyLock(),
-                               cce,
-                               req.Txn(),
-                               req.NodeGroupId(),
-                               LockType::ReadIntent);
-            }
-            else
-            {
-                // For ON_KEY_OBJECT, we add lock regardless of whether the
-                // record is deleted, so just pass RecordStatus::Normal.
-                std::tie(acquired_lock, err_code) =
-                    LockHandleForResumedRequest(cce,
-                                                RecordStatus::Normal,
-                                                &req,
-                                                req.NodeGroupId(),
-                                                ng_term,
-                                                req.TxTerm(),
-                                                cc_op,
-                                                req.Isolation(),
-                                                req.Protocol(),
-                                                0,
-                                                false);
-            }
+
+            // For ON_KEY_OBJECT, we add lock regardless of whether the record
+            // is deleted, so just pass RecordStatus::Normal.
+            std::tie(acquired_lock, err_code) =
+                LockHandleForResumedRequest(cce,
+                                            RecordStatus::Normal,
+                                            &req,
+                                            req.NodeGroupId(),
+                                            ng_term,
+                                            req.TxTerm(),
+                                            cc_op,
+                                            req.Isolation(),
+                                            req.Protocol(),
+                                            0,
+                                            false);
         }
         else if (cce_addr.CcePtr() == 0)
         {
@@ -415,7 +400,6 @@ public:
         // Lock acquired, set the result.
         obj_result.lock_acquired_ = acquired_lock;
 
-        assert(ccp != nullptr && cce != nullptr);
         if (cce->payload_status_ == RecordStatus::Unknown)
         {
             if (FLAGS_skip_kv)
@@ -425,28 +409,6 @@ public:
             }
             else
             {
-                if (acquired_lock == LockType::NoLock)
-                {
-                    assert(cc_op == CcOperation::Read &&
-                           req.Isolation() == IsolationLevel::ReadCommitted);
-                    // Add ReadIntent to pin ccentry for asynchronously
-                    // backfill.
-                    std::tie(acquired_lock, err_code) =
-                        AcquireCceKeyLock(cce,
-                                          ccp,
-                                          RecordStatus::Normal,
-                                          &req,
-                                          req.NodeGroupId(),
-                                          ng_term,
-                                          req.TxTerm(),
-                                          CcOperation::Read,
-                                          IsolationLevel::RepeatableRead,
-                                          CcProtocol::OCC,
-                                          0,
-                                          false);
-                    assert(acquired_lock == LockType::ReadIntent &&
-                           err_code == CcErrorCode::NO_ERROR);
-                }
                 shard_->FetchRecord(table_name_,
                                     table_schema_,
                                     look_key,
