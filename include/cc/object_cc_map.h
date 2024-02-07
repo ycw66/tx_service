@@ -607,8 +607,6 @@ public:
                 ccp->last_dirty_commit_ts_ = cce->commit_ts_;
             }
 
-            shard_->mem_usage_ += cce->PayloadMemUsage();
-
             ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
         }
@@ -714,8 +712,6 @@ public:
         cce->dirty_payload_ = nullptr;
         cce->dirty_payload_status_ = RecordStatus::NonExistent;
         cce->pending_cmd_ = nullptr;
-
-        shard_->mem_usage_ += cce->PayloadMemUsage();
 
         ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
         req.Result()->SetFinished();

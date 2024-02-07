@@ -7743,8 +7743,6 @@ protected:
                 }
 #else
                 // free entries will be erased
-                mem_decreased += cce->GetCcEntryMemUsage() +
-                                 key_it->MemUsage() - sizeof(KeyT);
                 free_cnt++;
 #endif
             }
@@ -7927,8 +7925,6 @@ protected:
      * @param page1_it The iterator to the merged page
      * @param page2_it The iterator to the discarded page
      * @param page
-     * @param page_key
-     * @param mem_decreased
      */
     void MergePages(
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
