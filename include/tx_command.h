@@ -272,8 +272,11 @@ void EmplaceAndCommitReplayTxnCommand(
     std::unique_ptr<T> &payload,
     std::unique_ptr<ReplayTxnCmdList> &replay_cmd_list,
     TxnCmd &txn_cmd,
-    uint64_t &cur_ver)
+    uint64_t &cur_ver,
+    RecordStatus &status)
 {
+    bool waiting_for_fetch =
+        status == RecordStatus::Unknown && replay_cmd_list != nullptr;
     if (replay_cmd_list == nullptr)
     {
         replay_cmd_list = std::make_unique<ReplayTxnCmdList>();
@@ -289,7 +292,12 @@ void EmplaceAndCommitReplayTxnCommand(
 
     replay_cmd_list->EmplaceTxnCmd(txn_cmd);
 
-    TryCommitReplayCommands(payload, replay_cmd_list, cur_ver);
+    if (!waiting_for_fetch || txn_cmd.has_del_)
+    {
+        TryCommitReplayCommands(payload, replay_cmd_list, cur_ver);
+        status =
+            payload == nullptr ? RecordStatus::Deleted : RecordStatus::Normal;
+    }
 }
 
 }  // namespace txservice

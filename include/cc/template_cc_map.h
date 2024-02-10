@@ -31,6 +31,7 @@
 #include "table_statistics.h"
 #include "tx_id.h"
 #include "tx_key.h"
+#include "tx_record.h"
 #include "tx_trace.h"
 #include "type.h"
 
@@ -4725,6 +4726,26 @@ public:
             {
                 cce->KickOutArchiveRecords(recycle_ts);
             }
+#else
+            if (cce->payload_status_ == RecordStatus::Unknown &&
+                cce->replay_cmd_list_ != nullptr)
+            {
+                // The cce is waiting for fetch record to return so that it
+                // can apply command log on the data store version. Wait for
+                // the log replay on this cce to complete before continuing.
+                req.pause_key_.at(shard_->core_id_).first = key->Clone();
+                // Call fetch record to put self into waiting queue of fetch
+                // record.
+                shard_->FetchRecord(table_name_,
+                                    table_schema_,
+                                    key,
+                                    cce,
+                                    this,
+                                    cc_ng_id_,
+                                    ng_term,
+                                    &req);
+                return false;
+            }
 #endif
 
             if (cce->NeedCkpt())
@@ -5354,10 +5375,7 @@ public:
                     (core_id != req.FirstCore() && core_id > shard_->core_id_))
                 {
                     // Move to the smallest unvisited core id
-                    if (core_id < req.NextCore())
-                    {
-                        req.SetNextCore(core_id);
-                    }
+                    next_core = std::min(core_id, next_core);
                 }
                 continue;
             }

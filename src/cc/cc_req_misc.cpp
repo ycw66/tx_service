@@ -614,14 +614,20 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 
             for (CcRequestBase *req : requesters_)
             {
-                ccs.Enqueue(ccs.core_id_, req);
+                if (req)
+                {
+                    ccs.Enqueue(ccs.core_id_, req);
+                }
             }
         }
         else
         {
             for (CcRequestBase *req : requesters_)
             {
-                req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+                if (req)
+                {
+                    req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+                }
             }
         }
     }
@@ -629,7 +635,10 @@ bool FetchRecordCc::Execute(CcShard &ccs)
     {
         for (CcRequestBase *req : requesters_)
         {
-            req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+            if (req)
+            {
+                req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+            }
         }
     }
 

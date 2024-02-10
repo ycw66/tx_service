@@ -3086,7 +3086,6 @@ public:
                                     node_group_id_,
                                     std::max(cc_ng_candid_term, cc_ng_term),
                                     this);
-
                     if (catalog_entry != nullptr)
                     {
                         // If FetchCatalogCc failure due to storage fault,
@@ -4018,6 +4017,7 @@ public:
         tx_ts_ = tx_ts;
         cce_ptr_ = nullptr;
         apply_and_commit_ = commit;
+        block_type_ = ApplyBlockType::NoBlocking;
     }
 
     // for remote
@@ -4053,6 +4053,7 @@ public:
         tx_term_ = tx_term;
         tx_ts_ = tx_ts;
         cce_ptr_ = nullptr;
+        block_type_ = ApplyBlockType::NoBlocking;
     }
 
     bool IsLocal() const
@@ -4155,6 +4156,14 @@ public:
     // acquiring lock and writing log. If false, just execute the command to
     // get the result.
     bool apply_and_commit_{};
+
+    enum struct ApplyBlockType
+    {
+        NoBlocking = 0,
+        BlockOnLock,
+        BlockOnFetch
+    };
+    ApplyBlockType block_type_{ApplyBlockType::NoBlocking};
 };
 
 struct RequestAborterCc : public CcRequestBase

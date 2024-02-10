@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -10,8 +11,10 @@
 #include "catalog_factory.h"
 #include "cc_entry.h"
 #include "cc_map.h"
+#include "error_messages.h"
 #include "non_blocking_lock.h"
 #include "template_cc_map.h"
+#include "tx_command.h"
 #include "tx_record.h"
 
 namespace txservice
@@ -137,21 +140,32 @@ public:
         {
             // the request was blocked and is now unblocked and lock acquired
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            ccp = static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
 
-            // For ON_KEY_OBJECT, we add lock regardless of whether the record
-            // is deleted, so just pass RecordStatus::Normal.
-            std::tie(acquired_lock, err_code) =
-                LockHandleForResumedRequest(cce,
-                                            RecordStatus::Normal,
-                                            &req,
-                                            req.NodeGroupId(),
-                                            ng_term,
-                                            req.TxTerm(),
-                                            cc_op,
-                                            req.Isolation(),
-                                            req.Protocol(),
-                                            0,
-                                            false);
+            if (req.block_type_ == ApplyCc::ApplyBlockType::BlockOnLock)
+            {
+                // For ON_KEY_OBJECT, we add lock regardless of whether the
+                // record is deleted, so just pass RecordStatus::Normal.
+                std::tie(acquired_lock, err_code) =
+                    LockHandleForResumedRequest(cce,
+                                                RecordStatus::Normal,
+                                                &req,
+                                                req.NodeGroupId(),
+                                                ng_term,
+                                                req.TxTerm(),
+                                                cc_op,
+                                                req.Isolation(),
+                                                req.Protocol(),
+                                                0,
+                                                false);
+            }
+            else if (req.block_type_ == ApplyCc::ApplyBlockType::BlockOnFetch)
+            {
+                // Already finished lock acquire.
+                err_code = CcErrorCode::NO_ERROR;
+                acquired_lock = obj_result.lock_acquired_;
+            }
+            req.block_type_ = ApplyCc::ApplyBlockType::NoBlocking;
         }
         else if (cce_addr.CcePtr() == 0)
         {
@@ -170,152 +184,6 @@ public:
                 look_key = &decoded_key;
             }
 
-#ifdef RANGE_PARTITION_ENABLED
-            Iterator it = Find(*look_key);
-            cce = it->second;
-            ccp = it.GetPage();
-
-            // collect metrics: slice cache hits
-            if (metrics::enable_cache_hit_rate)
-            {
-                auto meter = shard_->meter_.get();
-                if (cce != nullptr)
-                {
-                    meter->Collect(
-                        shard_->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "hits");
-                }
-            }
-
-            if (cce == nullptr)
-            {
-                if (Type() == TableType::Primary ||
-                    Type() == TableType::UniqueSecondary)
-                {
-                    RangeSliceOpStatus pin_status;
-                    RangeSliceId slice_id =
-                        shard_->PinRangeSlice(table_name_,
-                                              cc_ng_id_,
-                                              ng_term,
-                                              KeySchema(),
-                                              RecordSchema(),
-                                              schema_ts_,
-                                              table_schema_->GetKVCatalogInfo(),
-                                              *look_key,
-                                              true,
-                                              &req,
-                                              pin_status,
-                                              false,
-                                              0);
-
-                    if (pin_status == RangeSliceOpStatus::Successful)
-                    {
-                        // The slice is unpinned immediately. This is
-                        // because the prior pin operation brings all
-                        // records in the slice into memory, including the
-                        // target record sharded to this core. Since cache
-                        // cleaning is done by the tx processor associated
-                        // with this core, the target record cannot be
-                        // kicked out before this read request finishes.
-                        slice_id.Unpin();
-
-                        if (cc_op == CcOperation::Write)
-                        {
-                            auto it = FindEmplace(*look_key);
-                            cce = it->second;
-                            ccp = it.GetPage();
-                            if (cce == nullptr)
-                            {
-                                hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                                return true;
-                            }
-
-                            if (cce->payload_status_ == RecordStatus::Unknown)
-                            {
-                                cce->payload_status_ = RecordStatus::Deleted;
-                                cce->commit_ts_ = 1U;
-                                cce->gap_commit_ts_ = 1U;
-                                cce->ckpt_ts_.store(1U,
-                                                    std::memory_order_relaxed);
-                            }
-                            else
-                            {
-                                assert(cce->commit_ts_ > 1);
-                            }
-                        }
-                        else
-                        {
-                            assert(cc_op == CcOperation::Read);
-                            Iterator it = Find(*look_key);
-                            cce = it->second;
-                            ccp = it.GetPage();
-
-                            if (cce == nullptr)
-                            {
-                                bool proceed =
-                                    cmd->ProceedOnNonExistentObject();
-                                if (!proceed)
-                                {
-                                    // Del command on a non-existent object also
-                                    // returns directly.
-                                    obj_result.commit_ts_ = 1;
-                                    obj_result.rec_status_ =
-                                        RecordStatus::Deleted;
-                                    hd_res->SetFinished();
-                                    return true;
-                                }
-                                else
-                                {
-                                    assert(false);
-                                    hd_res->ForceError();
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                    else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
-                    {
-                        return false;
-                    }
-                    else if (pin_status == RangeSliceOpStatus::Retry)
-                    {
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        return false;
-                    }
-                    else if (pin_status == RangeSliceOpStatus::Delay)
-                    {
-                        if (slice_id.Range()->HasLock())
-                        {
-                            hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                            return true;
-                        }
-                        else
-                        {
-                            shard_->Enqueue(shard_->LocalCoreId(), &req);
-                            return false;
-                        }
-                    }
-                    else
-                    {
-                        // If the pin operation returns an error, the data
-                        // store is inaccessible.
-                        hd_res->SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                        return true;
-                    }
-                }
-                else
-                {
-                    assert(Type() == TableType::Catalog);
-                    auto it = FindEmplace(*look_key);
-                    cce = it->second;
-                    ccp = it.GetPage();
-                    if (cce == nullptr)
-                    {
-                        hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                        return true;
-                    }
-                }
-            }
-#else
             auto it = FindEmplace(*look_key);
             cce = it->second;
             ccp = it.GetPage();
@@ -329,17 +197,6 @@ public:
                 return false;
             }
 
-            // if ccm contains all the ccentries, then unknown status means
-            // that we can skip accessing kv store and return deleted status
-            // directly.
-            if (ccm_has_full_entries_ &&
-                cce->payload_status_ == RecordStatus::Unknown)
-            {
-                cce->payload_status_ = RecordStatus::Deleted;
-                cce->commit_ts_ = 1U;
-                cce->ckpt_ts_.store(1U);
-            }
-#endif
             req.SetCcePtr(cce);
 
             assert(cce != nullptr);
@@ -385,6 +242,7 @@ public:
             {
                 //                req.Acknowledge();
             }
+            req.block_type_ = ApplyCc::ApplyBlockType::BlockOnLock;
             // Acquire lock fail should stop the execution of current
             // ApplyCc request since it's already in blocking queue.
             return false;
@@ -399,13 +257,16 @@ public:
 
         // Lock acquired, set the result.
         obj_result.lock_acquired_ = acquired_lock;
-
+        // if ccm contains all the ccentries, then unknown status means
+        // that we can skip accessing kv store and return deleted status
+        // directly.
         if (cce->payload_status_ == RecordStatus::Unknown)
         {
-            if (FLAGS_skip_kv)
+            if (ccm_has_full_entries_ || FLAGS_skip_kv)
             {
                 cce->payload_status_ = RecordStatus::Deleted;
                 cce->commit_ts_ = 1U;
+                cce->ckpt_ts_.store(1U);
             }
             else
             {
@@ -417,6 +278,7 @@ public:
                                     cc_ng_id_,
                                     ng_term,
                                     &req);
+                req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
                 return false;
             }
         }
@@ -629,18 +491,6 @@ public:
         if (commit_ts > 0)
         {
             // The txn commits. Upload the change.
-#ifdef RANGE_PARTITION_ENABLED
-            if (req.GetOperationType() == OperationType::Insert &&
-                cce->commit_ts_ == 1)
-            {
-                // At post write we have already loaded the latest version
-                // of cce into memory. So if commit ts is 1 (entry does not
-                // exist and has no previous version), that means it does
-                // not exist in data store at all.
-                cce->data_store_size_.store(0, std::memory_order_relaxed);
-            }
-#endif
-
             if (cce->dirty_payload_status_ == RecordStatus::Normal ||
                 cce->dirty_payload_status_ == RecordStatus::Deleted)
             {
@@ -702,16 +552,18 @@ public:
         if (commit_ts < schema_ts_)
         {
             req.SetFinish();
-            return false;
+            return true;
         }
 
         KeyT key;
         size_t offset = req.Offset();
         const std::string_view &log_blob = req.LogContentView();
+        uint16_t next_core = req.NextCore();
+        req.SetNextCore(UINT16_MAX);
 
-        size_t prev_offset = offset;
         while (offset < log_blob.size())
         {
+            size_t prev_offset = offset;
             // the format of log_blob is: key_str, object_version, commands str
             // length, commands str
             key.Deserialize(log_blob.data(), offset, KeySchema());
@@ -732,10 +584,7 @@ public:
                     (core_id != req.FirstCore() && core_id > shard_->core_id_))
                 {
                     // Move to the smallest unvisited core id
-                    if (core_id < req.NextCore())
-                    {
-                        req.SetNextCore(core_id);
-                    }
+                    next_core = std::min(core_id, next_core);
                 }
                 continue;
             }
@@ -746,8 +595,11 @@ public:
 
             if (cce == nullptr)
             {
-                req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                return true;
+                // Renqueue cc req, wait for checkpoint and kickout flushed cce.
+                req.SetOffset(prev_offset);
+                req.SetNextCore(next_core);
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
             }
 
             bool has_del =
@@ -761,92 +613,21 @@ public:
                        << std::string_view(log_blob.data() + offset, cmds_len)
                        << " has_del: " << has_del;
 
-            // load payload from kvstore before committing pending commands
-            if (!has_del && cce->payload_status_ == RecordStatus::Unknown)
+            // load payload from kvstore before committing pending commands.
+            // If there's already buffered cmd, that means a previous replaycc
+            // has already sent FetchRecord.
+            if (!has_del && cce->payload_status_ == RecordStatus::Unknown &&
+                cce->replay_cmd_list_ == nullptr)
             {
                 int64_t cc_ng_candid_term =
                     Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
                 int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
                 int64_t ng_term = std::max(cc_ng_candid_term, cc_ng_term);
                 assert(ng_term > 0);
-                req.SetOffset(prev_offset);
 
-#ifdef RANGE_PARTITION_ENABLED
-                assert(Type() == TableType::Primary ||
-                       Type() == TableType::UniqueSecondary);
-
-                RangeSliceOpStatus pin_status;
-                RangeSliceId slice_id =
-                    shard_->PinRangeSlice(table_name_,
-                                          cc_ng_id_,
-                                          ng_term,
-                                          KeySchema(),
-                                          RecordSchema(),
-                                          schema_ts_,
-                                          table_schema_->GetKVCatalogInfo(),
-                                          key,
-                                          true,
-                                          &req,
-                                          pin_status,
-                                          false,
-                                          0);
-
-                if (pin_status == RangeSliceOpStatus::Successful)
-                {
-                    // The slice is unpinned immediately. This is
-                    // because the prior pin operation brings all
-                    // records in the slice into memory, including the
-                    // target record sharded to this core. Since cache
-                    // cleaning is done by the tx processor associated
-                    // with this core, the target record cannot be
-                    // kicked out before this read request finishes.
-                    slice_id.Unpin();
-
-                    if (cce->payload_status_ == RecordStatus::Unknown)
-                    {
-                        cce->payload_status_ = RecordStatus::Deleted;
-                        cce->commit_ts_ = 1U;
-                        cce->gap_commit_ts_ = 1U;
-                        cce->ckpt_ts_.store(1U, std::memory_order_relaxed);
-                    }
-                    else
-                    {
-                        assert(cce->commit_ts_ > 1);
-                    }
-                }
-                else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
-                {
-                    return false;
-                }
-                else if (pin_status == RangeSliceOpStatus::Retry)
-                {
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
-                }
-                else if (pin_status == RangeSliceOpStatus::Delay)
-                {
-                    if (slice_id.Range()->HasLock())
-                    {
-                        req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                        return true;
-                    }
-                    else
-                    {
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        return false;
-                    }
-                }
-                else
-                {
-                    // If the pin operation returns an error, the data
-                    // store is inaccessible.
-                    req.Result()->SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                    return true;
-                }
-
-#else
-
-                // load payload asynchronously
+                // load payload asynchronously, pass in null as requester cc
+                // since we will buffer the cmd in replay cmd list so there's no
+                // need to put this req back in queue after record is fetched.
                 shard_->FetchRecord(table_name_,
                                     table_schema_,
                                     &key,
@@ -854,9 +635,7 @@ public:
                                     this,
                                     cc_ng_id_,
                                     ng_term,
-                                    &req);
-                return false;
-#endif
+                                    nullptr);
             }
 
             // extract command list
@@ -879,22 +658,21 @@ public:
                 obj_version, commit_ts, has_del, std::move(cmd_list));
 
             // Emplace txn_cmd and try to commit all pending commands.
-            EmplaceAndCommitReplayTxnCommand(
-                cce->payload_, cce->replay_cmd_list_, txn_cmd, cce->commit_ts_);
+            EmplaceAndCommitReplayTxnCommand(cce->payload_,
+                                             cce->replay_cmd_list_,
+                                             txn_cmd,
+                                             cce->commit_ts_,
+                                             cce->payload_status_);
 
-            cce->payload_status_ = cce->payload_ == nullptr
-                                       ? RecordStatus::Deleted
-                                       : RecordStatus::Normal;
-
-            // Must update dirty_commit_ts. Otherwise, this entry may be skipped
-            // by checkpointer.
-            if (cce->commit_ts_ > last_dirty_commit_ts_)
+            // Must update dirty_commit_ts. Otherwise, this entry may be
+            // skipped by checkpointer.
+            if (commit_ts > last_dirty_commit_ts_)
             {
-                last_dirty_commit_ts_ = cce->commit_ts_;
+                last_dirty_commit_ts_ = commit_ts;
             }
-            if (cce->commit_ts_ > ccp->last_dirty_commit_ts_)
+            if (commit_ts > ccp->last_dirty_commit_ts_)
             {
-                ccp->last_dirty_commit_ts_ = cce->commit_ts_;
+                ccp->last_dirty_commit_ts_ = commit_ts;
             }
 
             NonBlockingLock *lk = cce->GetKeyLock();
@@ -912,17 +690,19 @@ public:
             }
         }
 
-        if (req.NextCore() != UINT16_MAX)
+        if (next_core != UINT16_MAX)
         {
             req.ResetCcm();
-            MoveRequest(&req, req.NextCore());
+            MoveRequest(&req, next_core);
+
+            return false;
         }
         else
         {
             req.SetFinish();
-        }
 
-        return false;
+            return true;
+        }
     }
 
     void BackFill(LruEntry *entry,
@@ -933,6 +713,7 @@ public:
         assert(status != RecordStatus::Unknown);
         CcEntry<KeyT, ValueT> *cce =
             dynamic_cast<CcEntry<KeyT, ValueT> *>(entry);
+        ValueT *rec_ptr = static_cast<ValueT *>(rec_uptr.get());
         // It's possible that first ReplayLogCc triggers FetchRecord and the
         // second ReplayLogCc has_del and overrides the cce.
         if (cce->payload_status_ == RecordStatus::Unknown)
@@ -940,7 +721,33 @@ public:
             cce->ckpt_ts_ = commit_ts;
             cce->commit_ts_ = commit_ts;
             cce->payload_status_ = status;
-            cce->payload_.reset(static_cast<ValueT *>(rec_uptr.release()));
+            if (rec_ptr)
+            {
+                cce->payload_.reset(
+                    static_cast<ValueT *>(rec_ptr->Clone().release()));
+            }
+            else
+            {
+                assert(cce->payload_ == nullptr);
+            }
+            // Check if there's any buffered replay cmds, and try to
+            // commit them.
+            if (cce->replay_cmd_list_)
+            {
+                // Clear cmds with smaller version than kv version.
+                for (auto it = cce->replay_cmd_list_->txn_cmd_list_.begin();
+                     it != cce->replay_cmd_list_->txn_cmd_list_.end();)
+                {
+                    if (it->obj_version_ >= commit_ts)
+                    {
+                        break;
+                    }
+                    it = cce->replay_cmd_list_->txn_cmd_list_.erase(it);
+                }
+                cce->replay_cmd_list_->cur_version_ = commit_ts;
+            }
+            TryCommitReplayCommands(
+                cce->payload_, cce->replay_cmd_list_, cce->commit_ts_);
         }
     }
 

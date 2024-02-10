@@ -3731,7 +3731,9 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
         &tx_cmd_set = *rw_set_.ObjectCommandCce();
 
     // organize by node group
-    std::unordered_map<NodeGroupId, std::vector<const CmdSetEntry *>>
+    std::unordered_map<
+        NodeGroupId,
+        std::unordered_map<TableName, std::vector<const CmdSetEntry *>>>
         ng_obj_cmds;
     for (const auto &[table_name, obj_cmd_set] : tx_cmd_set)
     {
@@ -3755,70 +3757,79 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
                 // TODO(zkl): remote data
             }
 
+            auto &table_cmds = ng_obj_cmds.try_emplace(ng_id).first->second;
             auto &obj_cmds_vector =
-                ng_obj_cmds.try_emplace(ng_id).first->second;
+                table_cmds.try_emplace(table_name).first->second;
             // insert cce into cmd_set
             obj_cmds_vector.emplace_back(&obj_cmd_entry);
         }
     }
 
     // construct one log_ng_blob per ng_id
-    for (const auto &[ng_id, cmd_entry_vec] : ng_obj_cmds)
+    for (const auto &[ng_id, table_cmds] : ng_obj_cmds)
     {
         (*shard_logs)[ng_id] = std::string{};
         std::string &log_ng_blob = shard_logs->at(ng_id);
 
-        for (const CmdSetEntry *cmd_entry : cmd_entry_vec)
+        for (const auto &[table_name, cmd_entry_vec] : table_cmds)
         {
-            const std::string &key_str = cmd_entry->obj_key_str_;
-            uint64_t obj_version = cmd_entry->object_version_;
-            const std::vector<std::string> &cmd_str_list =
-                cmd_entry->cmd_str_list_;
+            uint8_t tabname_len = table_name.StringView().size();
+            const char *ptr = reinterpret_cast<const char *>(&tabname_len);
+            log_ng_blob.append(ptr, sizeof(uint8_t));
+            log_ng_blob.append(table_name.StringView().data(), tabname_len);
 
             // The start position of the 4-byte integer for the length of
             // serialized key and object commands.
             size_t key_cmd_len_start = log_ng_blob.size();
             uint32_t key_cmd_len = 0;
-            const char *ptr = reinterpret_cast<const char *>(&key_cmd_len);
-            // Reserve 4 bytes in the blob for the length of serialized key and
-            // commands before it is known.
+            ptr = reinterpret_cast<const char *>(&key_cmd_len);
+            // Reserve 4 bytes in the blob for the length of serialized key
+            // and commands before it is known.
             log_ng_blob.append(ptr, sizeof(uint32_t));
-
-            // write object key, object version, and commands to log blob
-            log_ng_blob.append(key_str);
-            log_ng_blob.append(reinterpret_cast<const char *>(&obj_version),
-                               sizeof(obj_version));
-
-            size_t cmds_len_start = log_ng_blob.size();
-            uint32_t cmds_len = 0;
-            log_ng_blob.append(reinterpret_cast<const char *>(&cmds_len),
-                               sizeof(cmds_len));
-
-            uint8_t has_del = cmd_entry->has_del_;
-            log_ng_blob.append(reinterpret_cast<const char *>(&has_del),
-                               sizeof(has_del));
-            // number of commands
-            uint16_t cmd_cnt = cmd_str_list.size();
-            log_ng_blob.append(reinterpret_cast<const char *>(&cmd_cnt),
-                               sizeof(cmd_cnt));
-
-            for (const auto &cmd_str : cmd_str_list)
+            for (const CmdSetEntry *cmd_entry : cmd_entry_vec)
             {
-                uint32_t cmd_len = cmd_str.size();
-                log_ng_blob.append(reinterpret_cast<const char *>(&cmd_len),
-                                   sizeof(cmd_len));
-                log_ng_blob.append(cmd_str);
+                const std::string &key_str = cmd_entry->obj_key_str_;
+                uint64_t obj_version = cmd_entry->object_version_;
+                const std::vector<std::string> &cmd_str_list =
+                    cmd_entry->cmd_str_list_;
+
+                // write object key, object version, and commands to log
+                // blob
+                log_ng_blob.append(key_str);
+                log_ng_blob.append(reinterpret_cast<const char *>(&obj_version),
+                                   sizeof(obj_version));
+
+                size_t cmds_len_start = log_ng_blob.size();
+                uint32_t cmds_len = 0;
+                log_ng_blob.append(reinterpret_cast<const char *>(&cmds_len),
+                                   sizeof(cmds_len));
+
+                uint8_t has_del = cmd_entry->has_del_;
+                log_ng_blob.append(reinterpret_cast<const char *>(&has_del),
+                                   sizeof(has_del));
+                // number of commands
+                uint16_t cmd_cnt = cmd_str_list.size();
+                log_ng_blob.append(reinterpret_cast<const char *>(&cmd_cnt),
+                                   sizeof(cmd_cnt));
+
+                for (const auto &cmd_str : cmd_str_list)
+                {
+                    uint32_t cmd_len = cmd_str.size();
+                    log_ng_blob.append(reinterpret_cast<const char *>(&cmd_len),
+                                       sizeof(cmd_len));
+                    log_ng_blob.append(cmd_str);
+                }
+
+                cmds_len =
+                    log_ng_blob.size() - cmds_len_start - sizeof(uint32_t);
+                log_ng_blob.replace(cmds_len_start,
+                                    sizeof(cmds_len),
+                                    reinterpret_cast<const char *>(&cmds_len),
+                                    sizeof(cmds_len));
             }
 
-            cmds_len = log_ng_blob.size() - cmds_len_start - sizeof(uint32_t);
-            log_ng_blob.replace(cmds_len_start,
-                                sizeof(cmds_len),
-                                reinterpret_cast<const char *>(&cmds_len),
-                                sizeof(cmds_len));
-
             key_cmd_len =
-                log_ng_blob.size() - key_cmd_len_start - sizeof(uint32_t);
-
+                (log_ng_blob.size() - key_cmd_len_start - sizeof(uint32_t));
             // Refills the reserved 4 bytes after knowing the length of
             // serialized key and commands.
             log_ng_blob.replace(
@@ -5217,7 +5228,6 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
 
         if (lock_acquired == LockType::WriteLock)
         {
-            DLOG(INFO) << "txm acquired writelock";
             // The command modifies the object. Put it into the command set
             // for writing log and post-processing. If the command fails, only
             // to release the write lock.
@@ -5252,7 +5262,6 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         {
             // Read lock is acquired under locking protocol. Add the cce to
             // read set for later PostRead.
-            DLOG(INFO) << "txm acquired readlock/intent";
             bool add_res;
             if (obj_status == RecordStatus::Unknown)
             {
@@ -5441,7 +5450,6 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
                 if (lock_acquired == LockType::WriteLock)
                 {
-                    DLOG(INFO) << "txm acquired writelock";
                     // The command modifies the object. Put it into the command
                     // set for writing log and post-processing. If the command
                     // fails, only to release the write lock.
@@ -5477,8 +5485,6 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                          !rw_set_.FindObjectCommand(*obj_cmd_op.table_name_,
                                                     cmd_res.cce_addr_))
                 {
-                    LOG(INFO)
-                        << "txm acquired readlock, ReadIntent or WriteIntent";
                     // Read lock is acquired under locking protocol. Add the cce
                     // to read set for later PostRead.
                     rw_set_.AddRead(cmd_res.cce_addr_,

@@ -11,6 +11,7 @@
 #include <unordered_map>
 
 #include "cc_request.h"
+#include "error_messages.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "store/data_store_handler.h"
@@ -2249,6 +2250,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     }
     meta_lk.unlock();
     assert(ng_term == expected_ng_term);
+    if (Sharder::Instance().LeaderTerm(ng_id) < 0)
+    {
+        // node is still candidate leader of node group. Log replay is not
+        // finished yet. In this case we can flush data and kickout cce, but we
+        // cannot truncate redo log based on this data sync ts since we might
+        // miss the data that has not been recovered yet.
+        data_sync_task->SetErrorCode(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+    }
 
     // guard to unpin node group on finish.
     std::shared_ptr<void> defer_unpin(
