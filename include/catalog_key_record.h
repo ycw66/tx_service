@@ -12,6 +12,9 @@
 
 namespace txservice
 {
+
+struct DataSyncTask;
+
 /**
  * @brief A special type of tx keys for concurrency control (cc) maps of table
  * catalogs.
@@ -78,17 +81,7 @@ struct CatalogEntry
 {
     CatalogEntry() = default;
 
-    ~CatalogEntry()
-    {
-        {
-            std::unique_lock<std::shared_mutex> lk(s_mux_);
-            committing_ = false;
-        }
-        cv_.notify_all();
-
-        std::unique_lock<std::shared_mutex> lk(s_mux_);
-        cv_.wait(lk, [this] { return waiting_thd_cnt_ == 0; });
-    }
+    ~CatalogEntry();
 
     void InitSchema(std::unique_ptr<TableSchema> schema, uint64_t version_ts)
     {
@@ -156,6 +149,81 @@ struct CatalogEntry
     {
         return dirty_schema_version_;
     }
+
+#ifndef RANGE_PARTITION_ENABLED
+    struct TableSyncInfo
+    {
+        bool sync_ongoing_{false};
+        uint64_t last_sync_ts_{0};
+        // Multiple tasks on the same range are executed sequentially, so the
+        // subsequence tasks for this range should wait here.
+        std::queue<std::shared_ptr<DataSyncTask>> pending_sync_task_;
+    };
+
+    std::unique_ptr<TableSyncInfo> sync_info_{nullptr};
+
+    uint64_t GetLastSyncTs()
+    {
+        std::shared_lock<std::shared_mutex> lk(s_mux_);
+        if (sync_info_)
+        {
+            return sync_info_->last_sync_ts_;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+    bool TrySetDataSync(bool ongoing,
+                        std::shared_ptr<DataSyncTask> task = nullptr,
+                        uint64_t last_sync_ts = 0)
+    {
+        std::unique_lock<std::shared_mutex> lk(s_mux_);
+        if (!sync_info_)
+        {
+            // Only initialize sync_info_ when it is needed.
+            // If we're setting ongoing to false that means
+            // sync_info_ is deleted when data sync worker tries
+            // to sync this range, which means either term has
+            // changed or range is migrated away.
+            if (!ongoing)
+            {
+                return true;
+            }
+            sync_info_ = std::make_unique<TableSyncInfo>();
+        }
+        if (ongoing && sync_info_->sync_ongoing_)
+        {
+            // Another task is processing this range.
+            // To avoid the possible busy loop when there are fewer tasks, put
+            // this task into `pending_task` instead of put back into
+            // `data_sync_task_queue_`.
+            sync_info_->pending_sync_task_.push(task);
+            return false;
+        }
+        if (!ongoing && last_sync_ts > sync_info_->last_sync_ts_)
+        {
+            // data sync succeeded, update last sync ts
+            sync_info_->last_sync_ts_ = last_sync_ts;
+        }
+        sync_info_->sync_ongoing_ = ongoing;
+        return true;
+    }
+
+    void PopPendingSyncTask();
+
+    void PushPendingSyncTask(std::shared_ptr<DataSyncTask> task)
+    {
+        std::unique_lock<std::shared_mutex> lk(s_mux_);
+        if (!sync_info_)
+        {
+            sync_info_ = std::make_unique<TableSyncInfo>();
+        }
+        sync_info_->pending_sync_task_.emplace(task);
+    }
+
+#endif
 
     std::shared_ptr<TableSchema> schema_{nullptr};
     std::shared_ptr<TableSchema> dirty_schema_{nullptr};

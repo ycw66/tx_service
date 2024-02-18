@@ -348,6 +348,20 @@ CatalogEntry *LocalCcShards::GetCatalog(const TableName &table_name,
                                                      : &catalog_it->second;
 }
 
+CatalogEntry *LocalCcShards::GetCatalogInternal(const TableName &table_name,
+                                                NodeGroupId cc_ng_id)
+{
+    auto ng_catalog_it = table_catalogs_.find(table_name);
+    if (ng_catalog_it == table_catalogs_.end())
+    {
+        return nullptr;
+    }
+
+    auto catalog_it = ng_catalog_it->second.find(cc_ng_id);
+    return catalog_it == ng_catalog_it->second.end() ? nullptr
+                                                     : &catalog_it->second;
+}
+
 std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
     NodeGroupId cc_ng_id, uint64_t snapshot_ts)
 {
@@ -1959,6 +1973,13 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
 
 #ifndef RANGE_PARTITION_ENABLED
+    if (status == nullptr)
+    {
+        // Only flushing one table and there's no thread waiting on the result.
+        assert(hres != nullptr);
+        status = std::make_shared<DataSyncStatus>();
+    }
+
     data_sync_task_queue_.emplace_back(std::make_shared<DataSyncTask>(
         table_name,
         0,
@@ -1978,20 +1999,22 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         },
         hres));
 
-    status->unfinished_tasks_++;
-    if (hres)
     {
-        status->all_task_started_ = true;
-        if (status->unfinished_tasks_ == 0)
+        std::lock_guard<std::mutex> status_lk(status->mux_);
+        status->unfinished_tasks_++;
+        if (hres)
         {
-            hres->SetFinished();
-            return;
+            status->all_task_started_ = true;
+            if (status->unfinished_tasks_ == 0)
+            {
+                hres->SetFinished();
+                return;
+            }
         }
     }
 
     data_sync_worker_ctx_.cv_.notify_all();
-    return;
-#endif
+#else
 
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition);
@@ -2010,6 +2033,9 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         assert(hres != nullptr);
         status = std::make_shared<DataSyncStatus>();
     }
+
+    uint32_t unfinished_task_cnt = 0;
+
     for (auto &range : *ranges)
     {
         if (EnqueueDataSyncTask(table_name,
@@ -2022,20 +2048,27 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                                 status,
                                 hres))
         {
-            status->unfinished_tasks_++;
+            // Increment local variable to reduce lock contention.
+            unfinished_task_cnt++;
         }
     }
-    if (hres)
+
     {
-        status->all_task_started_ = true;
-        if (status->unfinished_tasks_ == 0)
+        std::lock_guard<std::mutex> status_lk(status->mux_);
+        status->unfinished_tasks_ += unfinished_task_cnt;
+        if (hres)
         {
-            hres->SetFinished();
-            return;
+            status->all_task_started_ = true;
+            if (status->unfinished_tasks_ == 0)
+            {
+                hres->SetFinished();
+                return;
+            }
         }
     }
 
     data_sync_worker_ctx_.cv_.notify_all();
+#endif
 }
 
 void LocalCcShards::EnqueueDataSyncTaskForBucket(
@@ -2049,6 +2082,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>();
+    uint32_t unfinished_task_cnt = 0;
     for (auto &[range_table_name, range_ids] : ranges_in_bucket_snapshot)
     {
         TableType type;
@@ -2079,17 +2113,22 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
                                                    status,
                                                    hres))
             {
-                status->unfinished_tasks_++;
+                unfinished_task_cnt++;
             }
         }
     }
 
-    status->all_task_started_ = true;
-    if (status->unfinished_tasks_ == 0)
     {
-        hres->SetFinished();
-        return;
+        std::lock_guard<std::mutex> status_lk(status->mux_);
+        status->unfinished_tasks_ += unfinished_task_cnt;
+        status->all_task_started_ = true;
+        if (status->unfinished_tasks_ == 0)
+        {
+            hres->SetFinished();
+            return;
+        }
     }
+
     data_sync_worker_ctx_.cv_.notify_all();
 }
 
@@ -2176,8 +2215,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     task_worker_lk.unlock();
 
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
-    bool need_process = false;
     uint64_t last_sync_ts = 0;
+    bool need_process = false;
 
 #ifdef RANGE_PARTITION_ENABLED
     int32_t range_id = data_sync_task->range_id_;
@@ -2225,6 +2264,41 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     {
         return;
     }
+#else
+    const TableName primary_base_table_name{table_name.GetBaseTableNameSV(),
+                                            TableType::Primary};
+    CatalogEntry *catalog_entry =
+        GetCatalogInternal(primary_base_table_name, ng_id);
+    if (catalog_entry == nullptr)
+    {
+        data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+    }
+    else
+    {
+        // For dirty tables (create index in process), data older than
+        // last sync ts will be continously written into memory. We cannot
+        // rely on last sync ts to determin if there's dirty data that needs
+        // to be flushed.
+        last_sync_ts = is_dirty ? 0 : catalog_entry->GetLastSyncTs();
+        if (target_data_sync_ts <= last_sync_ts && !is_dirty)
+        {
+            // 1) For table that is_dirty is false, can set finish
+            // directly.
+            data_sync_task->SetFinish();
+            // Handle the pending tasks for the same table
+            catalog_entry->PopPendingSyncTask();
+        }
+        else if (catalog_entry->TrySetDataSync(true, data_sync_task))
+        {
+            need_process = true;
+        }
+    }
+
+    if (!need_process)
+    {
+        return;
+    }
+
 #endif
 
     // Check the leader
@@ -2239,6 +2313,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         range_entry->TrySetDataSync(false);
         // Handle the pending tasks for the same range
         range_entry->PopPendingSyncTask();
+#else
+        // Set table sync status.
+        catalog_entry->TrySetDataSync(false);
+        // Handle the pending tasks for the same table
+        catalog_entry->PopPendingSyncTask();
 #endif
         if (ng_term >= 0)
         {
@@ -2288,6 +2367,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         {
             range_entry->TrySetDataSync(false);
         }
+#else
+        meta_lk.lock();
+        catalog_entry = GetCatalogInternal(primary_base_table_name, ng_id);
+        if (catalog_entry)
+        {
+            catalog_entry->TrySetDataSync(false);
+        }
 #endif
         return;
     }
@@ -2335,6 +2421,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             // If read lock acquire failed, retry next time.
             // Put back into the beginning.
             data_sync_task_queue_.emplace_front(std::move(data_sync_task));
+
 #ifdef RANGE_PARTITION_ENABLED
             meta_lk.lock();
             range_entry =
@@ -2342,6 +2429,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             if (range_entry)
             {
                 range_entry->TrySetDataSync(false);
+            }
+#else
+            meta_lk.lock();
+            catalog_entry = GetCatalogInternal(primary_base_table_name, ng_id);
+            if (catalog_entry)
+            {
+                catalog_entry->TrySetDataSync(false);
             }
 #endif
         }
@@ -2490,6 +2584,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 #ifdef RANGE_PARTITION_ENABLED
             // Update the table data sync status.
             range_entry->TrySetDataSync(false);
+#else
+            catalog_entry->TrySetDataSync(false);
 #endif
             txservice::AbortTx(data_sync_txm);
             task_worker_lk.lock();
@@ -2554,13 +2650,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 
     std::unique_ptr<std::vector<const TxKey *>> mv_base_vec =
         std::make_unique<std::vector<const TxKey *>>();
+
+#ifdef RANGE_PARTITION_ENABLED
     // Sort output vectors in key sorting order.
     auto key_greater = [](const TxKey *r1, const TxKey *r2) -> bool
     { return *r2 < *r1; };
     auto rec_greater = [](const FlushRecord &r1, const FlushRecord &r2) -> bool
     { return *r2.Key() < *r1.Key(); };
 
-#ifdef RANGE_PARTITION_ENABLED
     MergeSortedVectors(
         std::move(mv_base_vecs), *mv_base_vec, key_greater, false);
 
@@ -2579,12 +2676,29 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 #else
     for (size_t i = 0; i < cc_shards_.size(); i++)
     {
-        for (int j = 0; j < data_sync_vecs[i].size(); j++)
+        for (size_t j = 0; j < data_sync_vecs[i].size(); j++)
         {
             data_sync_vec->push_back(std::move(data_sync_vecs[i][j]));
         }
     }
+
+    for (size_t i = 0; i < cc_shards_.size(); ++i)
+    {
+        for (size_t j = 0; j < archive_vecs[i].size(); ++j)
+        {
+            archive_vec->push_back(std::move(archive_vecs[i][j]));
+        }
+    }
+
+    for (size_t i = 0; i < cc_shards_.size(); ++i)
+    {
+        for (size_t j = 0; j < mv_base_vecs[i].size(); ++j)
+        {
+            mv_base_vec->push_back(std::move(mv_base_vecs[i][j]));
+        }
+    }
 #endif
+
     // 4. Process the data sync vec
     if (data_sync_vec->size() != 0 || archive_vec->size() != 0 ||
         mv_base_vec->size() != 0)
@@ -2721,6 +2835,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         // Handle the pending tasks for the same table
         range_entry->PopPendingSyncTask();
         // Nothing to flush in this range.
+#else
+        catalog_entry->TrySetDataSync(false, nullptr, target_data_sync_ts);
+        catalog_entry->PopPendingSyncTask();
 #endif
         // Commit the data sync txm
         txservice::CommitTx(data_sync_txm);
@@ -3121,9 +3238,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
     if (ng_term >= 0)
     {
-#ifdef RANGE_PARTITION_ENABLED
         if (data_sync_task != nullptr)
         {
+#ifdef RANGE_PARTITION_ENABLED
             TableRangeEntry *range_entry =
                 const_cast<TableRangeEntry *>(GetTableRangeEntry(
                     table_name, node_group, data_sync_task->range_id_));
@@ -3139,8 +3256,24 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             }
             range_entry->UnPinStoreRange();
             range_entry->PopPendingSyncTask();
-        }
+#else
+            const TableName base_table_name{table_name.GetBaseTableNameSV(),
+                                            TableType::Primary};
+            CatalogEntry *catalog_entry =
+                GetCatalog(base_table_name, node_group);
+            assert(catalog_entry);
+            if (succ)
+            {
+                catalog_entry->TrySetDataSync(false, nullptr, data_sync_ts);
+            }
+            else
+            {
+                catalog_entry->TrySetDataSync(false);
+            }
+
+            catalog_entry->PopPendingSyncTask();
 #endif
+        }
         // Unpin node group data.
         Sharder::Instance().UnpinNodeGroupData(node_group);
     }

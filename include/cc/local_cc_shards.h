@@ -425,6 +425,8 @@ public:
     void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
     CatalogEntry *GetCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
+    CatalogEntry *GetCatalogInternal(const TableName &table_name,
+                                     NodeGroupId cc_ng_id);
 
     /**
      * @brief Drops all tables' catalogs associated with the specified cc node

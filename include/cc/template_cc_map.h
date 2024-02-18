@@ -4437,6 +4437,7 @@ public:
         }
     }
 
+#ifdef RANGE_PARTITION_ENABLED
     bool Execute(DataSyncScanCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -4751,9 +4752,9 @@ public:
             if (cce->NeedCkpt())
             {
                 bool need_export = true;
-#ifdef RANGE_PARTITION_ENABLED
-                if (cce->data_store_size_.load(std::memory_order_acquire) ==
-                    INT32_MAX)
+                if (!req.include_flushed_rec_ &&
+                    cce->data_store_size_.load(std::memory_order_acquire) ==
+                        INT32_MAX)
                 {
                     // Load data store size by pinning the slice. Data
                     // store size is required to decide slice & range
@@ -4821,10 +4822,10 @@ public:
                         // is set, pinning slice in checkpointing never returns
                         // Delay.
                         req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                        return true;
+                        return false;
                     }
                 }
-#endif
+
                 if (need_export)
                 {
                     cce->ExportForCkpt(
@@ -5010,8 +5011,8 @@ public:
         }
         else
         {
-            // set the pause_key_ to mark resume position and put the CkptScanCc
-            // request into CcQueue again.
+            // set the pause_key_ to mark resume position and put the
+            // DataSyncScanCc request into CcQueue again.
             if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
                 req.scan_batch_size_)
             {
@@ -5031,6 +5032,215 @@ public:
 
         return false;
     }
+#else
+
+    bool Execute(DataSyncScanCc &req) override
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
+        const KeyT *const req_start_key =
+            req.start_key_ ? static_cast<const KeyT *>(req.start_key_)
+                           : NegativeInfinity<KeyT>::Instance();
+        const KeyT *const req_end_key =
+            req.end_key_ ? static_cast<const KeyT *>(req.end_key_)
+                         : PositiveInfinity<KeyT>::Instance();
+
+        Iterator it;
+        Iterator end_it;
+        if (req.pause_key_.at(shard_->core_id_).second)
+        {
+            // scan is already finished on this core
+            std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
+            req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+            return false;
+        }
+
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            return false;
+        }
+
+        if (req.pause_key_.at(shard_->core_id_).first == nullptr)
+        {
+            // If this is a new scan cc, start from the specified start
+            // key or negative inf.
+            if (req_start_key == NegativeInfinity<KeyT>::Instance())
+            {
+                it = Begin();
+                it++;
+            }
+            else
+            {
+                it = LowerBound(*req_start_key);
+                if (it->first == NegativeInfinity<KeyT>::Instance())
+                {
+                    it++;
+                }
+            }
+        }
+        else
+        {
+            const KeyT *pause_key = static_cast<const KeyT *>(
+                req.pause_key_.at(shard_->core_id_).first.get());
+            it = LowerBound(*pause_key);
+        }
+
+        const KeyT *search_end_key = req_end_key;
+
+        if (search_end_key == PositiveInfinity<KeyT>::Instance())
+        {
+            end_it = End();
+        }
+        else
+        {
+            std::pair<Iterator, ScanType> end_pair =
+                ForwardScanStart(*search_end_key, true);
+            end_it = end_pair.first;
+            if (end_pair.second == ScanType::ScanGap)
+            {
+                ++end_it;
+            }
+        }
+
+        // Since we might skip the page that end_it is on if it's not updated
+        // since last ckpt, it might skip end_it. If the last page is skipped it
+        // will be set as the first entry on the next page. Also check if (it ==
+        // end_it_next_page_it).
+        Iterator end_it_next_page_it = end_it;
+        if (end_it_next_page_it != End())
+        {
+            CcPage<KeyT, ValueT> *ccp = end_it_next_page_it.GetPage();
+            assert(ccp != nullptr);
+            if (ccp->next_page_ == PagePosInf())
+            {
+                end_it_next_page_it = End();
+            }
+            else
+            {
+                end_it_next_page_it = Iterator(ccp->next_page_, 0, &neg_inf_);
+            }
+        }
+
+        uint64_t recycle_ts = 1U;
+        if (shard_->EnableMvcc())
+        {
+            recycle_ts = shard_->GlobalMinSiTxStartTs();
+        }
+
+        // Only scan for updates after given from ts. previous_ckpt_ts_ is
+        // used during regular ckpt, and previous_scan_ts_ is used during range
+        // split explicitly.
+        uint64_t from_ts = req.previous_ckpt_ts_;
+
+        // DataSyncScanCc is running on TxProcessor thread. To avoid
+        // blocking other transaction for a long time, we only process
+        // CkptScanBatch number of pages in each round.
+        for (size_t scan_cnt = 0;
+             scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
+             req.accumulated_scan_cnt_.at(shard_->core_id_) <
+                 req.scan_batch_size_ &&
+             it != end_it && it != end_it_next_page_it;
+             scan_cnt++)
+        {
+            const KeyT *key = it->first;
+            CcEntry<KeyT, ValueT> *cce = it->second;
+            CcPage<KeyT, ValueT> *ccp = it.GetPage();
+            assert(ccp);
+
+            if (ccp->last_dirty_commit_ts_ <= from_ts)
+            {
+                // Skip the pages that have no updates since last data sync.
+                if (ccp->next_page_ == PagePosInf())
+                {
+                    it = End();
+                }
+                else
+                {
+                    it = Iterator(ccp->next_page_, 0, &neg_inf_);
+                }
+                continue;
+            }
+
+#ifndef ON_KEY_OBJECT
+            if (shard_->EnableMvcc())
+            {
+                shard_->DecrementMemory(cce->KickOutArchiveRecords(recycle_ts));
+            }
+#endif
+
+            if (cce->NeedCkpt())
+            {
+                cce->ExportForCkpt(*key,
+                                   req.DataSyncVec(shard_->core_id_),
+                                   req.ArchiveVec(shard_->core_id_),
+                                   req.MoveBaseIdxVec(shard_->core_id_),
+                                   req.previous_scan_ts_,
+                                   req.data_sync_ts_,
+                                   recycle_ts,
+                                   Type(),
+                                   shard_->EnableMvcc(),
+                                   req.accumulated_scan_cnt_[shard_->core_id_],
+                                   false);
+            }
+
+            // Forward iterator
+            it++;
+        }
+
+        TxKey::Uptr next_pause_key = nullptr;
+        bool no_more_data = (it == end_it) || (it == end_it_next_page_it);
+        if (!no_more_data)
+        {
+            next_pause_key = it->first->Clone();
+        }
+
+        if (no_more_data)
+        {
+            // scan data drained
+            std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
+            req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+            // Access DataSyncScanCc member variable is unsafe after
+            // SetFinished(...).
+
+            return false;
+        }
+        else
+        {
+            // set the pause_key_ to mark resume position and put the
+            // DataSyncScanCc request into CcQueue again.
+            if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
+                req.scan_batch_size_)
+            {
+                req.pause_key_.at(shard_->core_id_).first =
+                    std::move(next_pause_key);
+                shard_->Enqueue(&req);
+            }
+            else
+            {
+                // scan data is not drained
+                std::pair<TxKey::Uptr, bool> ckpt_scan_result{
+                    std::move(next_pause_key), false};
+                req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+                return false;
+            }
+        }
+
+        return false;
+    }
+#endif
 
     bool Execute(BroadcastStatisticsCc &req) override
     {
