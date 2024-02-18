@@ -745,9 +745,9 @@ public:
                     it = cce->replay_cmd_list_->txn_cmd_list_.erase(it);
                 }
                 cce->replay_cmd_list_->cur_version_ = commit_ts;
+                TryCommitReplayCommands(
+                    cce->payload_, cce->replay_cmd_list_, cce->commit_ts_);
             }
-            TryCommitReplayCommands(
-                cce->payload_, cce->replay_cmd_list_, cce->commit_ts_);
         }
     }
 
