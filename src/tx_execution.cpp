@@ -442,10 +442,10 @@ void TransactionExecution::CloseTxScan(uint64_t alias,
 
     Execute(scan_close_req);
 #ifdef EXT_TX_PROC_ENABLED
-    // Note that for scan open, we don't enlist the tx for execution, and only
-    // enlist for scan close. This is because scan open is always followed by
-    // scan next or scan close, which will enlist the tx and executes scan open.
-    // ExternalForward();
+// Note that for scan open, we don't enlist the tx for execution, and only
+// enlist for scan close. This is because scan open is always followed by
+// scan next or scan close, which will enlist the tx and executes scan open.
+// ExternalForward();
 #endif
 }
 
@@ -2231,7 +2231,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
 void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 {
-    // collect metrics: remote scan next duration
+// collect metrics: remote scan next duration
 #ifdef RANGE_PARTITION_ENABLED
     if (metrics::enable_transactions &&
         !scan_next.slice_hd_result_.Value().is_local_)
@@ -5485,6 +5485,8 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                          !rw_set_.FindObjectCommand(*obj_cmd_op.table_name_,
                                                     cmd_res.cce_addr_))
                 {
+                    DLOG(INFO)
+                        << "txm acquired readlock, ReadIntent or WriteIntent";
                     // Read lock is acquired under locking protocol. Add the cce
                     // to read set for later PostRead.
                     rw_set_.AddRead(cmd_res.cce_addr_,

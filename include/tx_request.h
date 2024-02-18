@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <tuple>
 #include <utility>
@@ -743,6 +744,13 @@ struct ObjectCommandTxRequest
     // whether this object is pointer owner
     bool is_key_owner_{};
     bool is_cmd_owner_{};
+
+    bool operator<(const ObjectCommandTxRequest &r) const
+    {
+        return *this->Key() < *r.Key();
+    }
+
+    bool operator<(const MultiObjectCommandTxRequest &r) const;
 };
 
 struct MultiObjectCommandTxRequest
@@ -810,6 +818,33 @@ struct MultiObjectCommandTxRequest
     MultiObjectCommandTxRequest &operator=(MultiObjectCommandTxRequest &&rhs) =
         delete;
 
+    bool operator<(const ObjectCommandTxRequest &r) const
+    {
+        const auto &max_key =
+            *std::max_element(this->VctKey()->begin(),
+                              this->VctKey()->end(),
+                              [](const TxKey *lhs, const TxKey *rhs) -> bool
+                              { return *lhs < *rhs; });
+        return *max_key < *r.Key();
+    }
+
+    bool operator<(const MultiObjectCommandTxRequest &r) const
+    {
+        const auto &key_ptrs = this->VctKey();
+        const auto &r_key_ptrs = r.VctKey();
+        const auto &max_key =
+            *std::max_element(key_ptrs->begin(),
+                              key_ptrs->end(),
+                              [](const TxKey *lhs, const TxKey *rhs) -> bool
+                              { return *lhs < *rhs; });
+        const auto &r_min_key =
+            *std::min_element(r_key_ptrs->begin(),
+                              r_key_ptrs->end(),
+                              [](const TxKey *lhs, const TxKey *rhs) -> bool
+                              { return *lhs < *rhs; });
+        return *max_key < *r_min_key;
+    }
+
     const std::vector<const TxKey *> *VctKey() const
     {
         MultiObjectTxCommand *cmd =
@@ -840,6 +875,18 @@ struct MultiObjectCommandTxRequest
     };
     bool is_cmd_owner_{};
 };
+
+inline bool ObjectCommandTxRequest::operator<(
+    const MultiObjectCommandTxRequest &r) const
+{
+    const auto &key_ptr = this->Key();
+    const auto &r_key_ptrs = r.VctKey();
+    const auto &r_min_key = *std::min_element(
+        r_key_ptrs->begin(),
+        r_key_ptrs->end(),
+        [](const TxKey *lhs, const TxKey *rhs) -> bool { return *lhs < *rhs; });
+    return *key_ptr < *r_min_key;
+}
 
 struct ClusterScaleTxRequest
     : public TemplateTxRequest<ClusterScaleTxRequest, Void>
