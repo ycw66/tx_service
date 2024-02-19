@@ -1281,6 +1281,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             }
             else if (retry_num_ > 0)
             {
+                slice_hd_result_.Value().Reset();
                 slice_hd_result_.Reset();
                 ReRunOp(txm);
                 return;

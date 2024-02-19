@@ -259,11 +259,9 @@ void CcStreamReceiver::PreProcessScanResp(
 
     RangeScanSliceResult &scan_slice_result = hd_res->Value();
     CcScanner &range_scanner = *scan_slice_result.ccm_scanner_;
-    const TxKey *scan_end = nullptr;
     if (!msg->last_key().empty())
     {
-        scan_end = scan_slice_result.SetLastKey(
-            range_scanner.DecodeKey(msg->last_key()));
+        scan_slice_result.SetLastKey(range_scanner.DecodeKey(msg->last_key()));
     }
     else
     {

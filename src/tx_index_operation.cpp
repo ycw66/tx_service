@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "../log_service/include/log_type.h"
+#include "error_messages.h"
 #include "local_cc_shards.h"
 #include "remote/remote_type.h"
 #include "tx_execution.h"
@@ -1345,6 +1346,12 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
         if (ng_term < 0)
         {
             ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        }
+        if (ng_term < 0)
+        {
+            Sharder::Instance().UpdateLeader(ng_id);
+            hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return;
         }
         assert(ng_term > 0);
         local_cc_shards->EnqueueDataSyncTaskForTable(table_name,
