@@ -39,7 +39,7 @@ public:
      * @param object
      * @return success
      */
-    virtual bool ExecuteOn(TxObject &object) = 0;
+    virtual bool ExecuteOn(const TxObject &object) = 0;
 
     // Commit current command on obj_ptr, return the new object if the command
     // changes or deletes the object. Read only command need not commit.
