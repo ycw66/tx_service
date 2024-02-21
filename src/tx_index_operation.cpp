@@ -2153,7 +2153,9 @@ bool UpsertTableIndexOp::ScanNextFromCcMap(
 
             ScanBatchTxRequest scan_batch_req(
                 scan_alias, table_name, &scan_batch);
+#ifdef RANGE_PARTITION_ENABLED
             scan_batch_req.prefetch_slice_cnt_ = PrefetchSize();
+#endif
             scan_txm->Execute(&scan_batch_req);
             scan_batch_req.Wait();
 
