@@ -135,6 +135,22 @@ public:
     int64_t node_group_term_{-1};
     uint64_t data_sync_ts_{0};
 
+#ifndef RANGE_PARTITION_ENABLED
+    enum class CkptErrorCode
+    {
+        NO_ERROR = 0,
+        // Failed on data sync scan
+        SCAN_ERROR,
+        // Failed on flush data
+        FLUSH_ERROR,
+    };
+
+    std::mutex flight_task_mux_;
+    // Flush data task cnt + 1 (Data sync task)
+    int64_t flight_task_cnt_{0};
+    CkptErrorCode ckpt_err_{CkptErrorCode::NO_ERROR};
+#endif
+
     std::shared_ptr<DataSyncStatus> status_{nullptr};
     // True if need to truncate redo log when all tasks succeed.
     bool need_truncate_log_{true};
@@ -862,6 +878,12 @@ private:
                              bool is_dirty,
                              std::shared_ptr<DataSyncStatus> status,
                              CcHandlerResult<Void> *hres);
+#ifndef RANGE_PARTITION_ENABLED
+    void PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
+                                 TransactionExecution *data_sync_txm,
+                                 CatalogEntry *catalog_entry,
+                                 DataSyncTask::CkptErrorCode ckpt_err);
+#endif
 
     const uint32_t node_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;

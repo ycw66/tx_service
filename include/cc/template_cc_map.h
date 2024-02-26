@@ -4462,11 +4462,10 @@ public:
 
         Iterator it;
         Iterator end_it;
-        if (req.pause_key_.at(shard_->core_id_).second)
+        if (req.IsDrained(shard_->core_id_))
         {
             // scan is already finished on this core
-            std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
-            req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+            req.SetFinish(shard_->core_id_);
             return false;
         }
 
@@ -4477,16 +4476,18 @@ public:
             return false;
         }
 
+        auto &pause_key_and_is_drained = req.PauseKey(shard_->core_id_);
+
         // Slice_id is not set, We need to pin slice.
         if (req.include_flushed_rec_ &&
             nullptr == req.slice_ids_[shard_->core_id_].Slice())
         {
             const KeyT *slice_start_key = nullptr;
-            if (req.pause_key_[shard_->core_id_].first != nullptr)
+            if (pause_key_and_is_drained.first != nullptr)
             {
                 // Pin slice failed in the previous execution. Now, retry to pin
                 slice_start_key = static_cast<const KeyT *>(
-                    req.pause_key_[shard_->core_id_].first.get());
+                    pause_key_and_is_drained.first.get());
             }
             else
             {
@@ -4526,14 +4527,12 @@ public:
                 }
                 case RangeSliceOpStatus::BlockedOnLoad:
                 {
-                    req.pause_key_.at(shard_->core_id_).first =
-                        slice_start_key->Clone();
+                    pause_key_and_is_drained.first = slice_start_key->Clone();
                     return false;
                 }
                 case RangeSliceOpStatus::Retry:
                 {
-                    req.pause_key_.at(shard_->core_id_).first =
-                        slice_start_key->Clone();
+                    pause_key_and_is_drained.first = slice_start_key->Clone();
                     shard_->Enqueue(shard_->LocalCoreId(), &req);
                     return false;
                 }
@@ -4599,7 +4598,7 @@ public:
         }
         else
         {
-            if (req.pause_key_.at(shard_->core_id_).first == nullptr)
+            if (pause_key_and_is_drained.first == nullptr)
             {
                 // If this is a new scan cc, start from the specified start
                 // key or negative inf.
@@ -4620,7 +4619,7 @@ public:
             else
             {
                 const KeyT *pause_key = static_cast<const KeyT *>(
-                    req.pause_key_.at(shard_->core_id_).first.get());
+                    pause_key_and_is_drained.first.get());
                 it = LowerBound(*pause_key);
             }
 
@@ -4789,15 +4788,13 @@ public:
                     }
                     else if (pin_status == RangeSliceOpStatus::Retry)
                     {
-                        req.pause_key_.at(shard_->core_id_).first =
-                            key->Clone();
+                        pause_key_and_is_drained.first = key->Clone();
                         shard_->Enqueue(shard_->LocalCoreId(), &req);
                         return false;
                     }
                     else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
                     {
-                        req.pause_key_.at(shard_->core_id_).first =
-                            key->Clone();
+                        pause_key_and_is_drained.first = key->Clone();
                         return false;
                     }
                     else if (pin_status == RangeSliceOpStatus::NotOwner)
@@ -4932,13 +4929,13 @@ public:
                     }
                     case RangeSliceOpStatus::BlockedOnLoad:
                     {
-                        req.pause_key_.at(shard_->core_id_).first =
+                        pause_key_and_is_drained.first =
                             slice_start_key->Clone();
                         return false;
                     }
                     case RangeSliceOpStatus::Retry:
                     {
-                        req.pause_key_.at(shard_->core_id_).first =
+                        pause_key_and_is_drained.first =
                             slice_start_key->Clone();
                         shard_->Enqueue(shard_->LocalCoreId(), &req);
                         return false;
@@ -5002,8 +4999,8 @@ public:
                 req.slice_ids_[shard_->core_id_].Reset();
             }
 
-            std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
-            req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+            pause_key_and_is_drained = {nullptr, true};
+            req.SetFinish(shard_->core_id_);
             // Access DataSyncScanCc member variable is unsafe after
             // SetFinished(...).
 
@@ -5016,16 +5013,14 @@ public:
             if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
                 req.scan_batch_size_)
             {
-                req.pause_key_.at(shard_->core_id_).first =
-                    std::move(next_pause_key);
+                pause_key_and_is_drained.first = std::move(next_pause_key);
                 shard_->Enqueue(&req);
             }
             else
             {
                 // scan data is not drained
-                std::pair<TxKey::Uptr, bool> ckpt_scan_result{
-                    std::move(next_pause_key), false};
-                req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+                pause_key_and_is_drained.first = std::move(next_pause_key);
+                req.SetFinish(shard_->core_id_);
                 return false;
             }
         }
@@ -5058,11 +5053,10 @@ public:
 
         Iterator it;
         Iterator end_it;
-        if (req.pause_key_.at(shard_->core_id_).second)
+        if (req.IsDrained(shard_->core_id_))
         {
             // scan is already finished on this core
-            std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
-            req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+            req.SetFinish(shard_->core_id_);
             return false;
         }
 
@@ -5073,7 +5067,9 @@ public:
             return false;
         }
 
-        if (req.pause_key_.at(shard_->core_id_).first == nullptr)
+        auto &pause_key_and_is_drained = req.PauseKey(shard_->core_id_);
+
+        if (pause_key_and_is_drained.first == nullptr)
         {
             // If this is a new scan cc, start from the specified start
             // key or negative inf.
@@ -5093,8 +5089,8 @@ public:
         }
         else
         {
-            const KeyT *pause_key = static_cast<const KeyT *>(
-                req.pause_key_.at(shard_->core_id_).first.get());
+            const KeyT *pause_key =
+                static_cast<const KeyT *>(pause_key_and_is_drained.first.get());
             it = LowerBound(*pause_key);
         }
 
@@ -5209,31 +5205,29 @@ public:
 
         if (no_more_data)
         {
+            pause_key_and_is_drained = {nullptr, true};
             // scan data drained
-            std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
-            req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+            req.SetFinish(shard_->core_id_);
             // Access DataSyncScanCc member variable is unsafe after
             // SetFinished(...).
-
             return false;
         }
         else
         {
+            assert(pause_key_and_is_drained.second == false);
             // set the pause_key_ to mark resume position and put the
             // DataSyncScanCc request into CcQueue again.
             if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
                 req.scan_batch_size_)
             {
-                req.pause_key_.at(shard_->core_id_).first =
-                    std::move(next_pause_key);
+                pause_key_and_is_drained.first = std::move(next_pause_key);
                 shard_->Enqueue(&req);
             }
             else
             {
                 // scan data is not drained
-                std::pair<TxKey::Uptr, bool> ckpt_scan_result{
-                    std::move(next_pause_key), false};
-                req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+                pause_key_and_is_drained.first = std::move(next_pause_key);
+                req.SetFinish(shard_->core_id_);
                 return false;
             }
         }

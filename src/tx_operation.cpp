@@ -3728,21 +3728,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     assert(need_copy_range);
 
                                     // We only need to pin slices that falls
-                                    // into old range after range split.
+                                    // into new range after range split.
                                     req_start_key =
                                         new_range_info_.begin()->first.get();
                                     req_end_key = end_key;
                                     include_flushed_rec = true;
-                                }
-
-                                std::vector<std::pair<TxKey::Uptr, bool>>
-                                    resume_pos;
-                                for (size_t i = 0;
-                                     i < Sharder::Instance()
-                                             .GetLocalCcShardsCount();
-                                     i++)
-                                {
-                                    resume_pos.emplace_back(nullptr, false);
                                 }
 
                                 bool scan_data_drained = false;
@@ -3759,7 +3749,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     node_group,
                                     tx_term,
                                     Sharder::Instance().GetLocalCcShardsCount(),
-                                    std::move(resume_pos),
                                     LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
                                     req_start_key,
                                     req_end_key,
@@ -3787,7 +3776,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     }
                                     else
                                     {
-                                        auto &res = scan_cc.Result();
                                         scan_data_drained = true;
 
                                         for (size_t i = 0;
@@ -3848,7 +3836,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                                             // if the data is drained
                                             scan_data_drained =
-                                                res.at(i).second &&
+                                                scan_cc.IsDrained(i) &&
                                                 scan_data_drained;
                                             // move the bucket into the tank
 
@@ -3858,7 +3846,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                 std::back_inserter(
                                                     archive_vecs.at(i)));
                                         }
-                                        scan_cc.Reset(std::move(res));
+                                        scan_cc.Reset();
                                     }
                                 }
                             }

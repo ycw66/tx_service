@@ -223,7 +223,7 @@ void CcStreamReceiver::PreProcessScanResp(
             msg->handler_addr());
 
         CODE_FAULT_INJECTOR("before_mark_remote_received", {
-            std::this_thread::sleep_for(std::chrono::seconds(10));
+            std::this_thread::sleep_for(std::chrono::seconds(15));
             std::this_thread::yield();
         });
 
@@ -249,7 +249,7 @@ void CcStreamReceiver::PreProcessScanResp(
         }
 
         CODE_FAULT_INJECTOR("after_mark_remote_received", {
-            std::this_thread::sleep_for(std::chrono::seconds(10));
+            std::this_thread::sleep_for(std::chrono::seconds(15));
             std::this_thread::yield();
         });
     }

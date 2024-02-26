@@ -365,17 +365,17 @@ struct BlobTxRecord : public TxRecord
      * To estimate log length.
      * @return
      */
-    virtual size_t SerializedLength() const
+    size_t SerializedLength() const override
     {
         return value_.size();
     };
 
-    virtual size_t MemUsage() const
+    size_t MemUsage() const override
     {
         return sizeof(BlobTxRecord) + value_.size();
     }
 
-    virtual size_t Size() const
+    size_t Size() const override
     {
         return value_.size();
     }

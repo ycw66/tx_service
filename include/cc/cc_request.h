@@ -2571,7 +2571,6 @@ public:
                    uint64_t node_group_id,
                    int64_t node_group_term,
                    uint16_t core_cnt,
-                   std::vector<std::pair<TxKey::Uptr, bool>> &&resume_pos,
                    size_t scan_batch_size,
                    const TxKey *target_start_key = nullptr,
                    const TxKey *target_end_key = nullptr,
@@ -2585,7 +2584,6 @@ public:
           data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
-          pause_key_(std::move(resume_pos)),
           scan_batch_size_(scan_batch_size),
           err_(CcErrorCode::NO_ERROR),
           unfinished_cnt_(core_cnt_),
@@ -2605,7 +2603,7 @@ public:
             archive_vec_.back().reserve(scan_batch_size);
             mv_base_idx_vec_.emplace_back();
             mv_base_idx_vec_.back().reserve(scan_batch_size);
-            res_.emplace_back(nullptr, false);
+            pause_key_.emplace_back(nullptr, false);
             accumulated_scan_cnt_.emplace_back(0);
         }
 #ifdef RANGE_PARTITION_ENABLED
@@ -2629,14 +2627,24 @@ public:
         }
         else
         {
+            pause_key_[ccs.core_id_] = {nullptr, true};
             // ccmap for this table does not exist on this shard, skip
             // scanning for this shard.
-            std::pair<TxKey::Uptr, bool> res{nullptr, true};
-            SetFinish(std::move(res), ccs.core_id_);
+            SetFinish(ccs.core_id_);
         }
         // return false since DataSyncScanCc is not re-used and does not need to
         // call CcRequestBase::Free
         return false;
+    }
+
+    bool IsDrained(size_t core_idx) const
+    {
+        return pause_key_[core_idx].second;
+    }
+
+    std::pair<TxKey::Uptr, bool> &PauseKey(size_t core_idx)
+    {
+        return pause_key_[core_idx];
     }
 
     void Wait()
@@ -2645,17 +2653,14 @@ public:
         cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
     }
 
-    void Reset(std::vector<std::pair<TxKey::Uptr, bool>> &&resume_pos)
+    void Reset()
     {
         std::lock_guard<std::mutex> lk(mux_);
-        pause_key_ = std::move(resume_pos);
         unfinished_cnt_ = core_cnt_;
-        res_.clear();
         for (size_t i = 0; i < core_cnt_; i++)
         {
             archive_vec_.at(i).clear();
             mv_base_idx_vec_.at(i).clear();
-            res_.emplace_back(nullptr, false);
             accumulated_scan_cnt_.at(i) = 0;
         }
     }
@@ -2695,10 +2700,9 @@ public:
         return err_;
     }
 
-    void SetFinish(std::pair<TxKey::Uptr, bool> &&res, size_t core_id)
+    void SetFinish(size_t core_id)
     {
         std::unique_lock<std::mutex> lk(mux_);
-        res_.at(core_id) = std::move(res);
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
@@ -2709,11 +2713,6 @@ public:
     uint32_t NodeGroupId()
     {
         return node_group_id_;
-    }
-
-    std::vector<std::pair<TxKey::Uptr, bool>> &Result()
-    {
-        return res_;
     }
 
     std::vector<FlushRecord> &DataSyncVec(uint16_t core_id)
@@ -2770,9 +2769,6 @@ private:
     uint32_t unfinished_cnt_;
     std::mutex mux_;
     std::condition_variable cv_;
-
-    // scan result
-    std::vector<std::pair<TxKey::Uptr, bool>> res_;
 
 #ifdef RANGE_PARTITION_ENABLED
     // True means we also need to scan data which has been flushed to storage.
