@@ -279,6 +279,21 @@ public:
                                     ng_term,
                                     &req);
                 req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
+
+                if (metrics::enable_cache_hit_rate)
+                {
+                    auto meter = shard_->GetMeter();
+                    if (cce->payload_status_ == RecordStatus::Unknown)
+                    {
+                        meter->Collect(
+                            metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
+                    }
+                    else
+                    {
+                        meter->Collect(
+                            metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
+                    }
+                }
                 return false;
             }
         }

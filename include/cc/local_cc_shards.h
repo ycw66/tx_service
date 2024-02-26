@@ -20,12 +20,12 @@
 #include "catalog_key_record.h"
 #include "cc_shard.h"
 #include "local_cc_handler.h"
-#include "metrics.h"
 #include "raft_log.pb.h"
 #include "range_record.h"
 #include "store/data_store_handler.h"
 #include "system_handler.h"
 #include "tx_service_common.h"
+#include "tx_service_metrics.h"
 #include "type.h"
 
 namespace txservice
@@ -791,8 +791,6 @@ public:
     // 5% of the total memory limit.
     const uint64_t range_slice_memory_limit_;
     store::DataStoreHandler *const store_hd_;
-    metrics::MetricsRegistry *const metrics_registry_;
-    metrics::CommonLabels common_labels_;
 
     /*
 

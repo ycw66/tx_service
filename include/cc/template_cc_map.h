@@ -19,8 +19,6 @@
 #include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
-#include "meter.h"
-#include "metrics.h"
 #include "proto/cc_request.pb.h"
 #include "remote/remote_cc_handler.h"  //RemoteCcHandler
 #include "remote/remote_cc_request.h"
@@ -32,6 +30,7 @@
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_record.h"
+#include "tx_service_metrics.h"
 #include "tx_trace.h"
 #include "type.h"
 
@@ -1409,11 +1408,11 @@ public:
                 // collect metrics: slice cache hits
                 if (metrics::enable_cache_hit_rate)
                 {
-                    auto meter = shard_->meter_.get();
+                    auto meter = shard_->GetMeter();
                     if (cce != nullptr)
                     {
                         meter->Collect(
-                            shard_->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "hits");
+                            metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
                     }
                 }
 
@@ -1559,6 +1558,21 @@ public:
                     cce->payload_status_ = RecordStatus::Deleted;
                     cce->commit_ts_ = 1U;
                     cce->ckpt_ts_.store(1U);
+                }
+
+                if (metrics::enable_cache_hit_rate)
+                {
+                    auto meter = shard_->GetMeter();
+                    if (cce->payload_status_ == RecordStatus::Unknown)
+                    {
+                        meter->Collect(
+                            metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
+                    }
+                    else
+                    {
+                        meter->Collect(
+                            metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
+                    }
                 }
 #endif
 
@@ -1727,6 +1741,18 @@ public:
                 {
                     assert(req.RecordBlob() != nullptr);
                     v_rec.payload_ptr_->Serialize(*req.RecordBlob());
+                }
+            }
+
+            if (metrics::enable_cache_hit_rate)
+            {
+                auto meter = shard_->GetMeter();
+                if (v_rec.payload_status_ == RecordStatus::Unknown ||
+                    v_rec.payload_status_ == RecordStatus::VersionUnknown ||
+                    v_rec.payload_status_ == RecordStatus::BaseVersionMiss)
+                {
+                    meter->Collect(
+                        metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
                 }
             }
             hd_res->Value().ts_ = v_rec.commit_ts_;

@@ -1,19 +1,20 @@
 #pragma once
 
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
-#include <vector>  // std::vector
+#include <vector>
 
 #include "catalog_factory.h"
 #include "cc/cc_entry.h"
-#include "metrics.h"
 #include "range_record.h"
 #include "range_slice.h"
 #include "store/data_store_scanner.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
+#include "tx_service_metrics.h"
 #include "type.h"
 
 namespace txservice
@@ -294,8 +295,27 @@ public:
         const std::vector<DataStoreSearchCond> &search_conds,
         const std::vector<TableName> &new_indexes_name) = 0;
 
-    virtual void SetMetricsRegistry(metrics::MetricsRegistry *,
-                                    metrics::CommonLabels = {}){};
+    void RegisterKvMetrics(metrics::MetricsRegistry *metrics_registry,
+                           metrics::CommonLabels common_labels = {})
+    {
+        assert(metrics_registry);
+        if (metrics::enable_kv_metrics)
+        {
+            metrics::kv_meter = std::make_unique<metrics::Meter>(
+                metrics_registry, common_labels);
+            metrics::kv_meter->Register(metrics::NAME_KV_FLUSH_ROWS_TOTAL,
+                                        metrics::Type::Counter,
+                                        {{"type", {"base", "archive"}}});
+            metrics::kv_meter->Register(metrics::NAME_KV_LOAD_SLICE_TOTAL,
+                                        metrics::Type::Counter);
+            metrics::kv_meter->Register(metrics::NAME_KV_LOAD_SLICE_DURATION,
+                                        metrics::Type::Histogram);
+            metrics::kv_meter->Register(metrics::NAME_KV_READ_TOTAL,
+                                        metrics::Type::Counter);
+            metrics::kv_meter->Register(metrics::NAME_KV_READ_DURATION,
+                                        metrics::Type::Histogram);
+        }
+    };
 
     virtual bool UpdateClusterConfig(
         const std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_cnf,

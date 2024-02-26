@@ -14,6 +14,7 @@
 #include "error_messages.h"
 #include "tx_key.h"
 #include "tx_record.h"
+#include "tx_service_metrics.h"
 #include "type.h"
 
 namespace txservice
@@ -40,6 +41,7 @@ public:
     size_t RequesterCount() const;
     NodeGroupId GetNodeGroupId() const;
     int64_t LeaderTerm() const;
+    metrics::TimePoint start_;
 
 protected:
     FetchCc(CcShard &ccs, NodeGroupId cc_ng_id, int64_t cc_ng_term);
@@ -367,6 +369,7 @@ public:
     }
 
     std::function<void(LoadRangeSliceRequest *)> post_lambda_;
+    metrics::TimePoint start_;
 
 private:
     const TableName *table_name_;

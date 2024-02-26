@@ -40,11 +40,9 @@ LocalCcShards::LocalCcShards(
     TxService *tx_service,
     bool enable_mvcc,
     metrics::MetricsRegistry *metrics_registry,
-    std::unordered_map<std::string, std::string> common_labels)
+    metrics::CommonLabels common_labels)
     : range_slice_memory_limit_(((uint64_t) MB(memory_limit_mb)) / 20),
       store_hd_(store_hd),
-      metrics_registry_(metrics_registry),
-      common_labels_(common_labels),
       node_id_(node_id),
       timer_terminate_(false),
       is_waiting_ckpt_(false),
@@ -78,6 +76,7 @@ LocalCcShards::LocalCcShards(
 
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
+        common_labels["core_id"] = std::to_string(thd_idx);
         cc_shards_.emplace_back(std::make_unique<CcShard>(thd_idx,
                                                           core_cnt,
                                                           memory_limit_mb,
@@ -86,7 +85,9 @@ LocalCcShards::LocalCcShards(
                                                           node_id,
                                                           *this,
                                                           catalog_factory_,
-                                                          system_handler));
+                                                          system_handler,
+                                                          metrics_registry,
+                                                          common_labels));
     }
 
     // Starts flush worker threads firstly.

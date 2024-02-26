@@ -7,6 +7,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -23,6 +24,7 @@
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
 #include "error_messages.h"
+#include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
 #include "meter.h"
 #include "metrics.h"
 #include "moodycamelqueue.h"
@@ -33,6 +35,7 @@
 #include "system_handler.h"
 #include "tentry.h"
 #include "tx_service_common.h"
+#include "tx_service_metrics.h"
 
 namespace txservice
 {
@@ -104,7 +107,9 @@ public:
             uint32_t node_id,
             LocalCcShards &local_shards,
             CatalogFactory *catalog_factory,
-            SystemHandler *system_handler);
+            SystemHandler *system_handler,
+            metrics::MetricsRegistry *metrics_registry = nullptr,
+            metrics::CommonLabels common_labels = {});
     /**
      * @brief Returns the cc map at this shard given the table name and the cc
      * node group.
@@ -184,14 +189,15 @@ public:
     size_t ProcessRequests()
     {
         uint32_t queue_size = cc_queue_size_.load(std::memory_order_relaxed);
-        // collect metrics: memory usage
+
         if (metrics::enable_memory_usage)
         {
             if (memory_usage_round_ == metrics::memory_usage_sample_round)
             {
                 int64_t allocated, committed;
                 mi_thread_stats(&allocated, &committed);
-                meter_->Collect(MEMORY_USAGE_NAME_, allocated * core_cnt_);
+                meter_->Collect(metrics::NAME_MEMORY_USAGE,
+                                allocated * core_cnt_);
                 memory_usage_round_ = 1;
             }
             else
@@ -725,6 +731,11 @@ public:
         last_read_ts_ = std::max(last_read_ts_, read_ts);
     }
 
+    metrics::Meter *GetMeter()
+    {
+        return meter_.get();
+    };
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
@@ -832,6 +843,8 @@ private:
     // reached.
     uint8_t lock_sparse_num_{0};
 
+    std::unique_ptr<metrics::Meter> meter_;
+
     /**
      * @brief The variable bookkeeps the latest time when any record in this
      * shard is accessed by read tx's. It is used to coordinate with write tx's
@@ -848,12 +861,5 @@ private:
     friend class LocalCcHandler;
     friend class LocalCcShards;
     friend class Checkpointer;
-
-public:
-    std::unique_ptr<metrics::Meter> meter_;
-    const metrics::Name MEMORY_LIMIT_NAME_{"memory_limit"};
-    const metrics::Name CACHE_HIT_OR_MISS_TOTAL_NAME_{
-        "cache_hit_or_miss_total"};
-    const metrics::Name MEMORY_USAGE_NAME_{"memory_usage"};
 };
 }  // namespace txservice

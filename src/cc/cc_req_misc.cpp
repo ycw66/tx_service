@@ -352,6 +352,12 @@ void LoadRangeSliceRequest::SetFinish()
     {
         post_lambda_(this);
     }
+    if (metrics::enable_kv_metrics)
+    {
+        metrics::kv_meter->Collect(metrics::NAME_KV_LOAD_SLICE_TOTAL, 1);
+        metrics::kv_meter->CollectDuration(metrics::NAME_KV_LOAD_SLICE_DURATION,
+                                           start_);
+    }
 }
 
 void LoadRangeSliceRequest::SetError()

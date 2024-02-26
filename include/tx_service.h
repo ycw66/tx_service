@@ -28,13 +28,12 @@
 #include "dead_lock_check.h"
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
-#include "meter.h"
-#include "metrics.h"
 #include "moodycamelqueue.h"
 #include "spinlock.h"
 #include "tx_execution.h"
 #include "tx_request.h"
 #include "tx_service_common.h"
+#include "tx_service_metrics.h"
 #include "tx_start_ts_collector.h"
 #include "txlog.h"
 
@@ -80,43 +79,46 @@ public:
           free_txs_(),
           free_prod_token_(free_txs_),
           free_consumer_token_(free_txs_),
-          txlog_hd_(txlog_hd),
-          meter_(
-              std::make_unique<metrics::Meter>(metrics_registry, common_labels))
+          txlog_hd_(txlog_hd)
     {
         if (metrics::enable_busy_round_metrics)
         {
-            meter_->Register(BUSY_ROUND_DURATION_NAME_,
-                             metrics::Type::Histogram);
-            meter_->Register(BUSY_ROUND_ACTIVE_TX_COUNT_NAME_,
-                             metrics::Type::Gauge);
-            meter_->Register(BUSY_ROUND_PROCESSED_CC_REQUEST_COUNT_NAME_,
-                             metrics::Type::Gauge);
-            meter_->Register(EMPTY_ROUND_RATIO_NAME_, metrics::Type::Gauge);
+            auto meter = GetMeter();
+            meter->Register(metrics::NAME_BUSY_ROUND_DURATION,
+                            metrics::Type::Histogram);
+            meter->Register(metrics::NAME_BUSY_ROUND_ACTIVE_TX_COUNT,
+                            metrics::Type::Gauge);
+            meter->Register(metrics::NAME_BUSY_ROUND_PROCESSED_CC_REQUEST_COUNT,
+                            metrics::Type::Gauge);
+            meter->Register(metrics::NAME_EMPTY_ROUND_RATIO,
+                            metrics::Type::Gauge);
         }
 
-        if (metrics::enable_transactions)
+        if (metrics::enable_tx_service_metrics)
         {
-            meter_->Register(TX_DURATION_NAME_, metrics::Type::Histogram);
-            meter_->Register(TX_PROCESSED_TOTAL_NAME_, metrics::Type::Counter);
-            meter_->Register(REMOTE_REQUEST_DURATION_NAME_,
-                             metrics::Type::Histogram,
-                             {{"type",
-                               {"read",
-                                "acquire_write",
-                                "validate",
-                                "post_process",
-                                "scan_next",
-                                "write_log"}}});
-            meter_->Register(REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
-                             metrics::Type::Gauge,
-                             {{"type",
-                               {"read",
-                                "acquire_write",
-                                "validate",
-                                "post_process",
-                                "scan_next",
-                                "write_log"}}});
+            auto meter = GetMeter();
+            meter->Register(metrics::NAME_TX_DURATION,
+                            metrics::Type::Histogram);
+            meter->Register(metrics::NAME_TX_PROCESSED_TOTAL,
+                            metrics::Type::Counter);
+            meter->Register(metrics::NAME_REMOTE_REQUEST_DURATION,
+                            metrics::Type::Histogram,
+                            {{"type",
+                              {"read",
+                               "acquire_write",
+                               "validate",
+                               "post_process",
+                               "scan_next",
+                               "write_log"}}});
+            meter->Register(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
+                            metrics::Type::Gauge,
+                            {{"type",
+                              {"read",
+                               "acquire_write",
+                               "validate",
+                               "post_process",
+                               "scan_next",
+                               "write_log"}}});
         }
 
         coordi_ = std::make_shared<TxProcCoordinator>();
@@ -131,6 +133,11 @@ public:
             expected = TxShardStatus::Free;
         }
     }
+
+    metrics::Meter *GetMeter()
+    {
+        return local_cc_shards_.GetCcShard(thd_id_)->GetMeter();
+    };
 
     TransactionExecution *NewTx()
     {
@@ -311,12 +318,13 @@ public:
 
         if (is_busy_round_ && metrics::enable_busy_round_metrics)
         {
-            meter_->CollectDuration(BUSY_ROUND_DURATION_NAME_,
-                                    busy_round_start_);
-            meter_->Collect(BUSY_ROUND_ACTIVE_TX_COUNT_NAME_,
-                            busy_round_active_tx_count_);
-            meter_->Collect(BUSY_ROUND_PROCESSED_CC_REQUEST_COUNT_NAME_,
-                            busy_round_processed_cc_req_count_);
+            auto meter = GetMeter();
+            meter->CollectDuration(metrics::NAME_BUSY_ROUND_DURATION,
+                                   busy_round_start_);
+            meter->Collect(metrics::NAME_BUSY_ROUND_ACTIVE_TX_COUNT,
+                           busy_round_active_tx_count_);
+            meter->Collect(metrics::NAME_BUSY_ROUND_PROCESSED_CC_REQUEST_COUNT,
+                           busy_round_processed_cc_req_count_);
             is_busy_round_ = false;
         }
 
@@ -405,7 +413,8 @@ public:
             }
 
             if (loop == 0 && metrics::enable_busy_round_metrics &&
-                local_cc_shards_.QueueSize(thd_id_) >= busy_round_threshold_)
+                local_cc_shards_.QueueSize(thd_id_) >=
+                    metrics::busy_round_threshold)
             {
                 is_busy_round_ = true;
                 busy_round_start_ = metrics::Clock::now();
@@ -428,14 +437,15 @@ public:
         }
 #endif
 
-        if (metrics::enable_collect_metrics)
+        if (metrics::enable_metrics)
         {
             empty_round_count_ += req_cnt == 0 ? 1 : 0;
             if (++total_round_count_ == empty_round_threshold_)
             {
-                meter_->Collect(EMPTY_ROUND_RATIO_NAME_,
-                                static_cast<double>(empty_round_count_) /
-                                    total_round_count_);
+                auto meter = GetMeter();
+                meter->Collect(metrics::NAME_EMPTY_ROUND_RATIO,
+                               static_cast<double>(empty_round_count_) /
+                                   total_round_count_);
                 empty_round_count_ = 0;
                 total_round_count_ = 0;
             }
@@ -846,27 +856,11 @@ private:
     bool is_busy_round_{false};
     size_t busy_round_processed_cc_req_count_{0};
     size_t busy_round_active_tx_count_{0};
-    size_t busy_round_threshold_{10};
     size_t empty_round_count_{0};
     size_t total_round_count_{0};
     size_t empty_round_threshold_{1000};
 
-    const metrics::Name BUSY_ROUND_DURATION_NAME_{"busy_round_duration"};
-    const metrics::Name BUSY_ROUND_ACTIVE_TX_COUNT_NAME_{
-        "busy_round_active_tx_count"};
-    const metrics::Name BUSY_ROUND_PROCESSED_CC_REQUEST_COUNT_NAME_{
-        "busy_round_processed_cc_request_count"};
-    const metrics::Name EMPTY_ROUND_RATIO_NAME_{"empty_round_ratio"};
-
 public:
-    std::unique_ptr<metrics::Meter> meter_;
-    const metrics::Name TX_DURATION_NAME_{"tx_duration"};
-    const metrics::Name TX_PROCESSED_TOTAL_NAME_{"tx_processed_total"};
-    const metrics::Name REMOTE_REQUEST_DURATION_NAME_{
-        "remote_request_duration"};
-    const metrics::Name REMOTE_REQUEST_ON_FLY_COUNT_NAME_{
-        "remote_request_on_fly_count"};
-
     friend class TxService;
     friend struct txservice::SplitFlushRangeOp;
 };
@@ -918,7 +912,7 @@ public:
 
         for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
         {
-            if (metrics::enable_collect_metrics)
+            if (metrics::enable_metrics)
             {
                 common_labels["core_id"] = std::to_string(thd_idx);
                 pool_.emplace_back(

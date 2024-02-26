@@ -1303,7 +1303,7 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
                 .append(std::to_string(this->tx_term_));
         });
 
-    if (metrics::enable_transactions)
+    if (metrics::enable_tx_service_metrics)
     {
         tx_duration_start_ = metrics::Clock::now();
     }
@@ -1569,13 +1569,12 @@ void TransactionExecution::Process(ReadOperation &read)
 
             if (!read.hd_result_.Value().is_local_)
             {
-                if (metrics::enable_transactions)
+                if (metrics::enable_tx_service_metrics)
                 {
-                    auto meter = tx_processor_->meter_.get();
-                    meter->Collect(
-                        tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
-                        metrics::Value::IncDecValue::Increment,
-                        "read");
+                    auto meter = tx_processor_->GetMeter();
+                    meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
+                                   metrics::Value::IncDecValue::Increment,
+                                   "read");
                     read.op_start_ = metrics::Clock::now();
                 }
 
@@ -1626,14 +1625,14 @@ void TransactionExecution::Process(ReadOperation &read)
 void TransactionExecution::PostProcess(ReadOperation &read)
 {
     // collect metrics: remote read duration
-    if (metrics::enable_transactions && !read.hd_result_.Value().is_local_)
+    if (metrics::enable_tx_service_metrics &&
+        !read.hd_result_.Value().is_local_)
     {
         metrics::Meter *meter;
-        meter = tx_processor_->meter_.get();
-        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
-                               read.op_start_,
-                               "read");
-        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+        meter = tx_processor_->GetMeter();
+        meter->CollectDuration(
+            metrics::NAME_REMOTE_REQUEST_DURATION, read.op_start_, "read");
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
                        "read");
     }
@@ -2104,10 +2103,10 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 protocol_);
 
             is_local = scan_next.slice_hd_result_.Value().is_local_;
-            if (metrics::enable_transactions && !is_local)
+            if (metrics::enable_tx_service_metrics && !is_local)
             {
-                auto meter = tx_processor_->meter_.get();
-                meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+                auto meter = tx_processor_->GetMeter();
+                meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                                metrics::Value::IncDecValue::Increment,
                                "scan_next");
                 scan_next.op_start_ = metrics::Clock::now();
@@ -2159,13 +2158,12 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     protocol_);
 
                 is_local = scan_next.slice_hd_result_.Value().is_local_;
-                if (metrics::enable_transactions && !is_local)
+                if (metrics::enable_tx_service_metrics && !is_local)
                 {
-                    auto meter = tx_processor_->meter_.get();
-                    meter->Collect(
-                        tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
-                        metrics::Value::IncDecValue::Increment,
-                        "scan_next");
+                    auto meter = tx_processor_->GetMeter();
+                    meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
+                                   metrics::Value::IncDecValue::Increment,
+                                   "scan_next");
                     scan_next.op_start_ = metrics::Clock::now();
                 }
             }
@@ -2233,16 +2231,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 {
 // collect metrics: remote scan next duration
 #ifdef RANGE_PARTITION_ENABLED
-    if (metrics::enable_transactions &&
+    if (metrics::enable_tx_service_metrics &&
         !scan_next.slice_hd_result_.Value().is_local_)
     {
         metrics::Meter *meter;
-        meter = tx_processor_->meter_.get();
-        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
+        meter = tx_processor_->GetMeter();
+        meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
                                scan_next.op_start_,
                                "scan_next");
-        meter = tx_processor_->meter_.get();
-        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+        meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
                        "scan_next");
     }
@@ -3175,12 +3173,12 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
         }
     }
 
-    if (metrics::enable_transactions &&
+    if (metrics::enable_tx_service_metrics &&
         acquire_write.hd_result_.Value().at(0).remote_ack_cnt_->load(
             std::memory_order_relaxed) > 0)
     {
-        auto meter = tx_processor_->meter_.get();
-        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+        auto meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Increment,
                        "acquire_write");
         acquire_write.op_start_ = metrics::Clock::now();
@@ -3192,16 +3190,16 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
 void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
 {
     // collect metrics: remote acquire write duration
-    if (metrics::enable_transactions &&
+    if (metrics::enable_tx_service_metrics &&
         acquire_write.op_start_ < metrics::TimePoint::max())
     {
         metrics::Meter *meter;
-        meter = tx_processor_->meter_.get();
-        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
+        meter = tx_processor_->GetMeter();
+        meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
                                acquire_write.op_start_,
                                "acquire_write");
-        meter = tx_processor_->meter_.get();
-        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+        meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
                        "acquire_write");
     }
@@ -3403,10 +3401,11 @@ void TransactionExecution::Process(ValidateOperation &validate)
         }
     }
 
-    if (metrics::enable_transactions && !validate.hd_result_.Value().is_local_)
+    if (metrics::enable_tx_service_metrics &&
+        !validate.hd_result_.Value().is_local_)
     {
-        auto meter = tx_processor_->meter_.get();
-        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+        auto meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Increment,
                        "validate");
         validate.op_start_ = metrics::Clock::now();
@@ -3426,14 +3425,15 @@ void TransactionExecution::Process(ValidateOperation &validate)
 void TransactionExecution::PostProcess(ValidateOperation &validate)
 {
     // collect metrics: remote validate duration
-    if (metrics::enable_transactions && !validate.hd_result_.Value().is_local_)
+    if (metrics::enable_tx_service_metrics &&
+        !validate.hd_result_.Value().is_local_)
     {
         metrics::Meter *meter;
-        meter = tx_processor_->meter_.get();
-        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
+        meter = tx_processor_->GetMeter();
+        meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
                                validate.op_start_,
                                "validate");
-        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
                        "validate");
     }
@@ -3856,10 +3856,10 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
     write_log.Reset();
     write_log.is_running_ = true;
 
-    if (metrics::enable_transactions)
+    if (metrics::enable_tx_service_metrics)
     {
-        auto meter = tx_processor_->meter_.get();
-        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+        auto meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Increment,
                        "write_log");
         write_log.op_start_ = metrics::Clock::now();
@@ -3890,15 +3890,15 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
 void TransactionExecution::PostProcess(WriteToLogOp &write_log)
 {
     // collect metrics: write log duration
-    if (metrics::enable_transactions)
+    if (metrics::enable_tx_service_metrics)
     {
         metrics::Meter *meter;
-        meter = tx_processor_->meter_.get();
-        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
+        meter = tx_processor_->GetMeter();
+        meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
                                write_log.op_start_,
                                "write_log");
-        meter = tx_processor_->meter_.get();
-        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+        meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
                        "write_log");
     }
@@ -4278,11 +4278,11 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         }
     }
 
-    if (metrics::enable_transactions &&
+    if (metrics::enable_tx_service_metrics &&
         !post_process.hd_result_.Value().is_local_)
     {
-        auto meter = tx_processor_->meter_.get();
-        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+        auto meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Increment,
                        "post_process");
         post_process.op_start_ = metrics::Clock::now();
@@ -4295,21 +4295,20 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
 {
     // collect metrics: remote post process duration
     // collect metrics: tx duration, and tx processed total
-    if (metrics::enable_transactions)
+    if (metrics::enable_tx_service_metrics)
     {
-        auto meter = tx_processor_->meter_.get();
+        auto meter = tx_processor_->GetMeter();
         if (!post_process.hd_result_.Value().is_local_)
         {
-            meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
+            meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
                                    post_process.op_start_,
                                    "post_process");
-            meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+            meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                            metrics::Value::IncDecValue::Decrement,
                            "post_process");
         }
-        meter->CollectDuration(tx_processor_->TX_DURATION_NAME_,
-                               tx_duration_start_);
-        meter->Collect(tx_processor_->TX_PROCESSED_TOTAL_NAME_, 1);
+        meter->CollectDuration(metrics::NAME_TX_DURATION, tx_duration_start_);
+        meter->Collect(metrics::NAME_TX_PROCESSED_TOTAL, 1);
     }
 
     TX_TRACE_ACTION_WITH_CONTEXT(

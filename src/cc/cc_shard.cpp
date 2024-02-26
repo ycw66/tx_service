@@ -2,6 +2,7 @@
 
 #include <chrono>  // std::chrono
 #include <cstdint>
+#include <string>
 
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
@@ -24,7 +25,9 @@ CcShard::CcShard(uint16_t core_id,
                  uint32_t node_id,
                  LocalCcShards &local_shards,
                  CatalogFactory *catalog_factory,
-                 SystemHandler *system_handler)
+                 SystemHandler *system_handler,
+                 metrics::MetricsRegistry *metrics_registry,
+                 metrics::CommonLabels common_labels)
     : node_id_(node_id),
       core_id_(core_id),
       core_cnt_(core_cnt),
@@ -48,10 +51,7 @@ CcShard::CcShard(uint16_t core_id,
       ckpter_(nullptr),
       catalog_factory_(catalog_factory),
       system_handler_(system_handler),
-      active_si_txs_(),
-      meter_(std::make_unique<metrics::Meter>(local_shards.metrics_registry_,
-                                              local_shards_.common_labels_))
-
+      active_si_txs_()
 {
     // memory_limit_ and log_limit_ are calculated at shard level.
 #ifdef RANGE_PARTITION_ENABLED
@@ -104,33 +104,35 @@ CcShard::CcShard(uint16_t core_id,
                                      this, node_id_, cluster_config_ccm_name));
     }
 
-    if (metrics::enable_collect_metrics)
+    // init meter
+    if (metrics::enable_metrics)
     {
-        meter_->Register(MEMORY_LIMIT_NAME_, metrics::Type::Gauge);
+        meter_ =
+            std::make_unique<metrics::Meter>(metrics_registry, common_labels);
+    }
+
+    if (metrics::enable_metrics)
+    {
+        meter_->Register(metrics::NAME_MEMORY_LIMIT, metrics::Type::Gauge);
+#ifdef RANGE_PARTITION_ENABLED
+        meter_->Collect(metrics::NAME_MEMORY_LIMIT,
+                        (uint64_t) MB(node_memory_limit_mb) * 0.95);
+#else
+        meter_->Collect(metrics::NAME_MEMORY_LIMIT,
+                        (uint64_t) MB(node_memory_limit_mb));
+#endif
     }
 
     if (metrics::enable_cache_hit_rate)
     {
-        meter_->Register(CACHE_HIT_OR_MISS_TOTAL_NAME_,
+        meter_->Register(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
                          metrics::Type::Counter,
                          {{"type", {"hits", "miss"}}});
     }
 
     if (metrics::enable_memory_usage)
     {
-        meter_->Register(MEMORY_USAGE_NAME_, metrics::Type::Gauge);
-    }
-
-    // collect metrics: memory limit
-    if (metrics::enable_collect_metrics)
-    {
-#ifdef RANGE_PARTITION_ENABLED
-        meter_->Collect(MEMORY_LIMIT_NAME_,
-                        (uint64_t) MB(node_memory_limit_mb) * 0.95);
-#else
-        meter_->Collect(MEMORY_LIMIT_NAME_,
-                        (uint64_t) MB(node_memory_limit_mb));
-#endif
+        meter_->Register(metrics::NAME_MEMORY_USAGE, metrics::Type::Gauge);
     }
 
     last_read_ts_ = Now();

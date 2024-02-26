@@ -11,13 +11,13 @@
 #include "cc_entry.h"
 #include "cluster_config_record.h"
 #include "log_closure.h"
-#include "metrics.h"
 #include "range_record.h"
 #include "read_write_set.h"
 #include "tx_command.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
+#include "tx_service_metrics.h"
 
 namespace txservice
 {

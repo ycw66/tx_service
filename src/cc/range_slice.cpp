@@ -10,10 +10,10 @@
 #include "cc_shard.h"
 #include "error_messages.h"
 #include "local_cc_shards.h"
-#include "metrics.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "tx_key.h"
+#include "tx_service_metrics.h"
 #include "tx_start_ts_collector.h"
 #include "util.h"
 
@@ -166,8 +166,8 @@ RangeSliceId StoreRange::PinSlices(const TableName &tbl_name,
         // collect metrics: slice cache hits
         if (metrics::enable_cache_hit_rate)
         {
-            auto meter = cc_shard->meter_.get();
-            meter->Collect(cc_shard->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "hits");
+            auto meter = cc_shard->GetMeter();
+            meter->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
         }
 
         ++slice->pins_;
@@ -253,8 +253,8 @@ RangeSliceId StoreRange::PinSlices(const TableName &tbl_name,
         // collect metrics: slice cache miss
         if (metrics::enable_cache_hit_rate)
         {
-            auto meter = cc_shard->meter_.get();
-            meter->Collect(cc_shard->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "miss");
+            auto meter = cc_shard->GetMeter();
+            meter->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
         }
 
         LoadSliceStatus load_ret = LoadSlice(tbl_name,
@@ -344,8 +344,8 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
         // collect metrics: slice cache hits
         if (metrics::enable_cache_hit_rate)
         {
-            auto meter = cc_shard->meter_.get();
-            meter->Collect(cc_shard->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "hits");
+            auto meter = cc_shard->GetMeter();
+            meter->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
         }
 
         ++slice->pins_;
@@ -357,8 +357,8 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
         // collect metrics: slice cache miss
         if (metrics::enable_cache_hit_rate)
         {
-            auto meter = cc_shard->meter_.get();
-            meter->Collect(cc_shard->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "miss");
+            auto meter = cc_shard->GetMeter();
+            meter->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
         }
 
         RangeSliceOpStatus pin_status;
@@ -1047,6 +1047,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         }
 
         slice_lk.unlock();
+        slice.fetch_slice_cc_->LoadRequest()->start_ = metrics::Clock::now();
         bool success =
             store_hd->LoadRangeSlice(tbl_name,
                                      kv_info,
