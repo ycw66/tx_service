@@ -806,7 +806,9 @@ public:
             return exported_count;
         }
 
+#ifndef ON_KEY_OBJECT
         size_t ckpt_idx = ckpt_vec_size;
+#endif
         if (from_ts < commit_ts_ && commit_ts_ <= to_ts)
         {
             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];

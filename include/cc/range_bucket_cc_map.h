@@ -492,6 +492,9 @@ public:
                     // succeed.
                     assert(lock_pair.first == LockType::WriteLock &&
                            lock_pair.second == CcErrorCode::NO_ERROR);
+                    // This silences the -Wunused-but-set-variable warning
+                    // without any runtime overhead.
+                    (void) lock_pair;
                 }
             }
         }

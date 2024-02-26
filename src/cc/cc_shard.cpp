@@ -286,6 +286,9 @@ void CcShard::Enqueue(CcRequestBase *req)
 
     bool ret = cc_queue_.enqueue(req);
     assert(ret == true);
+    // This silences the -Wunused-but-set-variable warning without any runtime
+    // overhead.
+    (void) ret;
 
     // Wakes up the tx processor dedicated to this shard, when it is asleep. The
     // notify function internally uses a std::mutex before notifying via the
@@ -688,6 +691,9 @@ void CcShard::VerifyLruList()
         pre = cur;
     }
     assert(pre == &tail_ccp_);
+    // This silences the -Wunused-but-set-variable warning without any runtime
+    // overhead.
+    (void) pre;
 }
 
 /**

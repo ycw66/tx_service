@@ -394,6 +394,9 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                                            index_table_name.Type()),
                                        std::forward_as_tuple(false));
                     assert(ins_it.second);
+                    // This silences the -Wunused-but-set-variable warning
+                    // without any runtime overhead.
+                    (void) ins_it;
                 }
 
                 // For alter table, should include new index tables.
@@ -420,6 +423,9 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                                     index_table_name.Type()),
                                 std::forward_as_tuple(true));
                             assert(ins_it.second);
+                            // This silences the -Wunused-but-set-variable
+                            // warning without any runtime overhead.
+                            (void) ins_it;
                         }
                     }
                 } /* End of dirty index table schema */
@@ -543,6 +549,9 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             // Checkpoint cannot start until recover is finished, we should be
             // the only one trying to sync the range.
             assert(res);
+            // This silences the -Wunused-but-set-variable warning without any
+            // runtime overhead.
+            (void) res;
             TransactionExecution *txm = tx_service_->NewTx();
             ClusterConfigRecord rec;
             txm->SetRecoverTxState(txn, tx_term, commit_ts);
@@ -2208,7 +2217,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
-    uint64_t expected_range_version = data_sync_task->range_version_;
     int64_t expected_ng_term = data_sync_task->node_group_term_;
     uint64_t target_data_sync_ts = data_sync_task->data_sync_ts_;
     bool is_dirty = data_sync_task->is_dirty_;
@@ -2412,6 +2420,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     }
 
     // Lock bucket so that bucket cannot be migrated away during data sync.
+    uint64_t expected_range_version = data_sync_task->range_version_;
     RangeBucketRecord bucket_rec;
     RangeBucketKey bucket_key(
         Sharder::Instance().MapRangeIdToBucketId(range_id));

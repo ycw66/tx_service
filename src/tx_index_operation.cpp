@@ -688,6 +688,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
 
         auto add_index_it = alter_table_info_.index_add_names_.cbegin();
         assert(add_index_it != alter_table_info_.index_add_names_.cend());
+        // This silences the -Wunused-but-set-variable warning without any
+        // runtime overhead.
+        (void) add_index_it;
 
         // Be sure that the no failover happen between this operation and the
         // former operation.

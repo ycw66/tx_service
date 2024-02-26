@@ -1586,7 +1586,7 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
 {
     const BlockedCcReqCheckRequest &req = input_msg_->blocked_check_req();
     const CceAddr_msg &caddr = req.cce_addr();
-    AckStatus status;
+    AckStatus status = AckStatus::Unknown;
 
     if (!Sharder::Instance().CheckLeaderTerm(req.node_group_id(), caddr.term()))
     {

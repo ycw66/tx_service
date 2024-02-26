@@ -127,7 +127,7 @@ void CatalogKey::Deserialize(const char *buf, size_t &offset, const Schema *)
     offset += len_val;
 
     // construct table type
-    TableType table_type;
+    TableType table_type = TableType::Primary;
     uint8_t *type_ptr = (uint8_t *) (buf + offset);
     uint8_t type_val = *type_ptr;
     switch (type_val)

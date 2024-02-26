@@ -280,6 +280,9 @@ public:
     {
         uint32_t res = result_status_.fetch_sub(1, std::memory_order_release);
         assert(res > 0);
+        // This silences the -Wunused-but-set-variable warning without any
+        // runtime overhead.
+        (void) res;
     }
 
     /**

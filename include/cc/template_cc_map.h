@@ -5834,6 +5834,9 @@ public:
                                                          tmp_akv_vec,
                                                          only_archives);
                     assert(res == true);
+                    // This silences the -Wunused-but-set-variable warning
+                    // without any runtime overhead.
+                    (void) res;
                 }
                 if (only_archives)
                 {
@@ -6389,13 +6392,18 @@ public:
             const KeyT &page_key = it->first;
             CcPage<KeyT, ValueT> *page = &it->second;
             assert(page_key == page->FirstKey());
+            // This silences the -Wunused-but-set-variable warning without any
+            // runtime overhead.
+            (void) page_key;
             assert(page->prev_page_ == prev_page &&
                    prev_page->next_page_ == page);
             prev_page = page;
         }
         assert(prev_page->next_page_ == &pos_inf_page_ &&
                pos_inf_page_.prev_page_ == prev_page);
-
+        // This silences the -Wunused-but-set-variable warning without any
+        // runtime overhead.
+        (void) prev_page;
         // verify key order in all pages
         Iterator ccm_it = Begin();
         Iterator pos_inf_it = End();
@@ -6406,6 +6414,9 @@ public:
         {
             const KeyT *key = ccm_it->first;
             assert(*prev_key < *key);
+            // This silences the -Wunused-but-set-variable warning without any
+            // runtime overhead.
+            (void) prev_key;
             prev_key = key;
             ++cnt;
         }
@@ -7110,6 +7121,9 @@ protected:
             auto [it, inserted] =
                 ccmp_.try_emplace(key, this, &neg_inf_page_, &pos_inf_page_);
             assert(inserted);
+            // This silences the -Wunused-but-set-variable warning without any
+            // runtime overhead.
+            (void) inserted;
         }
 
         // First locate target page, then find or emplace `key` in the page.
@@ -7914,7 +7928,8 @@ protected:
         std::vector<KeyT> &keys = page->keys_;
         std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &entries =
             page->entries_;
-        const KeyT *start_key, *end_key;
+        const KeyT *start_key = nullptr;
+        const KeyT *end_key = nullptr;
         if (kickout_cc)
         {
             start_key = static_cast<const KeyT *>(kickout_cc->StartKey());
