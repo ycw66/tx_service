@@ -4754,7 +4754,7 @@ public:
             }
 #else
             if (cce->payload_status_ == RecordStatus::Unknown &&
-                cce->replay_cmd_list_ != nullptr)
+                cce->HasReplayCommandList())
             {
                 // The cce is waiting for fetch record to return so that it
                 // can apply command log on the data store version. Wait for

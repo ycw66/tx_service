@@ -8,9 +8,10 @@ bool LruEntry::IsFree()
 {
     // As long as all locks are released, the lock associated with this cc entry
     // should be recycled.
-    assert(cc_lock_ == nullptr || !cc_lock_->KeyLock()->IsEmpty());
+    assert(cc_lock_and_extra_ == nullptr ||
+           !cc_lock_and_extra_->KeyLock()->IsEmpty());
 
-    return cc_lock_ == nullptr &&
+    return cc_lock_and_extra_ == nullptr &&
            commit_ts_ <= ckpt_ts_.load(std::memory_order_acquire);
 }
 
@@ -18,21 +19,22 @@ NonBlockingLock &LruEntry::GetOrCreateKeyLock(CcShard *ccs,
                                               CcMap *ccm,
                                               LruPage *page)
 {
-    if (cc_lock_ == nullptr)
+    if (cc_lock_and_extra_ == nullptr)
     {
-        cc_lock_ = ccs->NewLock(ccm, page);
+        cc_lock_and_extra_ = ccs->NewLock(ccm, page);
     }
 
-    assert(cc_lock_->GetCcMap() == ccm);
+    assert(cc_lock_and_extra_->GetCcMap() == ccm);
     // For cc entries of the bucket cc map, the input page may be null.
-    assert(page == nullptr || cc_lock_->GetCcPage() == nullptr ||
-           cc_lock_->GetCcPage() == page);
-    return *cc_lock_->KeyLock();
+    assert(page == nullptr || cc_lock_and_extra_->GetCcPage() == nullptr ||
+           cc_lock_and_extra_->GetCcPage() == page);
+    return *cc_lock_and_extra_->KeyLock();
 }
 
 NonBlockingLock *LruEntry::GetKeyLock() const
 {
-    return cc_lock_ == nullptr ? nullptr : cc_lock_->KeyLock();
+    return cc_lock_and_extra_ == nullptr ? nullptr
+                                         : cc_lock_and_extra_->KeyLock();
 }
 
 NonBlockingLock *LruEntry::GetGapLock() const
@@ -41,25 +43,27 @@ NonBlockingLock *LruEntry::GetGapLock() const
     return nullptr;
 }
 
-void LruEntry::RecycleKeyLock(CcShard &ccs)
+bool LruEntry::RecycleKeyLock(CcShard &ccs)
 {
-    if (cc_lock_ != nullptr && cc_lock_->KeyLock()->IsEmpty())
+    if (cc_lock_and_extra_ != nullptr && cc_lock_and_extra_->IsEmpty())
     {
         // recycle key lock if all the locks in lock entry are released.
-        cc_lock_->SetUsedStatus(false);
+        cc_lock_and_extra_->SetUsedStatus(false);
         ccs.DecreaseLockCount();
-        cc_lock_ = nullptr;
+        cc_lock_and_extra_ = nullptr;
+        return true;
     }
+    return false;
 }
 
 void LruEntry::ClearLocks(CcShard &ccs, NodeGroupId ng_id)
 {
-    if (cc_lock_ == nullptr)
+    if (cc_lock_and_extra_ == nullptr)
     {
         return;
     }
 
-    NonBlockingLock *key_lock = cc_lock_->KeyLock();
+    NonBlockingLock *key_lock = cc_lock_and_extra_->KeyLock();
 
     // Deletes the write lock/intent.
     auto [w_tx, w_type] = key_lock->WriteTx();
@@ -81,26 +85,28 @@ void LruEntry::ClearLocks(CcShard &ccs, NodeGroupId ng_id)
     }
 
     // reset lock entry in ccshard lock array to make it reusable.
-    cc_lock_->SetUsedStatus(false);
-    cc_lock_ = nullptr;
+    cc_lock_and_extra_->SetUsedStatus(false);
+    cc_lock_and_extra_ = nullptr;
     ccs.DecreaseLockCount();
 }
 
 CcMap *LruEntry::GetCcMap() const
 {
-    return cc_lock_ != nullptr ? cc_lock_->GetCcMap() : nullptr;
+    return cc_lock_and_extra_ != nullptr ? cc_lock_and_extra_->GetCcMap()
+                                         : nullptr;
 }
 
 LruPage *LruEntry::GetCcPage() const
 {
-    return cc_lock_ != nullptr ? cc_lock_->GetCcPage() : nullptr;
+    return cc_lock_and_extra_ != nullptr ? cc_lock_and_extra_->GetCcPage()
+                                         : nullptr;
 }
 
 void LruEntry::UpdateCcPage(LruPage *page)
 {
-    if (cc_lock_ != nullptr)
+    if (cc_lock_and_extra_ != nullptr)
     {
-        cc_lock_->UpdateCcPage(page);
+        cc_lock_and_extra_->UpdateCcPage(page);
     }
 }
 

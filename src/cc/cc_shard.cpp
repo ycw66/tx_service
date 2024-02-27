@@ -73,7 +73,7 @@ CcShard::CcShard(uint16_t core_id,
     lock_vec_.reserve(LOCK_ARRAY_INIT_SIZE);
     for (uint32_t idx = 0; idx < LOCK_ARRAY_INIT_SIZE; ++idx)
     {
-        lock_vec_.emplace_back(std::make_unique<KeyGapLock>());
+        lock_vec_.emplace_back(std::make_unique<KeyGapLockAndExtraData>());
     }
 
     head_ccp_.lru_prev_ = nullptr;
@@ -390,13 +390,13 @@ TEntry &CcShard::NewTx(NodeGroupId tx_ng_id,
     return tentry;
 }
 
-KeyGapLock *CcShard::NewLock(CcMap *ccm, LruPage *page)
+KeyGapLockAndExtraData *CcShard::NewLock(CcMap *ccm, LruPage *page)
 {
-    // Cicurlar iteration to find an available lock.
+    // Circular iteration to find an available lock.
     size_t cnt = 0;
     while (cnt < lock_vec_.size())
     {
-        KeyGapLock *lk = lock_vec_[next_lock_idx_].get();
+        KeyGapLockAndExtraData *lk = lock_vec_[next_lock_idx_].get();
 
         if (lk->GetUsedStatus() == false)
         {
@@ -422,14 +422,14 @@ KeyGapLock *CcShard::NewLock(CcMap *ccm, LruPage *page)
 
         for (uint32_t idx = old_size; idx < new_size; ++idx)
         {
-            lock_vec_.emplace_back(std::make_unique<KeyGapLock>());
+            lock_vec_.emplace_back(std::make_unique<KeyGapLockAndExtraData>());
         }
 
         // position old_size must be an available slot.
         next_lock_idx_ = old_size;
     }
 
-    KeyGapLock *lk = lock_vec_.at(next_lock_idx_).get();
+    KeyGapLockAndExtraData *lk = lock_vec_.at(next_lock_idx_).get();
     assert(!lk->GetUsedStatus());
     lk->Reset(ccm, page);
     lk->SetUsedStatus(true);

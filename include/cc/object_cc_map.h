@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -298,32 +299,69 @@ public:
             }
         }
 
+        // Read only commands in read committed isolation level just checks the
+        // payload.
+        if (req.Isolation() == IsolationLevel::ReadCommitted &&
+            cmd->IsReadOnly())
+        {
+            assert(acquired_lock == LockType::NoLock);
+            bool object_not_exist =
+                cce->payload_status_ == RecordStatus::Deleted;
+            if (object_not_exist)
+            {
+                bool proceed = cmd->ProceedOnNonExistentObject();
+                // Read only commands should never proceed if object doesn't
+                // exist.
+                assert(!proceed);
+                obj_result.rec_status_ = RecordStatus::Deleted;
+                obj_result.commit_ts_ = cce->commit_ts_;
+                hd_res->SetFinished();
+                return true;
+            }
+
+            // Execute the command on payload.
+            ValueT &object = *cce->payload_;
+            cmd_success = cmd->ExecuteOn(object);
+
+            obj_result.commit_ts_ = cce->commit_ts_;
+            obj_result.rec_status_ = cce->payload_status_;
+            hd_res->SetFinished();
+            return true;
+        }
+
+        // Lock must have been acquired and it is not NoLock.
+        assert(cce->GetKeyLock() != nullptr);
+
+        RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
         // Create the dirty object if there is already a pending command on this
         // object.
-        if (cce->dirty_payload_status_ == RecordStatus::Uncreated)
+        if (dirty_payload_status == RecordStatus::Uncreated)
         {
+            std::unique_ptr<TxCommand> pending_cmd = cce->PendingCmd();
+            std::unique_ptr<ValueT> dirty_payload = cce->DirtyPayload();
             // Since pending_cmd_ exists, the payload must also exist.
             // Otherwise, the dirty payload should have already been created by
             // the last command.
-            assert(cce->pending_cmd_ != nullptr);
+            assert(pending_cmd != nullptr);
             assert(cce->payload_status_ == RecordStatus::Normal &&
                    cce->payload_ != nullptr);
 
-            std::tie(cce->dirty_payload_, cce->dirty_payload_status_) =
+            std::tie(dirty_payload, dirty_payload_status) =
                 CreateDirtyPayloadFromExistingPayload(cce->payload_.get());
-            assert(cce->dirty_payload_status_ == RecordStatus::Normal);
+            assert(dirty_payload_status == RecordStatus::Normal);
 
             // Commit the pending command.
-            CommitCommandOnDirtyPayload(cce->dirty_payload_,
-                                        cce->dirty_payload_status_,
-                                        *cce->pending_cmd_);
-            cce->pending_cmd_ = nullptr;
+            CommitCommandOnDirtyPayload(
+                dirty_payload, dirty_payload_status, *pending_cmd);
+            cce->SetDirtyPayload(std::move(dirty_payload));
+            cce->SetDirtyPayloadStatus(dirty_payload_status);
+            cce->SetPendingCmd(nullptr);
         }
 
         bool object_not_exist =
-            cce->dirty_payload_status_ == RecordStatus::Deleted ||
+            dirty_payload_status == RecordStatus::Deleted ||
             (cce->payload_status_ == RecordStatus::Deleted &&
-             cce->dirty_payload_status_ == RecordStatus::NonExistent);
+             dirty_payload_status == RecordStatus::NonExistent);
 
         // Create the temporary object if the object does not exist.
         if (object_not_exist)
@@ -333,6 +371,7 @@ public:
             {
                 if (req.apply_and_commit_)
                 {
+                    // Release and try to recycle the lock.
                     ReleaseCceLock(
                         cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
                     obj_result.lock_acquired_ = LockType::NoLock;
@@ -349,9 +388,12 @@ public:
                 // Create an empty temporary object to process the commands, the
                 // dirty payload will be uploaded to payload in PostWriteCc if
                 // the txn commits.
-                std::tie(cce->dirty_payload_, cce->dirty_payload_status_) =
+                std::unique_ptr<ValueT> dirty_payload = cce->DirtyPayload();
+                std::tie(dirty_payload, dirty_payload_status) =
                     CreateDirtyPayloadFromCommand(cmd);
-                cce->pending_cmd_ = nullptr;
+                cce->SetDirtyPayload(std::move(dirty_payload));
+                cce->SetDirtyPayloadStatus(dirty_payload_status);
+                cce->SetPendingCmd(nullptr);
             }
         }
         else
@@ -361,6 +403,7 @@ public:
             {
                 if (req.apply_and_commit_)
                 {
+                    // Release and try to recycle the lock.
                     ReleaseCceLock(
                         cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
                     obj_result.lock_acquired_ = LockType::NoLock;
@@ -373,26 +416,31 @@ public:
             }
         }
 
-        if (cce->dirty_payload_status_ == RecordStatus::Normal)
+        if (dirty_payload_status == RecordStatus::Normal)
         {
-            assert(cce->dirty_payload_ != nullptr);
+            std::unique_ptr<ValueT> dirty_payload = cce->DirtyPayload();
+            assert(dirty_payload != nullptr);
+
             // Temporary object exists, execute and commit the command on
             // the temporary object.
-            ValueT &tmp_object = *cce->dirty_payload_;
-            cmd_success = cmd->ExecuteOn(tmp_object);
+            ValueT &dirty_object = *dirty_payload;
+            cmd_success = cmd->ExecuteOn(dirty_object);
             DLOG(INFO) << "execute and commit current command on dirty payload";
             if (cmd_success && !cmd->IsReadOnly())
             {
                 CommitCommandOnDirtyPayload(
-                    cce->dirty_payload_, cce->dirty_payload_status_, *cmd);
+                    dirty_payload, dirty_payload_status, *cmd);
             }
+            cce->SetDirtyPayload(std::move(dirty_payload));
+            cce->SetDirtyPayloadStatus(dirty_payload_status);
         }
         else if (cce->payload_status_ == RecordStatus::Normal)
         {
             // The dirty payload does not exist. This is the first command.
             // Execute and copy the command. The command will be committed
             // in PostWriteCc if the txn commits.
-            assert(cce->pending_cmd_ == nullptr);
+            std::unique_ptr<TxCommand> pending_cmd = cce->PendingCmd();
+            assert(pending_cmd == nullptr);
             ValueT &object = *cce->payload_;
             cmd_success = cmd->ExecuteOn(object);
 
@@ -400,14 +448,14 @@ public:
             {
                 // Copy the command to be committed in PostWriteCc or when
                 // executing subsequent commands of the same txn.
-                cce->pending_cmd_ = cmd->Clone();
+                cce->SetPendingCmd(cmd->Clone());
 
                 // The object is being modified, set dirty_payload_status_ to
                 // Uncreated so that a temporary object will be created when
                 // processing subsequent commands of the same txn. In
                 // PostWriteCc, the original object will be replaced by the
                 // temporary object if the txn commits.
-                cce->dirty_payload_status_ = RecordStatus::Uncreated;
+                cce->SetDirtyPayloadStatus(RecordStatus::Uncreated);
             }
         }
 
@@ -415,12 +463,12 @@ public:
         {
             // Skipping writing log, do the PostWrite and release the lock.
             assert(acquired_lock == LockType::WriteLock);
-            if (cce->dirty_payload_status_ == RecordStatus::Normal ||
-                cce->dirty_payload_status_ == RecordStatus::Deleted)
+            if (dirty_payload_status == RecordStatus::Normal ||
+                dirty_payload_status == RecordStatus::Deleted)
             {
                 // Dirty payload exists. Use it to replace payload.
-                cce->payload_ = std::move(cce->dirty_payload_);
-                cce->payload_status_ = cce->dirty_payload_status_;
+                cce->payload_ = cce->DirtyPayload();
+                cce->payload_status_ = dirty_payload_status;
             }
             else
             {
@@ -429,9 +477,10 @@ public:
             }
 
             // Reset the dirty status.
-            cce->dirty_payload_ = nullptr;
-            cce->dirty_payload_status_ = RecordStatus::NonExistent;
-            cce->pending_cmd_ = nullptr;
+            cce->SetDirtyPayload(nullptr);
+            cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
+            cce->SetPendingCmd(nullptr);
+
             // Set commit ts based on the TxTs since there is no PostWriteCc if
             // apply_and_commit_.
             cce->commit_ts_ =
@@ -446,6 +495,7 @@ public:
                 ccp->last_dirty_commit_ts_ = cce->commit_ts_;
             }
 
+            // Release and try to recycle the lock.
             ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
         }
@@ -505,19 +555,25 @@ public:
 
         if (commit_ts > 0)
         {
+            RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
             // The txn commits. Upload the change.
-            if (cce->dirty_payload_status_ == RecordStatus::Normal ||
-                cce->dirty_payload_status_ == RecordStatus::Deleted)
+            if (dirty_payload_status == RecordStatus::Normal ||
+                dirty_payload_status == RecordStatus::Deleted)
             {
                 // Dirty payload exists. Use it to replace payload.
-                cce->payload_status_ = cce->dirty_payload_status_;
-                cce->payload_ = std::move(cce->dirty_payload_);
+                cce->payload_status_ = dirty_payload_status;
+                cce->payload_ = cce->DirtyPayload();
             }
-            else if (cce->pending_cmd_ != nullptr)
+            else
             {
-                assert(cce->payload_ != nullptr);
-                CommitCommandOnPayload(
-                    cce->payload_, cce->payload_status_, *cce->pending_cmd_);
+                // Commit the pending command.
+                std::unique_ptr<TxCommand> pending_cmd = cce->PendingCmd();
+                if (pending_cmd != nullptr)
+                {
+                    assert(cce->payload_ != nullptr);
+                    CommitCommandOnPayload(
+                        cce->payload_, cce->payload_status_, *pending_cmd);
+                }
             }
 
             cce->commit_ts_ = commit_ts;
@@ -536,9 +592,9 @@ public:
         }
 
         // Reset the dirty status.
-        cce->dirty_payload_ = nullptr;
-        cce->dirty_payload_status_ = RecordStatus::NonExistent;
-        cce->pending_cmd_ = nullptr;
+        cce->SetDirtyPayload(nullptr);
+        cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
+        cce->SetPendingCmd(nullptr);
 
         ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
         req.Result()->SetFinished();
@@ -632,7 +688,7 @@ public:
             // If there's already buffered cmd, that means a previous replaycc
             // has already sent FetchRecord.
             if (!has_del && cce->payload_status_ == RecordStatus::Unknown &&
-                cce->replay_cmd_list_ == nullptr)
+                !cce->HasReplayCommandList())
             {
                 int64_t cc_ng_candid_term =
                     Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
@@ -672,12 +728,40 @@ public:
             TxnCmd txn_cmd(
                 obj_version, commit_ts, has_del, std::move(cmd_list));
 
+            bool acquired_extra_data = false;
+            if (cce->GetKeyLock() == nullptr)
+            {
+                cce->GetOrCreateKeyLock(shard_, this, ccp);
+                assert(cce->GetKeyLock() != nullptr);
+                acquired_extra_data = true;
+            }
+
+            std::unique_ptr<ReplayTxnCmdList> replay_cmd_list =
+                cce->ReplayCommandList();
+
             // Emplace txn_cmd and try to commit all pending commands.
             EmplaceAndCommitReplayTxnCommand(cce->payload_,
-                                             cce->replay_cmd_list_,
+                                             replay_cmd_list,
                                              txn_cmd,
                                              cce->commit_ts_,
                                              cce->payload_status_);
+
+            if (replay_cmd_list == nullptr)
+            {
+                // Recycles the lock if this and prior commands have been
+                // applied and there is no pending command.
+                bool lock_recycled = cce->RecycleKeyLock(*shard_);
+                if (acquired_extra_data)
+                {
+                    // The lock is newly assigned, recycle must succeed.
+                    assert(lock_recycled);
+                }
+            }
+            else
+            {
+                // Passes the replay command list back to the cc entry.
+                cce->SetReplayCommandList(std::move(replay_cmd_list));
+            }
 
             // Must update dirty_commit_ts. Otherwise, this entry may be
             // skipped by checkpointer.
@@ -699,6 +783,13 @@ public:
                 // the log record.
                 // TODO: it is safer if we ship the tx ID with the
                 // recovering message and match it against the lock holder.
+
+                // Reset the dirty status since the committed commands are
+                // already committed on the object.
+                cce->SetDirtyPayload(nullptr);
+                cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
+                cce->SetPendingCmd(nullptr);
+
                 TxNumber txn = lk->WriteLockTx();
                 ReleaseCceLock(
                     lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
@@ -747,21 +838,36 @@ public:
             }
             // Check if there's any buffered replay cmds, and try to
             // commit them.
-            if (cce->replay_cmd_list_)
+            if (cce->HasReplayCommandList())
             {
+                std::unique_ptr<ReplayTxnCmdList> replay_cmd_list =
+                    cce->ReplayCommandList();
                 // Clear cmds with smaller version than kv version.
-                for (auto it = cce->replay_cmd_list_->txn_cmd_list_.begin();
-                     it != cce->replay_cmd_list_->txn_cmd_list_.end();)
+                for (auto it = replay_cmd_list->txn_cmd_list_.begin();
+                     it != replay_cmd_list->txn_cmd_list_.end();)
                 {
                     if (it->obj_version_ >= commit_ts)
                     {
                         break;
                     }
-                    it = cce->replay_cmd_list_->txn_cmd_list_.erase(it);
+                    it = replay_cmd_list->txn_cmd_list_.erase(it);
                 }
-                cce->replay_cmd_list_->cur_version_ = commit_ts;
+
+                replay_cmd_list->cur_version_ = commit_ts;
                 TryCommitReplayCommands(
-                    cce->payload_, cce->replay_cmd_list_, cce->commit_ts_);
+                    cce->payload_, replay_cmd_list, cce->commit_ts_);
+
+                if (replay_cmd_list == nullptr)
+                {
+                    // Recycles the lock if all the replay commands have been
+                    // applied.
+                    cce->RecycleKeyLock(*shard_);
+                }
+                else
+                {
+                    // Passes the replay command list back to the cc entry.
+                    cce->SetReplayCommandList(std::move(replay_cmd_list));
+                }
             }
         }
     }
@@ -910,5 +1016,32 @@ private:
 
         remote_cache->cache_mem_size_ += tuple_size;
     }
+
+    void SetExpire(LruEntry *cce, uint64_t expire_ts)
+    {
+        auto it = expires_.emplace(cce, expire_ts);
+        if (!it.second)
+        {
+            it.first->second = expire_ts;
+        }
+    }
+
+    bool IsExpired(LruEntry *cce, uint64_t now_ts) const
+    {
+        auto it = expires_.find(cce);
+        if (it != expires_.end() && it->second <= now_ts)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    void RemoveExpire(LruEntry *cce)
+    {
+        expires_.erase(cce);
+    }
+
+    // Expire timestamp of keys with expire_ts set.
+    std::unordered_map<LruEntry *, uint64_t> expires_;
 };
 }  // namespace txservice

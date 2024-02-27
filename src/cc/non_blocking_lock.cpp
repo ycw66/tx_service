@@ -4,6 +4,7 @@
 
 #include <cassert>
 
+#include "cc/cc_entry.h"
 #include "cc/cc_shard.h"
 #include "error_messages.h"
 
@@ -539,7 +540,7 @@ bool NonBlockingLock::FindQueueRequest(TxNumber txid)
     return false;
 }
 
-void KeyGapLock::SetUsedStatus(bool is_used)
+void KeyGapLockAndExtraData::SetUsedStatus(bool is_used)
 {
     in_use_ = is_used;
 }

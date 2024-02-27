@@ -269,7 +269,7 @@ public:
      * recycle the lock ptr to lock array if lock set is empty.
      *
      */
-    void RecycleKeyLock(CcShard &ccs);
+    bool RecycleKeyLock(CcShard &ccs);
 
     /**
      * @brief Forces to clear the locks on the cc entry. This is called when a
@@ -294,8 +294,8 @@ public:
      */
     bool IsFree();
 
-private:
-    KeyGapLock *cc_lock_{nullptr};
+protected:
+    KeyGapLockAndExtraData *cc_lock_and_extra_{nullptr};
 
 public:
     uint64_t commit_ts_{1};
@@ -473,13 +473,64 @@ public:
     }
 
 #ifdef ON_KEY_OBJECT
+    std::unique_ptr<TxCommand> PendingCmd()
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        return cc_lock_and_extra_->PendingCmd();
+    }
+
+    void SetPendingCmd(std::unique_ptr<TxCommand> cmd_uptr)
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        cc_lock_and_extra_->SetPendingCmd(std::move(cmd_uptr));
+    }
+
+    std::unique_ptr<ValueT> DirtyPayload()
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        return std::unique_ptr<ValueT>(static_cast<ValueT *>(
+            cc_lock_and_extra_->DirtyPayload().release()));
+    }
+
+    void SetDirtyPayload(std::unique_ptr<ValueT> dirty_payload)
+    {
+        auto tx_obj_uptr = std::unique_ptr<TxObject>(
+            static_cast<TxObject *>(dirty_payload.release()));
+        assert(cc_lock_and_extra_ != nullptr);
+        cc_lock_and_extra_->SetDirtyPayload(std::move(tx_obj_uptr));
+    }
+
+    RecordStatus DirtyPayloadStatus()
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        return cc_lock_and_extra_->DirtyPayloadStatus();
+    }
+
+    void SetDirtyPayloadStatus(RecordStatus status)
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        cc_lock_and_extra_->SetDirtyPayloadStatus(status);
+    }
+
+    std::unique_ptr<ReplayTxnCmdList> ReplayCommandList()
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        return cc_lock_and_extra_->ReplayCommandList();
+    }
+
+    void SetReplayCommandList(std::unique_ptr<ReplayTxnCmdList> replay_list)
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        cc_lock_and_extra_->SetReplayCommandList(std::move(replay_list));
+    }
+
+    bool HasReplayCommandList()
+    {
+        return cc_lock_and_extra_ != nullptr &&
+               cc_lock_and_extra_->HasReplayCommandList();
+    }
+
     std::unique_ptr<ValueT> payload_{nullptr};
-    std::unique_ptr<TxCommand> pending_cmd_;
-    std::unique_ptr<ReplayTxnCmdList> replay_cmd_list_;
-    // temporary object to process subsequent commands in the same txn
-    std::unique_ptr<ValueT> dirty_payload_;
-    // status of temporary object
-    RecordStatus dirty_payload_status_{RecordStatus::NonExistent};
 #else
     std::shared_ptr<ValueT> payload_{nullptr};
     // save versions exclude the current version.(descending order,eg.[4,3,2,1])

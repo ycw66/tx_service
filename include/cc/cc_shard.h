@@ -243,7 +243,7 @@ public:
      * @brief Find an available NonBlockingLock in lock array and initialize it.
      *
      */
-    KeyGapLock *NewLock(CcMap *ccm, LruPage *page);
+    KeyGapLockAndExtraData *NewLock(CcMap *ccm, LruPage *page);
 
     TEntry *LocateTx(const TxId &tx_id);
 
@@ -751,7 +751,7 @@ private:
 
     // all the lock acquire/release on this ccshard. It used to reduce the cost
     // of allocation/dellocation of memory.
-    std::vector<KeyGapLock::uptr> lock_vec_;
+    std::vector<KeyGapLockAndExtraData::uptr> lock_vec_;
     // pointer to the next slot in lock array.
     uint32_t next_lock_idx_;
     uint32_t used_lock_count_;

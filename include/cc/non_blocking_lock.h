@@ -2,6 +2,7 @@
 
 #include <butil/logging.h>
 
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -11,7 +12,9 @@
 #include "cc_req_base.h"
 #include "circular_queue.h"
 #include "error_messages.h"
+#include "tx_command.h"
 #include "tx_id.h"
+#include "tx_object.h"
 
 namespace txservice
 {
@@ -301,12 +304,17 @@ private:
     friend struct CcEntry;
 };
 
-class KeyGapLock
+/**
+ * The lock structure and extra data fields that are accessed with lock
+ * acquired. This structure is assigned on-demand to reduce CcEntry's memory
+ * overhead.
+ */
+class KeyGapLockAndExtraData
 {
 public:
-    using uptr = std::unique_ptr<KeyGapLock>;
+    using uptr = std::unique_ptr<KeyGapLockAndExtraData>;
 
-    KeyGapLock() = default;
+    KeyGapLockAndExtraData() = default;
 
     void Reset(CcMap *ccm, LruPage *page)
     {
@@ -342,11 +350,82 @@ public:
         page_ = new_page;
     }
 
+    bool IsEmpty()
+    {
+#ifdef ON_KEY_OBJECT
+        if (key_lock_.IsEmpty())
+        {
+            // There must be no pending command and dirty payload if lock is
+            // empty.
+            assert(pending_cmd_ == nullptr && dirty_payload_ == nullptr &&
+                   dirty_payload_status_ == RecordStatus::NonExistent);
+        }
+#endif
+        return key_lock_.IsEmpty();
+    }
+
+#ifdef ON_KEY_OBJECT
+    std::unique_ptr<TxCommand> PendingCmd()
+    {
+        return std::move(pending_cmd_);
+    }
+
+    void SetPendingCmd(std::unique_ptr<TxCommand> cmd_uptr)
+    {
+        pending_cmd_ = std::move(cmd_uptr);
+    }
+
+    std::unique_ptr<TxObject> DirtyPayload()
+    {
+        return std::move(dirty_payload_);
+    }
+
+    void SetDirtyPayload(std::unique_ptr<TxObject> dirty_payload)
+    {
+        dirty_payload_ = std::move(dirty_payload);
+    }
+
+    RecordStatus DirtyPayloadStatus()
+    {
+        return dirty_payload_status_;
+    }
+
+    void SetDirtyPayloadStatus(RecordStatus status)
+    {
+        dirty_payload_status_ = status;
+    }
+
+    std::unique_ptr<ReplayTxnCmdList> ReplayCommandList()
+    {
+        return std::move(replay_cmd_list_);
+    }
+
+    void SetReplayCommandList(std::unique_ptr<ReplayTxnCmdList> replay_list)
+    {
+        replay_cmd_list_ = std::move(replay_list);
+    }
+
+    bool HasReplayCommandList()
+    {
+        return replay_cmd_list_ != nullptr;
+    }
+
+#endif
+
 private:
     NonBlockingLock key_lock_;
     bool in_use_{false};
     CcMap *ccm_{nullptr};
     LruPage *page_{nullptr};
+
+#ifdef ON_KEY_OBJECT
+    std::unique_ptr<TxCommand> pending_cmd_;
+    // temporary object to process subsequent commands in the same txn
+    std::unique_ptr<TxObject> dirty_payload_;
+    // status of temporary object
+    RecordStatus dirty_payload_status_{RecordStatus::NonExistent};
+    std::unique_ptr<ReplayTxnCmdList> replay_cmd_list_;
+#endif
 };
 
 }  // namespace txservice
