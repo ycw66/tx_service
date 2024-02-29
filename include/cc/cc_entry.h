@@ -249,7 +249,8 @@ public:
 struct LruEntry
 {
 public:
-    LruEntry() = default;
+    LruEntry();
+
     virtual ~LruEntry() = default;
 
     /**
@@ -294,11 +295,45 @@ public:
      */
     bool IsFree();
 
+    uint64_t CommitTs() const;
+
+#ifndef ON_KEY_OBJECT
+    uint64_t CkptTs() const
+    {
+        return ckpt_ts_;
+    }
+#endif
+
+    /**
+     * @brief Updates the checkpoint timestamp such that it is no smaller than
+     * the input timestamp. The method is called by the checkpoint thread, after
+     * flushing the key-value pair to the data store, or the tx processor thread
+     * which back fills the cache-miss record into memory.
+     *
+     * @param ts
+     */
+    void SetCkptTs(uint64_t ts);
+
+    bool IsPersistent() const;
+
+    RecordStatus PayloadStatus() const;
+
+    void SetCommitTsPayloadStatus(uint64_t ts, RecordStatus status);
+
 protected:
     KeyGapLockAndExtraData *cc_lock_and_extra_{nullptr};
 
-public:
-    uint64_t commit_ts_{1};
+private:
+    /**
+     * @brief The 8-byte integer encodes the record's commit timestamp and
+     * status. The higher 7 bytes represent the timestamp. The 7-byte integer is
+     * big enough to encode 100 years from now on (2024) in micro seconds. The
+     * lowest 4 bits (0-3 bits) represent record status. The next 4 bits (4-7
+     * bits) are reserved for other usage: when MVCC is not needed, the 5th bit
+     * represents whether or not the latest version has been flushed.
+     *
+     */
+    std::atomic<uint64_t> commit_ts_and_status_{0};
 
     // The commit timestamp of the latest checkpoint version record. Unlike
     // other fields that are read/modified via a single thread, this field is
@@ -306,6 +341,7 @@ public:
     // the data store.
     std::atomic<uint64_t> ckpt_ts_{0};
 
+public:
     /**
      * @brief Size of this record in data store.
      * INT32_MAX is a special value that means unknown size.
@@ -314,7 +350,6 @@ public:
      * in KV storage.
      */
     std::atomic<int32_t> data_store_size_{INT32_MAX};
-    RecordStatus payload_status_{RecordStatus::Unknown};
 };
 
 /**
@@ -553,7 +588,8 @@ public:
      */
     size_t ArchiveBeforeUpdate(TableType tbl_type)
     {
-        if (payload_status_ == RecordStatus::Unknown)
+        const RecordStatus rec_status = PayloadStatus();
+        if (rec_status == RecordStatus::Unknown)
         {
             return 0;
         }
@@ -565,19 +601,20 @@ public:
             mem_usage += sizeof(*archives_);
         }
 
+        const uint64_t commit_ts = CommitTs();
         if (archives_->size() > 0)
         {
-            assert(commit_ts_ > archives_->front().commit_ts_);
+            assert(commit_ts > archives_->front().commit_ts_);
         }
 
         if (tbl_type != TableType::Secondary)
         {
             archives_->emplace_front(
-                std::move(payload_), commit_ts_, payload_status_);
+                std::move(payload_), commit_ts, rec_status);
         }
         else
         {
-            archives_->emplace_front(nullptr, commit_ts_, payload_status_);
+            archives_->emplace_front(nullptr, commit_ts, rec_status);
         }
         mem_usage += sizeof(VersionResultRecord<ValueT>);
         return mem_usage;
@@ -678,7 +715,7 @@ public:
             return 0;
         }
 
-        if (commit_ts_ <= oldest_active_tx_ts)
+        if (CommitTs() <= oldest_active_tx_ts)
         {
             size_t mem_usage = GetArchiveMemUsage();
             archives_.reset(nullptr);
@@ -739,25 +776,28 @@ public:
                  uint64_t &last_read_ts,
                  VersionResultRecord<ValueT> &rec)
     {
-        if (payload_status_ == RecordStatus::Unknown)
+        const uint64_t commit_ts = CommitTs();
+        const RecordStatus rec_status = PayloadStatus();
+
+        if (rec_status == RecordStatus::Unknown)
         {
             rec.payload_status_ = RecordStatus::Unknown;
-            rec.commit_ts_ = commit_ts_;
+            rec.commit_ts_ = commit_ts;
             return;
         }
-        if (commit_ts_ <= ts)
+        if (commit_ts <= ts)
         {
             // MVCC update last_read_ts_ of lastest ccentry to tell later
             // writer's commit_ts must be higher than MVCC reader's ts. Or it
             // will break the REPEATABLE READ since the next MVCC read in the
             // same transaction will read the new updated ccentry.
             last_read_ts = std::max(ts, last_read_ts);
-            if (payload_status_ == RecordStatus::Normal)
+            if (rec_status == RecordStatus::Normal)
             {
                 rec.payload_ptr_ = payload_;
             }
-            rec.commit_ts_ = commit_ts_;
-            rec.payload_status_ = payload_status_;
+            rec.commit_ts_ = commit_ts;
+            rec.payload_status_ = rec_status;
             return;
         }
 
@@ -787,12 +827,13 @@ public:
         }
 
         rec.commit_ts_ = 1U;
-        if (ckpt_ts_ == 0U)
+        const uint64_t ckpt_ts = CkptTs();
+        if (ckpt_ts == 0U)
         {
             // need fetch base table and archive table.
             rec.payload_status_ = RecordStatus::VersionUnknown;
         }
-        else if (ckpt_ts_ <= ts)
+        else if (ckpt_ts <= ts)
         {
             // only need fetch base table.
             rec.payload_status_ = RecordStatus::BaseVersionMiss;
@@ -809,7 +850,7 @@ public:
      */
     bool HasVisibleVersion(uint64_t read_ts) const
     {
-        if (commit_ts_ <= read_ts)
+        if (CommitTs() <= read_ts)
         {
             return true;
         }
@@ -852,7 +893,8 @@ public:
                          bool include_flushed_rec) const
     {
         size_t exported_count = 0;
-        if (commit_ts_ <= ckpt_ts_)
+
+        if (IsPersistent())
         {
             return exported_count;
         }
@@ -860,14 +902,17 @@ public:
 #ifndef ON_KEY_OBJECT
         size_t ckpt_idx = ckpt_vec_size;
 #endif
-        if (from_ts < commit_ts_ && commit_ts_ <= to_ts)
+        const uint64_t commit_ts = CommitTs();
+        const RecordStatus rec_status = PayloadStatus();
+
+        if (from_ts < commit_ts && commit_ts <= to_ts)
         {
             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
             ref.CloneOrCopyKey(key);
             ref.cce_ =
                 const_cast<LruEntry *>(static_cast<const LruEntry *>(this));
 
-            if (payload_status_ == RecordStatus::Normal)
+            if (rec_status == RecordStatus::Normal)
             {
 #ifndef ON_KEY_OBJECT
                 ref.SetPayload(payload_);
@@ -876,8 +921,8 @@ public:
 #endif
             }
 
-            ref.payload_status_ = payload_status_;
-            ref.commit_ts_ = commit_ts_;
+            ref.payload_status_ = rec_status;
+            ref.commit_ts_ = commit_ts;
 
             int32_t data_store_size =
                 data_store_size_.load(std::memory_order_acquire);
@@ -907,19 +952,21 @@ public:
         }
 
 #ifndef ON_KEY_OBJECT
+        const uint64_t ckpt_ts = CkptTs();
+
         if (archives_ != nullptr && archives_->size() > 0)
         {
             for (auto it = archives_->begin(); it != archives_->end(); it++)
             {
                 if (from_ts < it->commit_ts_ && it->commit_ts_ <= to_ts)
                 {
-                    if (it->commit_ts_ < ckpt_ts_ || it->commit_ts_ == 1U)
+                    if (it->commit_ts_ < ckpt_ts || it->commit_ts_ == 1U)
                     {
                         break;
                     }
                     else
                     {
-                        if (exported_count == 0 && it->commit_ts_ == ckpt_ts_)
+                        if (exported_count == 0 && it->commit_ts_ == ckpt_ts)
                         {
                             if (include_flushed_rec)
                             {
@@ -1028,12 +1075,12 @@ public:
                 {
                     if (include_flushed_rec && exported_count == 0)
                     {
-                        if (it->commit_ts_ > ckpt_ts_)
+                        if (it->commit_ts_ > ckpt_ts)
                         {
                             continue;
                         }
 
-                        if (it->commit_ts_ == ckpt_ts_ && it->commit_ts_ != 1)
+                        if (it->commit_ts_ == ckpt_ts && it->commit_ts_ != 1)
                         {
                             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
                             ref.CloneOrCopyKey(key);
@@ -1068,15 +1115,14 @@ public:
                     }
 
                     assert(!include_flushed_rec || exported_count != 0 ||
-                           it->commit_ts_ < ckpt_ts_ || it->commit_ts_ == 1);
+                           it->commit_ts_ < ckpt_ts || it->commit_ts_ == 1);
                     break;
                 }
                 // else: it->commit_ts_ > to_ts
             }
         }
 
-        if (exported_count > 0 &&
-            ckpt_ts_.load(std::memory_order_relaxed) == 0 &&
+        if (exported_count > 0 && ckpt_ts == 0 &&
             !HasVisibleVersion(oldest_active_tx_ts))
         {
             // last ckpt version is needed but not in memory, and we're not sure
@@ -1110,9 +1156,9 @@ public:
 
     bool NeedCkpt()
     {
-        return commit_ts_ > ckpt_ts_.load(std::memory_order_acquire) &&
-               (payload_status_ == RecordStatus::Normal ||
-                payload_status_ == RecordStatus::Deleted);
+        RecordStatus rec_status = PayloadStatus();
+        return !IsPersistent() && (rec_status == RecordStatus::Normal ||
+                                   rec_status == RecordStatus::Deleted);
     }
 };
 
@@ -1385,7 +1431,7 @@ struct CcPage : public LruPage
         for (size_t idx = split_pos; idx < entries_.size(); idx++)
         {
             new_last_commit_ts =
-                std::max(new_last_commit_ts, entries_[idx]->commit_ts_);
+                std::max(new_last_commit_ts, entries_[idx]->CommitTs());
             new_page_entries.push_back(std::move(entries_[idx]));
         }
         keys_.erase(keys_.begin() + split_pos, keys_.end());

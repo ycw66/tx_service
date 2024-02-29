@@ -4187,8 +4187,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                             continue;
                         }
 
-                        ref.cce_->ckpt_ts_.store(ref.commit_ts_,
-                                                 std::memory_order_release);
+                        ref.cce_->SetCkptTs(ref.commit_ts_);
                         ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
                     }
 
@@ -4240,8 +4239,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     continue;
                                 }
 
-                                ref.cce_->ckpt_ts_.store(
-                                    ref.commit_ts_, std::memory_order_release);
+                                ref.cce_->SetCkptTs(ref.commit_ts_);
                                 ref.cce_->data_store_size_.fetch_add(
                                     ref.delta_size_);
                             }

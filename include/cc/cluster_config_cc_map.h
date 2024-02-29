@@ -23,9 +23,9 @@ public:
 
     ClusterConfigCcMap(CcShard *shard,
                        NodeGroupId cc_ng_id,
-                       const TableName &table_name)
+                       uint64_t config_version)
         : TemplateCcMap<VoidKey, ClusterConfigRecord>(
-              shard, cc_ng_id, table_name, 1, nullptr, true)
+              shard, cc_ng_id, cluster_config_ccm_name, 1, nullptr, true)
     {
         // We only store one record in ClusterConfigCcMap as neg_inf_ key. It is
         // is only used for concurrency control purpose.
@@ -34,8 +34,8 @@ public:
 #else
         neg_inf_.payload_ = std::make_unique<ClusterConfigRecord>();
 #endif
-        neg_inf_.commit_ts_ = Sharder::Instance().ClusterConfigVersion();
-        neg_inf_.payload_status_ = RecordStatus::Normal;
+        assert(config_version > 0);
+        neg_inf_.SetCommitTsPayloadStatus(config_version, RecordStatus::Normal);
     }
 
     bool Execute(AcquireAllCc &req) override
@@ -62,7 +62,7 @@ public:
                 req.CcePtr());
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce_ptr,
-                                            neg_inf_.payload_status_,
+                                            neg_inf_.PayloadStatus(),
                                             &req,
                                             ng_id,
                                             ng_term,
@@ -94,7 +94,7 @@ public:
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(&cc_entry,
                                   &neg_inf_page_,
-                                  cc_entry.payload_status_,
+                                  cc_entry.PayloadStatus(),
                                   &req,
                                   req.NodeGroupId(),
                                   ng_term,
@@ -119,7 +119,7 @@ public:
                 ng_term,
                 req.NodeGroupId(),
                 shard_->LocalCoreId());
-            acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
+            acquire_all_result.commit_ts_ = cc_entry.CommitTs();
             acquire_all_result.node_term_ = ng_term;
 
             // Cluster config map is only stored on the first core, so we don't
@@ -239,7 +239,8 @@ public:
 
         if (lk_type != LockType::NoLock)
         {
-            neg_inf_.commit_ts_ = req.CommitTs();
+            neg_inf_.SetCommitTsPayloadStatus(req.CommitTs(),
+                                              RecordStatus::Normal);
             ReleaseCceLock(lock, &neg_inf_, txn, req.NodeGroupId());
         }
 
@@ -432,7 +433,8 @@ public:
                 cluster_scale_txn, tx_candidate_term, req.CommitTs());
             txm->RecoverClusterScale(scale_op_msg, dm_started, dm_finished);
         }
-        neg_inf_.commit_ts_ = Sharder::Instance().ClusterConfigVersion();
+        neg_inf_.SetCommitTsPayloadStatus(
+            Sharder::Instance().ClusterConfigVersion(), RecordStatus::Normal);
 
         req.SetFinish();
         return true;

@@ -34,7 +34,8 @@ public:
             RangeBucketKey bucket_key(bucket.first);
             auto cce_it = FindEmplace(bucket_key);
             CcEntry<RangeBucketKey, RangeBucketRecord> *cce = cce_it->second;
-            cce->commit_ts_ = bucket.second->Version();
+            cce->SetCommitTsPayloadStatus(bucket.second->Version(),
+                                          RecordStatus::Normal);
 #ifndef ON_KEY_OBJECT
             cce->payload_ =
                 std::make_shared<RangeBucketRecord>(bucket.second.get());
@@ -93,7 +94,7 @@ public:
                                                  : CcOperation::Read;
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce,
-                                            cce->payload_status_,
+                                            cce->PayloadStatus(),
                                             &req,
                                             req.NodeGroupId(),
                                             ng_term,
@@ -116,7 +117,7 @@ public:
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(cce,
                                   ccp,
-                                  cce->payload_status_,
+                                  cce->PayloadStatus(),
                                   &req,
                                   ng_id,
                                   ng_term,
@@ -142,7 +143,7 @@ public:
             RangeBucketRecord *bucket_rec =
                 static_cast<RangeBucketRecord *>(req.Record());
             *bucket_rec = *(cce->payload_);
-            hd_result->Value().ts_ = cce->commit_ts_;
+            hd_result->Value().ts_ = cce->CommitTs();
             hd_result->Value().rec_status_ = RecordStatus::Normal;
             hd_result->Value().lock_type_ = acquired_lock;
             hd_result->SetFinished();

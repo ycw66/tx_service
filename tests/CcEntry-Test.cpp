@@ -14,8 +14,8 @@ TEST_CASE("CcEntry Init", "[cc-entry]")
 {
     CcEntry<CompositeKey<int>, CompositeRecord<int>> entry;
 
-    REQUIRE(entry.commit_ts_ == 1);
-    REQUIRE(entry.payload_status_ == RecordStatus::Unknown);
+    REQUIRE(entry.CommitTs() == 0);
+    REQUIRE(entry.PayloadStatus() == RecordStatus::Unknown);
     REQUIRE(entry.ArchiveRecordsCount() == 0);
 }
 
@@ -23,21 +23,18 @@ TEST_CASE("CcEntry ArchiveBeforeUpdate", "[cc-entry]")
 {
     CcEntry<CompositeKey<int>, CompositeRecord<int>> entry;
 
-    entry.commit_ts_ = 1U;
     entry.payload_ = std::make_unique<CompositeRecord<int>>(1);
-    entry.payload_status_ = RecordStatus::Unknown;
+    entry.SetCommitTsPayloadStatus(1U, RecordStatus::Unknown);
 
     entry.ArchiveBeforeUpdate(TableType::Primary);
     REQUIRE(entry.ArchiveRecordsCount() == 0);
 
-    entry.commit_ts_ = 2U;
     entry.payload_ = std::make_unique<CompositeRecord<int>>(2);
-    entry.payload_status_ = RecordStatus::Normal;
+    entry.SetCommitTsPayloadStatus(2U, RecordStatus::Normal);
     entry.ArchiveBeforeUpdate(TableType::Primary);
 
-    entry.commit_ts_ = 3U;
     entry.payload_ = std::make_unique<CompositeRecord<int>>(3);
-    entry.payload_status_ = RecordStatus::Normal;
+    entry.SetCommitTsPayloadStatus(3U, RecordStatus::Normal);
     entry.ArchiveBeforeUpdate(TableType::Primary);
     REQUIRE(entry.ArchiveRecordsCount() == 2);
 
@@ -183,8 +180,7 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
 TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
 {
     CcEntry<CompositeKey<int>, CompositeRecord<int>> entry;
-    entry.commit_ts_ = 12U;
-    entry.payload_status_ = RecordStatus::Deleted;
+    entry.SetCommitTsPayloadStatus(12U, RecordStatus::Deleted);
 
     // [10,9,8,6,3,2]
     std::vector<VersionTxRecord> records;  // desc order
@@ -319,8 +315,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
     }
 
-    entry.commit_ts_ = 12U;
-    entry.payload_status_ = RecordStatus::Deleted;
+    entry.SetCommitTsPayloadStatus(12U, RecordStatus::Deleted);
     entry.payload_ = std::make_unique<CompositeRecord<int>>(12);
     //== CcEntry has been filled, but has no historical version.
 
@@ -334,7 +329,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     }
 
     // (read_ts: 5, ckpt_ts=3, ckpt_ts<=read_ts)->... => BaseVersionMiss
-    entry.ckpt_ts_ = 3;
+    entry.SetCkptTs(3);
     {
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
@@ -344,7 +339,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     }
 
     // (read_ts: 5, ckpt_ts=8, ckpt_ts>read_ts)->... =>ArchiveVesionMiss
-    entry.ckpt_ts_ = 8;
+    entry.SetCkptTs(8);
     {
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;

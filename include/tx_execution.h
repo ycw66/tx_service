@@ -262,17 +262,6 @@ private:
     void PushOperation(TransactionOperation *op, int retry_num = RETRY_NUM);
 
     /**
-     * @brief Move forward the tx's ts, either as the commit_ts_bound_ +1 or
-     * candidate_ts +1, depends on which one is max
-     */
-    void ForwardTs(uint64_t candidate_ts = 0);
-
-    /**
-     * @brief Mark transaction as failed, and forward to clean up step
-     */
-    void MarkFailed();
-
-    /**
      * Process Operations.
      * The TxRequest is responsible for putting the corresponding operations
      * into state_stack. The first Forward call will start to process these

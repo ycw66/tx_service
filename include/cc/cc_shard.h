@@ -108,8 +108,10 @@ public:
             LocalCcShards &local_shards,
             CatalogFactory *catalog_factory,
             SystemHandler *system_handler,
+            uint64_t cluster_config_version,
             metrics::MetricsRegistry *metrics_registry = nullptr,
             metrics::CommonLabels common_labels = {});
+
     /**
      * @brief Returns the cc map at this shard given the table name and the cc
      * node group.

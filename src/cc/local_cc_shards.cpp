@@ -77,17 +77,19 @@ LocalCcShards::LocalCcShards(
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
         common_labels["core_id"] = std::to_string(thd_idx);
-        cc_shards_.emplace_back(std::make_unique<CcShard>(thd_idx,
-                                                          core_cnt,
-                                                          memory_limit_mb,
-                                                          log_limit_mb,
-                                                          realtime_sampling,
-                                                          node_id,
-                                                          *this,
-                                                          catalog_factory_,
-                                                          system_handler,
-                                                          metrics_registry,
-                                                          common_labels));
+        cc_shards_.emplace_back(
+            std::make_unique<CcShard>(thd_idx,
+                                      core_cnt,
+                                      memory_limit_mb,
+                                      log_limit_mb,
+                                      realtime_sampling,
+                                      node_id,
+                                      *this,
+                                      catalog_factory_,
+                                      system_handler,
+                                      cluster_config_version,
+                                      metrics_registry,
+                                      common_labels));
     }
 
     // Starts flush worker threads firstly.
@@ -139,12 +141,12 @@ uint64_t LocalCcShards::ClockTs()
 
 uint64_t LocalCcShards::TsBase()
 {
-    return ts_base_.load(std::memory_order_acquire);
+    return ts_base_.load(std::memory_order_relaxed);
 }
 
 void LocalCcShards::UpdateTsBase(uint64_t timestamp)
 {
-    uint64_t tsb = ts_base_.load(std::memory_order_acquire);
+    uint64_t tsb = ts_base_.load(std::memory_order_relaxed);
     // Update ts_base_ only if new timestamp is bigger. If the CAS fails, tsb
     // will be set to the actual value of ts_base_, keep retrying until success
     // or ts_base_ is already bigger than timestamp.
@@ -3546,8 +3548,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
                         assert(ref.cce_ != nullptr);
                         // todo: remove cce_
-                        ref.cce_->ckpt_ts_.store(ref.commit_ts_,
-                                                 std::memory_order_release);
+                        ref.cce_->SetCkptTs(ref.commit_ts_);
                         ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
                     }
                     ResetCleanStartPageCc reset_cc(cc_shards_.size());

@@ -97,18 +97,17 @@ public:
             if (start_key->Type() == KeyType::NegativeInf)
             {
                 neg_inf_.payload_->range_info_ = range_info;
-                neg_inf_.commit_ts_ = range_info->version_ts_;
-                neg_inf_.payload_status_ = RecordStatus::Normal;
                 neg_inf_.payload_->range_owner_rec_ =
                     bucket_ccm_->GetBucketRecord(Sharder::MapRangeIdToBucketId(
                         range_info->PartitionId()));
+                neg_inf_.SetCommitTsPayloadStatus(range_info->version_ts_,
+                                                  RecordStatus::Normal);
             }
             else
             {
                 auto it =
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
-                cce->commit_ts_ = range_info->version_ts_;
 #ifndef ON_KEY_OBJECT
                 cce->payload_ = std::make_shared<RangeRecord>();
 #else
@@ -118,7 +117,8 @@ public:
                 cce->payload_->range_info_ = range_info;
                 cce->payload_->range_owner_rec_ = bucket_ccm_->GetBucketRecord(
                     Sharder::MapRangeIdToBucketId(range_info->PartitionId()));
-                cce->payload_status_ = RecordStatus::Normal;
+                cce->SetCommitTsPayloadStatus(range_info->version_ts_,
+                                              RecordStatus::Normal);
             }
         }
     }
@@ -239,7 +239,7 @@ public:
         std::tie(acquired_lock, err_code) =
             AcquireCceKeyLock(bucket_cce,
                               nullptr,
-                              bucket_cce->payload_status_,
+                              bucket_cce->PayloadStatus(),
                               &req,
                               req.NodeGroupId(),
                               ng_term,
@@ -264,7 +264,7 @@ public:
         std::tie(acquired_lock, err_code) =
             AcquireCceKeyLock(floor_cce,
                               range_page,
-                              floor_cce->payload_status_,
+                              floor_cce->PayloadStatus(),
                               &req,
                               req.NodeGroupId(),
                               ng_term,
@@ -284,7 +284,7 @@ public:
                             shard_->LocalCoreId());
             RangeRecord *range_rec = static_cast<RangeRecord *>(req.Record());
             range_rec->CopyForReadResult(*(floor_cce->payload_));
-            hd_result->Value().ts_ = floor_cce->commit_ts_;
+            hd_result->Value().ts_ = floor_cce->CommitTs();
             hd_result->Value().rec_status_ = RecordStatus::Normal;
             hd_result->Value().lock_type_ = acquired_lock;
             hd_result->SetFinished();
@@ -725,12 +725,11 @@ public:
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
 
-                if (cce->commit_ts_ >= new_range_info->version_ts_)
+                if (cce->CommitTs() >= new_range_info->version_ts_)
                 {
                     // Skip if the new range entry is already committed.
                     continue;
                 }
-                cce->commit_ts_ = new_range_info->version_ts_;
 #ifndef ON_KEY_OBJECT
                 cce->payload_ = std::make_shared<RangeRecord>();
 #else
@@ -741,7 +740,8 @@ public:
                 cce->payload_->range_owner_rec_ = new_range_owner_rec.at(idx);
 
                 // update previous cce's end key
-                cce->payload_status_ = RecordStatus::Normal;
+                cce->SetCommitTsPayloadStatus(new_range_info->version_ts_,
+                                              RecordStatus::Normal);
             }
             // range_owner_rec_ needs to be reset on each core since they point
             // to bucket records on different cores.
@@ -1108,11 +1108,10 @@ public:
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
 
-                if (cce->commit_ts_ >= new_range_info->version_ts_)
+                if (cce->CommitTs() >= new_range_info->version_ts_)
                 {
                     continue;
                 }
-                cce->commit_ts_ = new_range_info->version_ts_;
 #ifndef ON_KEY_OBJECT
                 cce->payload_ = std::make_shared<RangeRecord>();
 #else
@@ -1124,7 +1123,8 @@ public:
                 cce->payload_->range_owner_rec_ =
                     bucket_map->GetBucketRecord(Sharder::MapRangeIdToBucketId(
                         new_range_info->PartitionId()));
-                cce->payload_status_ = RecordStatus::Normal;
+                cce->SetCommitTsPayloadStatus(new_range_info->version_ts_,
+                                              RecordStatus::Normal);
             }
         }
 
@@ -1142,7 +1142,7 @@ public:
             // what.
             auto lock_pair = AcquireCceKeyLock(old_range_cce,
                                                old_range_page,
-                                               old_range_cce->payload_status_,
+                                               old_range_cce->PayloadStatus(),
                                                &req,
                                                req.NodeGroupId(),
                                                ng_term,

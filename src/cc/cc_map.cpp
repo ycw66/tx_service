@@ -32,7 +32,7 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
 {
     if (iso_level == IsolationLevel::Snapshot)
     {
-        if (cc_op == CcOperation::ReadForWrite && read_ts < cce->commit_ts_)
+        if (cc_op == CcOperation::ReadForWrite && read_ts < cce->CommitTs())
         {
             LOG(WARNING) << "SI ReadForWrite, latest version not fits the read "
                             "timestamp. tx:"
@@ -240,7 +240,7 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
     }
     else if (acquired_lock == LockType::WriteIntent &&
-             iso_level == IsolationLevel::Snapshot && read_ts < cce->commit_ts_)
+             iso_level == IsolationLevel::Snapshot && read_ts < cce->CommitTs())
     {
         // The write intent has been acquired. Does not keep the write intent if
         // this tx under Snapshot Isolation (SI) is destined to fail. For

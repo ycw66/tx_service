@@ -825,7 +825,7 @@ public:
             static_cast<const CatalogKey *>(req.Key());
         Iterator it = FindEmplace(*table_key);
         CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
-        if (cce->payload_status_ == RecordStatus::Unknown)
+        if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             const CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
@@ -835,7 +835,7 @@ public:
             // the catalog has been constructed at this node. If so, turns
             // this request into a read-outside request that installs the
             // value in the cc entry.
-            if (catalog_entry != nullptr)
+            if (catalog_entry != nullptr && catalog_entry->Version() > 0)
             {
                 if (catalog_entry->schema_ != nullptr)
                 {
@@ -858,13 +858,13 @@ public:
                     cce->payload_->Set(catalog_entry->schema_,
                                        catalog_entry->dirty_schema_,
                                        catalog_entry->Version());
-                    cce->payload_status_ = RecordStatus::Normal;
-                    cce->commit_ts_ = catalog_entry->Version();
+                    cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
+                                                  RecordStatus::Normal);
                 }
                 else
                 {
-                    cce->payload_status_ = RecordStatus::Deleted;
-                    cce->commit_ts_ = catalog_entry->Version();
+                    cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
+                                                  RecordStatus::Deleted);
                 }
             }
             else
@@ -1193,7 +1193,7 @@ public:
         {
             auto lock_pair = AcquireCceKeyLock(cce,
                                                ccp,
-                                               cce->payload_status_,
+                                               cce->PayloadStatus(),
                                                &req,
                                                req.NodeGroupId(),
                                                ng_term,
@@ -1213,7 +1213,7 @@ public:
         {
             auto lock_pair = AcquireCceKeyLock(cce,
                                                ccp,
-                                               cce->payload_status_,
+                                               cce->PayloadStatus(),
                                                &req,
                                                req.NodeGroupId(),
                                                ng_term,
@@ -1285,7 +1285,7 @@ public:
         CatalogKey table_key(base_table_name);
         Iterator it = FindEmplace(table_key);
         CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
-        if (cce->payload_status_ == RecordStatus::Unknown)
+        if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             const CatalogEntry *catalog_entry =
                 shard_->GetCatalog(base_table_name, req.NodeGroupId());
@@ -1298,13 +1298,13 @@ public:
                     cce->payload_->Set(catalog_entry->schema_,
                                        catalog_entry->dirty_schema_,
                                        catalog_entry->Version());
-                    cce->payload_status_ = RecordStatus::Normal;
-                    cce->commit_ts_ = catalog_entry->Version();
+                    cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
+                                                  RecordStatus::Normal);
                 }
                 else
                 {
-                    cce->payload_status_ = RecordStatus::Deleted;
-                    cce->commit_ts_ = catalog_entry->Version();
+                    cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
+                                                  RecordStatus::Deleted);
                 }
             }
             else
@@ -1324,7 +1324,7 @@ public:
             }
         }
 
-        if (cce->payload_status_ == RecordStatus::Normal)
+        if (cce->PayloadStatus() == RecordStatus::Normal)
         {
             // Initialize table statistics before create ccmap.
             if (!shard_->LoadRangesAndStatisticsNx(

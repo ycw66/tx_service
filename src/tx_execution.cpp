@@ -335,20 +335,6 @@ TxmStatus TransactionExecution::Forward()
     }
 }
 
-void TransactionExecution::ForwardTs(uint64_t candidate_ts)
-{
-    commit_ts_ = commit_ts_bound_ + 1;
-    if (candidate_ts != 0)
-    {
-        commit_ts_ = std::max(commit_ts_, candidate_ts + 1);
-    }
-}
-
-void TransactionExecution::MarkFailed()
-{
-    commit_ts_ = 0;
-}
-
 int TransactionExecution::Execute(TxRequest *tx_req)
 {
     TxnStatus status = tx_status_.load(std::memory_order_relaxed);

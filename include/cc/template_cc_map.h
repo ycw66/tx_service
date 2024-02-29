@@ -175,7 +175,7 @@ public:
 
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce_ptr,
-                                            cce_ptr->payload_status_,
+                                            cce_ptr->PayloadStatus(),
                                             &req,
                                             req.NodeGroupId(),
                                             ng_term,
@@ -218,7 +218,7 @@ public:
                     // The floor entry's key is equal to the insert key. If the
                     // key is deleted, the insert becomes an update. Or the
                     // insert is aborted due to the duplidate key conflict.
-                    if (cce_ptr->payload_status_ == RecordStatus::Deleted)
+                    if (cce_ptr->PayloadStatus() == RecordStatus::Deleted)
                     {
                         cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
                                         ng_term,
@@ -278,7 +278,7 @@ public:
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(&cc_entry,
                                       ccp,
-                                      cc_entry.payload_status_,
+                                      cc_entry.PayloadStatus(),
                                       &req,
                                       req.NodeGroupId(),
                                       ng_term,
@@ -307,7 +307,19 @@ public:
                 // this shard that may overlap with the ongoing tx.
                 acquire_key_result.last_vali_ts_ =
                     std::max(shard_->LastReadTs(), lock_ts);
-                acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
+
+                uint64_t curr_version_ts = cc_entry.CommitTs();
+                // If a write is an update, delete or insert w/o duplicate, the
+                // write must be preceded by a read, which acquires the write
+                // intent and sets the payload status. The fact that the commit
+                // ts is 0 means that this write disregards the existing value,
+                // if there is any, and overwrites it. In such a case, we return
+                // the current time via acquire_key_result.commit_ts_ so that
+                // the tx's commit timestamp is bigger than the prior version
+                // (if there is any).
+                curr_version_ts =
+                    curr_version_ts > 0 ? curr_version_ts : shard_->Now();
+                acquire_key_result.commit_ts_ = curr_version_ts;
 
                 hd_res->SetFinished();
             }
@@ -453,13 +465,6 @@ public:
 
                 // Since this is a forward req, we assume this entry is not
                 // visible on this ng yet so no need to check for lock.
-
-                if (cce->ckpt_ts_ == 0U &&
-                    (ccm_has_full_entries_ || req.IsInitialInsert()))
-                {
-                    uint64_t tmp_ts = 0U;
-                    cce->ckpt_ts_.compare_exchange_strong(tmp_ts, 1U);
-                }
             }
             else
             {
@@ -482,7 +487,7 @@ public:
             if (commit_ts > 0)
             {
 #ifdef RANGE_PARTITION_ENABLED
-                if (op_type == OperationType::Insert && cce->commit_ts_ == 1)
+                if (op_type == OperationType::Insert && cce->CommitTs() == 1)
                 {
                     // At post write we have already loaded the latest version
                     // of cce into memory. So if commit ts is 1 (entry does not
@@ -500,14 +505,13 @@ public:
                     // may be in use by checkpointer and must not be deleted
                     // here. These expired archives will be deleted at next
                     // checkpoint.
-                    uint64_t recycle_ts = std::min(
-                        shard_->GlobalMinSiTxStartTs(), cce->ckpt_ts_.load());
+                    uint64_t recycle_ts = shard_->GlobalMinSiTxStartTs();
                     cce->KickOutArchiveRecords(recycle_ts);
                     cce->ArchiveBeforeUpdate(Type());
                 }
 #endif
 
-                if (commit_ts < cce->commit_ts_)
+                if (commit_ts < cce->CommitTs())
                 {
                     // Concurrent upsert_tx has write the latest value, so
                     // discard the old value directly. For example, during add
@@ -520,8 +524,6 @@ public:
                     req.Result()->SetFinished();
                     return true;
                 }
-
-                cce->commit_ts_ = commit_ts;
 
                 // FIXME: when working with MySQL, the key contains a binary
                 // image and a sturcture for unpack info. Unfortunately, the
@@ -578,9 +580,17 @@ public:
                     }
                 }
 
-                RecordStatus cce_old_status = cce->payload_status_;
-                cce->payload_status_ =
+                RecordStatus cce_old_status = cce->PayloadStatus();
+                RecordStatus new_status =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
+                cce->SetCommitTsPayloadStatus(commit_ts, new_status);
+
+                if (is_upload && req.IsInitialInsert())
+                {
+                    // Updates the ckpt ts after commit ts is set.
+                    cce->SetCkptTs(1U);
+                }
+
                 DLOG_IF(INFO, TRACE_OCC_ERR)
                     << "PostWriteCc, txn:" << txn << " ,cce: " << cce
                     << " ,commit_ts: " << commit_ts;
@@ -677,7 +687,7 @@ public:
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce_ptr,
-                                            cce_ptr->payload_status_,
+                                            cce_ptr->PayloadStatus(),
                                             &req,
                                             ng_id,
                                             ng_term,
@@ -738,7 +748,7 @@ public:
                     // The floor entry's key is equal to the insert key. If the
                     // key is deleted, the insert becomes an update. Or the
                     // insert is aborted due to the duplidate key conflict.
-                    if (cce_ptr->payload_status_ != RecordStatus::Deleted)
+                    if (cce_ptr->PayloadStatus() != RecordStatus::Deleted)
                     {
                         // Inserts a duplicate key.
                         hd_res->SetError(CcErrorCode::DUPLICATE_INSERT_ERR);
@@ -809,7 +819,7 @@ public:
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(&cc_entry,
                                       ccp,
-                                      cc_entry.payload_status_,
+                                      cc_entry.PayloadStatus(),
                                       &req,
                                       req.NodeGroupId(),
                                       ng_term,
@@ -825,7 +835,7 @@ public:
             {
             case CcErrorCode::NO_ERROR:
             {
-                if (cc_entry.payload_status_ != RecordStatus::Deleted)
+                if (cc_entry.PayloadStatus() != RecordStatus::Deleted)
                 {
                     assert(acquired_lock == LockType::WriteIntent ||
                            acquired_lock == LockType::WriteLock);
@@ -851,7 +861,7 @@ public:
                         ng_term,
                         req.NodeGroupId(),
                         shard_->LocalCoreId());
-                    acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
+                    acquire_all_result.commit_ts_ = cc_entry.CommitTs();
                     acquire_all_result.node_term_ = ng_term;
                 }
 
@@ -1055,17 +1065,17 @@ public:
                     // and does not change the record status and commit_ts.
                     if (req.CommitType() != PostWriteType::PrepareCommit)
                     {
-                        cce_ptr->commit_ts_ = commit_ts;
 #ifndef ON_KEY_OBJECT
-                        cce_ptr->payload_status_ =
+                        RecordStatus status =
                             (req.OpType() == OperationType::Delete ||
                              req.OpType() == OperationType::DropTable)
                                 ? RecordStatus::Deleted
                                 : RecordStatus::Normal;
 #else
                         // no need to delete catalog
-                        cce_ptr->payload_status_ = RecordStatus::Normal;
+                        RecordStatus status = RecordStatus::Normal;
 #endif
+                        cce_ptr->SetCommitTsPayloadStatus(commit_ts, status);
                     }
                 }
 
@@ -1174,8 +1184,8 @@ public:
         // FIXME(lzx): Now, we don't backfill for "Unkown" entry when scanning.
         // So, Validate operation fails if another tx backfilled it. Temporary
         // fix is that we don't validate for "Unkown" status results.
-        if (cc_entry.payload_status_ != RecordStatus::Unknown && key_ts > 0 &&
-            key_ts != cc_entry.commit_ts_)
+        if (cc_entry.PayloadStatus() != RecordStatus::Unknown && key_ts > 0 &&
+            key_ts != cc_entry.CommitTs())
         {
             ReleaseCceLock(
                 cc_entry.GetKeyLock(), &cc_entry, txn, req.NodeGroupId());
@@ -1185,9 +1195,9 @@ public:
             DLOG_IF(INFO, TRACE_OCC_ERR)
                 << "PostReadCc, occ_err, txn:" << txn << " ,cce: " << &cc_entry
                 << " ,payload_status: "
-                << static_cast<int>(cc_entry.payload_status_)
+                << static_cast<int>(cc_entry.PayloadStatus())
                 << " ,key_ts: " << key_ts
-                << " ,cc_entry.commit_ts_: " << cc_entry.commit_ts_;
+                << " ,cc_entry.commit_ts_: " << cc_entry.CommitTs();
         }
         else
         {
@@ -1370,7 +1380,7 @@ public:
                 {
                     std::tie(acquired_lock, err_code) =
                         LockHandleForResumedRequest(cce,
-                                                    cce->payload_status_,
+                                                    cce->PayloadStatus(),
                                                     &req,
                                                     ng_id,
                                                     ng_term,
@@ -1460,18 +1470,16 @@ public:
                                     return true;
                                 }
 
-                                if (cce->payload_status_ ==
+                                if (cce->PayloadStatus() ==
                                     RecordStatus::Unknown)
                                 {
-                                    cce->payload_status_ =
-                                        RecordStatus::Deleted;
-                                    cce->commit_ts_ = 1U;
-                                    cce->ckpt_ts_.store(
-                                        1U, std::memory_order_relaxed);
+                                    cce->SetCommitTsPayloadStatus(
+                                        1U, RecordStatus::Deleted);
+                                    cce->SetCkptTs(1U);
                                 }
                                 else
                                 {
-                                    assert(cce->commit_ts_ > 1);
+                                    assert(cce->CommitTs() > 1);
                                 }
                             }
                             else
@@ -1598,7 +1606,7 @@ public:
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
                                       ccp,
-                                      cce->payload_status_,
+                                      cce->PayloadStatus(),
                                       &req,
                                       ng_id,
                                       ng_term,
@@ -1685,19 +1693,15 @@ public:
                 tmp_payload_status = RecordStatus::Deleted;
             }
 
-            if (cce->payload_status_ == RecordStatus::Unknown)
+            if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
                 cce->payload_ = std::move(tmp_payload);
-                cce->payload_status_ = tmp_payload_status;
-                cce->commit_ts_ = req.ReadTimestamp();
-                // set "ckpt_ts_" to identify the entry is refilled
-                uint64_t tmp_ts = 0U;
-                cce->ckpt_ts_.compare_exchange_strong(tmp_ts,
-                                                      req.ReadTimestamp());
+                cce->SetCommitTsPayloadStatus(req.ReadTimestamp(),
+                                              tmp_payload_status);
             }
 #ifndef ON_KEY_OBJECT
-            else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 0U &&
-                     cce->commit_ts_ > req.ReadTimestamp())
+            else if (shard_->EnableMvcc() &&
+                     cce->CommitTs() > req.ReadTimestamp())
             {
                 // Trying to insert the record to backfill into archives is
                 // needed, because the entry may be created when executing
@@ -1705,11 +1709,10 @@ public:
                 cce->AddArchiveRecord(std::move(tmp_payload),
                                       tmp_payload_status,
                                       req.ReadTimestamp());
-                // set "ckpt_ts_" to identify the entry is refilled
-                uint64_t tmp_ts = 0U;
-                cce->ckpt_ts_.compare_exchange_strong(tmp_ts,
-                                                      req.ReadTimestamp());
             }
+            // Updates the ckpt timestamp such that it is no smaller than the
+            // backfill version.
+            cce->SetCkptTs(req.ReadTimestamp());
 
             // Refill mvcc archives
             if (shard_->EnableMvcc() &&
@@ -1761,8 +1764,8 @@ public:
             return true;
 #endif
         }
-        else if (cce->payload_status_ == RecordStatus::Normal &&
-                 (req.Type() == ReadType::Inside || cce->commit_ts_ > 1))
+        else if (cce->PayloadStatus() == RecordStatus::Normal &&
+                 (req.Type() == ReadType::Inside || cce->CommitTs() > 1))
         {
             // Copies the newest committed payload to the read result, if (1)
             // this is a read request that starts concurrency control for
@@ -1784,7 +1787,7 @@ public:
                 (key_lock != nullptr && key_lock->HasWriteLock() &&
                  key_lock->WriteLockTx() != req.Txn());
             if (req.Isolation() == IsolationLevel::ReadCommitted &&
-                cce->commit_ts_ > 0 && cce->commit_ts_ < req.ReadTimestamp() &&
+                cce->CommitTs() > 0 && cce->CommitTs() < req.ReadTimestamp() &&
                 wait_for_post_write)
             {
                 // When backtracking the content of primary key record according
@@ -1821,8 +1824,8 @@ public:
             }
         }
 
-        hd_res->Value().ts_ = cce->commit_ts_;
-        hd_res->Value().rec_status_ = cce->payload_status_;
+        hd_res->Value().ts_ = cce->CommitTs();
+        hd_res->Value().rec_status_ = cce->PayloadStatus();
         hd_res->SetFinished();
 
         return true;
@@ -1865,9 +1868,9 @@ public:
         CcEntry<KeyT, ValueT> *cce =
             reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
-        if (cce->payload_status_ == RecordStatus::Unknown)
+        if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
-            assert(cce->commit_ts_ == 1);
+            assert(cce->CommitTs() == 1);
             if (req.RecordStatus() == RecordStatus::Normal)
             {
                 size_t offset = 0;
@@ -1879,16 +1882,10 @@ public:
 #endif
                 cce->payload_->Deserialize(req.rec_str_->data(), offset);
             }
-            cce->commit_ts_ = req.CommitTs();
-            cce->payload_status_ = req.RecordStatus();
-
-            // set "ckpt_ts_" to identify the entry is refilled
-            uint64_t tmp_ts = 0U;
-            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs());
+            cce->SetCommitTsPayloadStatus(req.CommitTs(), req.RecordStatus());
         }
 #ifndef ON_KEY_OBJECT
-        else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 0U &&
-                 cce->commit_ts_ > req.CommitTs())
+        else if (shard_->EnableMvcc() && cce->CommitTs() > req.CommitTs())
         {
             // Trying to insert the record to backfill into archives is needed,
             // because the entry may be created when executing "ReplayLogCc".
@@ -1900,11 +1897,11 @@ public:
             }
             cce->AddArchiveRecord(
                 std::move(tmp_payload), req.RecordStatus(), req.CommitTs());
-
-            // set "ckpt_ts_" to identify the entry is refilled
-            uint64_t tmp_ts = 0U;
-            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs());
         }
+        // Updates the ckpt timestamp such that it is no smaller than the
+        // backfill version.
+        cce->SetCkptTs(req.CommitTs());
+
         // Refill mvcc archives.
         if (shard_->EnableMvcc())
         {
@@ -2080,7 +2077,7 @@ public:
                 // Lock has been acquired, UpsertLockHoldingTx
                 auto lock_pair =
                     LockHandleForResumedRequest(cce,
-                                                cce->payload_status_,
+                                                cce->PayloadStatus(),
                                                 &req,
                                                 ng_id,
                                                 ng_term,
@@ -2132,7 +2129,7 @@ public:
             {
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    ccp,
-                                                   cce->payload_status_,
+                                                   cce->PayloadStatus(),
                                                    &req,
                                                    ng_id,
                                                    ng_term,
@@ -2203,7 +2200,7 @@ public:
 
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    ccp,
-                                                   cce->payload_status_,
+                                                   cce->PayloadStatus(),
                                                    &req,
                                                    ng_id,
                                                    ng_term,
@@ -2271,7 +2268,7 @@ public:
 
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    ccp,
-                                                   cce->payload_status_,
+                                                   cce->PayloadStatus(),
                                                    &req,
                                                    ng_id,
                                                    ng_term,
@@ -2394,7 +2391,7 @@ public:
                 // Lock has been acquired, UpsertLockHoldingTx
                 auto lock_pair =
                     LockHandleForResumedRequest(prior_cce,
-                                                prior_cce->payload_status_,
+                                                prior_cce->PayloadStatus(),
                                                 &req,
                                                 ng_id,
                                                 ng_term,
@@ -2448,9 +2445,7 @@ public:
                 CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
                 CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 
-                if (req.is_ckpt_delta_ &&
-                    cce->commit_ts_ <=
-                        cce->ckpt_ts_.load(std::memory_order_acquire))
+                if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
                     // If this is a scan for modified records since last
                     // checkpoint, skips those that have been checkpointed.
@@ -2469,7 +2464,7 @@ public:
 
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    ccp,
-                                                   cce->payload_status_,
+                                                   cce->PayloadStatus(),
                                                    &req,
                                                    ng_id,
                                                    ng_term,
@@ -2555,7 +2550,7 @@ public:
 
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        ccp,
-                                                       cce->payload_status_,
+                                                       cce->PayloadStatus(),
                                                        &req,
                                                        ng_id,
                                                        ng_term,
@@ -2805,7 +2800,7 @@ public:
                 // Lock has been acquired, UpsertLockHoldingTx
                 auto lock_pair =
                     LockHandleForResumedRequest(cce,
-                                                cce->payload_status_,
+                                                cce->PayloadStatus(),
                                                 &req,
                                                 ng_id,
                                                 ng_term,
@@ -2853,7 +2848,7 @@ public:
             {
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    ccp,
-                                                   cce->payload_status_,
+                                                   cce->PayloadStatus(),
                                                    &req,
                                                    ng_id,
                                                    ng_term,
@@ -2915,9 +2910,7 @@ public:
                 cce = scan_ccm_it->second;
                 ccp = scan_ccm_it.GetPage();
 
-                if (req.is_ckpt_delta_ &&
-                    cce->commit_ts_ <=
-                        cce->ckpt_ts_.load(std::memory_order_acquire))
+                if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
                     ++scan_ccm_it;
                     continue;
@@ -2929,7 +2922,7 @@ public:
 
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    ccp,
-                                                   cce->payload_status_,
+                                                   cce->PayloadStatus(),
                                                    &req,
                                                    ng_id,
                                                    ng_term,
@@ -2986,9 +2979,7 @@ public:
                 cce = scan_ccm_it->second;
                 ccp = scan_ccm_it.GetPage();
 
-                if (req.is_ckpt_delta_ &&
-                    cce->commit_ts_ <=
-                        cce->ckpt_ts_.load(std::memory_order_acquire))
+                if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
                     --scan_ccm_it;
                     continue;
@@ -3000,7 +2991,7 @@ public:
 
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    ccp,
-                                                   cce->payload_status_,
+                                                   cce->PayloadStatus(),
                                                    &req,
                                                    ng_id,
                                                    ng_term,
@@ -3118,7 +3109,7 @@ public:
                 // Lock has been acquired, UpsertLockHoldingTx
                 auto lock_pair =
                     LockHandleForResumedRequest(prior_cce,
-                                                prior_cce->payload_status_,
+                                                prior_cce->PayloadStatus(),
                                                 &req,
                                                 ng_id,
                                                 ng_term,
@@ -3169,9 +3160,7 @@ public:
                 CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
                 CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 
-                if (req.is_ckpt_delta_ &&
-                    cce->commit_ts_ <=
-                        cce->ckpt_ts_.load(std::memory_order_acquire))
+                if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
                     continue;
                 }
@@ -3181,7 +3170,7 @@ public:
 
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    ccp,
-                                                   cce->payload_status_,
+                                                   cce->PayloadStatus(),
                                                    &req,
                                                    ng_id,
                                                    ng_term,
@@ -3259,7 +3248,7 @@ public:
 
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        ccp,
-                                                       cce->payload_status_,
+                                                       cce->PayloadStatus(),
                                                        &req,
                                                        ng_id,
                                                        ng_term,
@@ -3542,7 +3531,7 @@ public:
         {
             auto lock_pair = AcquireCceKeyLock(cce,
                                                ccp,
-                                               cce->payload_status_,
+                                               cce->PayloadStatus(),
                                                &req,
                                                ng_id,
                                                ng_term,
@@ -3664,7 +3653,7 @@ public:
                     // lock holding tx collection in this shard.
                     auto lock_pair =
                         LockHandleForResumedRequest(cce,
-                                                    cce->payload_status_,
+                                                    cce->PayloadStatus(),
                                                     &req,
                                                     ng_id,
                                                     ng_term,
@@ -4869,11 +4858,12 @@ public:
             {
                 if (req.include_flushed_rec_)
                 {
-                    if (cce->commit_ts_ != 1 &&
-                        cce->commit_ts_ == cce->ckpt_ts_ &&
-                        cce->commit_ts_ <= req.data_sync_ts_ &&
-                        (cce->payload_status_ == RecordStatus::Normal ||
-                         cce->payload_status_ == RecordStatus::Deleted))
+                    const RecordStatus rec_status = cce->PayloadStatus();
+
+                    if (cce->CommitTs() != 1 &&
+                        cce->CommitTs() <= req.data_sync_ts_ &&
+                        (rec_status == RecordStatus::Normal ||
+                         rec_status == RecordStatus::Deleted))
                     {
                         size_t vec_idx =
                             req.accumulated_scan_cnt_[shard_->core_id_]++;
@@ -4887,10 +4877,10 @@ public:
                         // invalidation.
                         ref.cce_ = nullptr;
 
-                        ref.payload_status_ = cce->payload_status_;
-                        ref.commit_ts_ = cce->commit_ts_;
+                        ref.payload_status_ = rec_status;
+                        ref.commit_ts_ = cce->CommitTs();
 
-                        if (cce->payload_status_ == RecordStatus::Normal)
+                        if (rec_status == RecordStatus::Normal)
                         {
 #ifndef ON_KEY_OBJECT
                             ref.SetPayload(cce->payload_);
@@ -5434,7 +5424,7 @@ public:
                     const KeyT &key = *iter->first;
                     const CcEntry<KeyT, ValueT> &cc_entry = *iter->second;
 
-                    if (cc_entry.payload_status_ == RecordStatus::Normal)
+                    if (cc_entry.PayloadStatus() == RecordStatus::Normal)
                     {
                         if (key.Type() == KeyType::Normal)
                         {
@@ -5657,7 +5647,7 @@ public:
                 return false;
             }
 
-            if (cce->commit_ts_ >= req.CommitTs())
+            if (cce->CommitTs() >= req.CommitTs())
             {
                 // If the key exists in the cc map and its commit ts is
                 // greater than that of the log record, and if (1) mvcc is
@@ -5697,6 +5687,7 @@ public:
                     cce->ArchiveBeforeUpdate(Type());
                 }
 #endif
+                RecordStatus rec_status;
                 if (op_type == OperationType::Insert ||
                     op_type == OperationType::Update)
                 {
@@ -5710,7 +5701,7 @@ public:
                     cce->payload_ = std::make_unique<ValueT>();
 #endif
                     cce->payload_->Deserialize(log_blob.data(), offset);
-                    cce->payload_status_ = RecordStatus::Normal;
+                    rec_status = RecordStatus::Normal;
                 }
                 else
                 {
@@ -5718,16 +5709,18 @@ public:
                     {
                         cce->payload_ = nullptr;
                     }
-                    cce->payload_status_ = RecordStatus::Deleted;
+                    rec_status = RecordStatus::Deleted;
                 }
-                cce->commit_ts_ = req.CommitTs();
-                if (cce->commit_ts_ > last_dirty_commit_ts_)
+                const uint64_t commit_ts = req.CommitTs();
+                cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
+
+                if (commit_ts > last_dirty_commit_ts_)
                 {
-                    last_dirty_commit_ts_ = cce->commit_ts_;
+                    last_dirty_commit_ts_ = commit_ts;
                 }
-                if (cce->commit_ts_ > ccp->last_dirty_commit_ts_)
+                if (commit_ts > ccp->last_dirty_commit_ts_)
                 {
-                    ccp->last_dirty_commit_ts_ = cce->commit_ts_;
+                    ccp->last_dirty_commit_ts_ = commit_ts;
                 }
                 if (shard_->realtime_sampling_ && sample_pool_)
                 {
@@ -5805,7 +5798,7 @@ public:
                                        tmp_akv_vec,
                                        tmp_mv_base_idx_vec,
                                        0,
-                                       cce->commit_ts_,
+                                       cce->CommitTs(),
                                        1U,
                                        Type(),
                                        shard_->EnableMvcc(),
@@ -5970,7 +5963,7 @@ public:
             const KeyT *cce_key = map_it->first;
             CcEntry<KeyT, ValueT> *cce = map_it->second;
 
-            if (cce->commit_ts_ <= 1)
+            if (cce->CommitTs() <= 1)
             {
                 // This is a new inserted key that the tx has not finished
                 // post-processing.
@@ -6441,12 +6434,12 @@ public:
             }
             CcEntry<KeyT, ValueT> *cce = it->second;
             CcPage<KeyT, ValueT> *ccp = it.GetPage();
-            cce->payload_status_ = RecordStatus::Normal;
             // randomly set ckpt_ts and commit_ts
-            cce->ckpt_ts_ = distribution(generator);
-            cce->commit_ts_ = distribution(generator);
+            cce->SetCommitTsPayloadStatus(distribution(generator),
+                                          RecordStatus::Normal);
+            cce->SetCkptTs(distribution(generator));
             ccp->last_dirty_commit_ts_ =
-                std::max(cce->commit_ts_, ccp->last_dirty_commit_ts_);
+                std::max(cce->CommitTs(), ccp->last_dirty_commit_ts_);
         }
         return true;
     }
@@ -6799,7 +6792,8 @@ protected:
             // If the in-memory version is from a upload request (i.e. generated
             // sk record from pk), the data store version might be newer. Only
             // overwrite if in memory version is newer.
-            if (cce->commit_ts_ > 1 && data_item.version_ts_ <= cce->commit_ts_)
+            const uint64_t cce_version = cce->CommitTs();
+            if (cce_version > 1 && data_item.version_ts_ <= cce_version)
             {
                 // Initialize the data store size if it is unspecified before
                 if (cce->data_store_size_.load(std::memory_order_acquire) ==
@@ -6809,17 +6803,17 @@ protected:
                                                 std::memory_order_relaxed);
                 }
 
-                if (shard->EnableMvcc() && cce->ckpt_ts_ == 0)
-                {
-                    cce->ckpt_ts_ = data_item.version_ts_;
 #ifndef ON_KEY_OBJECT
+                if (shard->EnableMvcc())
+                {
                     cce->AddArchiveRecord(std::make_shared<ValueT>(*record),
                                           data_item.is_deleted_
                                               ? RecordStatus::Deleted
                                               : RecordStatus::Normal,
                                           data_item.version_ts_);
-#endif
                 }
+#endif
+                cce->SetCkptTs(data_item.version_ts_);
 
                 // The cc entry's commit ts is 1 when it is initialized.
                 // Commit ts greater than 1 means that the key is already
@@ -6842,11 +6836,10 @@ protected:
                 static_cast<ValueT *>(record->Clone().release()));
 #endif
 
-            cce->commit_ts_ = data_item.version_ts_;
-            cce->ckpt_ts_.store(data_item.version_ts_,
-                                std::memory_order_relaxed);
-            cce->payload_status_ = data_item.is_deleted_ ? RecordStatus::Deleted
-                                                         : RecordStatus::Normal;
+            RecordStatus status = data_item.is_deleted_ ? RecordStatus::Deleted
+                                                        : RecordStatus::Normal;
+            cce->SetCommitTsPayloadStatus(data_item.version_ts_, status);
+            cce->SetCkptTs(data_item.version_ts_);
             cce->data_store_size_.store(rec_store_size,
                                         std::memory_order_relaxed);
         };
@@ -7573,9 +7566,10 @@ protected:
         }
         else
         {
+            const RecordStatus rec_status = cce->PayloadStatus();
 #ifdef RANGE_PARTITION_ENABLED
-            if (cce->payload_status_ == RecordStatus::Normal ||
-                (cce->payload_status_ == RecordStatus::Deleted && keep_deleted))
+            if (rec_status == RecordStatus::Normal ||
+                (rec_status == RecordStatus::Deleted && keep_deleted))
             {
                 tuple = typed_cache->AddScanTuple();
             }
@@ -7589,9 +7583,8 @@ protected:
             tuple->KeyObj().Copy(*key);
             tuple_size = key->Size();
 
-            if (cce->payload_status_ == RecordStatus::Normal ||
-                (is_ckpt_delta &&
-                 cce->payload_status_ == RecordStatus::Deleted))
+            if (rec_status == RecordStatus::Normal ||
+                (is_ckpt_delta && rec_status == RecordStatus::Deleted))
             {
                 if (cce->payload_ != nullptr)
                 {
@@ -7607,8 +7600,8 @@ protected:
                     // actual payload size.
                 }
             }
-            tuple->rec_status_ = cce->payload_status_;
-            tuple->key_ts_ = cce->commit_ts_;
+            tuple->rec_status_ = rec_status;
+            tuple->key_ts_ = cce->CommitTs();
         }
 
         tuple->gap_ts_ = 0;
@@ -7669,18 +7662,17 @@ protected:
         }
         else
         {
-            if (!(cce->payload_status_ == RecordStatus::Normal ||
-                  (cce->payload_status_ == RecordStatus::Deleted &&
-                   keep_deleted)))
+            const RecordStatus rec_status = cce->PayloadStatus();
+            if (!(rec_status == RecordStatus::Normal ||
+                  (rec_status == RecordStatus::Deleted && keep_deleted)))
             {
                 return;
             }
             key->Serialize(remote_cache->keys_);
             tuple_size += key->SerializedLength();
 
-            if (cce->payload_status_ == RecordStatus::Normal ||
-                (is_ckpt_delta &&
-                 cce->payload_status_ == RecordStatus::Deleted))
+            if (rec_status == RecordStatus::Normal ||
+                (is_ckpt_delta && rec_status == RecordStatus::Deleted))
             {
                 if (cce->payload_ != nullptr)
                 {
@@ -7689,9 +7681,8 @@ protected:
                 }
             }
             remote_cache->rec_status_.push_back(
-                remote::ToRemoteType::ConvertRecordStatus(
-                    cce->payload_status_));
-            remote_cache->key_ts_.push_back(cce->commit_ts_);
+                remote::ToRemoteType::ConvertRecordStatus(rec_status));
+            remote_cache->key_ts_.push_back(cce->CommitTs());
         }
 
         if (include_gap)
@@ -7770,9 +7761,10 @@ protected:
         }
         else
         {
+            const RecordStatus rec_status = cce->PayloadStatus();
 #ifdef RANGE_PARTITION_ENABLED
-            if (cce->payload_status_ == RecordStatus::Normal ||
-                (cce->payload_status_ == RecordStatus::Deleted && keep_deleted))
+            if (rec_status == RecordStatus::Normal ||
+                (rec_status == RecordStatus::Deleted && keep_deleted))
             {
                 tuple = remote_cache->cache_msg_->add_scan_tuple();
             }
@@ -7786,9 +7778,8 @@ protected:
             key->Serialize(*tuple->mutable_key());
             tuple_size += key->Size();
 
-            if (cce->payload_status_ == RecordStatus::Normal ||
-                (is_ckpt_delta &&
-                 cce->payload_status_ == RecordStatus::Deleted))
+            if (rec_status == RecordStatus::Normal ||
+                (is_ckpt_delta && rec_status == RecordStatus::Deleted))
             {
                 tuple->clear_record();
                 if (cce->payload_ != nullptr)
@@ -7797,9 +7788,9 @@ protected:
                     tuple_size += cce->payload_->Size();
                 }
             }
-            tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
-                cce->payload_status_));
-            tuple->set_key_ts(cce->commit_ts_);
+            tuple->set_rec_status(
+                remote::ToRemoteType::ConvertRecordStatus(rec_status));
+            tuple->set_key_ts(cce->CommitTs());
         }
 
         if (include_gap)
@@ -7963,8 +7954,8 @@ protected:
             case CleanType::CleanForAlterTable:
             {
                 assert(kickout_cc);
-                can_be_clean = cce->commit_ts_ <= kickout_cc->CkptTs() &&
-                               cce->commit_ts_ > 1 && cce->IsFree();
+                can_be_clean = cce->CommitTs() <= kickout_cc->CkptTs() &&
+                               cce->CommitTs() > 1 && cce->IsFree();
                 break;
             }
             default:
@@ -7988,7 +7979,7 @@ protected:
                     key_insert_it++;
                     entry_insert_it++;
                     // record the commit_ts if the entry cannot be cleaned.
-                    last_commit_ts = std::max(last_commit_ts, cce->commit_ts_);
+                    last_commit_ts = std::max(last_commit_ts, cce->CommitTs());
                     // The ccentry that expect to clean cannot be kick out.
                     // In this branch, only when clean_type is
                     // CleanForSplitRange or CleanForAlterTable care this clean
@@ -8017,8 +8008,8 @@ protected:
                 // can_be_clean is false, it mean that this ccentry is not the
                 // target one, so it do not care this clean status.
                 if (clean_type == CleanType::CleanForAlterTable &&
-                    cce->commit_ts_ <= kickout_cc->CkptTs() &&
-                    cce->commit_ts_ > 1)
+                    cce->CommitTs() <= kickout_cc->CkptTs() &&
+                    cce->CommitTs() > 1)
                 {
                     assert(!cce->IsFree());
                     clean_success = false;
@@ -8030,7 +8021,7 @@ protected:
                 entry_insert_it++;
 
                 // record the commit_ts if the entry cannot be cleaned.
-                last_commit_ts = std::max(last_commit_ts, cce->commit_ts_);
+                last_commit_ts = std::max(last_commit_ts, cce->CommitTs());
             }
         }
         keys.erase(key_insert_it, keys.end());

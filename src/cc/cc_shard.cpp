@@ -26,6 +26,7 @@ CcShard::CcShard(uint16_t core_id,
                  LocalCcShards &local_shards,
                  CatalogFactory *catalog_factory,
                  SystemHandler *system_handler,
+                 uint64_t cluster_config_version,
                  metrics::MetricsRegistry *metrics_registry,
                  metrics::CommonLabels common_labels)
     : node_id_(node_id),
@@ -101,7 +102,7 @@ CcShard::CcShard(uint16_t core_id,
     {
         native_ccms_.try_emplace(cluster_config_ccm_name,
                                  std::make_unique<ClusterConfigCcMap>(
-                                     this, node_id_, cluster_config_ccm_name));
+                                     this, node_id_, cluster_config_version));
     }
 
     // init meter
@@ -161,7 +162,9 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
                 auto insert_it = native_ccms_.emplace(
                     cluster_config_ccm_name,
                     std::make_unique<ClusterConfigCcMap>(
-                        this, node_group, cluster_config_ccm_name));
+                        this,
+                        node_group,
+                        Sharder::Instance().ClusterConfigVersion()));
                 return insert_it.first->second.get();
             }
             return nullptr;
@@ -234,7 +237,9 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
                 auto insert_it = ng_ccm.emplace(
                     node_group,
                     std::make_unique<ClusterConfigCcMap>(
-                        this, node_group, cluster_config_ccm_name));
+                        this,
+                        node_group,
+                        Sharder::Instance().ClusterConfigVersion()));
                 return insert_it.first->second.get();
             }
         }

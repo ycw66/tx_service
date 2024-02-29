@@ -89,7 +89,7 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
         node_id,
         &ng_configs,
         9001,
-        0,
+        2,
         &tx_ips,
         &tx_ports,
         store_hd.get(),
