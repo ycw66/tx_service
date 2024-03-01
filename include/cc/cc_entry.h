@@ -335,11 +335,13 @@ private:
      */
     std::atomic<uint64_t> commit_ts_and_status_{0};
 
+#ifndef ON_KEY_OBJECT
     // The commit timestamp of the latest checkpoint version record. Unlike
     // other fields that are read/modified via a single thread, this field is
     // updated by a separate checkpointing thread, after it flushes changes to
     // the data store.
     std::atomic<uint64_t> ckpt_ts_{0};
+#endif
 
 public:
     /**

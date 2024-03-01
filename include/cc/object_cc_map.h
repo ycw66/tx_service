@@ -261,13 +261,12 @@ public:
         // if ccm contains all the ccentries, then unknown status means
         // that we can skip accessing kv store and return deleted status
         // directly.
-        if (cce->payload_status_ == RecordStatus::Unknown)
+        if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             if (ccm_has_full_entries_ || FLAGS_skip_kv)
             {
-                cce->payload_status_ = RecordStatus::Deleted;
-                cce->commit_ts_ = 1U;
-                cce->ckpt_ts_.store(1U);
+                cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
+                cce->SetCkptTs(1U);
             }
             else
             {
@@ -284,7 +283,7 @@ public:
                 if (metrics::enable_cache_hit_rate)
                 {
                     auto meter = shard_->GetMeter();
-                    if (cce->payload_status_ == RecordStatus::Unknown)
+                    if (cce->PayloadStatus() == RecordStatus::Unknown)
                     {
                         meter->Collect(
                             metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
@@ -306,7 +305,7 @@ public:
         {
             assert(acquired_lock == LockType::NoLock);
             bool object_not_exist =
-                cce->payload_status_ == RecordStatus::Deleted;
+                cce->PayloadStatus() == RecordStatus::Deleted;
             if (object_not_exist)
             {
                 bool proceed = cmd->ProceedOnNonExistentObject();
@@ -314,7 +313,7 @@ public:
                 // exist.
                 assert(!proceed);
                 obj_result.rec_status_ = RecordStatus::Deleted;
-                obj_result.commit_ts_ = cce->commit_ts_;
+                obj_result.commit_ts_ = cce->CommitTs();
                 hd_res->SetFinished();
                 return true;
             }
@@ -323,8 +322,8 @@ public:
             ValueT &object = *cce->payload_;
             cmd_success = cmd->ExecuteOn(object);
 
-            obj_result.commit_ts_ = cce->commit_ts_;
-            obj_result.rec_status_ = cce->payload_status_;
+            obj_result.commit_ts_ = cce->CommitTs();
+            obj_result.rec_status_ = cce->PayloadStatus();
             hd_res->SetFinished();
             return true;
         }
@@ -343,7 +342,7 @@ public:
             // Otherwise, the dirty payload should have already been created by
             // the last command.
             assert(pending_cmd != nullptr);
-            assert(cce->payload_status_ == RecordStatus::Normal &&
+            assert(cce->PayloadStatus() == RecordStatus::Normal &&
                    cce->payload_ != nullptr);
 
             std::tie(dirty_payload, dirty_payload_status) =
@@ -360,7 +359,7 @@ public:
 
         bool object_not_exist =
             dirty_payload_status == RecordStatus::Deleted ||
-            (cce->payload_status_ == RecordStatus::Deleted &&
+            (cce->PayloadStatus() == RecordStatus::Deleted &&
              dirty_payload_status == RecordStatus::NonExistent);
 
         // Create the temporary object if the object does not exist.
@@ -379,7 +378,7 @@ public:
 
                 // Del command on a non-existent object also returns directly.
                 obj_result.rec_status_ = RecordStatus::Deleted;
-                obj_result.commit_ts_ = cce->commit_ts_;
+                obj_result.commit_ts_ = cce->CommitTs();
                 hd_res->SetFinished();
                 return true;
             }
@@ -410,7 +409,7 @@ public:
                 }
 
                 obj_result.rec_status_ = RecordStatus::Normal;
-                obj_result.commit_ts_ = cce->commit_ts_;
+                obj_result.commit_ts_ = cce->CommitTs();
                 hd_res->SetFinished();
                 return true;
             }
@@ -434,7 +433,7 @@ public:
             cce->SetDirtyPayload(std::move(dirty_payload));
             cce->SetDirtyPayloadStatus(dirty_payload_status);
         }
-        else if (cce->payload_status_ == RecordStatus::Normal)
+        else if (cce->PayloadStatus() == RecordStatus::Normal)
         {
             // The dirty payload does not exist. This is the first command.
             // Execute and copy the command. The command will be committed
@@ -463,17 +462,17 @@ public:
         {
             // Skipping writing log, do the PostWrite and release the lock.
             assert(acquired_lock == LockType::WriteLock);
+            RecordStatus status;
             if (dirty_payload_status == RecordStatus::Normal ||
                 dirty_payload_status == RecordStatus::Deleted)
             {
                 // Dirty payload exists. Use it to replace payload.
                 cce->payload_ = cce->DirtyPayload();
-                cce->payload_status_ = dirty_payload_status;
+                status = dirty_payload_status;
             }
             else
             {
-                CommitCommandOnPayload(
-                    cce->payload_, cce->payload_status_, *cmd);
+                CommitCommandOnPayload(cce->payload_, status, *cmd);
             }
 
             // Reset the dirty status.
@@ -483,16 +482,17 @@ public:
 
             // Set commit ts based on the TxTs since there is no PostWriteCc if
             // apply_and_commit_.
-            cce->commit_ts_ =
-                std::max({cce->commit_ts_ + 1, req.TxTs(), shard_->Now()});
+            const uint64_t commit_ts =
+                std::max({cce->CommitTs() + 1, req.TxTs(), shard_->Now()});
+            cce->SetCommitTsPayloadStatus(commit_ts, status);
 
-            if (last_dirty_commit_ts_ < cce->commit_ts_)
+            if (last_dirty_commit_ts_ < commit_ts)
             {
-                last_dirty_commit_ts_ = cce->commit_ts_;
+                last_dirty_commit_ts_ = commit_ts;
             }
-            if (cce->commit_ts_ > ccp->last_dirty_commit_ts_)
+            if (commit_ts > ccp->last_dirty_commit_ts_)
             {
-                ccp->last_dirty_commit_ts_ = cce->commit_ts_;
+                ccp->last_dirty_commit_ts_ = commit_ts;
             }
 
             // Release and try to recycle the lock.
@@ -514,8 +514,8 @@ public:
                 std::max(shard_->LastReadTs(), shard_->Now());
         }
 
-        obj_result.commit_ts_ = cce->commit_ts_;
-        obj_result.rec_status_ = cce->payload_status_;
+        obj_result.commit_ts_ = cce->CommitTs();
+        obj_result.rec_status_ = cce->PayloadStatus();
         hd_res->SetFinished();
         return true;
     }
@@ -556,27 +556,26 @@ public:
         if (commit_ts > 0)
         {
             RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
+            RecordStatus commit_status;
             // The txn commits. Upload the change.
             if (dirty_payload_status == RecordStatus::Normal ||
                 dirty_payload_status == RecordStatus::Deleted)
             {
                 // Dirty payload exists. Use it to replace payload.
-                cce->payload_status_ = dirty_payload_status;
+                commit_status = dirty_payload_status;
                 cce->payload_ = cce->DirtyPayload();
             }
             else
             {
                 // Commit the pending command.
                 std::unique_ptr<TxCommand> pending_cmd = cce->PendingCmd();
-                if (pending_cmd != nullptr)
-                {
-                    assert(cce->payload_ != nullptr);
-                    CommitCommandOnPayload(
-                        cce->payload_, cce->payload_status_, *pending_cmd);
-                }
+                assert(pending_cmd != nullptr);
+                assert(cce->payload_ != nullptr);
+                CommitCommandOnPayload(
+                    cce->payload_, commit_status, *pending_cmd);
             }
 
-            cce->commit_ts_ = commit_ts;
+            cce->SetCommitTsPayloadStatus(commit_ts, commit_status);
             if (last_dirty_commit_ts_ < commit_ts)
             {
                 last_dirty_commit_ts_ = commit_ts;
@@ -585,9 +584,9 @@ public:
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
             assert(ccp != nullptr);
-            if (cce->commit_ts_ > ccp->last_dirty_commit_ts_)
+            if (commit_ts > ccp->last_dirty_commit_ts_)
             {
-                ccp->last_dirty_commit_ts_ = cce->commit_ts_;
+                ccp->last_dirty_commit_ts_ = commit_ts;
             }
         }
 
@@ -687,7 +686,7 @@ public:
             // load payload from kvstore before committing pending commands.
             // If there's already buffered cmd, that means a previous replaycc
             // has already sent FetchRecord.
-            if (!has_del && cce->payload_status_ == RecordStatus::Unknown &&
+            if (!has_del && cce->PayloadStatus() == RecordStatus::Unknown &&
                 !cce->HasReplayCommandList())
             {
                 int64_t cc_ng_candid_term =
@@ -740,11 +739,14 @@ public:
                 cce->ReplayCommandList();
 
             // Emplace txn_cmd and try to commit all pending commands.
+            uint64_t commit_version;
+            RecordStatus commit_status;
             EmplaceAndCommitReplayTxnCommand(cce->payload_,
                                              replay_cmd_list,
                                              txn_cmd,
-                                             cce->commit_ts_,
-                                             cce->payload_status_);
+                                             commit_version,
+                                             commit_status);
+            cce->SetCommitTsPayloadStatus(commit_version, commit_status);
 
             if (replay_cmd_list == nullptr)
             {
@@ -822,11 +824,11 @@ public:
         ValueT *rec_ptr = static_cast<ValueT *>(rec_uptr.get());
         // It's possible that first ReplayLogCc triggers FetchRecord and the
         // second ReplayLogCc has_del and overrides the cce.
-        if (cce->payload_status_ == RecordStatus::Unknown)
+        if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
-            cce->ckpt_ts_ = commit_ts;
-            cce->commit_ts_ = commit_ts;
-            cce->payload_status_ = status;
+            cce->SetCommitTsPayloadStatus(commit_ts, status);
+            cce->SetCkptTs(commit_ts);
+
             if (rec_ptr)
             {
                 cce->payload_.reset(
@@ -854,8 +856,14 @@ public:
                 }
 
                 replay_cmd_list->cur_version_ = commit_ts;
+
+                uint64_t commit_version;
                 TryCommitReplayCommands(
-                    cce->payload_, replay_cmd_list, cce->commit_ts_);
+                    cce->payload_, replay_cmd_list, commit_version);
+                RecordStatus commit_status = cce->payload_ == nullptr
+                                                 ? RecordStatus::Deleted
+                                                 : RecordStatus::Normal;
+                cce->SetCommitTsPayloadStatus(commit_version, commit_status);
 
                 if (replay_cmd_list == nullptr)
                 {
@@ -996,8 +1004,8 @@ private:
         }
 
         tuple->set_rec_status(
-            remote::ToRemoteType::ConvertRecordStatus(cce->payload_status_));
-        tuple->set_key_ts(cce->commit_ts_);
+            remote::ToRemoteType::ConvertRecordStatus(cce->PayloadStatus()));
+        tuple->set_key_ts(cce->CommitTs());
 
         if (include_gap)
         {

@@ -1561,17 +1561,16 @@ public:
                 // that we can skip accessing kv store and return deleted status
                 // directly.
                 if (ccm_has_full_entries_ &&
-                    cce->payload_status_ == RecordStatus::Unknown)
+                    cce->PayloadStatus() == RecordStatus::Unknown)
                 {
-                    cce->payload_status_ = RecordStatus::Deleted;
-                    cce->commit_ts_ = 1U;
-                    cce->ckpt_ts_.store(1U);
+                    cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
+                    cce->SetCkptTs(1U);
                 }
 
                 if (metrics::enable_cache_hit_rate)
                 {
                     auto meter = shard_->GetMeter();
-                    if (cce->payload_status_ == RecordStatus::Unknown)
+                    if (cce->PayloadStatus() == RecordStatus::Unknown)
                     {
                         meter->Collect(
                             metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
@@ -2189,7 +2188,7 @@ public:
                 cce = scan_ccm_it->second;
                 ccp = scan_ccm_it.GetPage();
 #ifdef ON_KEY_OBJECT
-                if (cce->payload_status_ == RecordStatus::Deleted &&
+                if (cce->PayloadStatus() == RecordStatus::Deleted &&
                     (!cce->NeedCkpt() || FLAGS_skip_kv))
                 {
                     continue;
@@ -2257,7 +2256,7 @@ public:
                 cce = scan_ccm_it->second;
                 ccp = scan_ccm_it.GetPage();
 #ifdef ON_KEY_OBJECT
-                if (cce->payload_status_ == RecordStatus::Deleted &&
+                if (cce->PayloadStatus() == RecordStatus::Deleted &&
                     (!cce->NeedCkpt() || FLAGS_skip_kv))
                 {
                     continue;
@@ -2452,7 +2451,7 @@ public:
                     continue;
                 }
 #ifdef ON_KEY_OBJECT
-                if (cce->payload_status_ == RecordStatus::Deleted &&
+                if (cce->PayloadStatus() == RecordStatus::Deleted &&
                     (!cce->NeedCkpt() || FLAGS_skip_kv))
                 {
                     continue;
@@ -2541,7 +2540,7 @@ public:
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanBoth);
 #ifdef ON_KEY_OBJECT
-                    if (cce->payload_status_ == RecordStatus::Deleted &&
+                    if (cce->PayloadStatus() == RecordStatus::Deleted &&
                         (!cce->NeedCkpt() || FLAGS_skip_kv))
                     {
                         continue;

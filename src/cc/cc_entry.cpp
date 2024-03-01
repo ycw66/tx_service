@@ -25,7 +25,7 @@ void LruEntry::SetCkptTs(uint64_t ts)
                curr_ckpt_ts, ts, std::memory_order_acq_rel))
         ;
 #else
-    uint64_t curr_val = commit_ts_and_status_.load(memory_order_relaxed);
+    uint64_t curr_val = commit_ts_and_status_.load(std::memory_order_relaxed);
     uint64_t curr_commit_ts = curr_val >> 8;
     while (curr_commit_ts <= ts &&
            !commit_ts_and_status_.compare_exchange_weak(
