@@ -77,8 +77,6 @@ public:
           new_txs_(),
           new_tx_token_(new_txs_),
           free_txs_(),
-          free_prod_token_(free_txs_),
-          free_consumer_token_(free_txs_),
           txlog_hd_(txlog_hd)
     {
         if (metrics::enable_busy_round_metrics)
@@ -142,7 +140,7 @@ public:
     TransactionExecution *NewTx()
     {
         TransactionExecution::uptr tx = nullptr;
-        bool success = free_txs_.try_dequeue(free_consumer_token_, tx);
+        bool success = free_txs_.try_dequeue(tx);
         if (success)
         {
             assert(tx != nullptr);
@@ -207,7 +205,7 @@ public:
     TransactionExecution *NewExternalTx()
     {
         TransactionExecution::uptr tx = nullptr;
-        bool success = free_txs_.try_dequeue(free_consumer_token_, tx);
+        bool success = free_txs_.try_dequeue(tx);
         if (success)
         {
             assert(tx != nullptr);
@@ -302,7 +300,7 @@ public:
             switch (txm_status)
             {
             case TxmStatus::Finished:
-                free_txs_.enqueue(free_prod_token_, std::move(tx));
+                free_txs_.enqueue(std::move(tx));
                 active_tx_cnt_.fetch_sub(1, std::memory_order_relaxed);
                 break;
             case TxmStatus::Idle:
@@ -377,8 +375,7 @@ public:
                             active_tx_lock_.Unlock();
                             tx_progress_.erase(tx_uptr.get());
 
-                            free_txs_.enqueue(free_prod_token_,
-                                              std::move(tx_uptr));
+                            free_txs_.enqueue(std::move(tx_uptr));
                         }
                     }
 
@@ -398,7 +395,7 @@ public:
                 switch (txm_status)
                 {
                 case TxmStatus::Finished:
-                    free_txs_.enqueue(free_prod_token_, std::move(tx));
+                    free_txs_.enqueue(std::move(tx));
                     active_tx_cnt_.fetch_sub(1, std::memory_order_relaxed);
                     break;
                 case TxmStatus::Idle:
@@ -472,14 +469,6 @@ public:
 #ifdef EXT_TX_PROC_ENABLED
         size_t local_round_cnt = one_round_cnt_.load(std::memory_order_relaxed);
 #endif
-
-        // Allocate some free txms.
-        for (uint i = 0; i < 50; i++)
-        {
-            free_txs_.enqueue(free_prod_token_,
-                              std::make_unique<TransactionExecution>(
-                                  cc_hd_.get(), txlog_hd_, this));
-        }
 
         while (!terminated_.load(std::memory_order_relaxed))
         {
@@ -688,7 +677,7 @@ public:
                 active_tx_lock_.Unlock();
                 tx_progress_.erase(tx_uptr.get());
 
-                free_txs_.enqueue(free_prod_token_, std::move(tx_uptr));
+                free_txs_.enqueue(std::move(tx_uptr));
             }
             else
             {
@@ -813,8 +802,6 @@ private:
     CircularQueue<TransactionExecution::uptr> on_fly_txs_{100};
 
     moodycamel::ConcurrentQueue<TransactionExecution::uptr> free_txs_;
-    moodycamel::ProducerToken free_prod_token_;
-    moodycamel::ConsumerToken free_consumer_token_;
 
     TxLog *txlog_hd_;
 
