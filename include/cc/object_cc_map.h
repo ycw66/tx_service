@@ -462,7 +462,7 @@ public:
         {
             // Skipping writing log, do the PostWrite and release the lock.
             assert(acquired_lock == LockType::WriteLock);
-            RecordStatus status;
+            RecordStatus status = cce->PayloadStatus();
             if (dirty_payload_status == RecordStatus::Normal ||
                 dirty_payload_status == RecordStatus::Deleted)
             {
@@ -556,26 +556,28 @@ public:
         if (commit_ts > 0)
         {
             RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
-            RecordStatus commit_status;
+            RecordStatus payload_status = cce->PayloadStatus();
             // The txn commits. Upload the change.
             if (dirty_payload_status == RecordStatus::Normal ||
                 dirty_payload_status == RecordStatus::Deleted)
             {
                 // Dirty payload exists. Use it to replace payload.
-                commit_status = dirty_payload_status;
+                payload_status = dirty_payload_status;
                 cce->payload_ = cce->DirtyPayload();
             }
             else
             {
                 // Commit the pending command.
                 std::unique_ptr<TxCommand> pending_cmd = cce->PendingCmd();
-                assert(pending_cmd != nullptr);
-                assert(cce->payload_ != nullptr);
-                CommitCommandOnPayload(
-                    cce->payload_, commit_status, *pending_cmd);
+                if (pending_cmd != nullptr)
+                {
+                    assert(cce->payload_ != nullptr);
+                    CommitCommandOnPayload(
+                        cce->payload_, payload_status, *pending_cmd);
+                }
             }
 
-            cce->SetCommitTsPayloadStatus(commit_ts, commit_status);
+            cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
             if (last_dirty_commit_ts_ < commit_ts)
             {
                 last_dirty_commit_ts_ = commit_ts;
@@ -739,14 +741,14 @@ public:
                 cce->ReplayCommandList();
 
             // Emplace txn_cmd and try to commit all pending commands.
-            uint64_t commit_version;
-            RecordStatus commit_status;
+            uint64_t commit_version = cce->CommitTs();
+            RecordStatus payload_status = cce->PayloadStatus();
             EmplaceAndCommitReplayTxnCommand(cce->payload_,
                                              replay_cmd_list,
                                              txn_cmd,
                                              commit_version,
-                                             commit_status);
-            cce->SetCommitTsPayloadStatus(commit_version, commit_status);
+                                             payload_status);
+            cce->SetCommitTsPayloadStatus(commit_version, payload_status);
 
             if (replay_cmd_list == nullptr)
             {
@@ -857,7 +859,7 @@ public:
 
                 replay_cmd_list->cur_version_ = commit_ts;
 
-                uint64_t commit_version;
+                uint64_t commit_version = commit_ts;
                 TryCommitReplayCommands(
                     cce->payload_, replay_cmd_list, commit_version);
                 RecordStatus commit_status = cce->payload_ == nullptr
