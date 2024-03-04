@@ -3348,6 +3348,7 @@ void SplitFlushRangeOp::ClearInfos()
 
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 {
+#ifdef RANGE_PARTITION_ENABLED
     if (txm->TxStatus() == TxnStatus::Recovering &&
         Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
     {
@@ -4639,6 +4640,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             assert(txm->split_flush_op_ == nullptr);
         }
     }
+#endif
 }
 
 void SplitFlushRangeOp::MergeFlushRecord(

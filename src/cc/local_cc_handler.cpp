@@ -794,7 +794,7 @@ void txservice::LocalCcHandler::ScanOpen(
             }
 
 #ifdef EXT_TX_PROC_ENABLED
-            hres.SetToBlock();
+            hd_res.SetToBlock();
 #endif
             for (uint32_t core_id = 0; core_id < core_cnt; ++core_id)
             {
@@ -834,7 +834,7 @@ void txservice::LocalCcHandler::ScanOpen(
         else
         {
 #ifdef EXT_TX_PROC_ENABLED
-            hres.SetToBlock();
+            hd_res.SetToBlock();
 #endif
             remote_hd_.ScanOpen(cc_shards_.node_id_,
                                 table_name,

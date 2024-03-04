@@ -3549,7 +3549,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                         assert(ref.cce_ != nullptr);
                         // todo: remove cce_
                         ref.cce_->SetCkptTs(ref.commit_ts_);
+#ifdef RANGE_PARTITION_ENABLED
                         ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
+#endif
                     }
                     ResetCleanStartPageCc reset_cc(cc_shards_.size());
                     for (auto &ccs : cc_shards_)

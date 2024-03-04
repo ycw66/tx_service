@@ -341,7 +341,6 @@ private:
     // updated by a separate checkpointing thread, after it flushes changes to
     // the data store.
     std::atomic<uint64_t> ckpt_ts_{0};
-#endif
 
 public:
     /**
@@ -352,6 +351,7 @@ public:
      * in KV storage.
      */
     std::atomic<int32_t> data_store_size_{INT32_MAX};
+#endif
 };
 
 /**
@@ -926,6 +926,7 @@ public:
             ref.payload_status_ = rec_status;
             ref.commit_ts_ = commit_ts;
 
+#ifdef RANGE_PARTITION_ENABLED
             int32_t data_store_size =
                 data_store_size_.load(std::memory_order_acquire);
             if (data_store_size != INT32_MAX)
@@ -945,6 +946,7 @@ public:
                 // Mark the delta as unknwon
                 ref.delta_size_ = INT32_MAX;
             }
+#endif
             exported_count++;
         }
 

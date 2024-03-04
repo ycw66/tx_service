@@ -1,10 +1,11 @@
 #pragma once
 
+#include <bthread/moodycamelqueue.h>
+
 #include <memory>
 #include <vector>
 
 #include "cc/cc_req_pool.h"
-#include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
 #include "remote/cc_stream_sender.h"
 #include "remote_cc_request.h"

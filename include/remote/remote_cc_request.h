@@ -1,11 +1,12 @@
 #pragma once
 
+#include <bthread/moodycamelqueue.h>
+
 #include <atomic>
 #include <memory>  // unique_ptr
 
 #include "butil/logging.h"
 #include "cc/cc_request.h"
-#include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
 #include "tx_record.h"  // RecordStatus
 #include "type.h"

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bthread/moodycamelqueue.h>
 #include <stdint.h>
 
 #include <atomic>
@@ -13,7 +14,6 @@
 #include "braft/route_table.h"
 #include "brpc/server.h"
 #include "butil/third_party/murmurhash3/murmurhash3.h"
-#include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
 #include "tx_serialize.h"
 #include "txlog.h"

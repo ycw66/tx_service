@@ -2,6 +2,7 @@
 
 #include <brpc/channel.h>
 #include <brpc/stream.h>
+#include <bthread/moodycamelqueue.h>
 
 #include <condition_variable>
 #include <deque>
@@ -11,7 +12,6 @@
 #include <unordered_map>
 
 #include "cc/cc_handler_result.h"
-#include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
 #include "sharder.h"
 

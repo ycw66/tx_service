@@ -4,8 +4,6 @@
 #include <condition_variable>
 #include <mutex>
 
-#include "moodycamelqueue.h"
-
 namespace txservice
 {
 enum struct TxShardStatus

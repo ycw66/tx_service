@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bthread/bthread.h>
 #include <butil/macros.h>
 #include <mimalloc-2.1/mimalloc.h>
 #include <pthread.h>
@@ -28,7 +29,6 @@
 #include "dead_lock_check.h"
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
-#include "moodycamelqueue.h"
 #include "spinlock.h"
 #include "tx_execution.h"
 #include "tx_request.h"
@@ -260,10 +260,18 @@ public:
         mi_heap_t *prev_heap = nullptr;
         if (is_ext_proc)
         {
+            mi_heap_t *shard_heap =
+                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap();
+            if (shard_heap == nullptr)
+            {
+                shard_status.store(TxShardStatus::Free,
+                                   std::memory_order_release);
+                return;
+            }
+
             mi_override_thread(
                 local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
-            prev_heap = mi_heap_set_default(
-                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
+            prev_heap = mi_heap_set_default(shard_heap);
         }
         one_round_cnt_.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -942,6 +950,10 @@ public:
             tp->InitializeLocalHandler();
             thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
         }
+#ifdef ON_KEY_OBJECT
+        // set ext_tx_prc_func to brpc
+        bthread_set_ext_tx_prc_func(GetTxProcFunctors());
+#endif
 
         // Start cc stream receiver server.
         Sharder::Instance().StartCcStreamReceiver();

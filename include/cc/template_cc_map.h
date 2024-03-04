@@ -5880,6 +5880,7 @@ public:
 
     bool Execute(GetPostCkptSlice &req) override
     {
+#ifdef RANGE_PARTITION_ENABLED
         std::vector<SliceChangeInfo> &item_vec =
             req.SliceChangeInfoVec(shard_->core_id_);
 
@@ -6008,6 +6009,7 @@ public:
             req.SetFinish();
         }
 
+#endif
         return false;
     }
 
@@ -6794,6 +6796,7 @@ protected:
             const uint64_t cce_version = cce->CommitTs();
             if (cce_version > 1 && data_item.version_ts_ <= cce_version)
             {
+#ifdef RANGE_PARTITION_ENABLED
                 // Initialize the data store size if it is unspecified before
                 if (cce->data_store_size_.load(std::memory_order_acquire) ==
                     INT32_MAX)
@@ -6801,6 +6804,7 @@ protected:
                     cce->data_store_size_.store(rec_store_size,
                                                 std::memory_order_relaxed);
                 }
+#endif
 
 #ifndef ON_KEY_OBJECT
                 if (shard->EnableMvcc())
@@ -6839,8 +6843,11 @@ protected:
                                                         : RecordStatus::Normal;
             cce->SetCommitTsPayloadStatus(data_item.version_ts_, status);
             cce->SetCkptTs(data_item.version_ts_);
+
+#ifdef RANGE_PARTITION_ENABLED
             cce->data_store_size_.store(rec_store_size,
                                         std::memory_order_relaxed);
+#endif
         };
 
         typename decltype(ccmp_)::iterator target_iter;

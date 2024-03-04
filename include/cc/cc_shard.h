@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bthread/moodycamelqueue.h>
 #include <mimalloc-2.1/mimalloc.h>
 
 #include <atomic>
@@ -27,7 +28,6 @@
 #include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
 #include "meter.h"
 #include "metrics.h"
-#include "moodycamelqueue.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "range_slice.h"

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brpc/stream.h>
+#include <bthread/moodycamelqueue.h>
 
 #include <condition_variable>
 #include <memory>  // std::unique_ptr
@@ -8,7 +9,6 @@
 #include <unordered_set>
 
 #include "cc_req_pool.h"
-#include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
 #include "tx_record.h"
 #include "type.h"

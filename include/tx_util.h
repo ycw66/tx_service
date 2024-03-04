@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cc_protocol.h"
+#include "error_messages.h"
 #include "tx_execution.h"
 #include "tx_request.h"
 #include "tx_service.h"

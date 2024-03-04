@@ -1,12 +1,13 @@
 #pragma once
 
+#include <bthread/moodycamelqueue.h>
+
 #include <cstring>
 #include <functional>
 #include <mutex>
 #include <thread>
 
 #include "file-handler.h"
-#include "moodycamelqueue.h"
 #include "txlog.h"
 
 namespace txservice
