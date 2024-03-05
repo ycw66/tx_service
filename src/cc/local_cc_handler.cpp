@@ -664,7 +664,13 @@ void txservice::LocalCcHandler::ScanOpen(
     CcProtocol proto,
     bool is_for_write,
     bool is_ckpt_delta,
-    bool is_covering_keys)
+    bool is_covering_keys
+#ifdef ON_KEY_OBJECT
+    ,
+    int32_t obj_type,
+    const std::string_view &scan_pattern
+#endif
+)
 {
     CcShard &local_shard = *cc_shards_.cc_shards_[thd_id_];
     uint32_t shard_code = tx_number >> 32L;
@@ -715,6 +721,9 @@ void txservice::LocalCcHandler::ScanOpen(
     }
     else
     {
+#ifdef ON_KEY_OBJECT
+        const Schema *key_schema = nullptr;
+#else
         const CatalogEntry *catalog_entry =
             local_shard.GetCatalog(table_name, cc_ng_id);
 
@@ -725,7 +734,7 @@ void txservice::LocalCcHandler::ScanOpen(
         }
 
         const Schema *key_schema = catalog_entry->schema_->KeySchema();
-
+#endif
         if (direction == ScanDirection::Forward &&
             pk_forward_scanner_.Size() > 0)
         {
@@ -816,7 +825,14 @@ void txservice::LocalCcHandler::ScanOpen(
                            proto,
                            is_for_write,
                            is_ckpt_delta,
-                           is_covering_keys);
+                           is_covering_keys,
+                           false
+#ifdef ON_KEY_OBJECT
+                           ,
+                           obj_type,
+                           scan_pattern
+#endif
+                );
 
                 TX_TRACE_ACTION(this, req);
                 TX_TRACE_DUMP(req);
@@ -852,7 +868,13 @@ void txservice::LocalCcHandler::ScanOpen(
                                 proto,
                                 is_for_write,
                                 is_ckpt_delta,
-                                is_covering_keys);
+                                is_covering_keys
+#ifdef ON_KEY_OBJECT
+                                ,
+                                obj_type,
+                                scan_pattern
+#endif
+            );
         }
     }
 #endif
@@ -1007,7 +1029,13 @@ void txservice::LocalCcHandler::ScanNextBatch(
     uint16_t command_id,
     uint64_t start_ts,
     CcScanner &scanner,
-    CcHandlerResult<ScanNextResult> &hd_res)
+    CcHandlerResult<ScanNextResult> &hd_res
+#ifdef ON_KEY_OBJECT
+    ,
+    int32_t obj_type,
+    const std::string_view &scan_pattern
+#endif
+)
 {
     uint32_t shard_code = scanner.BlockedShard();
     ScanCache *blocked_cache = scanner.Cache(shard_code);
@@ -1032,7 +1060,13 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    scanner.protocol_,
                    scanner.is_for_write_,
                    scanner.is_ckpt_delta_,
-                   scanner.is_covering_keys_);
+                   scanner.is_covering_keys_
+#ifdef ON_KEY_OBJECT
+                   ,
+                   obj_type,
+                   scan_pattern
+#endif
+        );
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
@@ -1053,7 +1087,13 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             scanner.protocol_,
                             scanner.is_for_write_,
                             scanner.is_ckpt_delta_,
-                            scanner.is_covering_keys_);
+                            scanner.is_covering_keys_
+#ifdef ON_KEY_OBJECT
+                            ,
+                            obj_type,
+                            scan_pattern
+#endif
+        );
     }
 }
 

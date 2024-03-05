@@ -2050,12 +2050,13 @@ public:
         }
 
         const KeyT *key_ptr = nullptr;
-        CcEntry<KeyT, ValueT> *cce = nullptr;
-        CcPage<KeyT, ValueT> *ccp = nullptr;
+        CcEntry<KeyT, ValueT> *cce_last = nullptr;
+        CcPage<KeyT, ValueT> *ccp_last = nullptr;
 
         if (req.CcePtr() != nullptr)
         {
-            cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            CcEntry<KeyT, ValueT> *cce =
+                static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
             assert(ccp != nullptr);
@@ -2103,6 +2104,9 @@ public:
                          ng_term,
                          req.ReadTimestamp(),
                          is_read_snapshot);
+
+            cce_last = cce;
+            ccp_last = ccp;
         }
         else
         {
@@ -2117,8 +2121,8 @@ public:
 
             scan_ccm_it = start_pair.first;
             key_ptr = scan_ccm_it->first;
-            cce = scan_ccm_it->second;
-            ccp = scan_ccm_it.GetPage();
+            CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+            CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
             ScanType scan_type = start_pair.second;
 
             req.SetCcePtr(cce);
@@ -2174,6 +2178,8 @@ public:
                          ng_term,
                          req.ReadTimestamp(),
                          is_read_snapshot);
+            cce_last = cce;
+            ccp_last = ccp;
         }
 
         if (req.direct_ == ScanDirection::Forward)
@@ -2185,11 +2191,13 @@ public:
                  ++scan_ccm_it)
             {
                 key_ptr = scan_ccm_it->first;
-                cce = scan_ccm_it->second;
-                ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 #ifdef ON_KEY_OBJECT
-                if (cce->PayloadStatus() == RecordStatus::Deleted &&
-                    (!cce->NeedCkpt() || FLAGS_skip_kv))
+                if (!FilterRecord(key_ptr,
+                                  cce,
+                                  req.GetRedisObjectType(),
+                                  req.GetRedisScanPattern()))
                 {
                     continue;
                 }
@@ -2242,6 +2250,9 @@ public:
                              is_read_snapshot,
                              true,
                              req.is_ckpt_delta_);
+
+                cce_last = cce;
+                ccp_last = ccp;
             }
         }
         else
@@ -2253,11 +2264,13 @@ public:
                  --scan_ccm_it)
             {
                 key_ptr = scan_ccm_it->first;
-                cce = scan_ccm_it->second;
-                ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 #ifdef ON_KEY_OBJECT
-                if (cce->PayloadStatus() == RecordStatus::Deleted &&
-                    (!cce->NeedCkpt() || FLAGS_skip_kv))
+                if (!FilterRecord(key_ptr,
+                                  cce,
+                                  req.GetRedisObjectType(),
+                                  req.GetRedisScanPattern()))
                 {
                     continue;
                 }
@@ -2310,6 +2323,26 @@ public:
                              is_read_snapshot,
                              true,
                              req.is_ckpt_delta_);
+
+                cce_last = cce;
+                ccp_last = ccp;
+            }
+        }
+
+        if (cce_last != nullptr)
+        {
+            bool add_intent =
+                cce_last->GetOrCreateKeyLock(shard_, this, ccp_last)
+                    .AcquireReadIntent(req.Txn());
+
+            if (add_intent)
+            {
+                shard_->UpsertLockHoldingTx(req.Txn(),
+                                            tx_term,
+                                            cce_last,
+                                            false,
+                                            ng_id,
+                                            table_name_.Type());
             }
         }
 
@@ -2366,10 +2399,13 @@ public:
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
         Iterator scan_ccm_it;
+        CcEntry<KeyT, ValueT> *prior_cce;
+        CcEntry<KeyT, ValueT> *cce_last = nullptr;
+        CcPage<KeyT, ValueT> *ccp_last = nullptr;
+
         if (req.CcePtr() != nullptr)
         {
-            CcEntry<KeyT, ValueT> *prior_cce =
-                static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
             assert(ccp != nullptr);
@@ -2419,17 +2455,32 @@ public:
                          is_read_snapshot,
                          true,
                          req.is_ckpt_delta_);
+
+            cce_last = prior_cce;
+            ccp_last = ccp;
         }
         else
         {
-            CcEntry<KeyT, ValueT> *prior_cce =
-                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                    typed_cache->Last()->cce_addr_.CcePtr());
+            prior_cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                typed_cache->Last()->cce_addr_.CcePtr());
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             typed_cache->Reset();
+
+            if (LockTypeUtil::DeduceLockType(cc_op,
+                                             req.Isolation(),
+                                             req.Protocol(),
+                                             req.IsCoveringKeys()) ==
+                LockType::NoLock)
+            {
+                ReleaseCceLock(prior_cce->GetKeyLock(),
+                               prior_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
+            }
         }
 
         if (direction == ScanDirection::Forward)
@@ -2451,8 +2502,10 @@ public:
                     continue;
                 }
 #ifdef ON_KEY_OBJECT
-                if (cce->PayloadStatus() == RecordStatus::Deleted &&
-                    (!cce->NeedCkpt() || FLAGS_skip_kv))
+                if (!FilterRecord(key,
+                                  cce,
+                                  req.GetRedisObjectType(),
+                                  req.GetRedisScanPattern()))
                 {
                     continue;
                 }
@@ -2473,6 +2526,7 @@ public:
                                                    cc_proto,
                                                    req.ReadTimestamp(),
                                                    req.IsCoveringKeys());
+
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -2506,6 +2560,9 @@ public:
                              is_read_snapshot,
                              true,
                              req.is_ckpt_delta_);
+
+                cce_last = cce;
+                ccp_last = ccp;
             }
         }
         else
@@ -2537,15 +2594,17 @@ public:
                 }
                 else
                 {
-                    req.SetCcePtr(cce);
-                    req.SetCcePtrScanType(ScanType::ScanBoth);
 #ifdef ON_KEY_OBJECT
-                    if (cce->PayloadStatus() == RecordStatus::Deleted &&
-                        (!cce->NeedCkpt() || FLAGS_skip_kv))
+                    if (!FilterRecord(key,
+                                      cce,
+                                      req.GetRedisObjectType(),
+                                      req.GetRedisScanPattern()))
                     {
                         continue;
                     }
 #endif
+                    req.SetCcePtr(cce);
+                    req.SetCcePtrScanType(ScanType::ScanBoth);
 
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        ccp,
@@ -2592,7 +2651,27 @@ public:
                                  is_read_snapshot,
                                  true,
                                  req.is_ckpt_delta_);
+
+                    cce_last = cce;
+                    ccp_last = ccp;
                 }
+            }
+        }
+
+        if (cce_last != nullptr)
+        {
+            bool add_intent =
+                cce_last->GetOrCreateKeyLock(shard_, this, ccp_last)
+                    .AcquireReadIntent(req.Txn());
+
+            if (add_intent)
+            {
+                shard_->UpsertLockHoldingTx(req.Txn(),
+                                            tx_term,
+                                            cce_last,
+                                            false,
+                                            ng_id,
+                                            table_name_.Type());
             }
         }
 
@@ -2772,12 +2851,12 @@ public:
 
         Iterator scan_ccm_it;
         const KeyT *key_ptr = nullptr;
-        CcEntry<KeyT, ValueT> *cce = nullptr;
-        CcPage<KeyT, ValueT> *ccp = nullptr;
+        CcEntry<KeyT, ValueT> *cce_last = nullptr;
+        CcPage<KeyT, ValueT> *ccp_last = nullptr;
 
         if (req.CcePtr(shard_->LocalCoreId()) != nullptr)
         {
-            cce = static_cast<CcEntry<KeyT, ValueT> *>(
+            CcEntry<KeyT, ValueT> *cce = static_cast<CcEntry<KeyT, ValueT> *>(
                 req.CcePtr(shard_->LocalCoreId()));
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
@@ -2826,6 +2905,8 @@ public:
                             req.ReadTimestamp(),
                             is_read_snapshot,
                             req.is_ckpt_delta_);
+            cce_last = cce;
+            ccp_last = ccp;
         }
         else
         {
@@ -2837,8 +2918,8 @@ public:
             scan_ccm_it = start_pair.first;
             ScanType scan_type = start_pair.second;
             key_ptr = scan_ccm_it->first;
-            cce = scan_ccm_it->second;
-            ccp = scan_ccm_it.GetPage();
+            CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+            CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 
             req.SetCcePtr(cce, shard_->LocalCoreId());
             req.SetCcePtrScanType(scan_type, shard_->LocalCoreId());
@@ -2894,6 +2975,8 @@ public:
                             req.ReadTimestamp(),
                             is_read_snapshot,
                             req.is_ckpt_delta_);
+            cce_last = cce;
+            ccp_last = ccp;
         }
 
         if (req.direct_ == ScanDirection::Forward)
@@ -2906,15 +2989,22 @@ public:
                  ++scan_ccm_it)
             {
                 key_ptr = scan_ccm_it->first;
-                cce = scan_ccm_it->second;
-                ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 
                 if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
-                    ++scan_ccm_it;
                     continue;
                 }
-
+#ifdef ON_KEY_OBJECT
+                if (!FilterRecord(key_ptr,
+                                  cce,
+                                  req.GetRedisObjectType(),
+                                  req.GetRedisScanPattern()))
+                {
+                    continue;
+                }
+#endif
                 req.SetCcePtr(cce, shard_->LocalCoreId());
                 req.SetCcePtrScanType(ScanType::ScanBoth,
                                       shard_->LocalCoreId());
@@ -2931,6 +3021,7 @@ public:
                                                    cc_proto,
                                                    req.ReadTimestamp(),
                                                    req.IsCoveringKeys());
+
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -2963,6 +3054,9 @@ public:
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
+
+                cce_last = cce;
+                ccp_last = ccp;
             }
         }
         else
@@ -2975,15 +3069,22 @@ public:
                  --scan_ccm_it)
             {
                 key_ptr = scan_ccm_it->first;
-                cce = scan_ccm_it->second;
-                ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
 
                 if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
-                    --scan_ccm_it;
                     continue;
                 }
-
+#ifdef ON_KEY_OBJECT
+                if (!FilterRecord(key_ptr,
+                                  cce,
+                                  req.GetRedisObjectType(),
+                                  req.GetRedisScanPattern()))
+                {
+                    continue;
+                }
+#endif
                 req.SetCcePtr(cce, shard_->LocalCoreId());
                 req.SetCcePtrScanType(ScanType::ScanBoth,
                                       shard_->LocalCoreId());
@@ -3000,6 +3101,7 @@ public:
                                                    cc_proto,
                                                    req.ReadTimestamp(),
                                                    req.IsCoveringKeys());
+
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -3032,6 +3134,26 @@ public:
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
+
+                cce_last = cce;
+                ccp_last = ccp;
+            }
+        }
+
+        if (cce_last != nullptr)
+        {
+            bool add_intent =
+                cce_last->GetOrCreateKeyLock(shard_, this, ccp_last)
+                    .AcquireReadIntent(req.Txn());
+
+            if (add_intent)
+            {
+                shard_->UpsertLockHoldingTx(req.Txn(),
+                                            tx_term,
+                                            cce_last,
+                                            false,
+                                            ng_id,
+                                            table_name_.Type());
             }
         }
 
@@ -3084,6 +3206,8 @@ public:
         Iterator scan_ccm_it;
         ScanDirection direction = req.direct_;
         CcEntry<KeyT, ValueT> *prior_cce = nullptr;
+        CcEntry<KeyT, ValueT> *cce_last = nullptr;
+        CcPage<KeyT, ValueT> *ccp_last = nullptr;
 
         if (req.CcePtr() != nullptr)
         {
@@ -3118,7 +3242,6 @@ public:
                                                 cc_proto,
                                                 req.ReadTimestamp(),
                                                 req.IsCoveringKeys());
-
                 if (lock_pair.second != CcErrorCode::NO_ERROR)
                 {
                     assert(lock_pair.second ==
@@ -3136,6 +3259,8 @@ public:
                             req.ReadTimestamp(),
                             is_read_snapshot,
                             req.is_ckpt_delta_);
+            cce_last = prior_cce;
+            ccp_last = ccp;
         }
         else
         {
@@ -3145,6 +3270,19 @@ public:
                 static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
+
+            if (LockTypeUtil::DeduceLockType(cc_op,
+                                             req.Isolation(),
+                                             req.Protocol(),
+                                             req.IsCoveringKeys()) ==
+                LockType::NoLock)
+            {
+                ReleaseCceLock(prior_cce->GetKeyLock(),
+                               prior_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
+            }
         }
 
         if (direction == ScanDirection::Forward)
@@ -3164,6 +3302,15 @@ public:
                     continue;
                 }
 
+#ifdef ON_KEY_OBJECT
+                if (!FilterRecord(key,
+                                  cce,
+                                  req.GetRedisObjectType(),
+                                  req.GetRedisScanPattern()))
+                {
+                    continue;
+                }
+#endif
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
@@ -3179,6 +3326,7 @@ public:
                                                    cc_proto,
                                                    req.ReadTimestamp(),
                                                    req.IsCoveringKeys());
+
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -3211,6 +3359,9 @@ public:
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
+
+                cce_last = cce;
+                ccp_last = ccp;
             }
         }
         else
@@ -3238,10 +3389,20 @@ public:
                                     req.ReadTimestamp(),
                                     is_read_snapshot,
                                     req.is_ckpt_delta_);
+                    cce_last = cce;
                     break;
                 }
                 else
                 {
+#ifdef ON_KEY_OBJECT
+                    if (!FilterRecord(key,
+                                      cce,
+                                      req.GetRedisObjectType(),
+                                      req.GetRedisScanPattern()))
+                    {
+                        continue;
+                    }
+#endif
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanBoth);
 
@@ -3289,7 +3450,27 @@ public:
                                     req.ReadTimestamp(),
                                     is_read_snapshot,
                                     req.is_ckpt_delta_);
+
+                    cce_last = cce;
+                    ccp_last = ccp;
                 }
+            }
+        }
+
+        if (cce_last != nullptr)
+        {
+            bool add_intent =
+                cce_last->GetOrCreateKeyLock(shard_, this, ccp_last)
+                    .AcquireReadIntent(req.Txn());
+
+            if (add_intent)
+            {
+                shard_->UpsertLockHoldingTx(req.Txn(),
+                                            tx_term,
+                                            cce_last,
+                                            false,
+                                            ng_id,
+                                            table_name_.Type());
             }
         }
 
@@ -7682,8 +7863,15 @@ protected:
             {
                 if (cce->payload_ != nullptr)
                 {
+#ifndef ON_KEY_OBJECT
                     cce->payload_->Serialize(remote_cache->records_);
                     tuple_size += cce->payload_->SerializedLength();
+#else
+                    // Redis KEYS command doesn't need value. But ObjectCcMap
+                    // doesn't override ScanKey() on local ccmap. Thus,
+                    // TemplateCcMap::ScanKey() on local ccmp may be called, and
+                    // it need not set record.
+#endif
                 }
             }
             remote_cache->rec_status_.push_back(
@@ -7709,15 +7897,15 @@ protected:
         remote_cache->cache_mem_size_ += tuple_size;
     }
 
-    virtual void ScanKey(const KeyT *key,
-                         CcEntry<KeyT, ValueT> *cce,
-                         RemoteScanCache *remote_cache,
-                         bool include_gap,
-                         int64_t ng_term,
-                         uint64_t read_ts,
-                         bool is_read_snapshot,
-                         bool keep_deleted,
-                         bool is_ckpt_delta = false) const
+    void ScanKey(const KeyT *key,
+                 CcEntry<KeyT, ValueT> *cce,
+                 RemoteScanCache *remote_cache,
+                 bool include_gap,
+                 int64_t ng_term,
+                 uint64_t read_ts,
+                 bool is_read_snapshot,
+                 bool keep_deleted,
+                 bool is_ckpt_delta = false) const
     {
         remote::ScanTuple_msg *tuple = nullptr;
         uint32_t tuple_size = 0;
@@ -7790,8 +7978,15 @@ protected:
                 tuple->clear_record();
                 if (cce->payload_ != nullptr)
                 {
+#ifndef ON_KEY_OBJECT
                     cce->payload_->Serialize(*tuple->mutable_record());
                     tuple_size += cce->payload_->Size();
+#else
+                    // Redis KEYS command doesn't need value. But ObjectCcMap
+                    // doesn't override ScanKey() on local ccmap. Thus,
+                    // TemplateCcMap::ScanKey() on local ccmp may be called, and
+                    // it need not set record.
+#endif
                 }
             }
             tuple->set_rec_status(
@@ -7889,6 +8084,18 @@ protected:
         }
 
         return false;
+    }
+
+    /**
+     * If the a record is according to the conditions, return true, or return
+     * false to neglect this record.
+     */
+    virtual bool FilterRecord(const KeyT *key,
+                              const CcEntry<KeyT, ValueT> *cce,
+                              int32_t obj_type,
+                              const std::string_view &scan_pattern)
+    {
+        return true;
     }
 
     void TryUpdatePageKey(

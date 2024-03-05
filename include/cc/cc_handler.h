@@ -295,7 +295,13 @@ public:
         CcProtocol proto = CcProtocol::OCC,
         bool is_for_write = false,
         bool is_ckpt_delta = false,
-        bool is_covering_keys = false) = 0;
+        bool is_covering_keys = false
+#ifdef ON_KEY_OBJECT
+        ,
+        int32_t obj_type = -1,
+        const std::string_view &scan_pattern = {}
+#endif
+        ) = 0;
 
     virtual void ScanOpenLocal(
         const TableName &table_name,
@@ -318,7 +324,13 @@ public:
                                uint16_t command_id,
                                uint64_t start_ts,
                                CcScanner &scanner,
-                               CcHandlerResult<ScanNextResult> &hd_res) = 0;
+                               CcHandlerResult<ScanNextResult> &hd_res
+#ifdef ON_KEY_OBJECT
+                               ,
+                               int32_t obj_type = -1,
+                               const std::string_view &scan_pattern = {}
+#endif
+                               ) = 0;
 
     virtual void ScanNextBatch(
         const TableName &tbl_name,

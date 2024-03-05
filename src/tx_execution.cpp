@@ -641,7 +641,6 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
         });
 
     void_resp_ = nullptr;
-
     ScanClose(scan_close_req.unlock_batch_,
               scan_close_req.alias_,
               *scan_close_req.table_name_);
@@ -1869,7 +1868,13 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               protocol_,
                               is_for_write,
                               is_ckpt_delta,
-                              is_covering_keys);
+                              is_covering_keys
+#ifdef ON_KEY_OBJECT
+                              ,
+                              scan_open.tx_req_->obj_type_,
+                              scan_open.tx_req_->scan_pattern_
+#endif
+        );
     }
 
 #ifndef RANGE_PARTITION_ENABLED
@@ -2017,7 +2022,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
-
     bool is_local = true;
     if (to_scan_next && scanner.Type() == CcmScannerType::HashPartition)
     {
@@ -2039,7 +2043,13 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 command_id_.load(std::memory_order_relaxed),
                 start_ts_,
                 scanner,
-                scan_next.hd_result_);
+                scan_next.hd_result_
+#ifdef ON_KEY_OBJECT
+                ,
+                scan_next.tx_req_->obj_type_,
+                scan_next.tx_req_->scan_pattern_
+#endif
+            );
         }
 
         is_local = scan_next.hd_result_.Value().is_local_;
@@ -2804,6 +2814,26 @@ void TransactionExecution::ScanClose(
                     drain_batch_.emplace_back(last_tuple->cce_addr_,
                                               last_tuple->key_ts_);
                 }
+            }
+        }
+    }
+#else
+    // In hash partition, cross every channel of scanner and get the last tuple,
+    // then add it into drain_batch_ to ensure the ReadIntent lock to be
+    // released if added.
+    std::vector<const ScanTuple *> last_tuples;
+    last_tuples.reserve(scanner->CacheCount());
+    scanner->ShardCacheLastTuples(&last_tuples);
+    for (const ScanTuple *last_tuple : last_tuples)
+    {
+        if (last_tuple)
+        {
+            LockType lk_type =
+                scanner->DeduceScanTupleLockType(last_tuple->rec_status_);
+            if (lk_type == LockType::NoLock)
+            {
+                drain_batch_.emplace_back(last_tuple->cce_addr_,
+                                          last_tuple->key_ts_);
             }
         }
     }

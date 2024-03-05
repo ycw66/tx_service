@@ -464,7 +464,13 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     CcProtocol proto,
     bool is_for_write,
     bool is_ckpt,
-    bool is_covering_keys)
+    bool is_covering_keys
+#ifdef ON_KEY_OBJECT
+    ,
+    int32_t obj_type,
+    const std::string_view &scan_pattern
+#endif
+)
 {
     CcMessage send_msg;
 
@@ -504,6 +510,10 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_is_for_write(is_for_write);
     scan_open->set_ckpt(is_ckpt);
     scan_open->set_is_covering_keys(is_covering_keys);
+#ifdef ON_KEY_OBJECT
+    scan_open->set_obj_type(obj_type);
+    scan_open->set_scan_pattern(std::string(scan_pattern));
+#endif
 
     stream_sender_.SendMessageToNg(node_group_id, send_msg, &hd_res);
 }
@@ -521,7 +531,13 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     CcProtocol proto,
     bool is_for_write,
     bool is_ckpt,
-    bool is_covering_keys)
+    bool is_covering_keys
+#ifdef ON_KEY_OBJECT
+    ,
+    int32_t obj_type,
+    const std::string_view &scan_pattern
+#endif
+)
 {
     CcMessage send_msg;
 
@@ -550,6 +566,11 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_is_for_write(is_for_write);
     scan_next->set_ckpt(is_ckpt);
     scan_next->set_is_covering_keys(is_covering_keys);
+
+#ifdef ON_KEY_OBJECT
+    scan_next->set_obj_type(obj_type);
+    scan_next->set_scan_pattern(std::string(scan_pattern));
+#endif
 
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hd_res);
 }
@@ -632,7 +653,6 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_slice->set_is_for_write(scanner.is_for_write_);
     scan_slice->set_is_covering_keys(scanner.is_covering_keys_);
     scan_slice->set_prefetch_size(prefetch_size);
-
     stream_sender_.SendMessageToNg(cc_ng_id, send_msg, &hd_res);
 }
 

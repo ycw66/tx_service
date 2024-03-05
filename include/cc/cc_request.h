@@ -1360,7 +1360,13 @@ public:
                bool is_for_write,
                bool is_delta,
                bool is_covering_keys,
-               bool is_include_floor_cce = false)
+               bool is_include_floor_cce = false
+#ifdef ON_KEY_OBJECT
+               ,
+               int32_t obj_type = -1,
+               const std::string_view &scan_pattern = {}
+#endif
+    )
     {
         TemplatedCcRequest<ScanOpenBatchCc, ScanOpenResult>::Reset(
             tn, res, ng_id, tx_number, protocol, iso_level);
@@ -1378,6 +1384,10 @@ public:
         is_include_floor_cce_ = is_include_floor_cce;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
+#ifdef ON_KEY_OBJECT
+        obj_type_ = obj_type;
+        scan_pattern_ = scan_pattern;
+#endif
     }
 
     int64_t TxTerm()
@@ -1429,6 +1439,16 @@ public:
     {
         return is_wait_for_post_write_;
     }
+#ifdef ON_KEY_OBJECT
+    int32_t GetRedisObjectType() const
+    {
+        return obj_type_;
+    }
+    const std::string_view &GetRedisScanPattern() const
+    {
+        return scan_pattern_;
+    }
+#endif
 
 private:
     ScanIndexType index_type_{ScanIndexType::Primary};
@@ -1454,6 +1474,10 @@ private:
     LruEntry *cce_ptr_{nullptr};
 
     bool is_wait_for_post_write_{false};
+#ifdef ON_KEY_OBJECT
+    int32_t obj_type_{-1};
+    std::string_view scan_pattern_;
+#endif
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
@@ -1501,7 +1525,13 @@ public:
                CcProtocol protocol,
                bool is_for_write,
                bool is_delta,
-               bool is_covering_keys)
+               bool is_covering_keys
+#ifdef ON_KEY_OBJECT
+               ,
+               int32_t obj_type = -1,
+               const std::string_view &scan_pattern = {}
+#endif
+    )
     {
         TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(
             nullptr, next_res, ng_id, tx_number, protocol, iso_level);
@@ -1518,6 +1548,10 @@ public:
         const ScanTuple *last_tuple = cache->LastTuple();
         cce_addr_ = &last_tuple->cce_addr_;
         ccm_ = nullptr;
+#ifdef ON_KEY_OBJECT
+        obj_type_ = obj_type;
+        scan_pattern_ = scan_pattern;
+#endif
     }
 
     int64_t TxTerm()
@@ -1569,6 +1603,16 @@ public:
     {
         return is_wait_for_post_write_;
     }
+#ifdef ON_KEY_OBJECT
+    int32_t GetRedisObjectType() const
+    {
+        return obj_type_;
+    }
+    const std::string_view &GetRedisScanPattern() const
+    {
+        return scan_pattern_;
+    }
+#endif
 
 private:
     const CcEntryAddr *cce_addr_;
@@ -1591,6 +1635,10 @@ private:
 
     bool is_wait_for_post_write_{false};
 
+#ifdef ON_KEY_OBJECT
+    int32_t obj_type_{-1};
+    std::string_view scan_pattern_;
+#endif
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
 

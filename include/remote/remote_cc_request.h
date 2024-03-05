@@ -339,6 +339,17 @@ public:
         return is_wait_for_post_write_[core_id];
     }
 
+#ifdef ON_KEY_OBJECT
+    int32_t GetRedisObjectType() const
+    {
+        return obj_type_;
+    }
+    const std::string_view &GetRedisScanPattern() const
+    {
+        return scan_pattern_;
+    }
+#endif
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -368,6 +379,11 @@ private:
     std::vector<LruEntry *> cce_ptr_;
     // scan type for above cce_ptr_
     std::vector<ScanType> cce_ptr_scan_type_;
+
+#ifdef ON_KEY_OBJECT
+    int32_t obj_type_{-1};
+    std::string_view scan_pattern_;
+#endif
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
@@ -438,6 +454,17 @@ public:
         return prior_cce_addr_;
     }
 
+#ifdef ON_KEY_OBJECT
+    int32_t GetRedisObjectType() const
+    {
+        return obj_type_;
+    }
+    const std::string_view &GetRedisScanPattern() const
+    {
+        return scan_pattern_;
+    }
+#endif
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -465,6 +492,11 @@ private:
     // scan type for above cce_ptr_
     ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
     TableType tbl_type_;
+
+#ifdef ON_KEY_OBJECT
+    int32_t obj_type_{-1};
+    std::string_view scan_pattern_;
+#endif
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;

@@ -192,7 +192,13 @@ public:
                   CcProtocol proto = CcProtocol::OCC,
                   bool is_for_write = false,
                   bool is_ckpt_delta = false,
-                  bool is_covering_keys = false) override;
+                  bool is_covering_keys = false
+#ifdef ON_KEY_OBJECT
+                  ,
+                  int32_t obj_type = -1,
+                  const std::string_view &scan_pattern = {}
+#endif
+                  ) override;
 
     void ScanOpenLocal(const TableName &table_name,
                        ScanIndexType index_type,
@@ -214,7 +220,13 @@ public:
                        uint16_t command_id,
                        uint64_t start_ts,
                        CcScanner &scanner,
-                       CcHandlerResult<ScanNextResult> &hd_res) override;
+                       CcHandlerResult<ScanNextResult> &hd_res
+#ifdef ON_KEY_OBJECT
+                       ,
+                       int32_t obj_type = -1,
+                       const std::string_view &scan_pattern = {}
+#endif
+                       ) override;
 
     void ScanNextBatch(const TableName &tbl_name,
                        uint32_t range_id,

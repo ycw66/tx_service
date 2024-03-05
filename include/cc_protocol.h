@@ -30,7 +30,7 @@ enum class CcOperation
     Read = 0,
     ReadForWrite,
     Write,
-    ReadSkIndex,
+    ReadSkIndex
 };
 
 /**
@@ -117,6 +117,7 @@ public:
                 return LockType::NoLock;
             }
         }
+
         assert(false);
         return LockType::NoLock;
     }

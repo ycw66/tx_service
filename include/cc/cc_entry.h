@@ -1158,7 +1158,7 @@ public:
     }
 #endif
 
-    bool NeedCkpt()
+    bool NeedCkpt() const
     {
         RecordStatus rec_status = PayloadStatus();
         return !IsPersistent() && (rec_status == RecordStatus::Normal ||

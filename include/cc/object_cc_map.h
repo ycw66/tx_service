@@ -962,69 +962,31 @@ private:
         }
     }
 
-    void ScanKey(const KeyT *key,
-                 CcEntry<KeyT, ValueT> *cce,
-                 RemoteScanCache *remote_cache,
-                 bool include_gap,
-                 int64_t ng_term,
-                 uint64_t read_ts,
-                 bool is_read_snapshot,
-                 bool keep_deleted,
-                 bool is_ckpt_delta = false) const override
+    /**
+     * If the a record is according to the conditions, return true, or return
+     * false to neglect this record.
+     */
+    bool FilterRecord(const KeyT *key,
+                      const CcEntry<KeyT, ValueT> *cce,
+                      int32_t obj_type,
+                      const std::string_view &scan_pattern) override
     {
-        remote::ScanTuple_msg *tuple = nullptr;
-        uint32_t tuple_size = 0;
-
-#ifdef RANGE_PARTITION_ENABLED
-        if (cce->payload_status_ == RecordStatus::Normal ||
-            cce->payload_status_ == RecordStatus::Deleted && keep_deleted)
+        if (cce->PayloadStatus() == RecordStatus::Deleted &&
+            (!cce->NeedCkpt() || FLAGS_skip_kv))
         {
-            tuple = remote_cache->cache_msg_->add_scan_tuple();
+            return false;
         }
-        else
+        if (obj_type >= 0 && cce->payload_ != nullptr &&
+            !cce->payload_->IsMatchType(obj_type))
         {
-            return;
+            return false;
         }
-#else
-        tuple = remote_cache->cache_msg_->add_scan_tuple();
-#endif
-        key->Serialize(*tuple->mutable_key());
-        tuple_size += key->Size();
-
-        tuple->clear_record();
-        if (cce->payload_ != nullptr)
+        if (scan_pattern.size() > 0 && !key->IsMatch(scan_pattern))
         {
-            cce->payload_->ValueT::Serialize(*tuple->mutable_record());
-            tuple_size += sizeof(int8_t);
-        }
-        else
-        {
-            int8_t obj_type = -1;
-            tuple->mutable_record()->append(
-                reinterpret_cast<const char *>(&obj_type), sizeof(int8_t));
-            tuple_size += sizeof(int8_t);
+            return false;
         }
 
-        tuple->set_rec_status(
-            remote::ToRemoteType::ConvertRecordStatus(cce->PayloadStatus()));
-        tuple->set_key_ts(cce->CommitTs());
-
-        if (include_gap)
-        {
-            tuple->set_gap_ts(0);
-        }
-        else
-        {
-            tuple->set_gap_ts(0);
-        }
-
-        remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
-        cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
-        cce_addr->set_term(ng_term);
-        // For remote scans, the returned cc entries' node group ID is set
-        // on the sender side when the sender receives the response.
-
-        remote_cache->cache_mem_size_ += tuple_size;
+        return true;
     }
 
     void SetExpire(LruEntry *cce, uint64_t expire_ts)
