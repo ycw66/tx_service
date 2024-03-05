@@ -115,13 +115,7 @@ CcShard::CcShard(uint16_t core_id,
     if (metrics::enable_metrics)
     {
         meter_->Register(metrics::NAME_MEMORY_LIMIT, metrics::Type::Gauge);
-#ifdef RANGE_PARTITION_ENABLED
-        meter_->Collect(metrics::NAME_MEMORY_LIMIT,
-                        (uint64_t) MB(node_memory_limit_mb) * 0.95);
-#else
-        meter_->Collect(metrics::NAME_MEMORY_LIMIT,
-                        (uint64_t) MB(node_memory_limit_mb));
-#endif
+        meter_->Collect(metrics::NAME_MEMORY_LIMIT, memory_limit_);
     }
 
     if (metrics::enable_cache_hit_rate)
