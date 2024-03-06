@@ -4674,7 +4674,7 @@ public:
         auto &pause_key_and_is_drained = req.PauseKey(shard_->core_id_);
 
         // Slice_id is not set, We need to pin slice.
-        if (req.include_flushed_rec_ &&
+        if (req.export_base_table_rec_if_need_ &&
             nullptr == req.slice_ids_[shard_->core_id_].Slice())
         {
             const KeyT *slice_start_key = nullptr;
@@ -4820,7 +4820,7 @@ public:
 
             const KeyT *search_end_key = req_end_key;
 
-            if (req.include_flushed_rec_)
+            if (req.export_base_table_rec_if_need_)
             {
                 assert(req.slice_ids_[shard_->core_id_].Slice() != nullptr);
 
@@ -4854,7 +4854,7 @@ public:
         // will be set as the first entry on the next page. Also check if (it ==
         // end_it_next_page_it).
         Iterator end_it_next_page_it = end_it;
-        if (!req.include_flushed_rec_)
+        if (!req.export_base_table_rec_if_need_)
         {
             if (end_it_next_page_it != End())
             {
@@ -4899,7 +4899,7 @@ public:
             CcPage<KeyT, ValueT> *ccp = it.GetPage();
             assert(ccp);
 
-            if (!req.include_flushed_rec_)
+            if (!req.export_base_table_rec_if_need_)
             {
                 if (ccp->last_dirty_commit_ts_ <= from_ts)
                 {
@@ -4943,142 +4943,120 @@ public:
             }
 #endif
 
-            if (cce->NeedCkpt())
+            if (!req.export_base_table_rec_if_need_)
             {
-                bool need_export = true;
-                if (!req.include_flushed_rec_ &&
-                    cce->data_store_size_.load(std::memory_order_acquire) ==
+                if (cce->NeedCkpt())
+                {
+                    bool need_export = true;
+                    if (cce->data_store_size_.load(std::memory_order_acquire) ==
                         INT32_MAX)
-                {
-                    // Load data store size by pinning the slice. Data
-                    // store size is required to decide slice & range
-                    // update plan.
-                    RangeSliceOpStatus pin_status;
-                    RangeSliceId slice_id =
-                        shard_->PinRangeSlice(table_name_,
-                                              req.NodeGroupId(),
-                                              ng_term,
-                                              KeySchema(),
-                                              RecordSchema(),
-                                              schema_ts_,
-                                              table_schema_->GetKVCatalogInfo(),
-                                              *key,
-                                              true,
-                                              &req,
-                                              pin_status,
-                                              true,
-                                              UINT8_MAX);
-                    if (pin_status == RangeSliceOpStatus::Successful)
                     {
-                        if (cce->data_store_size_.load(
-                                std::memory_order_acquire) == INT32_MAX)
+                        // Load data store size by pinning the slice. Data
+                        // store size is required to decide slice & range
+                        // update plan.
+                        RangeSliceOpStatus pin_status;
+                        RangeSliceId slice_id = shard_->PinRangeSlice(
+                            table_name_,
+                            req.NodeGroupId(),
+                            ng_term,
+                            KeySchema(),
+                            RecordSchema(),
+                            schema_ts_,
+                            table_schema_->GetKVCatalogInfo(),
+                            *key,
+                            true,
+                            &req,
+                            pin_status,
+                            true,
+                            UINT8_MAX);
+                        if (pin_status == RangeSliceOpStatus::Successful)
                         {
-                            // If data store size is still unavailable
-                            // after the slice is loaded from data
-                            // store, that means this entry does not
-                            // exist in data store.
-                            cce->data_store_size_.store(0);
+                            if (cce->data_store_size_.load(
+                                    std::memory_order_acquire) == INT32_MAX)
+                            {
+                                // If data store size is still unavailable
+                                // after the slice is loaded from data
+                                // store, that means this entry does not
+                                // exist in data store.
+                                cce->data_store_size_.store(0);
+                            }
+                            slice_id.Unpin();
                         }
-                        slice_id.Unpin();
+                        else if (pin_status == RangeSliceOpStatus::Retry)
+                        {
+                            pause_key_and_is_drained.first = key->Clone();
+                            shard_->Enqueue(shard_->LocalCoreId(), &req);
+                            return false;
+                        }
+                        else if (pin_status ==
+                                 RangeSliceOpStatus::BlockedOnLoad)
+                        {
+                            pause_key_and_is_drained.first = key->Clone();
+                            return false;
+                        }
+                        else if (pin_status == RangeSliceOpStatus::NotOwner)
+                        {
+                            assert("Dead branch");
+                            // The recovered cc entry does not belong to this ng
+                            // anymore. This will happen if ng failover after a
+                            // range split just finished but before checkpointer
+                            // is able to truncate the log. In this case the log
+                            // records of the data that now falls on another ng
+                            // will still be replayed on the old ng on recover.
+                            // Skip the cc entry and remove it at the end.
+                            need_export = false;
+                        }
+                        else
+                        {
+                            // Checkpointing needs to load a slice only if one
+                            // or more changed records are to be flushed. Range
+                            // catalog must have been loaded when initial
+                            // changes were made. So, pinning slice in
+                            // checkpointing never returns BlockedOnCatalog.
+                            // Moreover, since the force_load flag is set,
+                            // pinning slice in checkpointing never returns
+                            // Delay.
+                            req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                            return false;
+                        }
                     }
-                    else if (pin_status == RangeSliceOpStatus::Retry)
-                    {
-                        pause_key_and_is_drained.first = key->Clone();
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        return false;
-                    }
-                    else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
-                    {
-                        pause_key_and_is_drained.first = key->Clone();
-                        return false;
-                    }
-                    else if (pin_status == RangeSliceOpStatus::NotOwner)
-                    {
-                        assert("Dead branch");
-                        // The recovered cc entry does not belong to this ng
-                        // anymore. This will happen if ng failover after a
-                        // range split just finished but before checkpointer is
-                        // able to truncate the log. In this case the log
-                        // records of the data that now falls on another ng will
-                        // still be replayed on the old ng on recover. Skip the
-                        // cc entry and remove it at the end.
-                        need_export = false;
-                    }
-                    else
-                    {
-                        // Checkpointing needs to load a slice only if one or
-                        // more changed records are to be flushed. Range catalog
-                        // must have been loaded when initial changes were made.
-                        // So, pinning slice in checkpointing never returns
-                        // BlockedOnCatalog. Moreover, since the force_load flag
-                        // is set, pinning slice in checkpointing never returns
-                        // Delay.
-                        req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                        return false;
-                    }
-                }
 
-                if (need_export)
-                {
-                    cce->ExportForCkpt(
-                        *key,
-                        req.DataSyncVec(shard_->core_id_),
-                        req.ArchiveVec(shard_->core_id_),
-                        req.MoveBaseIdxVec(shard_->core_id_),
-                        req.previous_scan_ts_,
-                        req.data_sync_ts_,
-                        recycle_ts,
-                        Type(),
-                        shard_->EnableMvcc(),
-                        req.accumulated_scan_cnt_[shard_->core_id_],
-                        req.include_flushed_rec_);
+                    if (need_export)
+                    {
+                        cce->ExportForCkpt(
+                            *key,
+                            req.DataSyncVec(shard_->core_id_),
+                            req.ArchiveVec(shard_->core_id_),
+                            req.MoveBaseIdxVec(shard_->core_id_),
+                            req.previous_scan_ts_,
+                            req.data_sync_ts_,
+                            recycle_ts,
+                            Type(),
+                            shard_->EnableMvcc(),
+                            req.accumulated_scan_cnt_[shard_->core_id_],
+                            false);
+                    }
                 }
             }
             else
             {
-                if (req.include_flushed_rec_)
-                {
-                    const RecordStatus rec_status = cce->PayloadStatus();
-
-                    if (cce->CommitTs() != 1 &&
-                        cce->CommitTs() <= req.data_sync_ts_ &&
-                        (rec_status == RecordStatus::Normal ||
-                         rec_status == RecordStatus::Deleted))
-                    {
-                        size_t vec_idx =
-                            req.accumulated_scan_cnt_[shard_->core_id_]++;
-                        FlushRecord &ref =
-                            req.DataSyncVec(shard_->core_id_)[vec_idx];
-                        ref.CloneOrCopyKey(*key);
-
-                        // This record was load from storage. We can't safely
-                        // point to CcEntry of CcMap. Because the entry will be
-                        // kickout after UnpinSlice. the pointer will become
-                        // invalidation.
-                        ref.cce_ = nullptr;
-
-                        ref.payload_status_ = rec_status;
-                        ref.commit_ts_ = cce->CommitTs();
-
-                        if (rec_status == RecordStatus::Normal)
-                        {
-#ifndef ON_KEY_OBJECT
-                            ref.SetPayload(cce->payload_);
-#else
-                            ref.SetPayload(cce->payload_.get());
-#endif
-                        }
-
-                        // the size of record is not change.
-                        ref.delta_size_ = 0;
-                    }
-                }
+                cce->ExportForCkpt(*key,
+                                   req.DataSyncVec(shard_->core_id_),
+                                   req.ArchiveVec(shard_->core_id_),
+                                   req.MoveBaseIdxVec(shard_->core_id_),
+                                   req.previous_scan_ts_,
+                                   req.data_sync_ts_,
+                                   recycle_ts,
+                                   Type(),
+                                   shard_->EnableMvcc(),
+                                   req.accumulated_scan_cnt_[shard_->core_id_],
+                                   true);
             }
 
             // Forward iterator
             it++;
 
-            if (req.include_flushed_rec_)
+            if (req.export_base_table_rec_if_need_)
             {
                 bool pin_next_slice =
                     it == end_it &&
@@ -5187,7 +5165,7 @@ public:
         if (no_more_data)
         {
             // scan data drained
-            if (req.include_flushed_rec_ &&
+            if (req.export_base_table_rec_if_need_ &&
                 req.slice_ids_[shard_->core_id_].Slice() != nullptr)
             {
                 // Unpin slice

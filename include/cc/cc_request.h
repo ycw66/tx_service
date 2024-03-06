@@ -2622,7 +2622,7 @@ public:
                    size_t scan_batch_size,
                    const TxKey *target_start_key = nullptr,
                    const TxKey *target_end_key = nullptr,
-                   bool include_flushed_rec = false)
+                   bool export_base_table_rec_if_need = false)
         : table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
@@ -2639,7 +2639,7 @@ public:
           cv_()
 #ifdef RANGE_PARTITION_ENABLED
           ,
-          include_flushed_rec_(include_flushed_rec)
+          export_base_table_rec_if_need_(export_base_table_rec_if_need)
 #endif
     {
         assert(scan_batch_size_ > DataSyncScanBatchSize);
@@ -2655,7 +2655,7 @@ public:
             accumulated_scan_cnt_.emplace_back(0);
         }
 #ifdef RANGE_PARTITION_ENABLED
-        if (include_flushed_rec)
+        if (export_base_table_rec_if_need)
         {
             slice_ids_.resize(core_cnt_);
         }
@@ -2819,9 +2819,9 @@ private:
     std::condition_variable cv_;
 
 #ifdef RANGE_PARTITION_ENABLED
-    // True means we also need to scan data which has been flushed to storage.
-    // Note: This flag only used for RangePartition.
-    bool include_flushed_rec_{false};
+    // True means If no larger version exists, we need to export the data which
+    // commit_ts same as ckpt_ts. Note: This flag only used for RangePartition.
+    bool export_base_table_rec_if_need_{false};
     std::vector<RangeSliceId> slice_ids_;
 #endif
 

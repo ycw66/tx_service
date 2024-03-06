@@ -877,9 +877,9 @@ public:
      * @param from_ts - Previous round scan timestamp. We scan the data between
      * (from_ts, to_ts].
      * @param to_ts - Current round checkpoint timestamp.
-     * @param include_flushed_rec - True means we also need to scan data which
-     * has been flushed to storage. Note: This flag only used for
-     * RangePartition.
+     * @param export_base_table_record_if_need - True means If no larger version
+     * exists, we need to export the data which commit_ts same as ckpt_ts. Note:
+     * This flag only used for RangePartition.
      * @return the number of exported version records.
      */
     size_t ExportForCkpt(const KeyT &key,
@@ -892,20 +892,67 @@ public:
                          TableType tbl_type,
                          bool mvcc_enabled,
                          size_t &ckpt_vec_size,
-                         bool include_flushed_rec) const
+                         bool export_base_table_record_if_need) const
     {
+        // `export_store_record_if_need` - True means If no larger version needs
+        // to be flushed(commit_ts > ckpt_ts && commit_ts <= to_ts), we need to
+        // export the data which commit_ts same as ckpt_ts. Because we
+        // want to flush this key to new range on base table. Only for range
+        // partition
         size_t exported_count = 0;
-
         if (IsPersistent())
         {
+            const uint64_t commit_ts = CommitTs();
+            const RecordStatus rec_status = PayloadStatus();
+            // 1.This version data has alredy flushed to base
+            // table(commit_ts == ckpt_ts).
+            // 2. No new version data to be
+            // flushed(newest commit ts == ckpt_ts).
+            // But we need to migrate data to new range on
+            // base table. So we need to export this record
+            // for range migration
+            if (export_base_table_record_if_need && commit_ts != 1 &&
+                commit_ts <= to_ts &&
+                (rec_status == RecordStatus::Normal ||
+                 rec_status == RecordStatus::Deleted))
+            {
+                assert(commit_ts != 1);
+                assert(exported_count == 0);
+                FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
+                ref.CloneOrCopyKey(key);
+
+                // This record was load from storage. We can't safely
+                // point to CcEntry of CcMap. Because the entry will be
+                // kickout after UnpinSlice. the pointer will become
+                // invalidation.
+                ref.cce_ = nullptr;
+
+                ref.payload_status_ = rec_status;
+                ref.commit_ts_ = commit_ts;
+
+                if (rec_status == RecordStatus::Normal)
+                {
+#ifndef ON_KEY_OBJECT
+                    ref.SetPayload(payload_);
+#else
+                    ref.SetPayload(payload_.get());
+#endif
+                }
+
+                // the size of record is not change.
+                ref.delta_size_ = 0;
+                exported_count++;
+            }
+
             return exported_count;
         }
 
+        const uint64_t commit_ts = CommitTs();
+        const RecordStatus rec_status = PayloadStatus();
+        assert(commit_ts > CkptTs());
 #ifndef ON_KEY_OBJECT
         size_t ckpt_idx = ckpt_vec_size;
 #endif
-        const uint64_t commit_ts = CommitTs();
-        const RecordStatus rec_status = PayloadStatus();
 
         if (from_ts < commit_ts && commit_ts <= to_ts)
         {
@@ -960,19 +1007,56 @@ public:
 
         if (archives_ != nullptr && archives_->size() > 0)
         {
+            // Scan data from largest version to smallest version
             for (auto it = archives_->begin(); it != archives_->end(); it++)
             {
                 if (from_ts < it->commit_ts_ && it->commit_ts_ <= to_ts)
                 {
                     if (it->commit_ts_ < ckpt_ts || it->commit_ts_ == 1U)
                     {
+                        // This version has already flushed to archive
+                        // table.(it->commit_ts_ < ckpt_ts_)
                         break;
                     }
-                    else
+                    else if (it->commit_ts_ == ckpt_ts)
                     {
-                        if (exported_count == 0 && it->commit_ts_ == ckpt_ts)
+                        // `exported_count != 0` - means the larger version
+                        // record will be flushed to base table.
+                        if (exported_count != 0)
                         {
-                            if (include_flushed_rec)
+                            // This record on base table will be overrided. We
+                            // need to flush this record to archive table.
+                            auto &ref = akv_vec.emplace_back();
+                            ref.SetKeyIndex(ckpt_idx);
+                            ref.cce_ = const_cast<LruEntry *>(
+                                static_cast<const LruEntry *>(this));
+                            if (it->payload_status_ == RecordStatus::Normal)
+                            {
+                                if (tbl_type != TableType::Secondary)
+                                {
+                                    ref.SetPayload(
+                                        it->payload_);  // pk, unique_sk
+                                }
+                                else
+                                {
+                                    ref.SetPayload(payload_);  // sk
+                                }
+                            }
+                            ref.payload_status_ = it->payload_status_;
+                            ref.commit_ts_ = it->commit_ts_;
+                            exported_count++;
+                        }
+                        else
+                        {
+                            assert(exported_count == 0);
+
+                            // 1.This version has already flushed to base
+                            // table(commit_ts == ckpt_ts).
+                            // 2. No larger version data to be
+                            // flushed(exported_count == 0).
+                            // We need to export this record in order to
+                            // flush it to new range.
+                            if (export_base_table_record_if_need)
                             {
                                 FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
                                 ref.CloneOrCopyKey(key);
@@ -1004,9 +1088,13 @@ public:
 
                                 exported_count++;
                             }
-
-                            break;
                         }
+
+                        break;
+                    }
+                    else
+                    {
+                        assert(it->commit_ts_ > ckpt_ts);
 
                         if (exported_count == 0)
                         {
@@ -1077,14 +1165,17 @@ public:
                 }
                 else if (from_ts >= it->commit_ts_)
                 {
-                    if (include_flushed_rec && exported_count == 0)
+                    if (export_base_table_record_if_need && exported_count == 0)
                     {
-                        if (it->commit_ts_ > ckpt_ts)
-                        {
-                            continue;
-                        }
+                        // 1.it->commit_ts > ckpt_ts: The previous scan has
+                        // exported this record(it->commits_ts <= from_ts).
+                        // 2.it->commit_ts < ckpt_ts: This version has already
+                        // flushed to archive table. We don't need to
+                        // migrate data on archive table. So we don't need
+                        // to export this record.
+                        // 3.it->commit_ts_ == -1: Dummy archive record. Ignore.
 
-                        if (it->commit_ts_ == ckpt_ts && it->commit_ts_ != 1)
+                        if (it->commit_ts_ != 1 && it->commit_ts_ == ckpt_ts)
                         {
                             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
                             ref.CloneOrCopyKey(key);
@@ -1117,9 +1208,6 @@ public:
                             exported_count++;
                         }
                     }
-
-                    assert(!include_flushed_rec || exported_count != 0 ||
-                           it->commit_ts_ < ckpt_ts || it->commit_ts_ == 1);
                     break;
                 }
                 // else: it->commit_ts_ > to_ts

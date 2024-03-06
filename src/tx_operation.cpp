@@ -3700,7 +3700,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                             {
                                 const TxKey *req_start_key = nullptr;
                                 const TxKey *req_end_key = nullptr;
-                                bool include_flushed_rec = false;
+                                bool export_base_table_rec_if_need = false;
 
                                 if (scan_idx == 0)
                                 {
@@ -3722,7 +3722,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     // We don't need to pin slices that
                                     // falls into the old range after range
                                     // split.
-                                    include_flushed_rec = false;
+                                    export_base_table_rec_if_need = false;
                                 }
                                 else
                                 {
@@ -3733,7 +3733,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     req_start_key =
                                         new_range_info_.begin()->first.get();
                                     req_end_key = end_key;
-                                    include_flushed_rec = true;
+                                    export_base_table_rec_if_need = true;
                                 }
 
                                 bool scan_data_drained = false;
@@ -3753,7 +3753,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
                                     req_start_key,
                                     req_end_key,
-                                    include_flushed_rec);
+                                    export_base_table_rec_if_need);
 
                                 while (!scan_data_drained)
                                 {
