@@ -949,9 +949,9 @@ public:
 
         const uint64_t commit_ts = CommitTs();
         const RecordStatus rec_status = PayloadStatus();
-        assert(commit_ts > CkptTs());
 #ifndef ON_KEY_OBJECT
         size_t ckpt_idx = ckpt_vec_size;
+        assert(commit_ts > CkptTs());
 #endif
 
         if (from_ts < commit_ts && commit_ts <= to_ts)
