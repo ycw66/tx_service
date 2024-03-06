@@ -218,13 +218,14 @@ public:
             OccupyTxShard();
             mi_override_thread(
                 local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
-            auto prev_heap = mi_heap_set_default(
+            coordi_->ext_tx_proc_heap_ = mi_heap_set_default(
                 local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
             tx = std::make_unique<TransactionExecution>(
                 cc_hd_.get(), txlog_hd_, this, true);
 
-            mi_heap_set_default(prev_heap);
+            mi_heap_set_default(coordi_->ext_tx_proc_heap_);
             mi_restore_default_thread_id();
+            coordi_->ext_tx_proc_heap_ = nullptr;
             ReleaseTxShardOwnership();
         }
 
@@ -257,7 +258,6 @@ public:
             yield = true;
             return;
         }
-        mi_heap_t *prev_heap = nullptr;
         if (is_ext_proc)
         {
             mi_heap_t *shard_heap =
@@ -271,7 +271,7 @@ public:
 
             mi_override_thread(
                 local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
-            prev_heap = mi_heap_set_default(shard_heap);
+            coordi_->ext_tx_proc_heap_ = mi_heap_set_default(shard_heap);
         }
         one_round_cnt_.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -436,9 +436,10 @@ public:
         shard_status.store(TxShardStatus::Free, std::memory_order_release);
         if (is_ext_proc)
         {
-            assert(prev_heap != nullptr);
-            mi_heap_set_default(prev_heap);
+            assert(coordi_->ext_tx_proc_heap_ != nullptr);
+            mi_heap_set_default(coordi_->ext_tx_proc_heap_);
             mi_restore_default_thread_id();
+            coordi_->ext_tx_proc_heap_ = nullptr;
         }
 #endif
 
@@ -642,6 +643,34 @@ public:
         };
     }
 
+    std::function<bool(bool)> OverrideShardHeapFunctor()
+    {
+        return [this](bool yield)
+        {
+            if (yield)
+            {
+                if (coordi_->ext_tx_proc_heap_)
+                {
+                    // tx proc is occupied by ext tx processor.
+                    mi_heap_set_default(coordi_->ext_tx_proc_heap_);
+                    mi_restore_default_thread_id();
+                    coordi_->ext_tx_proc_heap_ = nullptr;
+                    return true;
+                }
+            }
+            else
+            {
+                mi_heap_t *shard_heap =
+                    local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap();
+                assert(shard_heap);
+                mi_override_thread(local_cc_shards_.GetCcShard(thd_id_)
+                                       ->GetShardHeapThreadId());
+                coordi_->ext_tx_proc_heap_ = mi_heap_set_default(shard_heap);
+            }
+            return false;
+        };
+    }
+
     void EnlistTx(TransactionExecution *txm)
     {
         resume_tx_queue_.Enqueue(txm);
@@ -670,7 +699,7 @@ public:
         // Override default heap since we're accessing txm in cc shard.
         mi_override_thread(
             local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
-        mi_heap_t *prev_heap = mi_heap_set_default(
+        coordi_->ext_tx_proc_heap_ = mi_heap_set_default(
             local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
 
         TxmStatus txm_status = txm->Forward();
@@ -692,8 +721,9 @@ public:
                 active_tx_lock_.Unlock();
             }
         }
-        mi_heap_set_default(prev_heap);
+        mi_heap_set_default(coordi_->ext_tx_proc_heap_);
         mi_restore_default_thread_id();
+        coordi_->ext_tx_proc_heap_ = nullptr;
         ReleaseTxShardOwnership();
         return true;
     }
@@ -1020,6 +1050,22 @@ public:
         return pool_[sid]->NewExternalTx();
     }
 
+#ifdef ON_KEY_OBJECT
+    std::function<std::tuple<std::function<void()>,
+                             std::function<void(int16_t)>,
+                             std::function<bool(bool)>>(int16_t)>
+    GetTxProcFunctors()
+    {
+        return [this](int16_t group_id)
+        {
+            assert(group_id >= 0);
+            int16_t sid = group_id % pool_.size();
+            return std::make_tuple(pool_[sid]->TxProcessorFunctor(),
+                                   pool_[sid]->UpdateExtProcFunctor(),
+                                   pool_[sid]->OverrideShardHeapFunctor());
+        };
+    }
+#else
     std::function<
         std::pair<std::function<void()>, std::function<void(int16_t)>>(int16_t)>
     GetTxProcFunctors()
@@ -1032,6 +1078,7 @@ public:
                                   pool_[sid]->UpdateExtProcFunctor());
         };
     }
+#endif
 #endif
 
     LocalCcShards &CcShards()
