@@ -822,7 +822,7 @@ public:
     {
         assert(status != RecordStatus::Unknown);
         CcEntry<KeyT, ValueT> *cce =
-            dynamic_cast<CcEntry<KeyT, ValueT> *>(entry);
+            static_cast<CcEntry<KeyT, ValueT> *>(entry);
         ValueT *rec_ptr = static_cast<ValueT *>(rec_uptr.get());
         // It's possible that first ReplayLogCc triggers FetchRecord and the
         // second ReplayLogCc has_del and overrides the cce.

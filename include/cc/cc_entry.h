@@ -251,7 +251,7 @@ struct LruEntry
 public:
     LruEntry();
 
-    virtual ~LruEntry() = default;
+    ~LruEntry() = default;
 
     /**
      * @brief Get key lock from lock array if it is null.
