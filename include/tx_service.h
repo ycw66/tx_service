@@ -433,7 +433,6 @@ public:
             on_fly_txs_.Size() + new_tx_cnt_.load(std::memory_order_relaxed);
 
 #ifdef EXT_TX_PROC_ENABLED
-        shard_status.store(TxShardStatus::Free, std::memory_order_release);
         if (is_ext_proc)
         {
             assert(coordi_->ext_tx_proc_heap_ != nullptr);
@@ -441,6 +440,7 @@ public:
             mi_restore_default_thread_id();
             coordi_->ext_tx_proc_heap_ = nullptr;
         }
+        shard_status.store(TxShardStatus::Free, std::memory_order_release);
 #endif
 
         if (metrics::enable_metrics)
