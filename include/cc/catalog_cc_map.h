@@ -1293,6 +1293,16 @@ public:
             {
                 if (catalog_entry->schema_ != nullptr)
                 {
+                    // Initialize table statistics before create ccmap.
+                    if (!shard_->LoadRangesAndStatisticsNx(
+                            catalog_entry->schema_.get(),
+                            req.NodeGroupId(),
+                            ng_term,
+                            &req))
+                    {
+                        return false;  // Loading...
+                    }
+
                     // upload catalog record
                     cce->payload_ = std::make_unique<CatalogRecord>();
                     cce->payload_->Set(catalog_entry->schema_,
@@ -1326,13 +1336,6 @@ public:
 
         if (cce->PayloadStatus() == RecordStatus::Normal)
         {
-            // Initialize table statistics before create ccmap.
-            if (!shard_->LoadRangesAndStatisticsNx(
-                    cce->payload_->Schema(), req.NodeGroupId(), ng_term, &req))
-            {
-                return false;  // Loading...
-            }
-
             const StatisticsEntry *statistics_entry =
                 shard_->GetTableStatistics(base_table_name, req.NodeGroupId());
             assert(statistics_entry && statistics_entry->statistics_);
