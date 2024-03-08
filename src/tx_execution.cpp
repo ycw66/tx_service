@@ -4614,6 +4614,8 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
     cc_handler_->DataStoreUpsertTable(ds_upsert_table_op.table_schema_,
                                       ds_upsert_table_op.op_type_,
                                       commit_ts_,
+                                      TxCcNodeId(),
+                                      TxTerm(),
                                       ds_upsert_table_op.hd_result_,
                                       ds_upsert_table_op.alter_table_info_);
 }

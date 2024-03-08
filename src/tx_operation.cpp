@@ -2520,6 +2520,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // The tx node is no longer the leader or leader candidate(during
             // recovery), ForceToFinish.
             ForceToFinish(txm);
+            return;
         }
 
         // The tx's modification of the schema has finished. If the tx has

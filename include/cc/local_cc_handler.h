@@ -321,6 +321,8 @@ public:
         const TableSchema *schema,
         OperationType op_type,
         uint64_t commit_ts,
+        NodeGroupId ng_id,
+        int64_t tx_term,
         CcHandlerResult<Void> &hres,
         const txservice::AlterTableInfo *alter_table_info = nullptr) override;
 
