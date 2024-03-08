@@ -25,7 +25,15 @@ public:
     virtual ~TxCommand() = default;
     virtual std::unique_ptr<TxCommand> Clone() = 0;
     virtual bool IsReadOnly() const = 0;
-    virtual bool IsDelete() const
+    // If this value overwrites old value.
+    virtual bool IsOverwrite() const
+    {
+        return false;
+    }
+    // If this commands does not need previous object value. Note that
+    // this is different with IsOverwrite since some of the commands overwrites
+    // old value but need to return the status / value of the old object.
+    virtual bool IgnoreKvValue() const
     {
         return false;
     }

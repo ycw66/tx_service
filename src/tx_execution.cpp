@@ -3821,9 +3821,10 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
                 log_ng_blob.append(reinterpret_cast<const char *>(&cmds_len),
                                    sizeof(cmds_len));
 
-                uint8_t has_del = cmd_entry->has_del_;
-                log_ng_blob.append(reinterpret_cast<const char *>(&has_del),
-                                   sizeof(has_del));
+                uint8_t has_overwrite = cmd_entry->has_overwrite_;
+                log_ng_blob.append(
+                    reinterpret_cast<const char *>(&has_overwrite),
+                    sizeof(has_overwrite));
                 // number of commands
                 uint16_t cmd_cnt = cmd_str_list.size();
                 log_ng_blob.append(reinterpret_cast<const char *>(&cmd_cnt),

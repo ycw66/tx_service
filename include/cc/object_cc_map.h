@@ -13,6 +13,7 @@
 #include "cc_entry.h"
 #include "cc_map.h"
 #include "error_messages.h"
+#include "local_cc_shards.h"
 #include "non_blocking_lock.h"
 #include "template_cc_map.h"
 #include "tx_command.h"
@@ -258,11 +259,19 @@ public:
 
         // Lock acquired, set the result.
         obj_result.lock_acquired_ = acquired_lock;
-        // if ccm contains all the ccentries, then unknown status means
-        // that we can skip accessing kv store and return deleted status
-        // directly.
-        if (cce->PayloadStatus() == RecordStatus::Unknown)
+
+        // Check if this cce does not exists in ccmap at all.
+        // We need to double check that there is no dirty payload
+        // status on the cce since a previous cmd might ignores
+        // old payload value and directly applied dirty payload
+        // status.
+        if (cce->PayloadStatus() == RecordStatus::Unknown &&
+            (!cce->GetKeyLock() ||
+             cce->DirtyPayloadStatus() == RecordStatus::NonExistent))
         {
+            // if ccm contains all the ccentries, then unknown status means
+            // that we can skip accessing kv store and return deleted status
+            // directly.
             if (ccm_has_full_entries_ || FLAGS_skip_kv)
             {
                 cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
@@ -270,31 +279,50 @@ public:
             }
             else
             {
-                shard_->FetchRecord(table_name_,
-                                    table_schema_,
-                                    look_key,
-                                    cce,
-                                    this,
-                                    cc_ng_id_,
-                                    ng_term,
-                                    &req);
-                req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
-
-                if (metrics::enable_cache_hit_rate)
+                if (cmd->IgnoreKvValue())
                 {
-                    auto meter = shard_->GetMeter();
-                    if (cce->PayloadStatus() == RecordStatus::Unknown)
-                    {
-                        meter->Collect(
-                            metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
-                    }
-                    else
-                    {
-                        meter->Collect(
-                            metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
-                    }
+                    // cmd that ignores kv value should be applied regardless of
+                    // current value.
+                    assert(cmd->ProceedOnNonExistentObject() &&
+                           cmd->ProceedOnExistentObject() &&
+                           acquired_lock == LockType::WriteLock);
+                    // We will pretend that there's a delete on this cce just
+                    // before this cmd to ignore value in kv.
+                    cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
+                    cce->SetCkptTs(1);
                 }
-                return false;
+                else
+                {
+                    shard_->FetchRecord(table_name_,
+                                        table_schema_,
+                                        look_key,
+                                        cce,
+                                        this,
+                                        cc_ng_id_,
+                                        ng_term,
+                                        &req);
+                    req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
+
+                    if (metrics::enable_cache_hit_rate)
+                    {
+                        auto meter = shard_->GetMeter();
+                        if (cce->PayloadStatus() == RecordStatus::Unknown)
+                        {
+                            meter->Collect(
+                                metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
+                                1,
+                                "miss");
+                        }
+                        else
+                        {
+                            meter->Collect(
+                                metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
+                                1,
+                                "hits");
+                        }
+                    }
+                    return false;
+                }
             }
         }
 
@@ -514,8 +542,19 @@ public:
                 std::max(shard_->LastReadTs(), shard_->Now());
         }
 
-        obj_result.commit_ts_ = cce->CommitTs();
-        obj_result.rec_status_ = cce->PayloadStatus();
+        if (cce->PayloadStatus() == RecordStatus::Unknown)
+        {
+            // If this command ignores the old kv value, just pass
+            // in as deleted and current ts so that the tx will
+            // commit at a larger commit ts.
+            obj_result.commit_ts_ = shard_->Now();
+            obj_result.rec_status_ = RecordStatus::Deleted;
+        }
+        else
+        {
+            obj_result.commit_ts_ = cce->CommitTs();
+            obj_result.rec_status_ = cce->PayloadStatus();
+        }
         hd_res->SetFinished();
         return true;
     }
@@ -674,7 +713,7 @@ public:
                 return false;
             }
 
-            bool has_del =
+            bool has_overwrite =
                 *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
             offset += sizeof(uint8_t);
 
@@ -683,12 +722,13 @@ public:
                        << ", commit ts: " << commit_ts
                        << ", cmds len: " << cmds_len << ", cmds str: "
                        << std::string_view(log_blob.data() + offset, cmds_len)
-                       << " has_del: " << has_del;
+                       << " has_overwrite: " << has_overwrite;
 
             // load payload from kvstore before committing pending commands.
             // If there's already buffered cmd, that means a previous replaycc
             // has already sent FetchRecord.
-            if (!has_del && cce->PayloadStatus() == RecordStatus::Unknown &&
+            if (!has_overwrite &&
+                cce->PayloadStatus() == RecordStatus::Unknown &&
                 !cce->HasReplayCommandList())
             {
                 int64_t cc_ng_candid_term =
@@ -727,7 +767,7 @@ public:
             }
 
             TxnCmd txn_cmd(
-                obj_version, commit_ts, has_del, std::move(cmd_list));
+                obj_version, commit_ts, has_overwrite, std::move(cmd_list));
 
             bool acquired_extra_data = false;
             if (cce->GetKeyLock() == nullptr)
@@ -825,7 +865,7 @@ public:
             static_cast<CcEntry<KeyT, ValueT> *>(entry);
         ValueT *rec_ptr = static_cast<ValueT *>(rec_uptr.get());
         // It's possible that first ReplayLogCc triggers FetchRecord and the
-        // second ReplayLogCc has_del and overrides the cce.
+        // second ReplayLogCc has_overwrite and overrides the cce.
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             cce->SetCommitTsPayloadStatus(commit_ts, status);

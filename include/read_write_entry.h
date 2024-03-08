@@ -107,18 +107,18 @@ struct CmdSetEntry
     CmdSetEntry(uint64_t object_version, std::string &&key)
         : object_version_(object_version),
           obj_key_str_(std::move(key)),
-          has_del_(false)
+          has_overwrite_(false)
     {
     }
 
     void AddCommand(const TxCommand *cmd)
     {
         assert(cmd != nullptr);
-        if (cmd->IsDelete())
+        if (cmd->IsOverwrite())
         {
             // clear all the commands since we don't need to write them into log
             cmd_str_list_.clear();
-            has_del_ = true;
+            has_overwrite_ = true;
         }
         else
         {
@@ -131,7 +131,7 @@ struct CmdSetEntry
     // No need to write to the log if there is no successful command.
     bool HasSuccessfulCommand() const
     {
-        return has_del_ || !cmd_str_list_.empty();
+        return has_overwrite_ || !cmd_str_list_.empty();
     }
 
     // commit_ts of the object cce when the commands apply to it, commands on
@@ -141,9 +141,9 @@ struct CmdSetEntry
     std::string obj_key_str_{};
     // serialized commands, for writing log
     std::vector<std::string> cmd_str_list_{};
-    // Whether a DEL command exists. If true, commands before DEL are discarded
-    // since there is no point writing them into the log.
-    bool has_del_{};
+    // Whether a overwrite command exists. If true, commands before this cmd are
+    // discarded since there is no point writing them into the log.
+    bool has_overwrite_{};
 };
 
 }  // namespace txservice
