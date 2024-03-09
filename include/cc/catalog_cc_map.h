@@ -8,15 +8,15 @@
 #include <utility>
 #include <vector>
 
-#include "../log_service/include/log_type.h"
-#include "../log_service/proto/raft_log.pb.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc_request.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault_inject.h"
 #include "local_cc_shards.h"
+#include "log_type.h"
 #include "non_blocking_lock.h"
+#include "raft_log.pb.h"
 #include "sharder.h"
 #include "template_cc_map.h"
 

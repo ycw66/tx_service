@@ -1,5 +1,7 @@
 #include "remote/cc_node_service.h"
 
+#include <braft/util.h>  //braft::HostNameAddr2NSUrl
+
 #include "cc/local_cc_shards.h"
 #include "remote/remote_type.h"
 #include "sharder.h"

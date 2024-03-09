@@ -3428,7 +3428,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     int64_t leader_term = cur_work.node_group_term_;
     TableName table_name = cur_work.table_name_;
     const TableSchema *schema = cur_work.schema_;
+#ifdef RANGE_PARTITION_ENABLED
     uint64_t data_sync_ts = cur_work.data_sync_ts_;
+#endif
     bool is_delay_update_ckpt_ts = cur_work.delay_update_ckpt_ts_;
     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_owner,
         archive_vec_owner;

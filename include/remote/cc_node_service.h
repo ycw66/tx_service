@@ -3,7 +3,7 @@
 #include <brpc/channel.h>
 #include <bthread/condition_variable.h>
 
-#include "../proto/cc_request.pb.h"
+#include "proto/cc_request.pb.h"
 
 namespace txservice
 {

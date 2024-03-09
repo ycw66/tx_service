@@ -1,10 +1,12 @@
 #include "tx_index_operation.h"
 
+#include <braft/util.h>  //braft::HostNameAddr2NSUrl
+
 #include <algorithm>
 
-#include "../log_service/include/log_type.h"
 #include "error_messages.h"
 #include "local_cc_shards.h"
+#include "log_type.h"
 #include "remote/remote_type.h"
 #include "tx_execution.h"
 #include "tx_request.h"

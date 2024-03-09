@@ -1,5 +1,6 @@
 #include "log_replay_service.h"
 
+#include <braft/util.h>  //braft::HostNameAddr2NSUrl
 #include <brpc/stream.h>
 
 #include <memory>

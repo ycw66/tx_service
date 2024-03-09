@@ -4,11 +4,11 @@
 
 #include <brpc/controller.h>
 
-#include "../log_service/proto/raft_log.pb.h"
 #include "cc/cc_handler_result.h"
 #include "cc_request.pb.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault_inject.h"
+#include "raft_log.pb.h"
 #include "type.h"
 
 namespace txservice

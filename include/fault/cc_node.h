@@ -1,7 +1,6 @@
 #pragma once
 
 #include <braft/raft.h>  // braft::Node braft::StateMachine
-#include <braft/util.h>  // braft::AsyncClosureGuard
 #include <brpc/channel.h>
 
 #include <filesystem>

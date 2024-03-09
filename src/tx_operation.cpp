@@ -1,5 +1,7 @@
 #include "tx_operation.h"
 
+#include <braft/util.h>  //braft::HostNameAddr2NSUrl
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -7,12 +9,12 @@
 #include <string>
 #include <unordered_map>
 
-#include "../log_service/include/log_type.h"
 #include "cc/cc_handler_result.h"
 #include "cc_handler.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
+#include "log_type.h"
 #include "range_record.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"

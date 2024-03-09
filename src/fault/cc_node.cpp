@@ -1,5 +1,7 @@
 #include "fault/cc_node.h"
 
+#include <braft/util.h>  //braft::HostNameAddr2NSUrl
+
 #include "local_cc_shards.h"
 #include "sharder.h"
 
