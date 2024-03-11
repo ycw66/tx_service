@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <memory>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -155,6 +156,9 @@ struct CatalogEntry
     {
         bool sync_ongoing_{false};
         uint64_t last_sync_ts_{0};
+        // The largest sync ts of all pending task. All tasks with sync ts
+        // smaller than this number will be skipped by worker.
+        uint64_t latest_pending_task_ts_{0};
         // Multiple tasks on the same range are executed sequentially, so the
         // subsequence tasks for this range should wait here.
         std::queue<std::shared_ptr<DataSyncTask>> pending_sync_task_;
@@ -173,6 +177,31 @@ struct CatalogEntry
         {
             return 0;
         }
+    }
+
+    uint64_t GetLatestPendingTs()
+    {
+        std::shared_lock<std::shared_mutex> lk(s_mux_);
+        if (sync_info_)
+        {
+            return sync_info_->latest_pending_task_ts_;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+    void UpdateLastPendingTs(uint64_t ts)
+    {
+        std::unique_lock<std::shared_mutex> lk(s_mux_);
+        if (!sync_info_)
+        {
+            sync_info_ = std::make_unique<TableSyncInfo>();
+        }
+
+        sync_info_->latest_pending_task_ts_ =
+            std::max(ts, sync_info_->latest_pending_task_ts_);
     }
 
     bool TrySetDataSync(bool ongoing,

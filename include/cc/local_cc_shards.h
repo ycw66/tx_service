@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -146,6 +147,7 @@ public:
     };
 
     std::mutex flight_task_mux_;
+    std::condition_variable flight_task_cv_;
     // Flush data task cnt + 1 (Data sync task)
     int64_t flight_task_cnt_{0};
     CkptErrorCode ckpt_err_{CkptErrorCode::NO_ERROR};

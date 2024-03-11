@@ -3627,6 +3627,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             data_sync_scan_op_.op_func_ =
                 [this,
                  &table_name = table_name_,
+                 txn = txm->TxNumber(),
                  table_schema = table_schema_,
                  start_key = old_start_key_,
                  end_key = old_end_key_,
@@ -3658,6 +3659,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                      table_schema,
                      start_key,
                      end_key,
+                     txn,
                      previous_data_sync_vec,
                      previous_archive_vec,
                      previous_mv_base_vec,
@@ -3754,6 +3756,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     tx_term,
                                     Sharder::Instance().GetLocalCcShardsCount(),
                                     LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
+                                    txn,
                                     req_start_key,
                                     req_end_key,
                                     export_base_table_rec_if_need);

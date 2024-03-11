@@ -1,5 +1,6 @@
 #include "cc/local_cc_shards.h"
 
+#include <butil/time.h>
 #include <sys/stat.h>
 
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include "catalog_key_record.h"
 #include "cc_request.h"
 #include "error_messages.h"
 #include "range_bucket_key_record.h"
@@ -99,12 +101,14 @@ LocalCcShards::LocalCcShards(
             std::thread([this] { FlushDataWorker(); }));
     }
 
+#ifdef RANGE_PARTITION_ENABLED
     // Starts slice update worker threads.
     for (int id = 0; id < slice_update_worker_ctx_.worker_num_; id++)
     {
         slice_update_worker_ctx_.worker_thd_.push_back(
             std::thread([this] { UpdateSliceSpecWorker(); }));
     }
+#endif
 
     // Starts datasync worker threads.
     for (int id = 0; id < data_sync_worker_ctx_.worker_num_; id++)
@@ -2012,6 +2016,15 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         hres));
 
     {
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        CatalogEntry *catalog_entry = GetCatalogInternal(table_name, ng_id);
+        if (catalog_entry)
+        {
+            catalog_entry->UpdateLastPendingTs(data_sync_ts);
+        }
+    }
+
+    {
         std::lock_guard<std::mutex> status_lk(status->mux_);
         status->unfinished_tasks_++;
         if (hres)
@@ -2152,8 +2165,10 @@ void LocalCcShards::Terminate()
     // Terminate the flush worker thds.
     flush_data_worker_ctx_.Terminate();
 
+#ifdef RANGE_PARTITION_ENABLED
     // Terminate the slice update worker thds.
     slice_update_worker_ctx_.Terminate();
+#endif
 
     if (realtime_sampling_)
     {
@@ -2506,6 +2521,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                            ng_term,
                            cc_shards_.size(),
                            DATA_SYNC_SCAN_BATCH_SIZE,
+                           data_sync_txm->TxNumber(),
                            range_entry->GetRangeInfo()->StartKey(),
                            range_entry->GetRangeInfo()->EndKey());
 
@@ -2768,6 +2784,12 @@ void LocalCcShards::PostProcessDataSyncTask(
         ckpt_err = task->ckpt_err_;
     }
 
+    if (flush_task_cnt > 0 &&
+        flush_task_cnt < flush_data_worker_ctx_.worker_num_ * 3)
+    {
+        task->flight_task_cv_.notify_one();
+    }
+
     assert(ckpt_err == task->ckpt_err_);
 
     flight_task_lk.unlock();
@@ -2874,6 +2896,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             // directly.
             data_sync_task->SetFinish();
             // Handle the pending tasks for the same table
+            catalog_entry->PopPendingSyncTask();
+        }
+        else if (target_data_sync_ts < catalog_entry->GetLatestPendingTs() &&
+                 !is_dirty)
+        {
+            // There is a task on this table with larger data sync ts, skip the
+            // current task.
+            data_sync_task->SetError(CcErrorCode::TASK_EXPIRED);
             catalog_entry->PopPendingSyncTask();
         }
         else if (catalog_entry->TrySetDataSync(true, data_sync_task))
@@ -3052,7 +3082,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                            ng_id,
                            ng_term,
                            cc_shards_.size(),
-                           DATA_SYNC_SCAN_BATCH_SIZE);
+                           DATA_SYNC_SCAN_BATCH_SIZE,
+                           data_sync_txm->TxNumber());
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
@@ -3131,12 +3162,28 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                     rec_size_limit)
                 {
                     {
-                        std::lock_guard<std::mutex> flight_task_lk(
+                        std::unique_lock<std::mutex> flight_task_lk(
                             data_sync_task->flight_task_mux_);
                         if (data_sync_task->ckpt_err_ ==
                             DataSyncTask::CkptErrorCode::FLUSH_ERROR)
                         {
                             break;
+                        }
+
+                        // Since redis clones record out into FlushRecord during
+                        // data sync scan, we want to back pressure data sync
+                        // scan so that it does not alloc too much memory.
+                        while (data_sync_task->flight_task_cnt_ >
+                               flush_data_worker_ctx_.worker_num_ * 3)
+                        {
+                            data_sync_task->flight_task_cv_.wait(
+                                flight_task_lk,
+                                [data_sync_task,
+                                 max_flush_concurrency =
+                                     flush_data_worker_ctx_.worker_num_ * 3] {
+                                    return data_sync_task->flight_task_cnt_ <
+                                           max_flush_concurrency;
+                                });
                         }
                         // Flush worker will call PostProcessDataSyncTask() to
                         // decrement flight task count.

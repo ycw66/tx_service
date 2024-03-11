@@ -1,5 +1,8 @@
 #include "checkpointer.h"
 
+#include <cstdint>
+
+#include "catalog_key_record.h"
 #include "cc_request.h"
 #include "range_slice.h"
 #include "sharder.h"
@@ -101,6 +104,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         std::shared_ptr<DataSyncStatus> status =
             std::make_shared<DataSyncStatus>();
 
+#ifdef ON_KEY_OBJECT
+        uint64_t last_succ_ckpt_ts = UINT64_MAX;
+#endif
+
         // Iterate all the tables and execute CkptScanCc requests on this node
         // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
         // ckpt_vec.
@@ -116,6 +123,20 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             // This should correspond to CcShard::ActiveTxMinTs.
             if (!table_name.IsMeta())
             {
+#ifdef ON_KEY_OBJECT
+                // Since some of the data sync tasks might be skipped due to
+                // newer task in queue, causing data sync task always errors
+                // out, check the smallest valid synced ts of all tables and use
+                // it to truncate log.
+                CatalogEntry *catalog_entry =
+                    local_shards_.GetCatalog(table_name, node_group);
+                uint64_t table_synced_ts = catalog_entry->GetLastSyncTs();
+                if (table_synced_ts > 0)
+                {
+                    last_succ_ckpt_ts =
+                        std::min(table_synced_ts, last_succ_ckpt_ts);
+                }
+#endif
                 if (!is_dirty)
                 {
                     // Skip the table if it's not updated since last sync ts.
@@ -147,6 +168,18 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             Sharder::Instance().UnpinNodeGroupData(node_group);
             continue;
         }
+
+#ifdef ON_KEY_OBJECT
+        if (last_succ_ckpt_ts != UINT64_MAX && last_succ_ckpt_ts > last_ckpt_ts)
+        {
+            assert(last_succ_ckpt_ts != 0);
+            LOG(INFO) << "Checkpoint of node group #" << node_group
+                      << " succeeded with timestamp: " << last_succ_ckpt_ts;
+            Sharder::Instance().UpdateNodeGroupCkptTs(node_group,
+                                                      last_succ_ckpt_ts);
+            NotifyLogOfCkptTs(node_group, leader_term, last_succ_ckpt_ts);
+        }
+#endif
 
         {
             std::unique_lock<std::mutex> task_sender_lk(status->mux_);

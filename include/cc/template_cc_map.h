@@ -1,5 +1,7 @@
 #pragma once
 
+#include <butil/time.h>
+
 #include <algorithm>  // std::max
 #include <cassert>
 #include <cstddef>
@@ -4671,7 +4673,7 @@ public:
             return false;
         }
 
-        auto &pause_key_and_is_drained = req.PauseKey(shard_->core_id_);
+        auto &pause_key_and_is_drained = req.PausePos(shard_->core_id_);
 
         // Slice_id is not set, We need to pin slice.
         if (req.export_base_table_rec_if_need_ &&
@@ -4916,32 +4918,10 @@ public:
                 }
             }
 
-#ifndef ON_KEY_OBJECT
             if (shard_->EnableMvcc())
             {
                 cce->KickOutArchiveRecords(recycle_ts);
             }
-#else
-            if (cce->payload_status_ == RecordStatus::Unknown &&
-                cce->HasReplayCommandList())
-            {
-                // The cce is waiting for fetch record to return so that it
-                // can apply command log on the data store version. Wait for
-                // the log replay on this cce to complete before continuing.
-                req.pause_key_.at(shard_->core_id_).first = key->Clone();
-                // Call fetch record to put self into waiting queue of fetch
-                // record.
-                shard_->FetchRecord(table_name_,
-                                    table_schema_,
-                                    key,
-                                    cce,
-                                    this,
-                                    cc_ng_id_,
-                                    ng_term,
-                                    &req);
-                return false;
-            }
-#endif
 
             if (!req.export_base_table_rec_if_need_)
             {
@@ -5175,30 +5155,26 @@ public:
 
             pause_key_and_is_drained = {nullptr, true};
             req.SetFinish(shard_->core_id_);
-            // Access DataSyncScanCc member variable is unsafe after
-            // SetFinished(...).
-
-            return false;
         }
         else
         {
-            // set the pause_key_ to mark resume position and put the
+            pause_key_and_is_drained.first = std::move(next_pause_key);
+            // set the pause_pos_ to mark resume position and put the
             // DataSyncScanCc request into CcQueue again.
             if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
                 req.scan_batch_size_)
             {
-                pause_key_and_is_drained.first = std::move(next_pause_key);
                 shard_->Enqueue(&req);
             }
             else
             {
                 // scan data is not drained
-                pause_key_and_is_drained.first = std::move(next_pause_key);
                 req.SetFinish(shard_->core_id_);
-                return false;
             }
         }
 
+        // Access DataSyncScanCc member variable is unsafe after
+        // SetFinished(...).
         return false;
     }
 #else
@@ -5241,9 +5217,9 @@ public:
             return false;
         }
 
-        auto &pause_key_and_is_drained = req.PauseKey(shard_->core_id_);
+        auto &pause_pos_and_is_drained = req.PausePos(shard_->core_id_);
 
-        if (pause_key_and_is_drained.first == nullptr)
+        if (pause_pos_and_is_drained.first == nullptr)
         {
             // If this is a new scan cc, start from the specified start
             // key or negative inf.
@@ -5263,9 +5239,14 @@ public:
         }
         else
         {
-            const KeyT *pause_key =
-                static_cast<const KeyT *>(pause_key_and_is_drained.first.get());
-            it = LowerBound(*pause_key);
+            CcEntry<KeyT, ValueT> *pause_entry =
+                static_cast<CcEntry<KeyT, ValueT> *>(
+                    pause_pos_and_is_drained.first);
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(pause_entry->GetCcPage());
+            it = Iterator(pause_entry, ccp, &neg_inf_);
+            ReleaseCceLock(
+                pause_entry->GetKeyLock(), pause_entry, req.Txn(), cc_ng_id_);
         }
 
         const KeyT *search_end_key = req_end_key;
@@ -5370,16 +5351,11 @@ public:
             it++;
         }
 
-        TxKey::Uptr next_pause_key = nullptr;
         bool no_more_data = (it == end_it) || (it == end_it_next_page_it);
-        if (!no_more_data)
-        {
-            next_pause_key = it->first->Clone();
-        }
 
         if (no_more_data)
         {
-            pause_key_and_is_drained = {nullptr, true};
+            pause_pos_and_is_drained = {nullptr, true};
             // scan data drained
             req.SetFinish(shard_->core_id_);
             // Access DataSyncScanCc member variable is unsafe after
@@ -5388,19 +5364,28 @@ public:
         }
         else
         {
-            assert(pause_key_and_is_drained.second == false);
+            assert(pause_pos_and_is_drained.second == false);
+            pause_pos_and_is_drained.first = it->second;
+            bool add_intent =
+                it->second->GetOrCreateKeyLock(shard_, this, it.GetPage())
+                    .AcquireReadIntent(req.Txn());
+            assert(add_intent);
+            shard_->UpsertLockHoldingTx(req.Txn(),
+                                        req.node_group_term_,
+                                        it->second,
+                                        false,
+                                        cc_ng_id_,
+                                        table_name_.Type());
             // set the pause_key_ to mark resume position and put the
             // DataSyncScanCc request into CcQueue again.
             if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
                 req.scan_batch_size_)
             {
-                pause_key_and_is_drained.first = std::move(next_pause_key);
                 shard_->Enqueue(&req);
             }
             else
             {
                 // scan data is not drained
-                pause_key_and_is_drained.first = std::move(next_pause_key);
                 req.SetFinish(shard_->core_id_);
                 return false;
             }
@@ -6933,7 +6918,8 @@ protected:
             // entries that have been checkpointed but are not being
             // accessed by active tx's.
             shard_->Clean();
-            if (shard_->Full() && !table_name_.IsMeta() && !force_emplace)
+            if (shard_->Full() && !shard_->TryHeapCollect() &&
+                !table_name_.IsMeta() && !force_emplace)
             {
                 return false;
             }
@@ -7267,7 +7253,8 @@ protected:
             // entries that have been checkpointed but are not being
             // accessed by active tx's.
             shard_->Clean();
-            if (shard_->Full() && !table_name_.IsMeta() && !force_emplace)
+            if (shard_->Full() && !shard_->TryHeapCollect() &&
+                !table_name_.IsMeta() && !force_emplace)
             {
                 return End();
             }

@@ -187,6 +187,8 @@ enum struct CcErrorCode
     // For Redis, if key not on local node, return this error.
     DATA_NOT_ON_LOCAL_NODE,
 
+    TASK_EXPIRED,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 
@@ -249,6 +251,8 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::SYSTEM_HANDLER_ERR, "SYSTEM_HANDLER_ERR"},
 
     {CcErrorCode::DATA_NOT_ON_LOCAL_NODE, "DATA_NOT_ON_LOCAL_NODE"},
+
+    {CcErrorCode::TASK_EXPIRED, "TASK_EXPIRED"},
 
     // NOTICE: please keep this variable at tail.
     {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},

@@ -1,10 +1,12 @@
 #pragma once
 
 #include <bthread/moodycamelqueue.h>
+#include <butil/time.h>
 #include <mimalloc-2.1/mimalloc.h>
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -131,8 +133,50 @@ public:
             //
             int64_t allocated, committed;
             mi_thread_stats(&allocated, &committed);
+
             return allocated >= (int64_t) memory_limit_ ||
                    committed > (memory_limit_ * 1.1);
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    // Try to return memory not used back to system. This will decrease
+    // committed size if success.
+    bool TryHeapCollect()
+    {
+        if (shard_heap_)
+        {
+            int64_t allocated, committed;
+            mi_thread_stats(&allocated, &committed);
+            // If there's actually memory freed by us but not returned to this
+            // system, process with collect. Otherwise do not even try since
+            // collect is pretty expensive (at least ms level).
+            if (Now() > last_failed_collect_ts_ + 1000000 &&
+                allocated < committed * 0.8 &&
+                allocated < (int64_t) memory_limit_)
+            {
+                mi_heap_collect(shard_heap_, true);
+                mi_thread_stats(&allocated, &committed);
+                bool succ = allocated < (int64_t) memory_limit_ &&
+                            committed < memory_limit_ * 1.1;
+                if (!succ)
+                {
+                    // If heap collect failed this time, that means there's a
+                    // lot of memory fragementation and the memory blocks cannot
+                    // be returned to system. In this case do not spam collect,
+                    // wait for some time before retrying.
+                    last_failed_collect_ts_ = Now();
+                }
+
+                return succ;
+            }
+            else
+            {
+                return false;
+            }
         }
         else
         {
@@ -749,7 +793,8 @@ private:
     size_t memory_usage_round_ = 1;
 
     mi_heap_t *shard_heap_{nullptr};
-    mi_threadid_t shard_heap_thread_id_ = 0;
+    mi_threadid_t shard_heap_thread_id_{0};
+    size_t last_failed_collect_ts_{0};
 
     // all the lock acquire/release on this ccshard. It used to reduce the cost
     // of allocation/dellocation of memory.

@@ -26,6 +26,7 @@
 #include "cc/cc_map.h"
 #include "cc/cc_shard.h"
 #include "cc/ccm_scanner.h"
+#include "cc_entry.h"
 #include "cc_handler_result.h"
 #include "cc_protocol.h"
 #include "cc_req_base.h"
@@ -2605,9 +2606,13 @@ struct DataSyncScanCc : public CcRequestBase
 {
 public:
     // how many pages to scan one time
-    // static constexpr size_t DataSyncScanBatch = 20;
-    // todo: limit scan by scanned size
+#ifdef ON_KEY_OBJECT
+    // Yield more often on redis since any run one round
+    // latency increase cause significant peformance impact.
+    static constexpr size_t DataSyncScanBatchSize = 32;
+#else
     static constexpr size_t DataSyncScanBatchSize = 128;
+#endif
 
     DataSyncScanCc() = delete;
 
@@ -2619,6 +2624,7 @@ public:
                    int64_t node_group_term,
                    uint16_t core_cnt,
                    size_t scan_batch_size,
+                   uint64_t txn,
                    const TxKey *target_start_key = nullptr,
                    const TxKey *target_end_key = nullptr,
                    bool export_base_table_rec_if_need = false)
@@ -2641,6 +2647,7 @@ public:
           export_base_table_rec_if_need_(export_base_table_rec_if_need)
 #endif
     {
+        tx_number_ = txn;
         assert(scan_batch_size_ > DataSyncScanBatchSize);
         for (size_t i = 0; i < core_cnt; i++)
         {
@@ -2650,7 +2657,7 @@ public:
             archive_vec_.back().reserve(scan_batch_size);
             mv_base_idx_vec_.emplace_back();
             mv_base_idx_vec_.back().reserve(scan_batch_size);
-            pause_key_.emplace_back(nullptr, false);
+            pause_pos_.emplace_back(nullptr, false);
             accumulated_scan_cnt_.emplace_back(0);
         }
 #ifdef RANGE_PARTITION_ENABLED
@@ -2674,7 +2681,7 @@ public:
         }
         else
         {
-            pause_key_[ccs.core_id_] = {nullptr, true};
+            pause_pos_[ccs.core_id_] = {nullptr, true};
             // ccmap for this table does not exist on this shard, skip
             // scanning for this shard.
             SetFinish(ccs.core_id_);
@@ -2686,12 +2693,16 @@ public:
 
     bool IsDrained(size_t core_idx) const
     {
-        return pause_key_[core_idx].second;
+        return pause_pos_[core_idx].second;
     }
 
-    std::pair<TxKey::Uptr, bool> &PauseKey(size_t core_idx)
+#ifdef ON_KEY_OBJECT
+    std::pair<LruEntry *, bool> &PausePos(size_t core_idx)
+#else
+    std::pair<TxKey::Uptr, bool> &PausePos(size_t core_idx)
+#endif
     {
-        return pause_key_[core_idx];
+        return pause_pos_[core_idx];
     }
 
     void Wait()
@@ -2806,10 +2817,14 @@ private:
     // it's on entire table.
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
-    // Position that we left off during last round of ckpt scan. TxKey is the
-    // key that we stopped at (has not been scanned though), bool is if this
-    // core has finished scanning all keys already.
-    std::vector<std::pair<TxKey::Uptr, bool>> pause_key_;
+    // Position that we left off during last round of ckpt scan.
+    // pause_pos_.first is the key that we stopped at (has not been scanned
+    // though), bool is if this core has finished scanning all keys already.
+#ifdef ON_KEY_OBJECT
+    std::vector<std::pair<LruEntry *, bool>> pause_pos_;
+#else
+    std::vector<std::pair<TxKey::Uptr, bool>> pause_pos_;
+#endif
     size_t scan_batch_size_;
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
