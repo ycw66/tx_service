@@ -346,7 +346,6 @@ include/proto/*.pb.cc
 include/proto/*.pb.h
 
 # log_service dir
-log_service
 mono_metrics
 
 # pre-commit
