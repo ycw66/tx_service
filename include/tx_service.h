@@ -1,6 +1,7 @@
 #pragma once
 
 #include <bthread/bthread.h>
+#include <bthread/task_group.h>
 #include <butil/macros.h>
 #include <mimalloc-2.1/mimalloc.h>
 #include <pthread.h>
@@ -38,7 +39,10 @@
 #include "txlog.h"
 
 using namespace std::chrono_literals;
-
+namespace bthread
+{
+extern BAIDU_THREAD_LOCAL TaskGroup *tls_task_group;
+};
 namespace txservice
 {
 
@@ -154,13 +158,13 @@ public:
             OccupyTxShard();
             mi_override_thread(
                 local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
-            auto prev_heap = mi_heap_set_default(
+            coordi_->ext_tx_proc_heap_ = mi_heap_set_default(
                 local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
 #endif
             tx = std::make_unique<TransactionExecution>(
                 cc_hd_.get(), txlog_hd_, this);
 #ifdef EXT_TX_PROC_ENABLED
-            mi_heap_set_default(prev_heap);
+            mi_heap_set_default(coordi_->ext_tx_proc_heap_);
             mi_restore_default_thread_id();
             ReleaseTxShardOwnership();
 #endif
@@ -649,6 +653,9 @@ public:
         {
             if (yield)
             {
+                // Since only brpc worker thread will read and modify
+                // coordi_->ext_tx_proc_heap_, it is safe to directly
+                // access without lock.
                 if (coordi_->ext_tx_proc_heap_)
                 {
                     // tx proc is occupied by ext tx processor.
@@ -689,6 +696,17 @@ public:
      */
     bool ForwardTx(TransactionExecution *txm)
     {
+#ifdef ON_KEY_OBJECT
+        assert(bthread::tls_task_group->group_id_ >= 0);
+        if (bthread::tls_task_group->group_id_ != (int32_t) thd_id_)
+        {
+            // For redis a tx life cycle can spread across multiple cmds, which
+            // might be put into different bthread task group. If the task group
+            // id does not match the tx processor id, it is not safe to forward
+            // txm.
+            return false;
+        }
+#endif
         TxShardStatus expected = TxShardStatus::Free;
         bool success = coordi_->shard_status_.compare_exchange_strong(
             expected, TxShardStatus::Occupied, std::memory_order_acquire);

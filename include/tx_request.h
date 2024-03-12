@@ -115,6 +115,16 @@ struct TemplateTxRequest : TxRequest
         tx_result_.FinishError(err_code);
     }
 
+    bool TrySetTxm(TransactionExecution *txm)
+    {
+        if (!txm_)
+        {
+            txm_ = txm;
+            return true;
+        }
+        return false;
+    }
+
     TxResult<T> tx_result_;
 
 protected:
