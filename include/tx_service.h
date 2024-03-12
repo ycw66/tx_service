@@ -998,9 +998,11 @@ public:
             tp->InitializeLocalHandler();
             thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
         }
+#ifdef EXT_TX_PROC_ENABLED
 #ifdef ON_KEY_OBJECT
         // set ext_tx_prc_func to brpc
         bthread_set_ext_tx_prc_func(GetTxProcFunctors());
+#endif
 #endif
 
         // Start cc stream receiver server.
