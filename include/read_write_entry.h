@@ -120,12 +120,10 @@ struct CmdSetEntry
             cmd_str_list_.clear();
             has_overwrite_ = true;
         }
-        else
-        {
-            std::string cmd_str;
-            cmd->Serialize(cmd_str);
-            cmd_str_list_.emplace_back(std::move(cmd_str));
-        }
+
+        std::string cmd_str;
+        cmd->Serialize(cmd_str);
+        cmd_str_list_.emplace_back(std::move(cmd_str));
     }
 
     // No need to write to the log if there is no successful command.
