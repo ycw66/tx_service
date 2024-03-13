@@ -92,30 +92,15 @@ struct MultiObjectTxCommand
 {
     virtual ~MultiObjectTxCommand() = default;
 
-    std::vector<const TxKey *> *KeyPointers()
-    {
-        if (is_second_time_)
-        {
-            return &key_ptrs_two_;
-        }
-        else
-        {
-            return &key_ptrs_;
-        }
-    }
+    virtual std::vector<const TxKey *> *KeyPointers() = 0;
 
-    std::vector<TxCommand *> *CommandPointers()
-    {
-        if (is_second_time_)
-        {
-            return &cmd_ptrs_two_;
-        }
-        else
-        {
-            return &cmd_ptrs_;
-        }
-    }
+    virtual std::vector<TxCommand *> *CommandPointers() = 0;
 
+    virtual bool IsFinished() = 0;
+
+    virtual size_t CmdSteps() = 0;
+
+    virtual void IncrSteps() = 0;
     // If it has two parts of commands and finished to run the first part, it
     // should call below method to collect the result and fill the second part
     // of commands, then run the second part.
@@ -135,16 +120,6 @@ struct MultiObjectTxCommand
     {
         return true;
     }
-
-    std::vector<const txservice::TxKey *> key_ptrs_;
-    std::vector<txservice::TxCommand *> cmd_ptrs_;
-    // If the internal commands need to split two parts and one part need the
-    // result of first part before run.
-    bool is_two_parts_{false};
-    // If it is to run the second part of commands.
-    bool is_second_time_{false};
-    std::vector<const txservice::TxKey *> key_ptrs_two_;
-    std::vector<txservice::TxCommand *> cmd_ptrs_two_;
 };
 
 // commands and information of the same txn
