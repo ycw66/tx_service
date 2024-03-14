@@ -736,6 +736,8 @@ public:
                 int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
                 int64_t ng_term = std::max(cc_ng_candid_term, cc_ng_term);
                 assert(ng_term > 0);
+                // If kv is skipped then log should always be skipped too.
+                assert(!FLAGS_skip_kv);
 
                 // load payload asynchronously, pass in null as requester cc
                 // since we will buffer the cmd in replay cmd list so there's no

@@ -21,6 +21,9 @@
 #include "tx_util.h"
 #include "type.h"
 
+#ifdef ON_KEY_OBJECT
+DECLARE_bool(skip_kv);
+#endif
 namespace txservice
 {
 // whether skip write redo log to log_service.
@@ -4608,6 +4611,15 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
         });
     ds_upsert_table_op.Reset();
     ds_upsert_table_op.is_running_ = true;
+#ifdef ON_KEY_OBJECT
+    if (FLAGS_skip_kv)
+    {
+        ds_upsert_table_op.hd_result_.SetFinished();
+        PostProcess(ds_upsert_table_op);
+        return;
+    }
+#endif
+
 #ifdef EXT_TX_PROC_ENABLED
     ds_upsert_table_op.hd_result_.SetToBlock();
 #endif

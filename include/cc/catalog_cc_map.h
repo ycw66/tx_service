@@ -1012,6 +1012,7 @@ public:
 
             if (catalog_entry->schema_)
             {
+#ifndef ON_KEY_OBJECT
                 if (!shard_->LoadRangesAndStatisticsNx(
                         catalog_entry->schema_.get(),
                         req.NodeGroupId(),
@@ -1020,6 +1021,7 @@ public:
                 {
                     return false;
                 }
+#endif
 
                 // Load range and stats for the new added indexes.
                 if (catalog_entry->dirty_schema_)
@@ -1293,6 +1295,7 @@ public:
             {
                 if (catalog_entry->schema_ != nullptr)
                 {
+#ifndef ON_KEY_OBJECT
                     // Initialize table statistics before create ccmap.
                     if (!shard_->LoadRangesAndStatisticsNx(
                             catalog_entry->schema_.get(),
@@ -1302,6 +1305,7 @@ public:
                     {
                         return false;  // Loading...
                     }
+#endif
 
                     // upload catalog record
                     cce->payload_ = std::make_unique<CatalogRecord>();

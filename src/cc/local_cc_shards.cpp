@@ -42,7 +42,8 @@ LocalCcShards::LocalCcShards(
     TxService *tx_service,
     bool enable_mvcc,
     metrics::MetricsRegistry *metrics_registry,
-    metrics::CommonLabels common_labels)
+    metrics::CommonLabels common_labels,
+    std::unordered_map<TableName, std::string> *prebuilt_tables)
     : range_slice_memory_limit_(((uint64_t) MB(memory_limit_mb)) / 20),
       store_hd_(store_hd),
       node_id_(node_id),
@@ -125,6 +126,17 @@ LocalCcShards::LocalCcShards(
 
     defragment_worker_ctx_.worker_thd_.push_back(
         std::thread([this] { DefragmentWorker(); }));
+
+    if (prebuilt_tables)
+    {
+        for (auto &[table, image] : *prebuilt_tables)
+        {
+            auto ins_res = prebuilt_tables_.try_emplace(table, image);
+            assert(ins_res.second);
+        }
+
+        InitPrebuiltTables(node_id);
+    }
 }
 
 LocalCcShards::~LocalCcShards()
@@ -794,6 +806,20 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         }
     }
     ids.try_emplace(last_range_entry.partition_id_, &res.first->second);
+}
+
+void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id)
+{
+    for (auto &[table, image] : prebuilt_tables_)
+    {
+        auto table_it = table_catalogs_.try_emplace(table);
+        auto ng_it = table_it.first->second.try_emplace(node_id_);
+        if (ng_it.second)
+        {
+            ng_it.first->second.InitSchema(
+                catalog_factory_->CreateTableSchema(table, image, 2), 2);
+        }
+    }
 }
 
 std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>

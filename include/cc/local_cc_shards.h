@@ -192,22 +192,24 @@ class LocalCcShards
 public:
     static const size_t DATA_SYNC_SCAN_BATCH_SIZE = 3 * 1024;
 
-    LocalCcShards(uint32_t node_id,                 // = 0,
-                  uint16_t core_cnt,                // = 1,
-                  uint32_t memory_limit_mb,         // = 1000,
-                  uint32_t log_limit_mb,            // = 1000,
-                  bool realtime_sampling,           // = false,
-                  CatalogFactory *catalog_factory,  // = nullptr,
-                  SystemHandler *system_handler,    // = nullptr,
-                  std::unordered_map<uint32_t, std::vector<NodeConfig>>
-                      *ng_configs,                    // = nullptr,
-                  int32_t range_bucket_seed,          // = -1,
-                  uint64_t cluster_config_version,    // = 0,
-                  store::DataStoreHandler *store_hd,  // = nullptr,
-                  TxService *tx_service,              // = nullptr,
-                  bool enable_mvcc = true,
-                  metrics::MetricsRegistry *metrics_registry = nullptr,
-                  metrics::CommonLabels common_labels = {});
+    LocalCcShards(
+        uint32_t node_id,                 // = 0,
+        uint16_t core_cnt,                // = 1,
+        uint32_t memory_limit_mb,         // = 1000,
+        uint32_t log_limit_mb,            // = 1000,
+        bool realtime_sampling,           // = false,
+        CatalogFactory *catalog_factory,  // = nullptr,
+        SystemHandler *system_handler,    // = nullptr,
+        std::unordered_map<uint32_t, std::vector<NodeConfig>>
+            *ng_configs,                    // = nullptr,
+        int32_t range_bucket_seed,          // = -1,
+        uint64_t cluster_config_version,    // = 0,
+        store::DataStoreHandler *store_hd,  // = nullptr,
+        TxService *tx_service,              // = nullptr,
+        bool enable_mvcc = true,
+        metrics::MetricsRegistry *metrics_registry = nullptr,
+        metrics::CommonLabels common_labels = {},
+        std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr);
 
     ~LocalCcShards();
 
@@ -784,6 +786,8 @@ public:
         uint64_t data_sync_ts,
         CcHandlerResult<Void> *hres);
 
+    void InitPrebuiltTables(NodeGroupId ng_id);
+
     /**
      * @brief Generate bucket migration plan based on the new node group config.
      */
@@ -951,6 +955,8 @@ private:
 
     // Protects meta data (table_ranges_ and table_catalogs_)
     mutable std::shared_mutex meta_data_mux_;
+
+    std::unordered_map<TableName, std::string> prebuilt_tables_;
 
     // Memory used by range slices
     std::atomic_size_t range_slice_mem_usage_{0};

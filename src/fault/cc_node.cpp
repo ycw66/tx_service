@@ -511,6 +511,7 @@ void CcNode::on_leader_start(int64_t term)
             cc.Wait();
         }
     }
+    local_cc_shards_.InitPrebuiltTables(ng_id_);
     replay_service_->ReplayLog(ng_id_, term);
 
     NotifyNewLeaderStart(ng_id_, node_id_);
