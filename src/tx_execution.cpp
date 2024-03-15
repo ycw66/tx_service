@@ -26,9 +26,6 @@ DECLARE_bool(skip_kv);
 #endif
 namespace txservice
 {
-// whether skip write redo log to log_service.
-bool txservice_skip_redo_log = false;
-
 TransactionExecution::TransactionExecution(CcHandler *handler,
                                            TxLog *txlog,
                                            TxProcessor *tx_processor,
@@ -3344,7 +3341,7 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
         else
         {
             bool needs_write_log =
-                !txservice_skip_redo_log && rw_set_.NeedsWriteLog();
+                !txservice_skip_wal && rw_set_.NeedsWriteLog();
             if (txlog_ != nullptr && needs_write_log)
             {
 #ifdef ON_KEY_OBJECT
@@ -3520,8 +3517,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     }
     else
     {
-        bool needs_write_log =
-            !txservice_skip_redo_log && rw_set_.NeedsWriteLog();
+        bool needs_write_log = !txservice_skip_wal && rw_set_.NeedsWriteLog();
         if (txlog_ != nullptr && needs_write_log)
         {
 #ifdef ON_KEY_OBJECT
@@ -4620,7 +4616,7 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
     ds_upsert_table_op.Reset();
     ds_upsert_table_op.is_running_ = true;
 #ifdef ON_KEY_OBJECT
-    if (FLAGS_skip_kv)
+    if (txservice_skip_kv)
     {
         ds_upsert_table_op.hd_result_.SetFinished();
         PostProcess(ds_upsert_table_op);
@@ -5211,7 +5207,7 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     // Directly commit the new value to the object if autocommit and skip_wal
     // are both set, on contrary to acquiring lock and committing the command in
     // postprocess.
-    bool commit = obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+    bool commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
     cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
                                *obj_cmd_op.key_,
                                key_shard_code,
@@ -5340,8 +5336,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // For autocommit read-modify-write commands, the ObjectCommandTxRequest
         // sender will be notified after auto commit succeeds, i.e. after
         // PostProcess or WriteLog.
-        bool already_committed =
-            obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+        bool already_committed = obj_cmd_op.auto_commit_ && txservice_skip_wal;
 
         // Whether we should notify the request sender.
         if (!obj_cmd_op.auto_commit_ || already_committed || cmd->IsReadOnly())
@@ -5387,7 +5382,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
     obj_cmd_op.is_running_ = true;
     uint64_t current_ts =
         dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
-    bool commit = obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+    bool commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
 
     for (size_t i = 0; i < obj_cmd_op.vct_key_->size(); i++)
     {
@@ -5465,8 +5460,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
         // autocommit and skip wal are both set. In such case, there is no
         // need to write log and do post write, and no need to add command
         // into write set.
-        bool directly_commit =
-            obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+        bool directly_commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
         bool readonly = obj_cmd_op.vct_cmd_->at(0)->IsReadOnly();
         std::vector<RecordStatus> vct_rec;
 

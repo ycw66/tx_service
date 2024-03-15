@@ -18,6 +18,7 @@
 #include "template_cc_map.h"
 #include "tx_command.h"
 #include "tx_record.h"
+#include "tx_service.h"
 
 namespace txservice
 {
@@ -272,7 +273,7 @@ public:
             // if ccm contains all the ccentries, then unknown status means
             // that we can skip accessing kv store and return deleted status
             // directly.
-            if (ccm_has_full_entries_ || FLAGS_skip_kv)
+            if (ccm_has_full_entries_ || txservice_skip_kv)
             {
                 cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
                 cce->SetCkptTs(1U);
@@ -737,7 +738,7 @@ public:
                 int64_t ng_term = std::max(cc_ng_candid_term, cc_ng_term);
                 assert(ng_term > 0);
                 // If kv is skipped then log should always be skipped too.
-                assert(!FLAGS_skip_kv);
+                assert(!txservice_skip_kv);
 
                 // load payload asynchronously, pass in null as requester cc
                 // since we will buffer the cmd in replay cmd list so there's no
@@ -1014,7 +1015,7 @@ private:
                       const std::string_view &scan_pattern) override
     {
         if (cce->PayloadStatus() == RecordStatus::Deleted &&
-            (!cce->NeedCkpt() || FLAGS_skip_kv))
+            (!cce->NeedCkpt() || txservice_skip_kv))
         {
             return false;
         }

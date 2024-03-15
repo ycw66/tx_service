@@ -47,7 +47,9 @@ namespace txservice
 {
 
 // whether skip write redo log to log_service.
-extern bool txservice_skip_redo_log;
+inline bool txservice_skip_wal = false;
+// whether skip flush data into kv store.
+inline bool txservice_skip_kv = false;
 
 // the OFFSET_TABLE contains only prime numbers
 inline const size_t OFFSET_TABLE[] = {
@@ -926,7 +928,8 @@ public:
         store::DataStoreHandler *store_hd,    // = nullptr,
         std::unique_ptr<TxLog> log_hd,        // = nullptr,
         bool enable_mvcc = true,
-        bool skip_redo_log = false,
+        bool skip_wal = false,
+        bool skip_kv = false,
         metrics::MetricsRegistry *metrics_registry = nullptr,
         metrics::CommonLabels common_labels = {},
         std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr)
@@ -989,7 +992,8 @@ public:
             &local_cc_shards_,
             conf.at("collect_active_tx_ts_interval_seconds"));
         DeadLockCheck::Init(local_cc_shards_);
-        txservice_skip_redo_log = skip_redo_log;
+        txservice_skip_wal = skip_wal;
+        txservice_skip_kv = skip_kv;
     }
 
     void Start()
