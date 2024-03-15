@@ -2368,7 +2368,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 // "key_ts_ == 0", means the lock is added on gap. Now, gap
                 // lock is not used when do scan operation.
                 if (scan_tuple_lock_type != LockType::NoLock &&
-                    cc_scan_tuple->key_ts_ != 0)
+                    cc_scan_tuple->key_ts_ != 0
+#ifdef ON_KEY_OBJECT
+                    && !rw_set_.FindObjectCommand(table_name,
+                                                  cc_scan_tuple->cce_addr_)
+#endif
+                )
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         this,
@@ -2581,7 +2586,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 // "key_ts_ == 0", means the lock is added on gap. Now, gap
                 // lock is not used when do scan operation.
                 if (scan_tuple_lock_type != LockType::NoLock &&
-                    cc_scan_tuple->key_ts_ != 0)
+                    cc_scan_tuple->key_ts_ != 0
+#ifdef ON_KEY_OBJECT
+                    && !rw_set_.FindObjectCommand(table_name,
+                                                  cc_scan_tuple->cce_addr_)
+#endif
+                )
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         this,
