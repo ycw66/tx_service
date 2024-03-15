@@ -2731,6 +2731,17 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
+            if (export_base_table_rec_if_need_)
+            {
+                for (size_t i = 0; i < slice_ids_.size(); ++i)
+                {
+                    if (slice_ids_[i].Slice() != nullptr)
+                    {
+                        slice_ids_[i].Unpin();
+                        slice_ids_[i].Reset();
+                    }
+                }
+            }
             cv_.notify_one();
         }
     }
@@ -2743,6 +2754,17 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
+            if (export_base_table_rec_if_need_)
+            {
+                for (size_t i = 0; i < slice_ids_.size(); ++i)
+                {
+                    if (slice_ids_[i].Slice() != nullptr)
+                    {
+                        slice_ids_[i].Unpin();
+                        slice_ids_[i].Reset();
+                    }
+                }
+            }
             cv_.notify_one();
         }
     }
@@ -2765,6 +2787,17 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
+            if (err_ != CcErrorCode::NO_ERROR && export_base_table_rec_if_need_)
+            {
+                for (size_t i = 0; i < slice_ids_.size(); ++i)
+                {
+                    if (slice_ids_[i].Slice() != nullptr)
+                    {
+                        slice_ids_[i].Unpin();
+                        slice_ids_[i].Reset();
+                    }
+                }
+            }
             cv_.notify_one();
         }
     }
