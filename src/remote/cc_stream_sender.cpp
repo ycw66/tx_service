@@ -1,6 +1,7 @@
 #include "remote/cc_stream_sender.h"
 
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <netdb.h>  // getaddrinfo
 
 #include <atomic>
@@ -859,7 +860,6 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     uint16_t node_port = std::stoi(ip_addr.substr(comma_pos + 1));
     butil::ip_t ip_t;
     int err;
-    std::string node_ip;
     if (0 != butil::str2ip(node_ip_str.c_str(), &ip_t))
     {
         // for case `node_ip_str` is hostname format.
@@ -870,55 +870,22 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
             naming_service_url.c_str(), braft::LOAD_BALANCER_NAME, &options);
         if (err != 0)
         {
+            LOG(ERROR) << "Fail to init cc stream channel to node " << node_id
+                       << ", ip: " << ip_addr << ", channel init error: " << err
+                 << " naming_service_url: " << naming_service_url;
             return err;
         }
-        // Get IP address.
-        char ip_str[INET_ADDRSTRLEN];
-        struct addrinfo hints, *addrs;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_protocol = IPPROTO_TCP;
-        err = getaddrinfo(node_ip_str.c_str(), NULL, &hints, &addrs);
-        if (err != 0)
-        {
-            LOG(ERROR) << "GetAddrInfo error: " << gai_strerror(err);
-            return err;
-        }
-        for (struct addrinfo *item = addrs; item != NULL; item = item->ai_next)
-        {
-            void *addr;
-            // get pointer to the address itself, different fields in IPv4
-            // and IPv6
-            if (item->ai_family == AF_INET)
-            {
-                // address is IPv4
-                struct sockaddr_in *ipv4 = (struct sockaddr_in *) item->ai_addr;
-                addr = &(ipv4->sin_addr);
-            }
-            else
-            {
-                // address is IPv6
-                struct sockaddr_in6 *ipv6 =
-                    (struct sockaddr_in6 *) item->ai_addr;
-                addr = &(ipv6->sin6_addr);
-            }
-
-            // convert IP to a string
-            inet_ntop(item->ai_family, addr, ip_str, INET_ADDRSTRLEN);
-            break;
-        }
-        freeaddrinfo(addrs);
-        node_ip.append(ip_str);
     }
     else
     {
         err = channel.Init(ip_addr.c_str(), &options);
         if (err != 0)
         {
+            LOG(ERROR) << "Fail to init cc stream channel to node " << node_id
+                       << ", ip: " << ip_addr
+                       << ", channel init error: " << err;
             return err;
         }
-        node_ip.append(node_ip_str);
     }
 
     auto stream_it = outbound_streams_.find(node_id);
@@ -935,6 +902,10 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     err = brpc::StreamCreate(&stream_id, cntl, nullptr);
     if (err != 0)
     {
+        LOG(ERROR) << "Fail to create cc stream to node " << node_id
+                   << ", ip: " << ip_addr
+                   << ", connect error: " << cntl.ErrorCode() << ", "
+                   << cntl.ErrorText();
         return err;
     }
 
@@ -943,11 +914,57 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     request.set_message("Connect");
     request.set_type(remote::StreamType::RegularCcStream);
 
+    // Get local ip address
+    struct ifaddrs *ifaddr, *ifa;
+    char ip_str[NI_MAXHOST];
+    if ((err = getifaddrs(&ifaddr)) == -1)
+    {
+        LOG(ERROR) << "ERROR!!! Failed to getifaddrs.";
+        return err;
+    }
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next)
+    {
+        if (ifa->ifa_addr == nullptr)
+        {
+            continue;
+        }
+
+        int family = ifa->ifa_addr->sa_family;
+        if (family == AF_INET)
+        {
+            // Check for IPv4 addresses
+            err = getnameinfo(ifa->ifa_addr,
+                              sizeof(struct sockaddr_in),
+                              ip_str,
+                              NI_MAXHOST,
+                              nullptr,
+                              0,
+                              NI_NUMERICHOST);
+            if (err != 0)
+            {
+                LOG(ERROR) << "ERROR!!! failed to getnameinfo: "
+                           << gai_strerror(err);
+                return err;
+            }
+            // Skip loopback addresses
+            if (strcmp(ifa->ifa_name, "lo") != 0)
+            {
+                break;
+            }
+        }
+    }
+    freeifaddrs(ifaddr);
+    std::string node_ip(ip_str);
+
     request.set_node_id(Sharder::Instance().NodeId());
     request.set_node_ip(node_ip);
     stub.Connect(&cntl, &request, &response, nullptr);
     if (cntl.Failed())
     {
+        LOG(ERROR) << "Failed the connect rpc to node " << node_id
+                   << ", ip: " << ip_addr
+                   << ", connect error: " << cntl.ErrorCode() << ", "
+                   << cntl.ErrorText();
         return cntl.ErrorCode();
     }
     stream_version.store(version, std::memory_order_release);
@@ -1005,6 +1022,9 @@ int CcStreamSender::ConnectLongMsgStream(uint32_t node_id, int64_t version)
     }
     if (err != 0)
     {
+        LOG(ERROR) << "Fail to init long msg cc stream channel to node "
+                   << node_id << ", ip: " << ip_addr
+                   << ", channel init error: " << err;
         return err;
     }
 
@@ -1014,6 +1034,10 @@ int CcStreamSender::ConnectLongMsgStream(uint32_t node_id, int64_t version)
     err = brpc::StreamCreate(&long_msg_stream_id, long_msg_cntl, nullptr);
     if (err != 0)
     {
+        LOG(ERROR) << "Fail to create long msg cc stream to node " << node_id
+                   << ", ip: " << ip_addr
+                   << ", connect error: " << long_msg_cntl.ErrorCode() << ", "
+                   << long_msg_cntl.ErrorText();
         return err;
     }
 
@@ -1025,6 +1049,10 @@ int CcStreamSender::ConnectLongMsgStream(uint32_t node_id, int64_t version)
         &long_msg_cntl, &long_msg_request, &long_msg_response, nullptr);
     if (long_msg_cntl.Failed())
     {
+        LOG(ERROR) << "Failed the connect rpc to node " << node_id
+                   << ", ip: " << ip_addr
+                   << ", connect error: " << long_msg_cntl.ErrorCode() << ", "
+                   << long_msg_cntl.ErrorText();
         return long_msg_cntl.ErrorCode();
     }
     long_msg_stream_version.store(version, std::memory_order_release);
