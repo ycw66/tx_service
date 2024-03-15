@@ -5,6 +5,23 @@ project( CatchExamples CXX )
 
 find_package(Catch2 REQUIRED)
 
+option(USE_ROCKSDB_LOG_STATE "Whether use rocksdb log state or in-memory log state" ON)
+message(NOTICE "USE_ROCKSDB_LOG_STATE : ${USE_ROCKSDB_LOG_STATE}")
+option(WITH_ROCKSDB_CLOUD "RocksDB Cloud storage backend, S3 or GCS")
+set_property(CACHE WITH_ROCKSDB_CLOUD PROPERTY STRINGS "S3" "GCS")
+message(NOTICE "With RocksDB Cloud: ${WITH_ROCKSDB_CLOUD}")
+
+if (USE_ROCKSDB_LOG_STATE)
+  if (WITH_ROCKSDB_CLOUD MATCHES "S3|GCS")
+    if (WITH_ROCKSDB_CLOUD STREQUAL "S3")
+        add_compile_definitions(WITH_ROCKSDB_CLOUD=1)
+    elseif (WITH_ROCKSDB_CLOUD STREQUAL "GCS")
+        add_compile_definitions(WITH_ROCKSDB_CLOUD=2)
+    endif()
+  endif()
+  add_compile_definitions(USE_ROCKSDB_LOG_STATE)
+endif()
+	   
 # define folders used:
 set( TESTS_DIR ${CMAKE_SOURCE_DIR}/tests )
 set( HEADER_DIR   ${CMAKE_SOURCE_DIR}/tests/include) 
