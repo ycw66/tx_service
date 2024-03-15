@@ -441,16 +441,11 @@ void TransactionExecution::CloseTxScan(uint64_t alias,
 TxErrorCode TransactionExecution::TxUpsert(const TableName &table_name,
                                            TxKey::Uptr key,
                                            TxRecord::Uptr rec,
-                                           OperationType op)
+                                           OperationType op,
+                                           bool check_unqiue)
 {
-    if (!rw_set_.AddWrite(table_name, std::move(key), std::move(rec), op))
-    {
-        return TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR;
-    }
-    else
-    {
-        return TxErrorCode::NO_ERROR;
-    }
+    return rw_set_.AddWrite(
+        table_name, std::move(key), std::move(rec), op, check_unqiue);
 }
 
 void TransactionExecution::TxRevert(const TableName &table_name,
@@ -2915,9 +2910,12 @@ void TransactionExecution::Upsert(const TableName &table_name,
                                   TxRecord::Uptr rec,
                                   OperationType op)
 {
-    if (!rw_set_.AddWrite(table_name, std::move(key), std::move(rec), op))
+    TxErrorCode err_code = TxErrorCode::NO_ERROR;
+    if ((err_code = rw_set_.AddWrite(
+             table_name, std::move(key), std::move(rec), op)) !=
+        TxErrorCode::NO_ERROR)
     {
-        void_resp_->FinishError(TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR);
+        void_resp_->FinishError(err_code);
         return;
     }
     void_resp_->Finish(void_);
@@ -5629,6 +5627,7 @@ void TransactionExecution::ProcessTxRequest(BatchReadTxRequest &batch_read_req)
 
     batch_read_op_.batch_read_tx_req_ = &batch_read_req;
     batch_read_op_.Reset();
+    batch_read_op_.local_cache_checked_ = batch_read_req.local_cache_checked_;
 
     PushOperation(&batch_read_op_);
     Process(batch_read_op_);

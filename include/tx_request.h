@@ -1084,14 +1084,16 @@ public:
                        const std::function<void()> *yield_fptr = nullptr,
                        const std::function<void()> *resume_fptr = nullptr,
                        TransactionExecution *txm = nullptr,
-                       uint64_t corresponding_sk_commit_ts = 0)
+                       uint64_t corresponding_sk_commit_ts = 0,
+                       bool local_cache_checked = false)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           tab_name_(tab_name),
           read_batch_(tuple_batch),
           is_for_write_(is_for_write),
           is_for_share_(is_for_share),
           read_local_(read_local),
-          corresponding_sk_commit_ts_(corresponding_sk_commit_ts)
+          corresponding_sk_commit_ts_(corresponding_sk_commit_ts),
+          local_cache_checked_(local_cache_checked)
     {
     }
 
@@ -1108,6 +1110,7 @@ public:
         is_for_share_ = is_for_share;
         read_local_ = read_local;
         corresponding_sk_commit_ts_ = corresponding_sk_commit_ts;
+        local_cache_checked_ = false;
     }
 
     const TableName *tab_name_;
@@ -1116,6 +1119,7 @@ public:
     bool is_for_share_;  // used for "select ... lock in share mode".
     bool read_local_;
     uint64_t corresponding_sk_commit_ts_;
+    bool local_cache_checked_;
 };
 
 }  // namespace txservice

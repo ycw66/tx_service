@@ -159,7 +159,8 @@ public:
     TxErrorCode TxUpsert(const TableName &table_name,
                          TxKey::Uptr key,
                          TxRecord::Uptr rec,
-                         OperationType op);
+                         OperationType op,
+                         bool check_unqiue = false);
 
     void TxRevert(const TableName &table_name, const TxKey &key);
 

@@ -266,17 +266,18 @@ public:
         }
     }
 
-    bool AddWrite(const TableName &table_name,
-                  TxKey::Uptr key,
-                  TxRecord::Uptr rec,
-                  OperationType op_type)
+    TxErrorCode AddWrite(const TableName &table_name,
+                         TxKey::Uptr key,
+                         TxRecord::Uptr rec,
+                         OperationType op_type,
+                         bool check_unqiue = false)
     {
         // Check write set bytes count.
         wset_bytes_cnt_ += ((key.get() ? key.get()->SerializedLength() : 0) +
                             (rec.get() ? rec.get()->SerializedLength() : 0));
         if (wset_bytes_cnt_ > ReadWriteSet::MaxWriteSetBytesCnt)
         {
-            return false;
+            return TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR;
         }
 
         auto iter = wset_.find(table_name);
@@ -307,11 +308,15 @@ public:
         }
         else
         {
+            if (check_unqiue)
+            {
+                return TxErrorCode::DUPLICATE_KEY;
+            }
             // Modify old WriteSetEntry.
             it->second.rec_ = std::move(wset_entry.rec_);
             it->second.op_ = wset_entry.op_;
         }
-        return true;
+        return TxErrorCode::NO_ERROR;
     }
 
     const WriteSetEntry *FindWrite(const TableName &table_name,
