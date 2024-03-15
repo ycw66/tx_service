@@ -621,37 +621,21 @@ void CcNodeService::CheckClusterScaleStatus(
     {
         // Redirect rpc to leader node of tx ng.
         int32_t node_id = Sharder::Instance().LeaderNodeId(tx_ng_id);
-        std::string node_ip;
-        uint16_t node_port;
-        Sharder::Instance().GetNodeAddress(node_id, node_ip, node_port);
-
-        brpc::Channel channel;
-        butil::ip_t ip_t;
-        int err;
-        if (0 != butil::str2ip(node_ip.c_str(), &ip_t))
-        {
-            // for case `node_ip` is hostname format
-            std::string naming_service_url;
-            braft::HostNameAddr hostname_addr(node_ip,
-                                              GET_CCNODE_RPC_PORT(node_port));
-            braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
-            err = channel.Init(
-                naming_service_url.c_str(), braft::LOAD_BALANCER_NAME, nullptr);
-        }
-        else
-        {
-            err = channel.Init(
-                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr);
-        }
-        if (err != 0)
+        auto channel = Sharder::Instance().GetCcNodeServiceChannel(node_id);
+        if (channel == nullptr)
         {
             response->set_status(remote::ClusterScaleStatus::UNKNOWN);
             return;
         }
 
-        remote::CcRpcService_Stub stub(&channel);
+        remote::CcRpcService_Stub stub(channel.get());
         brpc::Controller cntl;
         stub.CheckClusterScaleStatus(&cntl, request, response, nullptr);
+        if (cntl.Failed())
+        {
+            response->set_status(remote::ClusterScaleStatus::UNKNOWN);
+            Sharder::Instance().UpdateCcNodeServiceChannel(node_id, channel);
+        }
     }
 }
 

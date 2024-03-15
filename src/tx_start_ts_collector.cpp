@@ -73,8 +73,6 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
 
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
 
-    std::string node_ip;
-    uint16_t node_port;
     for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
     {
         uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -89,40 +87,17 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
             min_start_ts_map_[ng_id] = local_shards_->StatsLocalActiveSiTxs();
             continue;
         }
-
-        Sharder::Instance().GetNodeAddress(dest_node_id, node_ip, node_port);
-
-        brpc::Channel channel;
-        butil::ip_t ip_t;
-        if (0 != butil::str2ip(node_ip.c_str(), &ip_t))
+        std::shared_ptr<brpc::Channel> channel =
+            Sharder::Instance().GetCcNodeServiceChannel(dest_node_id);
+        if (channel == nullptr)
         {
-            // for case `node_ip` is hostname format
-            std::string naming_service_url;
-            braft::HostNameAddr hostname_addr(node_ip,
-                                              GET_CCNODE_RPC_PORT(node_port));
-            braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
-            if (channel.Init(naming_service_url.c_str(),
-                             braft::LOAD_BALANCER_NAME,
-                             nullptr) != 0)
-            {
-                LOG(ERROR) << "Fail to init the channel to the node("
-                           << dest_node_id << ") .";
-                continue;
-            }
-        }
-        else
-        {
-            if (channel.Init(node_ip.c_str(),
-                             GET_CCNODE_RPC_PORT(node_port),
-                             nullptr) != 0)
-            {
-                LOG(ERROR) << "Fail to init the channel to the node("
-                           << dest_node_id << ") .";
+            LOG(ERROR) << "Fail to init the channel to the node("
+                       << dest_node_id << ") .";
 
-                continue;
-            }
+            continue;
         }
-        remote::CcRpcService_Stub stub(&channel);
+
+        remote::CcRpcService_Stub stub(channel.get());
         remote::GetMinTxStartTsRequest req;
         req.set_ng_id(ng_id);
         remote::GetMinTxStartTsResponse res;
@@ -137,6 +112,8 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
             LOG(ERROR) << "Fail to call the GetMinTxStartTs RPC of node("
                        << dest_node_id << "). Error code: " << cntl.ErrorCode()
                        << ". Msg: " << cntl.ErrorText();
+            Sharder::Instance().UpdateCcNodeServiceChannel(dest_node_id,
+                                                           channel);
         }
         else
         {

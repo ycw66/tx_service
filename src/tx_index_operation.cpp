@@ -1,6 +1,6 @@
 #include "tx_index_operation.h"
 
-#include <braft/util.h>  //braft::HostNameAddr2NSUrl
+#include <brpc/channel.h>
 
 #include <algorithm>
 
@@ -1371,37 +1371,10 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
     else
     {
         // For remote node, use RPC service
-        std::string node_ip;
-        uint16_t node_port;
-        Sharder::Instance().GetNodeAddress(dest_node_id, node_ip, node_port);
-        if (node_ip.empty())
+        std::shared_ptr<brpc::Channel> channel =
+            Sharder::Instance().GetCcNodeServiceChannel(dest_node_id);
+        if (channel == nullptr)
         {
-            LOG(ERROR) << "FlushDataIntoDataStore: node address is empty,"
-                          "dest node id "
-                       << ng_id;
-        }
-
-        brpc::Channel channel;
-        butil::ip_t ip_t;
-        int err;
-        if (0 != butil::str2ip(node_ip.c_str(), &ip_t))
-        {
-            // for case `node_ip` is hostname format.
-            std::string naming_service_url;
-            braft::HostNameAddr hostname_addr(node_ip,
-                                              GET_CCNODE_RPC_PORT(node_port));
-            braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
-            err = channel.Init(
-                naming_service_url.c_str(), braft::LOAD_BALANCER_NAME, nullptr);
-        }
-        else
-        {
-            err = channel.Init(
-                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr);
-        }
-        if (err != 0)
-        {
-            // Fail to establish the channel to the target node.
             LOG(ERROR) << "FlushDataIntoDataStore: Failed to init the channel"
                           " to the leader of ng#"
                        << ng_id;
@@ -1409,7 +1382,7 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
             return;
         }
 
-        remote::CcRpcService_Stub stub(&channel);
+        remote::CcRpcService_Stub stub(channel.get());
         remote::FlushDataAllRequest request;
         request.set_table_name_str(table_name.String());
         request.set_table_type(
@@ -1423,7 +1396,8 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
             std::make_unique<remote::FlushDataAllResponse>();
         remote::FlushDataAllResponse *resp_ptr = response.get();
 
-        flush_data_all_closures_.at(ng_id).Reset(&hres, std::move(response));
+        flush_data_all_closures_.at(ng_id).Reset(
+            &hres, std::move(response), channel, dest_node_id);
         flush_data_all_closures_.at(ng_id).post_lambda_ =
             [ng_id](CcHandlerResult<Void> *hd_res,
                     remote::FlushDataAllResponse *resp)
@@ -1498,35 +1472,9 @@ void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
     }
     else
     {
-        std::string node_ip;
-        uint16_t node_port;
-        Sharder::Instance().GetNodeAddress(leader_node_id, node_ip, node_port);
-        if (node_ip.empty())
-        {
-            LOG(ERROR) << "Acquire leader term: node address is empty,"
-                          "leader node id "
-                       << leader_node_id;
-        }
-        brpc::Channel channel;
-        butil::ip_t ip_t;
-        int err;
-        if (0 != butil::str2ip(node_ip.c_str(), &ip_t))
-        {
-            // for case `node_ip` is hostname format.
-            std::string naming_service_url;
-            braft::HostNameAddr hostname_addr(node_ip,
-                                              GET_CCNODE_RPC_PORT(node_port));
-            braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
-            err = channel.Init(
-                naming_service_url.c_str(), braft::LOAD_BALANCER_NAME, nullptr);
-        }
-        else
-        {
-            err = channel.Init(
-                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr);
-        }
-
-        if (err != 0)
+        std::shared_ptr<brpc::Channel> channel =
+            Sharder::Instance().GetCcNodeServiceChannel(leader_node_id);
+        if (channel == nullptr)
         {
             // Fail to establish the channel to the tx node. Do not update the
             // leader term of input node group.
@@ -1537,7 +1485,7 @@ void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
             return;
         }
 
-        remote::CcRpcService_Stub stub(&channel);
+        remote::CcRpcService_Stub stub(channel.get());
         remote::AcquireNodeGroupTermRequest request;
         request.set_node_group_id(ng_id);
         // This will be deleted after the response been handled.
@@ -1545,8 +1493,8 @@ void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
             std::make_unique<remote::AcquireNodeGroupTermResponse>();
         remote::AcquireNodeGroupTermResponse *resp_ptr = response.get();
 
-        acquire_leader_term_closures_.at(ng_id).Reset(&hd_res,
-                                                      std::move(response));
+        acquire_leader_term_closures_.at(ng_id).Reset(
+            &hd_res, std::move(response), channel, leader_node_id);
         acquire_leader_term_closures_.at(ng_id).post_lambda_ =
             [](CcHandlerResult<std::vector<int64_t>> *hd_res,
                remote::AcquireNodeGroupTermResponse *resp)

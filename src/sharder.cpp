@@ -1,6 +1,8 @@
 #include "sharder.h"
 
 #include <atomic>
+#include <memory>
+#include <mutex>
 
 #include "cc_req_base.h"
 #include "cc_shard.h"
@@ -336,6 +338,101 @@ int Sharder::Init(
 #endif
 
     return 0;
+}
+
+std::shared_ptr<brpc::Channel> Sharder::GetCcNodeServiceChannel(
+    uint32_t node_id)
+{
+    std::shared_lock<std::shared_mutex> lk(node_channel_mux_);
+    auto channel_it = cc_node_service_channels_.find(node_id);
+    if (channel_it == cc_node_service_channels_.end())
+    {
+        // If channel to this node is not initialized yet, try to construct the
+        // channel to this node.
+        lk.unlock();
+        std::unique_lock<std::shared_mutex> unique_lk(node_channel_mux_);
+        std::string ip;
+        uint16_t port;
+        GetNodeAddress(node_id, ip, port);
+        if (ip.empty())
+        {
+            // Invalid node id
+            return nullptr;
+        }
+        channel_it = cc_node_service_channels_.find(node_id);
+        if (channel_it == cc_node_service_channels_.end() ||
+            channel_it->second == nullptr)
+        {
+            auto channel = std::make_shared<brpc::Channel>();
+            if (channel->Init(ip.c_str(), GET_CCNODE_RPC_PORT(port), NULL) != 0)
+            {
+                LOG(ERROR) << "Fail to init the cc node service channel.";
+                return nullptr;
+            }
+            if (channel_it == cc_node_service_channels_.end())
+            {
+                cc_node_service_channels_.try_emplace(node_id, channel);
+            }
+            else
+            {
+                channel_it->second = channel;
+            }
+            return channel;
+        }
+        return channel_it->second;
+    }
+
+    return channel_it->second;
+}
+
+std::shared_ptr<brpc::Channel> Sharder::UpdateCcNodeServiceChannel(
+    uint32_t node_id, std::shared_ptr<brpc::Channel> old_channel)
+{
+    std::string ip;
+    uint16_t port;
+    GetNodeAddress(node_id, ip, port);
+    assert(!ip.empty());
+    std::unique_lock<std::shared_mutex> lk(node_channel_mux_);
+    auto channel_it = cc_node_service_channels_.find(node_id);
+    if (channel_it == cc_node_service_channels_.end() ||
+        channel_it->second == nullptr)
+    {
+        auto channel = std::make_shared<brpc::Channel>();
+        if (channel->Init(ip.c_str(), GET_CCNODE_RPC_PORT(port), NULL) != 0)
+        {
+            LOG(ERROR) << "Fail to init the cc node service channel.";
+            return nullptr;
+        }
+        if (channel_it == cc_node_service_channels_.end())
+        {
+            cc_node_service_channels_.try_emplace(node_id, channel);
+        }
+        else
+        {
+            channel_it->second = channel;
+        }
+        return channel;
+    }
+
+    if (channel_it->second == old_channel)
+    {
+        // No one has updated this channel since we read it, update it by
+        // ourselves.
+        auto channel = std::make_shared<brpc::Channel>();
+        if (channel->Init(ip.c_str(), GET_CCNODE_RPC_PORT(port), NULL) != 0)
+        {
+            LOG(ERROR) << "Fail to update the cc node service channel.";
+            return nullptr;
+        }
+        channel_it->second = channel;
+        return channel_it->second;
+    }
+    else
+    {
+        // Someone has already updated this channel, return the updated channel
+        // directly.
+        return channel_it->second;
+    }
 }
 
 bool Sharder::CheckLeaderTerm(uint32_t ng_id, int64_t term) const

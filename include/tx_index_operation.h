@@ -26,13 +26,20 @@ public:
         hd_result_ = rhs.hd_result_;
         rhs.hd_result_ = nullptr;
         rhs.cntl_.Reset();
+        channel_ = std::move(rhs.channel_);
+        node_id_ = rhs.node_id_;
     }
 
-    void Reset(CcHandlerResult<ResultType> *hd_res, RPCResponse_Uptr response)
+    void Reset(CcHandlerResult<ResultType> *hd_res,
+               RPCResponse_Uptr response,
+               std::shared_ptr<brpc::Channel> channel,
+               uint32_t node_id)
     {
         cntl_.Reset();
         hd_result_ = hd_res;
         response_uptr_ = std::move(response);
+        channel_ = channel;
+        node_id_ = node_id;
     }
 
     // Run() will be called when rpc request is processed by cc node service.
@@ -45,8 +52,11 @@ public:
                        << cntl_.ErrorCode()
                        << ". Error Msg: " << cntl_.ErrorText();
             hd_result_->SetError(CcErrorCode::REQUEST_LOST);
+            Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
+            channel_ = nullptr;
             return;
         }
+        channel_ = nullptr;
 
         if (post_lambda_)
         {
@@ -65,6 +75,8 @@ private:
     brpc::Controller cntl_;
     RPCResponse_Uptr response_uptr_;
     CcHandlerResult<ResultType> *hd_result_{nullptr};
+    std::shared_ptr<brpc::Channel> channel_;
+    uint32_t node_id_;
 
 public:
     std::function<void(CcHandlerResult<ResultType> *, ResponseType *)>

@@ -1074,6 +1074,7 @@ public:
                 << "Cluster scale tx notify migration response, node group: "
                 << request_.orig_owner() << ", success: false";
             migrate_plans_[request_.orig_owner()].has_migration_tx_ = false;
+            Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
         }
         else
         {
@@ -1084,6 +1085,7 @@ public:
             migrate_plans_[request_.orig_owner()].has_migration_tx_ =
                 response_.success();
         }
+        channel_ = nullptr;
 
         unfinished_cnt_->fetch_sub(1, std::memory_order_release);
     }
@@ -1107,6 +1109,13 @@ public:
     {
         cntl_.Reset();
         response_.Clear();
+        channel_ = nullptr;
+    }
+
+    void SetChannel(uint32_t node_id, std::shared_ptr<brpc::Channel> channel)
+    {
+        node_id_ = node_id;
+        channel_ = channel;
     }
 
 private:
@@ -1115,6 +1124,8 @@ private:
     remote::InitMigrationResponse response_;
     std::atomic<size_t> *unfinished_cnt_;
     std::unordered_map<NodeGroupId, BucketMigrateInfo> &migrate_plans_;
+    std::shared_ptr<brpc::Channel> channel_;
+    uint32_t node_id_;
 };
 
 struct NotifyStartMigrateOp : public TransactionOperation

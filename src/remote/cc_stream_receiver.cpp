@@ -103,6 +103,8 @@ void CcStreamReceiver::Connect(::google::protobuf::RpcController *controller,
         Sharder::Instance().GetCcStreamSender()->ReConnectLongMsgStream(
             request->node_id());
         Sharder::Instance().GetCcStreamSender()->NotifyConnectStream();
+        LOG(INFO) << "Reconnecting stream to " << request->node_ip()
+                  << " as it has failed over to a new ip.";
     }
 
     response->set_message("Accepted");

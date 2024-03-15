@@ -1,5 +1,6 @@
 #pragma once
 
+#include <brpc/channel.h>
 #include <bthread/moodycamelqueue.h>
 #include <stdint.h>
 
@@ -11,7 +12,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "braft/route_table.h"
 #include "brpc/server.h"
 #include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "proto/cc_request.pb.h"
@@ -490,6 +490,16 @@ public:
      */
     void StartCcStreamReceiver();
 
+    std::shared_ptr<brpc::Channel> GetCcNodeServiceChannel(uint32_t node_id);
+
+    /**
+     * Update cc node service channel if the current cached channel equals
+     * old_channel. If current cached channel != old_channel, that means it's
+     * already updated by someone else.
+     */
+    std::shared_ptr<brpc::Channel> UpdateCcNodeServiceChannel(
+        uint32_t node_id, std::shared_ptr<brpc::Channel> old_channel);
+
 private:
     Sharder();
 
@@ -585,5 +595,11 @@ private:
     std::unique_ptr<TxLog> log_agent_;
 
     std::string raft_local_path_{""};
+
+    // Channel to cc node service of other nodes.
+    std::unordered_map<uint32_t, std::shared_ptr<brpc::Channel>>
+        cc_node_service_channels_;
+
+    std::shared_mutex node_channel_mux_;
 };
 }  // namespace txservice
