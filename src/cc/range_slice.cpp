@@ -278,6 +278,9 @@ RangeSliceId StoreRange::PinSlices(const TableName &tbl_name,
         case LoadSliceStatus::Delay:
             pin_status = RangeSliceOpStatus::Delay;
             break;
+        case LoadSliceStatus::Retry:
+            pin_status = RangeSliceOpStatus::Retry;
+            break;
         default:
             pin_status = RangeSliceOpStatus::Error;
             break;
@@ -381,6 +384,11 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
         {
         case LoadSliceStatus::Success:
             pin_status = RangeSliceOpStatus::BlockedOnLoad;
+            break;
+        case LoadSliceStatus::Retry:
+            // When load slice from data store, may using the prepapre
+            // statement, if the PS is being built, it will return Retry.
+            pin_status = RangeSliceOpStatus::Retry;
             break;
         default:
             // This method is only called by the checkpointer, who sets the
@@ -555,6 +563,16 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             // There is a data store error when loading the slice, retry
             // until succeed. sleep for a second before retrying so that we
             // don't consume too much data store traffic
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        else if (status == RangeSliceOpStatus::Retry)
+        {
+            LOG(INFO) << "Waiting 1s for the prepare statement when loading "
+                      << "the slice of table: " << table_name.Trace()
+                      << " with slice start key: "
+                      << (slice->StartKey() != nullptr
+                              ? slice->StartKey()->ToString()
+                              : "NegativeInf");
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         else
@@ -1048,7 +1066,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
 
         slice_lk.unlock();
         slice.fetch_slice_cc_->LoadRequest()->start_ = metrics::Clock::now();
-        bool success =
+        store::DataStoreHandler::LoadRangeSliceStatus kv_load_status =
             store_hd->LoadRangeSlice(tbl_name,
                                      kv_info,
                                      partition_id_,
@@ -1062,12 +1080,44 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         // loading slice into memory cannot complete at this point.
 
         slice.last_load_ts_ = LocalCcShards::ClockTs();
-        if (success)
+        switch (kv_load_status)
         {
+        case store::DataStoreHandler::LoadRangeSliceStatus::Success:
             return LoadSliceStatus::Success;
-        }
-        else
-        {
+        case store::DataStoreHandler::LoadRangeSliceStatus::Retry:
+            // Put the ccrequests back to txprocessor queue except the first
+            // one which will be put back to txprocessor queue by the caller.
+            for (size_t i = 1; i < slice.cc_queue_.size(); ++i)
+            {
+                auto *cc_req = std::get<0>(slice.cc_queue_[i]);
+                auto *cc_shard = std::get<1>(slice.cc_queue_[i]);
+                cc_shard->Enqueue(cc_req);
+            }
+            slice.cc_queue_.clear();
+            slice.fetch_slice_cc_ = nullptr;
+            pins_.fetch_sub(1, std::memory_order_release);
+            return LoadSliceStatus::Retry;
+        default:
+            // Abort those ccrequests except the first one which will be aborted
+            // by the caller. We need to make sure that the
+            // CcMap::Execute(CcRequest ) and CcRequest::ABortCcRequest(...)
+            // functions occur on the same thread. Otherwise, AbortCcRequest is
+            // not safe behavior.
+            std::unordered_map<CcShard *, std::vector<CcRequestBase *>>
+                waiting_reqs;
+            for (size_t i = 1; i < slice.cc_queue_.size(); ++i)
+            {
+                auto *cc_req = std::get<0>(slice.cc_queue_[i]);
+                auto *cc_shard = std::get<1>(slice.cc_queue_[i]);
+                waiting_reqs[cc_shard].push_back(cc_req);
+            }
+
+            for (auto &[cc_shard, reqs] : waiting_reqs)
+            {
+                cc_shard->AbortCcRequests(std::move(reqs),
+                                          CcErrorCode::DATA_STORE_ERR);
+            }
+            slice.cc_queue_.clear();
             slice.fetch_slice_cc_ = nullptr;
             pins_.fetch_sub(1, std::memory_order_release);
             return LoadSliceStatus::Error;

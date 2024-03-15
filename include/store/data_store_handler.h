@@ -59,6 +59,13 @@ struct DataStoreSearchCond
 class DataStoreHandler
 {
 public:
+    enum struct LoadRangeSliceStatus
+    {
+        Success = 0,
+        Retry,
+        Error
+    };
+
     virtual ~DataStoreHandler() = default;
 
     virtual bool Connect() = 0;
@@ -160,12 +167,13 @@ public:
             &sample_pool_map,
         uint64_t version) = 0;
 
-    virtual bool LoadRangeSlice(const TableName &table_name,
-                                const KVCatalogInfo *kv_info,
-                                uint32_t partition_id,
-                                LoadRangeSliceRequest *load_slice_req)
+    virtual LoadRangeSliceStatus LoadRangeSlice(
+        const TableName &table_name,
+        const KVCatalogInfo *kv_info,
+        uint32_t partition_id,
+        LoadRangeSliceRequest *load_slice_req)
     {
-        return false;
+        return LoadRangeSliceStatus::Error;
     }
 
     virtual bool UpdateRangeSlices(

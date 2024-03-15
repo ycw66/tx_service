@@ -646,6 +646,7 @@ private:
     {
         Success,
         Delay,
+        Retry,
         Error
     };
 
