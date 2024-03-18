@@ -929,7 +929,7 @@ public:
         std::unique_ptr<TxLog> log_hd,        // = nullptr,
         bool enable_mvcc = true,
         bool skip_wal = false,
-        bool skip_kv = false,
+        bool skip_kv = false,  // only used in mono_redis
         metrics::MetricsRegistry *metrics_registry = nullptr,
         metrics::CommonLabels common_labels = {},
         std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr)
