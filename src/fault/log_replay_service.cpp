@@ -898,7 +898,7 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
     {
         // Node group is already removed from cluster. Need to ask log for
         // tx status.
-        tx_status = remote::CheckTxStatusResponse_TxStatus_ABORTED;
+        tx_status = remote::CheckTxStatusResponse_TxStatus_RESULT_UNKNOWN;
     }
     else if (tx_leader == Sharder::Instance().NodeId())
     {
@@ -961,73 +961,72 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
         }
 
         tx_status = res.tx_status();
+    }
+    if (tx_status == remote::CheckTxStatusResponse_TxStatus_ONGOING)
+    {
+        LOG(INFO) << "The tx " << task.tx_number_
+                  << " is ongoing. Does nothing for recovery.";
+        return;
+    }
+    else if (tx_status == remote::CheckTxStatusResponse_TxStatus_ABORTED)
+    {
+        LOG(INFO) << "The tx" << task.tx_number_
+                  << " has aborted. Clears the tx's lock.";
+        ClearTx(task.tx_number_);
+    }
+    else
+    {
+        // The tx is either committed or result unknown or not
+        // found in the tx's cc node, either because the tx node
+        // fails or because the tx didn't finish post-processing
+        // but decided to move on. In either case, asks the log
+        // group: if the tx has committed, the log group ships
+        // the tx's log record to the cc node to recover the
+        // committed record. Or, the tx must have aborted.
 
-        if (tx_status == remote::CheckTxStatusResponse_TxStatus_ONGOING)
+        RecoverTxStatus status = log_agent_->RecoverTx(task.tx_number_,
+                                                       task.tx_term_,
+                                                       task.write_lock_ts_,
+                                                       task.cc_ng_id_,
+                                                       task.cc_ng_term_,
+                                                       ip_,
+                                                       port_);
+
+        if (status == RecoverTxStatus::NotCommitted ||
+            status == RecoverTxStatus::Alive)
         {
             LOG(INFO) << "The tx " << task.tx_number_
-                      << " is ongoing. Does nothing for recovery.";
-            return;
-        }
-        else if (tx_status == remote::CheckTxStatusResponse_TxStatus_ABORTED)
-        {
-            LOG(INFO) << "The tx" << task.tx_number_
-                      << " has aborted. Clears the tx's lock.";
+                      << " is to be cleared, after asking "
+                         "the log group.";
+
+            // If the tx is not committed, sends a cc request to
+            // local cc shards to clear write intentions left by
+            // the tx. If the tx node is still alive according
+            // to the log group, and yet no log record is found,
+            // given that the prior inquiry of the tx status is
+            // inconclusive, the tx must have aborted
+            // proactively. Clears the tx's locks.
             ClearTx(task.tx_number_);
+        }
+        else if (status == RecoverTxStatus::RecoverError)
+        {
+            LOG(INFO) << "There is a tx recovery error when asking "
+                         "the log group. Tx number "
+                      << task.tx_number_;
         }
         else
         {
-            // The tx is either committed or result unknown or not
-            // found in the tx's cc node, either because the tx node
-            // fails or because the tx didn't finish post-processing
-            // but decided to move on. In either case, asks the log
-            // group: if the tx has committed, the log group ships
-            // the tx's log record to the cc node to recover the
-            // committed record. Or, the tx must have aborted.
-
-            RecoverTxStatus status = log_agent_->RecoverTx(task.tx_number_,
-                                                           task.tx_term_,
-                                                           task.write_lock_ts_,
-                                                           task.cc_ng_id_,
-                                                           task.cc_ng_term_,
-                                                           ip_,
-                                                           port_);
-
-            if (status == RecoverTxStatus::NotCommitted ||
-                status == RecoverTxStatus::Alive)
-            {
-                LOG(INFO) << "The tx " << task.tx_number_
-                          << " is to be cleared, after asking "
-                             "the log group.";
-
-                // If the tx is not committed, sends a cc request to
-                // local cc shards to clear write intentions left by
-                // the tx. If the tx node is still alive according
-                // to the log group, and yet no log record is found,
-                // given that the prior inquiry of the tx status is
-                // inconclusive, the tx must have aborted
-                // proactively. Clears the tx's locks.
-                ClearTx(task.tx_number_);
-            }
-            else if (status == RecoverTxStatus::RecoverError)
-            {
-                LOG(INFO) << "There is a tx recovery error when asking "
-                             "the log group. Tx number "
-                          << task.tx_number_;
-            }
-            else
-            {
-                LOG(INFO) << "The tx " << task.tx_number_
-                          << " to be recovered has committed.";
-                // For DML transactions, if the tx has committed,
-                // the log group will ship the tx's committed
-                // records to the cc node. If there is an error,
-                // does nothing. The next conflicting tx will try a
-                // new recovery.
-                // For multi-stage transactions, the tx has written
-                // log and is guaranteed to succeed and release the
-                // lock, do nothing and the lock will be released by
-                // the coordinator.
-            }
+            LOG(INFO) << "The tx " << task.tx_number_
+                      << " to be recovered has committed.";
+            // For DML transactions, if the tx has committed,
+            // the log group will ship the tx's committed
+            // records to the cc node. If there is an error,
+            // does nothing. The next conflicting tx will try a
+            // new recovery.
+            // For multi-stage transactions, the tx has written
+            // log and is guaranteed to succeed and release the
+            // lock, do nothing and the lock will be released by
+            // the coordinator.
         }
     }
 }
