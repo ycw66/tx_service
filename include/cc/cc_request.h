@@ -2731,6 +2731,7 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
+#ifdef RANGE_PARTITION_ENABLED
             if (export_base_table_rec_if_need_)
             {
                 for (size_t i = 0; i < slice_ids_.size(); ++i)
@@ -2742,6 +2743,7 @@ public:
                     }
                 }
             }
+#endif
             cv_.notify_one();
         }
     }
@@ -2754,6 +2756,7 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
+#ifdef RANGE_PARTITION_ENABLED
             if (export_base_table_rec_if_need_)
             {
                 for (size_t i = 0; i < slice_ids_.size(); ++i)
@@ -2765,6 +2768,7 @@ public:
                     }
                 }
             }
+#endif
             cv_.notify_one();
         }
     }
@@ -2787,6 +2791,7 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
+#ifdef RANGE_PARTITION_ENABLED
             if (err_ != CcErrorCode::NO_ERROR && export_base_table_rec_if_need_)
             {
                 for (size_t i = 0; i < slice_ids_.size(); ++i)
@@ -2798,6 +2803,7 @@ public:
                     }
                 }
             }
+#endif
             cv_.notify_one();
         }
     }
