@@ -460,7 +460,6 @@ public:
             // the temporary object.
             ValueT &dirty_object = *dirty_payload;
             cmd_success = cmd->ExecuteOn(dirty_object);
-            DLOG(INFO) << "execute and commit current command on dirty payload";
             if (cmd_success && !cmd->IsReadOnly())
             {
                 CommitCommandOnDirtyPayload(
@@ -948,7 +947,6 @@ private:
     {
         assert(payload != nullptr);
         ValueT &object = *payload;
-        DLOG(INFO) << "creating dirty payload from existing payload";
         std::unique_ptr<TxRecord> tx_rec_uptr = object.Clone();
         auto *obj_ptr = static_cast<ValueT *>(tx_rec_uptr.release());
         return {std::unique_ptr<ValueT>(obj_ptr), RecordStatus::Normal};
@@ -995,7 +993,6 @@ private:
                dirty_payload_status == RecordStatus::Normal);
         TxObject *old_obj_ptr = dirty_payload.get();
         TxObject *new_obj_ptr = cmd.CommitOn(old_obj_ptr);
-        DLOG(INFO) << "commit pending_cmd on dirty_payload";
         if (new_obj_ptr != old_obj_ptr)
         {
             if (new_obj_ptr == nullptr)
