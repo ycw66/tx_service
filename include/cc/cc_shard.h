@@ -659,6 +659,18 @@ public:
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 
+    /**
+     * Clean cc map and update its schema and schema ts. For truncate table
+     * operation.
+     * @param table_name
+     * @param ng_id
+     * @param schema_ts
+     */
+    void TruncateCcm(const TableName &table_name,
+                     NodeGroupId ng_id,
+                     const TableSchema *table_schema,
+                     uint64_t schema_ts);
+
     void CleanCcm(const TableName &table_name);
 
     void CleanCcm(const TableName &table_name, NodeGroupId ng_id);

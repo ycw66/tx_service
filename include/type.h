@@ -36,6 +36,7 @@ enum class OperationType
     Upsert,
     CreateTable,
     DropTable,
+    TruncateTable,
     AddIndex,
     DropIndex,
 

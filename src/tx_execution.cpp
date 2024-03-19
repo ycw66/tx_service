@@ -21,9 +21,6 @@
 #include "tx_util.h"
 #include "type.h"
 
-#ifdef ON_KEY_OBJECT
-DECLARE_bool(skip_kv);
-#endif
 namespace txservice
 {
 TransactionExecution::TransactionExecution(CcHandler *handler,
@@ -732,7 +729,8 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     if (req.op_type_ == OperationType::CreateTable ||
         req.op_type_ == OperationType::Update ||
-        req.op_type_ == OperationType::DropTable)
+        req.op_type_ == OperationType::DropTable ||
+        req.op_type_ == OperationType::TruncateTable)
     {
         std::unique_lock<std::mutex> lk(
             local_shards->table_schema_op_pool_mux_);
@@ -1050,6 +1048,7 @@ void TransactionExecution::ProcessTxRequest(
         {
         case OperationType::CreateTable:
         case OperationType::DropTable:
+        case OperationType::TruncateTable:
         case OperationType::Update:
         {
             std::unique_lock<std::mutex> lk(

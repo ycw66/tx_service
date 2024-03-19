@@ -1266,6 +1266,49 @@ void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)
     }
 }
 
+void CcShard::TruncateCcm(const txservice::TableName &table_name,
+                          txservice::NodeGroupId ng_id,
+                          const TableSchema *table_schema,
+                          uint64_t schema_ts)
+{
+    if (ng_id == node_id_)
+    {
+        auto native_it = native_ccms_.find(table_name);
+
+        if (native_it != native_ccms_.end())
+        {
+            auto &ccm = native_it->second;
+            ccm->Clean();
+            ccm->SetTableSchema(table_schema);
+            ccm->SetSchemaTs(schema_ts);
+            DLOG(INFO) << "Truncate ccm on shard: " << core_id_
+                       << ", set new table schema: " << ccm->GetTableSchema()
+                       << ", schema ts: " << ccm->SchemaTs();
+        }
+    }
+    else
+    {
+        auto fail_ccm_it = failover_ccms_.find(table_name);
+        if (fail_ccm_it != failover_ccms_.end())
+        {
+            std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
+                fail_ccm_it->second;
+            auto it = ccms.find(ng_id);
+            if (it != ccms.end())
+            {
+                auto &ccm = it->second;
+                ccm->Clean();
+                ccm->SetTableSchema(table_schema);
+                ccm->SetSchemaTs(schema_ts);
+                DLOG(INFO) << "Truncate ccm on shard: " << core_id_
+                           << ", set new table schema: "
+                           << ccm->GetTableSchema()
+                           << ", schema ts: " << ccm->SchemaTs();
+            }
+        }
+    }
+}
+
 /**
  * @brief Clean ccentries from ccm given a table name.
  *

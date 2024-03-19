@@ -230,14 +230,14 @@ void TryCommitReplayCommands(std::unique_ptr<T> &payload,
             }
         }
         cur_ver = it->new_version_;
-        LOG(INFO) << "commit replay txn cmds, obj ver: " << it->obj_version_
-                  << ", new ver: " << it->new_version_;
+        DLOG(INFO) << "commit replay txn cmds, obj ver: " << it->obj_version_
+                   << ", new ver: " << it->new_version_;
         it = txn_cmd_list.erase(it);
     }
 
     if (txn_cmd_list.empty())
     {
-        LOG(INFO) << "destruct replay_cmd_list_ on object: ";
+        DLOG(INFO) << "destruct replay_cmd_list_ on object: ";
         replay_cmd_list = nullptr;
     }
 }

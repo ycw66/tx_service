@@ -18,10 +18,12 @@
 #include "template_cc_map.h"
 #include "tx_command.h"
 #include "tx_record.h"
-#include "tx_service.h"
 
 namespace txservice
 {
+// whether skip accessing KV when cc map cache misses.
+extern bool txservice_skip_kv;
+
 template <typename KeyT, typename ValueT>
 class ObjectCcMap : public TemplateCcMap<KeyT, ValueT>
 {
@@ -48,8 +50,10 @@ public:
                                       table_schema,
                                       ccm_has_full_entries)
     {
-        LOG(INFO) << "creating ObjectCcmap, table name: "
-                  << table_name.StringView();
+        DLOG(INFO) << "creating ObjectCcmap on shard: " << shard_->core_id_
+                   << ", table name: " << table_name.StringView()
+                   << ", table_schema: " << table_schema_
+                   << ", schema_ts: " << schema_ts_;
     }
 
     using CcMap::AcquireCceKeyLock;
@@ -386,10 +390,13 @@ public:
             cce->SetPendingCmd(nullptr);
         }
 
+        // Check whether the object exists.
+        // If dirty payload exists, use dirty_payload_status. Use payload status
+        // only if dirty payload doesn't exist.
         bool object_not_exist =
             dirty_payload_status == RecordStatus::Deleted ||
-            (cce->PayloadStatus() == RecordStatus::Deleted &&
-             dirty_payload_status == RecordStatus::NonExistent);
+            (dirty_payload_status == RecordStatus::NonExistent &&
+             cce->PayloadStatus() == RecordStatus::Deleted);
 
         // Create the temporary object if the object does not exist.
         if (object_not_exist)
@@ -663,6 +670,8 @@ public:
         uint64_t commit_ts = req.CommitTs();
         if (commit_ts < schema_ts_)
         {
+            DLOG(INFO) << "discard log, commit_ts: " << commit_ts
+                       << ", schema_ts: " << schema_ts_;
             req.SetFinish();
             return true;
         }

@@ -1889,6 +1889,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
 {
     assert(op_type_ == OperationType::CreateTable ||
            op_type_ == OperationType::DropTable ||
+           op_type_ == OperationType::TruncateTable ||
            op_type_ == OperationType::Update);
 
     lock_cluster_config_op_.table_name_ =
@@ -2157,7 +2158,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     else if (op_ == &unlock_cluster_config_op_)
     {
         assert(op_type_ == OperationType::CreateTable ||
-               op_type_ == OperationType::Update);
+               op_type_ == OperationType::Update ||
+               op_type_ == OperationType::TruncateTable);
         if (unlock_cluster_config_op_.hd_result_.IsError())
         {
             if (txm->CheckLeaderTerm())
@@ -2185,8 +2187,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
-                // Keep retrying if it is DropTable or DropIndex.
-                if (op_type_ == OperationType::DropTable)
+                // Keep retrying if it is DropTable or DropIndex or
+                // TruncateTable.
+                if (op_type_ == OperationType::DropTable ||
+                    op_type_ == OperationType::TruncateTable)
                 {
                     txm->PushOperation(&upsert_kv_table_op_);
                     txm->Process(upsert_kv_table_op_);
@@ -2662,7 +2666,8 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
 {
     assert(op_type_ == OperationType::CreateTable ||
            op_type_ == OperationType::Update ||
-           op_type_ == OperationType::DropTable);
+           op_type_ == OperationType::DropTable ||
+           op_type_ == OperationType::TruncateTable);
 
     // reset TransactionOperation
     retry_num_ = RETRY_NUM;
