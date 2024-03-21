@@ -77,6 +77,16 @@ LocalCcShards::LocalCcShards(
     InitRangeBuckets(
         node_id, ng_configs->size(), cluster_config_version, range_bucket_seed);
 
+    if (prebuilt_tables)
+    {
+        for (auto &[table, image] : *prebuilt_tables)
+        {
+            auto ins_res = prebuilt_tables_.try_emplace(table, image);
+            assert(ins_res.second);
+        }
+
+        InitPrebuiltTables(node_id);
+    }
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
         common_labels["core_id"] = std::to_string(thd_idx);
@@ -94,7 +104,21 @@ LocalCcShards::LocalCcShards(
                                       metrics_registry,
                                       common_labels));
     }
+}
 
+LocalCcShards::~LocalCcShards()
+{
+    {
+        std::scoped_lock<std::mutex> lk(timer_terminate_mux_);
+        timer_terminate_ = true;
+        timer_terminate_cv_.notify_one();
+    }
+    timer_thd_.join();
+    cc_shards_.clear();
+}
+
+void LocalCcShards::StartBackgroudWorkers()
+{
     // Starts flush worker threads firstly.
     for (int id = 0; id < flush_data_worker_ctx_.worker_num_; id++)
     {
@@ -118,7 +142,7 @@ LocalCcShards::LocalCcShards(
             std::thread([this] { DataSyncWorker(); }));
     }
 
-    if (realtime_sampling)
+    if (realtime_sampling_)
     {
         statistics_worker_ctx_.worker_thd_.push_back(
             std::thread([this] { SyncTableStatisticsWorker(); }));
@@ -126,28 +150,6 @@ LocalCcShards::LocalCcShards(
 
     defragment_worker_ctx_.worker_thd_.push_back(
         std::thread([this] { DefragmentWorker(); }));
-
-    if (prebuilt_tables)
-    {
-        for (auto &[table, image] : *prebuilt_tables)
-        {
-            auto ins_res = prebuilt_tables_.try_emplace(table, image);
-            assert(ins_res.second);
-        }
-
-        InitPrebuiltTables(node_id);
-    }
-}
-
-LocalCcShards::~LocalCcShards()
-{
-    {
-        std::scoped_lock<std::mutex> lk(timer_terminate_mux_);
-        timer_terminate_ = true;
-        timer_terminate_cv_.notify_one();
-    }
-    timer_thd_.join();
-    cc_shards_.clear();
 }
 
 uint64_t LocalCcShards::ClockTs()

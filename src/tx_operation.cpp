@@ -1,7 +1,5 @@
 #include "tx_operation.h"
 
-#include <braft/util.h>  //braft::HostNameAddr2NSUrl
-
 #include <algorithm>
 #include <atomic>
 #include <cstdint>

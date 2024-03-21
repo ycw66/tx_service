@@ -6,7 +6,6 @@
 #include <string>
 #include <unordered_map>
 
-#include "braft/route_table.h"
 #include "brpc/server.h"
 #include "butil/logging.h"
 #include "fault/cc_node.h"

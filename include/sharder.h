@@ -133,7 +133,6 @@ public:
 
     void Shutdown();
     void CloseStreamSender();
-    void CloseBraft();
 
     /**
      * @brief Returns the ID of the leader node of the input cc node group.
@@ -211,7 +210,6 @@ public:
      * local_port. The raft and the cc rpc services are on local_port+1. The log
      * group is on local_port+2. The replay service is on local_port+3.
      *
-     * @param path The local path where raft meta data is stored.
      * @return int Error code.
      */
     int Init(uint32_t node_id,
@@ -220,6 +218,9 @@ public:
              uint64_t config_version,
              const std::vector<std::string> *txlog_ips,
              const std::vector<uint16_t> *txlog_ports,
+             const std::string *hm_ip,
+             const uint16_t *hm_port,
+             const std::string *hm_bin_path,
              LocalCcShards *local_shards,
              std::unique_ptr<TxLog> log_agent,
              const std::string &local_path,
@@ -275,12 +276,16 @@ public:
 
     /**
      * @brief NotifyNewLeaderStart rpc will send the node_id of the new leader
-     * to each node. Update the leader cache without referring to braft service.
+     * to each node. Update the leader cache without referring to hm service.
      *
      * @param ng_id The cc node group ID.
      * @param node_id The node_id of leader.
      */
     void UpdateLeader(uint32_t ng_id, uint32_t node_id);
+
+    void OnLeaderStart(uint32_t ng_id, int64_t term);
+
+    void OnLeaderStop(uint32_t ng_id);
 
     /**
      * @brief Update the log group's leader node id when the log group leader
@@ -303,15 +308,6 @@ public:
     {
         return CandidateLeaderTerm(node_id_) > 0 || LeaderTerm(node_id_) > 0;
     }
-
-    /**
-     * @brief Processes the RPC that transfers the leader of the specified cc
-     * node group to the preferred cc node.
-     *
-     * @param ng_id The cc node group in which the leader is transferred.
-     * @return int Error code.
-     */
-    int TransferLeader(uint32_t ng_id);
 
     TxLog *GetLogAgent() const
     {
@@ -425,7 +421,7 @@ public:
      * Unpin data of cc_ng_id, clear ccmaps and catalogs if this node is no
      * longer group leader and pinning threads number decreases to 0.
      * Must be called in pair with TryPinNodeGroupData if TryPinNodeGroupData
-     * returns success, otherwise braft thread of cc_ng_id will be blocked
+     * returns success, otherwise OnLeaderStop will be blocked
      * forever.
      * @param cc_ng_id
      */
@@ -507,15 +503,6 @@ private:
 
     void SetCommandLineOptions();
 
-    /**
-     * @brief Registers all cc node groups and their configurations in the braft
-     * cache.
-     *
-     */
-    void ConfigRouteTable(
-        const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
-            &ng_configs);
-
 private:
     uint32_t node_id_;
 
@@ -588,18 +575,20 @@ private:
     // Worker pool for doing various aync works
     std::unique_ptr<TxWorkerPool> tx_worker_pool_;
 
-    // Worker thread that update braft config/info in sharder
+    // Worker thread that communicates with host manager process.
     std::unique_ptr<TxWorkerPool> sharder_worker_;
 
     LocalCcShards *local_shards_;
     std::unique_ptr<TxLog> log_agent_;
-
-    std::string raft_local_path_{""};
 
     // Channel to cc node service of other nodes.
     std::unordered_map<uint32_t, std::shared_ptr<brpc::Channel>>
         cc_node_service_channels_;
 
     std::shared_mutex node_channel_mux_;
+    // Host manager ip and port
+    std::string hm_ip_{""};
+    uint16_t hm_port_{0};
+    brpc::Channel hm_channel_;
 };
 }  // namespace txservice

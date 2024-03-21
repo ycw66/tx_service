@@ -114,8 +114,6 @@ public:
                    uint32_t cc_ng_id,
                    int64_t cc_ng_term);
 
-    void NotifyLeaderTransfer();
-
     int on_received_messages(brpc::StreamId stream_id,
                              butil::IOBuf *const messages[],
                              size_t size) override;
@@ -137,8 +135,6 @@ private:
     int ProcessDelayedReplayLogTask();
 
     void ProcessRecoverTxTask(RecoverTxTask &task);
-
-    void RequestLeaderTransfer();
 
     struct ConnectionInfo
     {
@@ -196,7 +192,6 @@ private:
     std::mutex queue_mux_;
     std::condition_variable queue_cv_;
     std::atomic<bool> finish_;
-    std::atomic<bool> request_transfer_;
 
     // ip and port of log replay server of this node
     std::string ip_;

@@ -347,6 +347,7 @@ include/proto/*.pb.h
 
 # log_service dir
 mono_metrics
+raft_host_manager
 
 # pre-commit
 .pre-commit-config.yaml

@@ -208,8 +208,8 @@ public:
         // First we need to update cluster configs in Sharder.
         if (Sharder::Instance().ClusterConfigVersion() < req.CommitTs())
         {
-            // async braft change_peers call is made. cc req will be put
-            // back in queue once it's done.
+            // async call to host manager to update ng is made. cc req will be
+            // put back in queue once it's done.
             Sharder::Instance().UpdateClusterConfig(
                 config_rec->GetNodeGroupConfigs(),
                 req.CommitTs(),

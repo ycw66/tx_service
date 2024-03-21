@@ -28,6 +28,11 @@ message(NOTICE "RANGE_PARTITION_ENABLED : ${RANGE_PARTITION_ENABLED}")
 if (RANGE_PARTITION_ENABLED)
     add_definitions(-DRANGE_PARTITION_ENABLED)
 endif()
+option (FORK_HM_PROCESS "Whether fork host manager process" ON)
+message(NOTICE "FORK_HM_PROCESS : ${FORK_HM_PROCESS}")
+if (FORK_HM_PROCESS)
+    add_definitions(-DFORK_HM_PROCESS)
+endif()
 
 option(TXRESULT_USE_BTHREAD_MUTEX "TxRequest use bthread::Mutex instead of std::mutex" OFF)
 message(STATUS "TXRESULT_USE_BTHREAD_MUTEX : ${RANGE_PARTITION_ENABLED}")
@@ -69,12 +74,6 @@ if ( CMAKE_COMPILER_IS_GNUCC )
     find_library(BRPC_LIB NAMES brpc)
     if ((NOT BRPC_INCLUDE_PATH) OR (NOT BRPC_LIB))
         message(FATAL_ERROR "Fail to find brpc")
-    endif()
-
-    find_path(BRAFT_INCLUDE_PATH NAMES braft/raft.h)
-    find_library(BRAFT_LIB NAMES braft)
-    if ((NOT BRAFT_INCLUDE_PATH) OR (NOT BRAFT_LIB))
-        message (FATAL_ERROR "Fail to find braft")
     endif()
 
     if(BRPC_WITH_GLOG)
@@ -133,7 +132,6 @@ if ( CMAKE_COMPILER_IS_GNUCC )
     set(INCLUDE_DIR ${INCLUDE_DIR}
         ${MIMALLOC_INCLUDE_PATH}
         ${BRPC_INCLUDE_PATH}
-        ${BRAFT_INCLUDE_PATH}
         ${GLOG_INCLUDE_PATH}
         ${GFLAGS_INCLUDE_PATH})
 endif()
@@ -145,7 +143,6 @@ if ( CMAKE_COMPILER_IS_GNUCC )
        ${MIMALLOC_LIB}
        ${GFLAGS_LIBRARY}
        ${LEVELDB_LIB}
-       ${BRAFT_LIB}
        ${BRPC_LIB}
        ${OPENSSL_LIB}
     )

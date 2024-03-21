@@ -53,7 +53,6 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
     : local_shards_(local_shards),
       log_agent_(log_agent),
       finish_(false),
-      request_transfer_(false),
       ip_(std::move(ip)),
       port_(port)
 {
@@ -71,9 +70,7 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                     {
                         return !replay_log_queue_.empty() ||
                                !recover_tx_queue_.empty() ||
-                               finish_.load(std::memory_order_acquire) ||
-                               request_transfer_.load(
-                                   std::memory_order_acquire);
+                               finish_.load(std::memory_order_acquire);
                     });
                 if (finish_.load(std::memory_order_acquire))
                 {
@@ -107,15 +104,6 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                     LOG(INFO) << "replay service processes a RecoverTx task";
                     ProcessRecoverTxTask(task);
                     continue;
-                }
-                request_transfer_.store(false, std::memory_order_release);
-                if (!Sharder::Instance().IsPreferredGroupLeader())
-                {
-                    lk.unlock();
-                    LOG(INFO)
-                        << "this node is not preferred node group's leader, "
-                           "request leader transfer";
-                    RequestLeaderTransfer();
                 }
             }
         });
@@ -304,12 +292,6 @@ void ReplayService::RecoverTx(uint64_t tx_number,
     std::unique_lock lk(queue_mux_);
     recover_tx_queue_.emplace_back(
         tx_number, tx_term, write_lock_ts, cc_ng_id, cc_ng_term);
-    queue_cv_.notify_one();
-}
-
-void ReplayService::NotifyLeaderTransfer()
-{
-    request_transfer_.store(true, std::memory_order_release);
     queue_cv_.notify_one();
 }
 
@@ -1031,56 +1013,5 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
     }
 }
 
-void ReplayService::RequestLeaderTransfer()
-{
-    uint32_t node_id = Sharder::Instance().NodeId();
-    Sharder::Instance().UpdateLeader(node_id);
-    uint32_t leader_node_id = Sharder::Instance().LeaderNodeId(node_id);
-    if (leader_node_id != node_id)
-    {
-        auto channel =
-            Sharder::Instance().GetCcNodeServiceChannel(leader_node_id);
-        if (channel == nullptr)
-        {
-            // Fails to establish the channel to the leader.
-            // Silently returns. LeaderTransfer will be retried
-            // if this node is still not preferred group leader.
-            LOG(ERROR) << "Fail to init the channel to the "
-                          "leader of ng#"
-                       << node_id << " for leader transfer.";
-            return;
-        }
-
-        remote::CcRpcService_Stub stub(channel.get());
-
-        remote::TransferRequest req;
-        req.set_ng_id(node_id);
-        remote::TransferResponse res;
-        res.set_error(false);
-
-        brpc::Controller cntl;
-        cntl.set_timeout_ms(3000);
-        stub.Transfer(&cntl, &req, &res, nullptr);
-
-        if (cntl.Failed())
-        {
-            LOG(ERROR) << "Fail the Transfer RPC of ng#" << node_id
-                       << ". Error code: " << cntl.ErrorCode()
-                       << ". Msg: " << cntl.ErrorText();
-            Sharder::Instance().UpdateCcNodeServiceChannel(leader_node_id,
-                                                           channel);
-        }
-        else if (res.error())
-        {
-            LOG(ERROR) << "Fail to transfer the leader of ng#" << node_id
-                       << " to this node";
-        }
-        else
-        {
-            LOG(INFO) << "Transfer rpc succeeds, this node should reclaim ng#"
-                      << node_id << " leadership later";
-        }
-    }
-}
 }  // namespace fault
 }  // namespace txservice

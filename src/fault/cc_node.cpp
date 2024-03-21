@@ -1,202 +1,27 @@
 #include "fault/cc_node.h"
 
-#include <braft/util.h>  //braft::HostNameAddr2NSUrl
-
 #include "local_cc_shards.h"
 #include "sharder.h"
+#include "tx_service.h"
 
 namespace txservice::fault
 {
 
 CcNode::CcNode(const uint32_t ng_id,
                const uint32_t node_id,
-               const std::string &ip,
-               const uint16_t port,
-               const std::vector<std::string> &ng_ips,
-               const std::vector<uint16_t> &ng_ports,
-               std::string storage_path,
                LocalCcShards &local_shards,
                fault::ReplayService *replay_service,
                uint32_t log_group_cnt)
     : ng_id_(ng_id),
       node_id_(node_id),
-      ip_(ip),
-      port_(port),
-      ng_ips_(ng_ips),
-      ng_ports_(ng_ports),
-      storage_path_(storage_path),
+      leader_term_(-1),
+      candidate_leader_term_(-1),
       last_ckpt_ts_(0),
       pinning_threads_(0),
       local_cc_shards_(local_shards),
       replay_service_(replay_service),
       log_group_cnt_(log_group_cnt)
 {
-    // FIXME: in which case the node_idx_ is not zero? should be failover
-    size_t nid = 0;
-    for (; nid < ng_ips_.size(); ++nid)
-    {
-        if (ng_ips_.at(nid) == ip_ && ng_ports_.at(nid) == port_)
-        {
-            node_idx_ = nid;
-            break;
-        }
-    }
-
-    if (nid >= ng_ips_.size())
-    {
-        LOG(ERROR) << "Failed to initialize the CC node, whose IP is not "
-                      "included in the node group.";
-    }
-}
-
-int CcNode::Start()
-{
-    braft::NodeOptions node_options = BaseNodeOptions();
-    braft::PeerId local_node;
-
-    std::string raft_conf;
-    for (size_t nid = 0; nid < ng_ips_.size(); ++nid)
-    {
-        if (nid > 0)
-        {
-            raft_conf.append(",");
-        }
-
-        raft_conf.append(ng_ips_.at(nid));
-        raft_conf.append(":");
-        raft_conf.append(std::to_string(ng_ports_.at(nid)));
-        raft_conf.append(":");
-        raft_conf.append(std::to_string(nid));
-    }
-
-    if (node_options.initial_conf.parse_from(raft_conf) != 0)
-    {
-        LOG(ERROR) << "Fail to parse configuration " << raft_conf;
-        return -1;
-    }
-    node_options.fsm = this;
-    node_options.log_uri = storage_path_ + "/log";
-    node_options.raft_meta_uri = storage_path_ + "/meta";
-    node_options.snapshot_uri = storage_path_ + "/snapshot";
-
-    // preferred leader has lower election timeout.
-    if (node_idx_ == 0)
-    {
-        node_options.election_timeout_ms = 1000;
-    }
-    else
-    {
-        node_options.election_timeout_ms = 5000;
-    }
-
-    std::string group_id("ng");
-    group_id.append(std::to_string(ng_id_));
-
-    if (0 != butil::str2ip(ip_.c_str(), &local_node.addr.ip))
-    {
-        // for case `ip_` is hostname format
-        local_node.type_ = braft::PeerId::Type::HostName;
-        local_node.hostname_addr.hostname = ip_;
-        local_node.hostname_addr.port = port_;
-        // node init process would check ip addr is not butil::IP_ANY
-        local_node.addr.ip = butil::my_ip();
-        local_node.addr.port = port_;
-    }
-    else
-    {
-        butil::str2endpoint(ip_.c_str(), port_, &local_node.addr);
-    }
-    local_node.idx = node_idx_;
-    braft::Node *node = new braft::Node(group_id, local_node);
-
-    if (node->init(node_options) != 0)
-    {
-        LOG(ERROR) << "Fail to init raft node";
-        delete node;
-        return -1;
-    }
-    node_ = node;
-
-    /*if (node_idx_ == 0)
-    {
-        node_->vote(0);
-    }*/
-
-    return 0;
-}
-
-CcNode::~CcNode()
-{
-    delete node_;
-
-    // leader term should've been reset to -1 when the node is joined,
-    // but let's do it again just to be safe.
-    Sharder::Instance().SetLeaderTerm(ng_id_, -1);
-    Sharder::Instance().SetCandidateTerm(ng_id_, -1);
-}
-
-// Shut this node down.
-void CcNode::Shutdown()
-{
-    if (node_)
-    {
-        node_->shutdown(NULL);
-    }
-}
-
-// Blocking this thread until the node is eventually down.
-void CcNode::Join()
-{
-    if (node_)
-    {
-        node_->join();
-    }
-}
-
-int CcNode::TransferLeader()
-{
-    // By default, the first node in a cc node group is expected to be the
-    // leader, so that leaders of all cc node groups are evenly distributed
-    // among physical nodes for maximal usage of resources. If the current
-    // node is the leader and yet is not the first in the group (either
-    // because the old leader fails over to this node or because on group
-    // start this node happens to be elected as the leader), tries to
-    // transfer the leadership to the first node for rebalance.
-
-    std::shared_lock<std::shared_mutex> config_lk(config_mux_);
-    if (node_idx_ > 0 && node_->is_leader())
-    {
-        braft::PeerId first_peer;
-        // ng_ips[0]/ng_ports[0] stores the addr of the preferred leader.
-        if (0 != butil::str2ip(ng_ips_.at(0).c_str(), &first_peer.addr.ip))
-        {
-            // for case `ng_ips_` is hostname format.
-            first_peer.type_ = braft::PeerId::Type::HostName;
-            first_peer.hostname_addr.hostname = ng_ips_.at(0);
-            first_peer.hostname_addr.port = ng_ports_.at(0);
-        }
-        else
-        {
-            butil::str2endpoint(
-                ng_ips_.at(0).c_str(), ng_ports_.at(0), &first_peer.addr);
-        }
-        first_peer.idx = 0;
-
-        int err = node_->transfer_leadership_to(first_peer);
-
-        size_t retry = 3;
-        while (retry > 0 && err != 0)
-        {
-            using namespace std::chrono_literals;
-            std::this_thread::sleep_for(1s);
-            err = node_->transfer_leadership_to(first_peer);
-            --retry;
-        }
-
-        return err;
-    }
-
-    return -1;
 }
 
 bool CcNode::CheckLogGroupReplayFinished(uint32_t log_group_id, int64_t ng_term)
@@ -248,7 +73,7 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
     // Since cc_node is not bound to specific log node group, finally the
     // cc_shard will be setup with the MAX last_committed_txn_no from all log
     // groups
-    if (node_idx_ == 0)
+    if (ng_id_ == node_id_)
     {
         local_cc_shards_.SetTxIdent(latest_committed_txn_no);
     }
@@ -347,44 +172,19 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
             continue;
         }
 
-        brpc::Channel channel;
-        butil::EndPoint addr;
-        butil::ip_t ip_t;
-        if (0 != butil::str2ip(node_ip.c_str(), &ip_t))
+        std::shared_ptr<brpc::Channel> channel =
+            Sharder::Instance().GetCcNodeServiceChannel(node_id);
+        if (channel == nullptr)
         {
-            // for case `node_ip` is hostname format
-            std::string naming_service_url;
-            braft::HostNameAddr hostname_addr(node_ip,
-                                              GET_CCNODE_RPC_PORT(node_port));
-            braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
-            if (channel.Init(naming_service_url.c_str(),
-                             braft::LOAD_BALANCER_NAME,
-                             nullptr) != 0)
-            {
-                // Fails to establish the channel to the tx node. Silently
-                // returns. The tx will be recovered again by next
-                // conflicting tx.
-                LOG(ERROR) << "Fail to init the channel to the leader of ng#"
-                           << leader_ng_id << " for tx lock recovery.";
-                continue;
-            }
-        }
-        else
-        {
-            if (channel.Init(node_ip.c_str(),
-                             GET_CCNODE_RPC_PORT(node_port),
-                             nullptr) != 0)
-            {
-                // Fails to establish the channel to the tx node. Silently
-                // returns. The tx will be recovered again by next
-                // conflicting tx.
-                LOG(ERROR) << "Fail to init the channel to the leader of ng#"
-                           << leader_ng_id << " for tx lock recovery.";
-                continue;
-            }
+            // Fails to establish the channel to the tx node. Silently
+            // returns. The tx will be recovered again by next
+            // conflicting tx.
+            LOG(ERROR) << "Fail to init the channel to the leader of ng#"
+                       << leader_ng_id << " for tx lock recovery.";
+            continue;
         }
 
-        remote::CcRpcService_Stub stub(&channel);
+        remote::CcRpcService_Stub stub(channel.get());
         remote::NotifyNewLeaderStartRequest req;
         req.set_ng_id(leader_ng_id);
         req.set_node_id(leader_node_id);
@@ -418,59 +218,71 @@ bool CcNode::UpdateNodeGroupConfig(const std::vector<std::string> &ng_ips,
                                    bool &finished,
                                    bool &succ)
 {
-    std::unique_lock<std::shared_mutex> lk(config_mux_);
-    bool ng_updated = false;
-    if (ng_ips.size() != ng_ips_.size())
-    {
-        ng_updated = true;
-        ng_ips_.resize(ng_ips.size());
-        ng_ports_.resize(ng_ports.size());
-    }
-    for (size_t idx = 0; idx < ng_ips.size(); ++idx)
-    {
-        if (ng_ips[idx] == ip_ && ng_ports[idx] == port_)
-        {
-            node_idx_ = idx;
-        }
-        if (ng_ips[idx] != ng_ips_[idx] || ng_ports[idx] != ng_ports_[idx])
-        {
-            ng_updated = true;
-            ng_ips_[idx] = ng_ips[idx];
-            ng_ports_[idx] = ng_ports[idx];
-        }
-    }
+    // std::unique_lock<std::shared_mutex> lk(config_mux_);
+    // bool ng_updated = false;
+    // if (ng_ips.size() != ng_ips_.size())
+    //{
+    //     ng_updated = true;
+    //     ng_ips_.resize(ng_ips.size());
+    //     ng_ports_.resize(ng_ports.size());
+    // }
+    // for (size_t idx = 0; idx < ng_ips.size(); ++idx)
+    //{
+    //     if (ng_ips[idx] == ip_ && ng_ports[idx] == port_)
+    //     {
+    //         node_idx_ = idx;
+    //     }
+    //     if (ng_ips[idx] != ng_ips_[idx] || ng_ports[idx] != ng_ports_[idx])
+    //     {
+    //         ng_updated = true;
+    //         ng_ips_[idx] = ng_ips[idx];
+    //         ng_ports_[idx] = ng_ports[idx];
+    //     }
+    // }
 
-    // Update node group config only if node is preferred leader.
-    if (ng_updated && node_idx_ == 0)
-    {
-        std::string raft_conf;
-        for (size_t nid = 0; nid < ng_ips_.size(); ++nid)
-        {
-            if (nid > 0)
-            {
-                raft_conf.append(",");
-            }
+    //// Update node group config only if node is preferred leader.
+    // if (ng_updated && node_idx_ == 0)
+    //{
+    //     std::string raft_conf;
+    //     for (size_t nid = 0; nid < ng_ips_.size(); ++nid)
+    //     {
+    //         if (nid > 0)
+    //         {
+    //             raft_conf.append(",");
+    //         }
 
-            raft_conf.append(ng_ips_.at(nid));
-            raft_conf.append(":");
-            raft_conf.append(std::to_string(ng_ports_.at(nid)));
-            raft_conf.append(":");
-            raft_conf.append(std::to_string(nid));
-        }
-        braft::Configuration braft_config;
-        braft_config.parse_from(raft_conf);
+    //        raft_conf.append(ng_ips_.at(nid));
+    //        raft_conf.append(":");
+    //        raft_conf.append(std::to_string(ng_ports_.at(nid)));
+    //        raft_conf.append(":");
+    //        raft_conf.append(std::to_string(nid));
+    //    }
+    //    braft::Configuration braft_config;
+    //    braft_config.parse_from(raft_conf);
 
-        // Put the cc req back in queue in the closure callback.
-        ChangePeerClosure *closure =
-            new ChangePeerClosure(mux, cv, finished, succ, braft_config, node_);
-        node_->change_peers(braft_config, closure);
-        return true;
-    }
+    //    // Put the cc req back in queue in the closure callback.
+    //    ChangePeerClosure *closure =
+    //        new ChangePeerClosure(mux, cv, finished, succ, braft_config,
+    //        node_);
+    //    node_->change_peers(braft_config, closure);
+    //    return true;
+    //}
     return false;
 }
 
-void CcNode::on_leader_start(int64_t term)
+void CcNode::OnLeaderStart(int64_t term)
 {
+    // Check if cc node still think it is the owner of node group. If so,
+    // we need to clear the expired in memory state first
+    int64_t orig_term = leader_term_.load(std::memory_order_acquire);
+    if (orig_term >= term)
+    {
+        return;
+    }
+    else if (orig_term > 0)
+    {
+        OnLeaderStop();
+    }
     {
         // replay thread and leader election thread may update
         // candidate_leader_term_ and recovered_log_groups_ concurrently.
@@ -482,8 +294,8 @@ void CcNode::on_leader_start(int64_t term)
         recovered_log_groups_.clear();
     }
 
-    LOG(INFO) << "CC node " << ip_ << ":" << port_
-              << " becomes the leader of ng#" << ng_id_ << ". Term: " << term;
+    LOG(INFO) << "CC node " << node_id_ << " becomes the leader of ng#"
+              << ng_id_ << ". Term: " << term;
 
     if (!local_cc_shards_.IsRangeBucketsInitialized(ng_id_))
     {
@@ -512,15 +324,26 @@ void CcNode::on_leader_start(int64_t term)
         }
     }
     local_cc_shards_.InitPrebuiltTables(ng_id_);
-    replay_service_->ReplayLog(ng_id_, term);
+    if (txservice_skip_wal)
+    {
+        Sharder::Instance().SetLeaderTerm(ng_id_, term);
+        LOG(INFO) << "Skipped log replay for cc node group #" << ng_id_
+                  << " with the term " << term;
+        Sharder::Instance().SetCandidateTerm(ng_id_, -1);
+        Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
+    }
+    else
+    {
+        replay_service_->ReplayLog(ng_id_, term);
+    }
 
     NotifyNewLeaderStart(ng_id_, node_id_);
 }
 
-void CcNode::on_leader_stop(const butil::Status &status)
+void CcNode::OnLeaderStop()
 {
-    LOG(INFO) << "CC node " << ip_ << ":" << port_
-              << " steps down as the leader of ng#" << ng_id_ << ".";
+    LOG(INFO) << "CC node " << node_id_ << " steps down as the leader of ng#"
+              << ng_id_ << ".";
 
     Sharder::Instance().SetCandidateTerm(ng_id_, -1);
     Sharder::Instance().SetLeaderTerm(ng_id_, -1);
@@ -539,58 +362,4 @@ void CcNode::on_leader_stop(const butil::Status &status)
     clear_ccm_req.Wait();
 }
 
-void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
-{
-    LOG(INFO) << "CC node " << ip_ << ":" << port_ << " starts following in ng#"
-              << ng_id_ << ", term: " << ctx.term();
-
-    if (node_idx_ == 0)
-    {
-        // notify replay service to request leader transfer immediately
-        replay_service_->NotifyLeaderTransfer();
-    }
-    else
-    {
-        /*
-         *Adjusting the election_timeout_ms on the non-preferred leader node
-         *to match the preferred leader node ensures that the non-preferred
-         *leader can quickly catch up with the leader election process. This
-         *prevents prolonged absence of the new leader from the log node
-         *group, improving system reliability.
-         */
-        node_->reset_election_timeout_ms(1000, 1000);
-    }
-}
-
-void ChangePeerClosure::Run()
-{
-    if (!status().ok())
-    {
-        if (node_->is_leader())
-        {
-            // Retry
-            LOG(ERROR) << "Failed to update braft config during cluster config "
-                          "update. Retrying...";
-            node_->change_peers(new_config_, this);
-        }
-        else
-        {
-            std::unique_lock<std::mutex> lk(mux_);
-            finished_ = true;
-            succ_ = false;
-            cv_.notify_one();
-        }
-        return;
-    }
-
-    // Free closure on exit if change_peers succeed.
-    std::unique_ptr<ChangePeerClosure> self_guard(this);
-    // Each node is only responsible for updating the ng of which it
-    // is the preferred leader. So we must be the only one braft ng
-    // change.
-    std::unique_lock<std::mutex> lk(mux_);
-    finished_ = true;
-    succ_ = true;
-    cv_.notify_one();
-}
 }  // namespace txservice::fault

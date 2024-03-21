@@ -23,10 +23,15 @@ class CcNodeService : public CcRpcService
 public:
     CcNodeService(LocalCcShards &local_shards);
 
-    void Transfer(::google::protobuf::RpcController *controller,
-                  const TransferRequest *request,
-                  TransferResponse *response,
-                  ::google::protobuf::Closure *done) override;
+    void OnLeaderStart(::google::protobuf::RpcController *controller,
+                       const OnLeaderStartRequest *request,
+                       OnLeaderChangeResponse *response,
+                       ::google::protobuf::Closure *done) override;
+
+    void OnLeaderStop(::google::protobuf::RpcController *controller,
+                      const OnLeaderStopRequest *request,
+                      OnLeaderChangeResponse *response,
+                      ::google::protobuf::Closure *done) override;
 
     void CheckTxStatus(::google::protobuf::RpcController *controller,
                        const CheckTxStatusRequest *request,

@@ -3915,6 +3915,12 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
 
     write_log.Reset();
     write_log.is_running_ = true;
+    if (txservice_skip_wal)
+    {
+        write_log.hd_result_.SetFinished();
+        PostProcess(write_log);
+        return;
+    }
 
     if (metrics::enable_tx_service_metrics)
     {

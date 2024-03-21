@@ -914,19 +914,16 @@ class TxService
 {
 public:
     TxService(
-        const std::string &local_path,
         CatalogFactory *catalog_factory,
         SystemHandler *system_handler,
         const std::map<std::string, uint32_t> &conf,
         uint32_t node_id,  // = 0,
         std::unordered_map<uint32_t, std::vector<NodeConfig>>
-            *ng_configs,                      // = nullptr,
-        int32_t range_bucket_seed,            // = -1,
-        uint64_t cluster_config_version,      // = 0,
-        std::vector<std::string> *txlog_ips,  // = nullptr,
-        std::vector<uint16_t> *txlog_ports,   // = nullptr,
-        store::DataStoreHandler *store_hd,    // = nullptr,
-        std::unique_ptr<TxLog> log_hd,        // = nullptr,
+            *ng_configs,                    // = nullptr,
+        int32_t range_bucket_seed,          // = -1,
+        uint64_t cluster_config_version,    // = 0,
+        store::DataStoreHandler *store_hd,  // = nullptr,
+        TxLog *log_hd,                      // = nullptr,
         bool enable_mvcc = true,
         bool skip_wal = false,
         bool skip_kv = false,  // only used in mono_redis
@@ -952,7 +949,7 @@ public:
           ckpt_(local_cc_shards_,
                 store_hd,
                 conf.at("checkpointer_interval"),
-                log_hd.get(),
+                log_hd,
                 conf.at("checkpointer_delay_seconds"))
     {
         uint32_t core_cnt = conf.at("core_num");
@@ -967,37 +964,55 @@ public:
                 pool_.emplace_back(
                     std::make_unique<TxProcessor>(thd_idx,
                                                   local_cc_shards_,
-                                                  log_hd.get(),
+                                                  log_hd,
                                                   metrics_registry,
                                                   common_labels));
             }
             else
             {
                 pool_.emplace_back(std::make_unique<TxProcessor>(
-                    thd_idx, local_cc_shards_, log_hd.get()));
+                    thd_idx, local_cc_shards_, log_hd));
             }
         }
 
-        uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
-        Sharder::Instance().Init(node_id,
-                                 ng_configs,
-                                 cluster_config_version,
-                                 txlog_ips,
-                                 txlog_ports,
-                                 &local_cc_shards_,
-                                 std::move(log_hd),
-                                 local_path,
-                                 ng_rep_cnt);
-        TxStartTsCollector::Instance().Init(
-            &local_cc_shards_,
-            conf.at("collect_active_tx_ts_interval_seconds"));
-        DeadLockCheck::Init(local_cc_shards_);
         txservice_skip_wal = skip_wal;
         txservice_skip_kv = skip_kv;
     }
 
-    void Start()
+    int Start(uint32_t node_id,
+              const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+                  *ng_configs,
+              uint64_t cluster_config_version,
+              const std::vector<std::string> *txlog_ips,
+              const std::vector<uint16_t> *txlog_ports,
+              const std::string *hm_ip,
+              const uint16_t *hm_port,
+              const std::string *hm_bin_path,
+              const std::map<std::string, uint32_t> &conf,
+              std::unique_ptr<TxLog> log_agent,
+              const std::string &local_path)
     {
+        uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
+        if (Sharder::Instance().Init(node_id,
+                                     ng_configs,
+                                     cluster_config_version,
+                                     txlog_ips,
+                                     txlog_ports,
+                                     hm_ip,
+                                     hm_port,
+                                     hm_bin_path,
+                                     &local_cc_shards_,
+                                     std::move(log_agent),
+                                     local_path,
+                                     ng_rep_cnt) < 0)
+
+        {
+            return -1;
+        }
+        TxStartTsCollector::Instance().Init(
+            &local_cc_shards_,
+            conf.at("collect_active_tx_ts_interval_seconds"));
+        DeadLockCheck::Init(local_cc_shards_);
         for (size_t thd_idx = 0; thd_idx < pool_.size(); ++thd_idx)
         {
             TxProcessor *tp = pool_[thd_idx].get();
@@ -1005,11 +1020,9 @@ public:
             tp->InitializeLocalHandler();
             thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
         }
-#ifdef EXT_TX_PROC_ENABLED
-#ifdef ON_KEY_OBJECT
+#if defined(EXT_TX_PROC_ENABLED) && defined(ON_KEY_OBJECT)
         // set ext_tx_prc_func to brpc
         bthread_set_ext_tx_prc_func(GetTxProcFunctors());
-#endif
 #endif
 
         // Start cc stream receiver server.
@@ -1019,6 +1032,8 @@ public:
         {
             TxStartTsCollector::Instance().Start();
         }
+        local_cc_shards_.StartBackgroudWorkers();
+        return 0;
     }
 
     void WaitClusterReady()

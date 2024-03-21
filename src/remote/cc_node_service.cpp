@@ -1,7 +1,5 @@
 #include "remote/cc_node_service.h"
 
-#include <braft/util.h>  //braft::HostNameAddr2NSUrl
-
 #include "cc/local_cc_shards.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
@@ -18,19 +16,27 @@ CcNodeService::CcNodeService(LocalCcShards &local_shards)
 {
 }
 
-void CcNodeService::Transfer(::google::protobuf::RpcController *controller,
-                             const TransferRequest *request,
-                             TransferResponse *response,
-                             ::google::protobuf::Closure *done)
+void CcNodeService::OnLeaderStart(::google::protobuf::RpcController *controller,
+                                  const OnLeaderStartRequest *request,
+                                  OnLeaderChangeResponse *response,
+                                  ::google::protobuf::Closure *done)
 {
-    // This object helps you to call done->Run() in RAII style. If you need
-    // to process the request asynchronously, pass done_guard.release().
     brpc::ClosureGuard done_guard(done);
+    NodeGroupId ng_id = request->node_group_id();
+    int64_t term = request->node_group_term();
+    Sharder::Instance().OnLeaderStart(ng_id, term);
+    response->set_error(false);
+}
 
-    uint32_t ng_id = request->ng_id();
-    int err = Sharder::Instance().TransferLeader(ng_id);
-
-    response->set_error(err != 0);
+void CcNodeService::OnLeaderStop(::google::protobuf::RpcController *controller,
+                                 const OnLeaderStopRequest *request,
+                                 OnLeaderChangeResponse *response,
+                                 ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    NodeGroupId ng_id = request->node_group_id();
+    Sharder::Instance().OnLeaderStop(ng_id);
+    response->set_error(false);
 }
 
 void CcNodeService::CheckTxStatus(::google::protobuf::RpcController *controller,
