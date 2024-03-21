@@ -6488,6 +6488,7 @@ public:
             // null.
             if (Type() != TableType::Secondary || cce->payload_ == nullptr)
             {
+#ifndef ON_KEY_OBJECT
                 if (cce->payload_.use_count() == 1)
                 {
                     *(cce->payload_) = *commit_val;
@@ -6496,6 +6497,10 @@ public:
                 {
                     cce->payload_ = std::make_shared<ValueT>(*commit_val);
                 }
+#else
+                assert(false);
+                cce->payload_ = std::make_unique<ValueT>(*commit_val);
+#endif
             }
 
             // Currently, this request is only used during add index

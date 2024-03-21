@@ -122,9 +122,13 @@ void SkGenerator::GenerateSkFromPk(const TableName &table_name,
                                 LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
                                 acq_range_lock_txm->TxNumber(),
                                 start_key,
-                                end_key,
+                                end_key
+#ifdef RANGE_PARTITION_ENABLED
+                                ,
                                 true,
-                                true);
+                                true
+#endif
+        );
 
         std::tie(scanned_pk_count, res_code) = ScanPkAndGenerateSk(
             table_name, range_owner, new_indexes_name, scan_req, task_status);
@@ -180,6 +184,7 @@ void SkGenerator::GenerateSkFromPk(const TableName &table_name,
 
     if (scanned_pk_count > 0)
     {
+#ifdef RANGE_PARTITION_ENABLED
         for (auto table_it = write_entry_set_.begin();
              table_it != write_entry_set_.end();
              ++table_it)
@@ -190,6 +195,7 @@ void SkGenerator::GenerateSkFromPk(const TableName &table_name,
                       [](const WriteEntry &e1, const WriteEntry &e2)
                       { return *(e1.key_) < *(e2.key_); });
         }
+#endif
 
         LOG(INFO) << "Upload sk generated from pk of ng#" << range_owner
                   << " for base table: " << table_name.Trace()
@@ -427,9 +433,13 @@ void SkGenerator::RemoteGenerateSkFromPk(
                                 LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
                                 acq_range_lock_txm->TxNumber(),
                                 range_start_key,
-                                range_end_key,
+                                range_end_key
+#ifdef RANGE_PARTITION_ENABLED
+                                ,
                                 true,
-                                true);
+                                true
+#endif
+        );
 
         std::tie(scanned_pk_count, res_code) = ScanPkAndGenerateSk(
             table_name, ng_id, new_indexes_name, scan_req, task_status);
@@ -485,6 +495,7 @@ void SkGenerator::RemoteGenerateSkFromPk(
 
     if (scanned_pk_count > 0)
     {
+#ifdef RANGE_PARTITION_ENABLED
         for (auto table_it = write_entry_set_.begin();
              table_it != write_entry_set_.end();
              ++table_it)
@@ -495,6 +506,7 @@ void SkGenerator::RemoteGenerateSkFromPk(
                       [](const WriteEntry &e1, const WriteEntry &e2)
                       { return *(e1.key_) < *(e2.key_); });
         }
+#endif
 
         LOG(INFO) << "Upload sk generated from pk of ng#" << ng_id
                   << " for base table: " << table_name.Trace()
@@ -720,6 +732,7 @@ std::pair<size_t, CcErrorCode> SkGenerator::ScanPkAndGenerateSk(
 CcErrorCode SkGenerator::UploadWithoutDataLog(NodeGroupId ng_id,
                                               GenerateSkStatus &task_status)
 {
+    CcErrorCode res = CcErrorCode::NO_ERROR;
 #ifdef RANGE_PARTITION_ENABLED
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
     TransactionExecution *acq_range_lock_txm =
@@ -740,7 +753,7 @@ CcErrorCode SkGenerator::UploadWithoutDataLog(NodeGroupId ng_id,
         return CcErrorCode::TX_NODE_NOT_LEADER;
     }
 
-    CcErrorCode res = AcquireRangeReadLocks(acq_range_lock_txm);
+    res = AcquireRangeReadLocks(acq_range_lock_txm);
     if (res != CcErrorCode::NO_ERROR)
     {
         LOG(ERROR)
@@ -753,14 +766,22 @@ CcErrorCode SkGenerator::UploadWithoutDataLog(NodeGroupId ng_id,
 #else
     size_t hash = 0;
     uint32_t key_shard_code = 0;
-    NodeGroupId ng_id = 0;
+    NodeGroupId dest_ng_id = 0;
     for (auto table_it = write_entry_set_.begin();
          table_it != write_entry_set_.end();
          ++table_it)
     {
         auto &table_write_entrys = table_it->second;
         auto ng_write_entry_it = ng_write_entry_set_.find(table_it->first);
-        assert(ng_write_entry_it != ng_write_entry_set_.end());
+        if (ng_write_entry_it == ng_write_entry_set_.end())
+        {
+            auto ins_it = ng_write_entry_set_.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(table_it->first.StringView(),
+                                      table_it->first.Type()),
+                std::forward_as_tuple(NGWriteEntry()));
+            ng_write_entry_it = ins_it.first;
+        }
         auto &ng_table_write_entrys = ng_write_entry_it->second;
         for (auto item_it = table_write_entrys.begin();
              item_it != table_write_entrys.end();
@@ -768,8 +789,8 @@ CcErrorCode SkGenerator::UploadWithoutDataLog(NodeGroupId ng_id,
         {
             hash = item_it->key_->Hash();
             key_shard_code = Sharder::Instance().ShardCode(hash);
-            ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
-            auto ng_it = ng_table_write_entrys.try_emplace(ng_id);
+            dest_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
+            auto ng_it = ng_table_write_entrys.try_emplace(dest_ng_id);
             ng_it.first->second.push_back(&(*item_it));
         }
     }
