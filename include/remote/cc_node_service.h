@@ -84,6 +84,17 @@ public:
         ::txservice::remote::InitMigrationResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void GenerateSkFromPk(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::GenerateSkFromPkRequest *request,
+        ::txservice::remote::GenerateSkFromPkResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void UploadBatch(::google::protobuf::RpcController *controller,
+                     const ::txservice::remote::UploadBatchRequest *request,
+                     ::txservice::remote::UploadBatchResponse *response,
+                     ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

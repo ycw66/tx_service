@@ -40,6 +40,7 @@
 #include "raft_log.pb.h"
 #include "random_pairing.h"
 #include "range_slice.h"
+#include "read_write_entry.h"
 #include "remote/cc_stream_receiver.h"
 #include "remote/remote_type.h"
 #include "scan.h"
@@ -1063,14 +1064,14 @@ public:
     bool ValidTermCheck() override
     {
         int64_t cc_ng_term = -1;
-        if (!is_in_recovering_)
-        {
-            cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-        }
-        else
+        if (is_in_recovering_)
         {
             cc_ng_term =
                 Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        }
+        if (cc_ng_term < 0)
+        {
+            cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         }
 
         auto &tmp_cce_addr = res_->Value().cce_addr_;
@@ -1184,6 +1185,52 @@ public:
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = false;
+        is_wait_for_post_write_ = false;
+        is_in_recovering_ = false;
+        is_covering_keys_ = is_covering_keys;
+
+        ccm_ = nullptr;
+        if (res->Value().cce_addr_.CcePtr() != 0)
+        {
+            table_name_ = nullptr;
+        }
+        else
+        {
+            table_name_ = tn;
+        }
+    }
+
+    void Reset(const TableName *tn,
+               const std::string &key_str,
+               uint32_t key_shard_code,
+               TxRecord *rec,
+               ReadType read_type,
+               uint64_t tx_number,
+               int64_t tx_term,
+               uint64_t ts,
+               CcHandlerResult<ReadKeyResult> *res,
+               IsolationLevel iso_level,
+               CcProtocol protocol,
+               bool is_for_write = false,
+               bool is_covering_keys = false,
+               std::vector<VersionTxRecord> *archives = nullptr)
+    {
+        uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
+        TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
+            nullptr, res, ng_id, tx_number, protocol, iso_level);
+
+        key_ = nullptr;
+        key_str_ = &key_str;
+        key_shard_code_ = key_shard_code;
+        rec_ = rec;
+        rec_str_ = nullptr;
+        tx_term_ = tx_term;
+        ts_ = ts;
+        type_ = read_type;
+        is_for_write_ = is_for_write;
+        cce_ptr_ = nullptr;
+        archives_ = archives;
+        is_local_ = true;
         is_wait_for_post_write_ = false;
         is_in_recovering_ = false;
         is_covering_keys_ = is_covering_keys;
@@ -2616,6 +2663,7 @@ public:
 #endif
 
     DataSyncScanCc() = delete;
+    ~DataSyncScanCc() = default;
 
     DataSyncScanCc(const TableName &table_name,
                    uint64_t previous_scan_ts,
@@ -2627,8 +2675,13 @@ public:
                    size_t scan_batch_size,
                    uint64_t txn,
                    const TxKey *target_start_key = nullptr,
-                   const TxKey *target_end_key = nullptr,
-                   bool export_base_table_rec_if_need = false)
+                   const TxKey *target_end_key = nullptr
+#ifdef RANGE_PARTITION_ENABLED
+                   ,
+                   bool export_base_table_rec_if_need = false,
+                   bool skip_archived_key = false
+#endif
+                   )
         : table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
@@ -2645,7 +2698,8 @@ public:
           cv_()
 #ifdef RANGE_PARTITION_ENABLED
           ,
-          export_base_table_rec_if_need_(export_base_table_rec_if_need)
+          export_base_table_rec_if_need_(export_base_table_rec_if_need),
+          skip_archived_key_(skip_archived_key)
 #endif
     {
         tx_number_ = txn;
@@ -2654,13 +2708,19 @@ public:
         {
             data_sync_vec_.emplace_back();
             data_sync_vec_.back().resize(scan_batch_size);
-            archive_vec_.emplace_back();
-            archive_vec_.back().reserve(scan_batch_size);
-            mv_base_idx_vec_.emplace_back();
-            mv_base_idx_vec_.back().reserve(scan_batch_size);
+#ifdef RANGE_PARTITION_ENABLED
+            if (!skip_archived_key_)
+#endif
+            {
+                archive_vec_.emplace_back();
+                archive_vec_.back().reserve(scan_batch_size);
+                mv_base_idx_vec_.emplace_back();
+                mv_base_idx_vec_.back().reserve(scan_batch_size);
+            }
             pause_pos_.emplace_back(nullptr, false);
             accumulated_scan_cnt_.emplace_back(0);
         }
+
 #ifdef RANGE_PARTITION_ENABLED
         if (export_base_table_rec_if_need)
         {
@@ -2669,24 +2729,64 @@ public:
 #endif
     }
 
+    bool ValidTermCheck()
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (node_group_term_ < 0)
+        {
+            node_group_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != node_group_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
     // DataSyncScanCc is always stack object and won't be reused, worse, it
     // might be destructed before Execute returns, so always return false as
     // callershould never access this object after Execute returns
     bool Execute(CcShard &ccs) override
     {
+        if (!ValidTermCheck())
+        {
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
-
-        if (ccm != nullptr)
+        if (ccm == nullptr)
         {
-            ccm->Execute(*this);
+            assert(!table_name_->IsMeta());
+            const CatalogEntry *catalog_entry = ccs.InitCcm(
+                *table_name_, node_group_id_, node_group_term_, this);
+            if (catalog_entry == nullptr)
+            {
+                // The local node does not contain the table's schema
+                // instance. The FetchCatalog() method will send an
+                // async request toward the data store to fetch the
+                // catalog. After fetching is finished, this cc request
+                // is re-enqueued for re-execution.
+                return false;
+            }
+            else
+            {
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    // The local node (LocalCcShards) contains a schema
+                    // instance, which indicates that the table has been
+                    // dropped. Returns the request with an error.
+                    SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                    return false;
+                }
+                ccm = ccs.GetCcm(*table_name_, node_group_id_);
+            }
         }
-        else
-        {
-            pause_pos_[ccs.core_id_] = {nullptr, true};
-            // ccmap for this table does not exist on this shard, skip
-            // scanning for this shard.
-            SetFinish(ccs.core_id_);
-        }
+        assert(ccm != nullptr);
+        ccm->Execute(*this);
         // return false since DataSyncScanCc is not re-used and does not need to
         // call CcRequestBase::Free
         return false;
@@ -2718,8 +2818,13 @@ public:
         unfinished_cnt_ = core_cnt_;
         for (size_t i = 0; i < core_cnt_; i++)
         {
-            archive_vec_.at(i).clear();
-            mv_base_idx_vec_.at(i).clear();
+#ifdef RANGE_PARTITION_ENABLED
+            if (!skip_archived_key_)
+#endif
+            {
+                archive_vec_.at(i).clear();
+                mv_base_idx_vec_.at(i).clear();
+            }
             accumulated_scan_cnt_.at(i) = 0;
         }
     }
@@ -2828,6 +2933,11 @@ public:
         return mv_base_idx_vec_[core_id];
     }
 
+    int64_t NodeGroupTerm() const
+    {
+        return node_group_term_;
+    }
+
     std::vector<size_t> accumulated_scan_cnt_;
 
 private:
@@ -2855,8 +2965,8 @@ private:
 
     // Start/end key of target range if the scan is on a range only, nullptr if
     // it's on entire table.
-    const TxKey *start_key_{nullptr};
-    const TxKey *end_key_{nullptr};
+    const TxKey *start_key_;
+    const TxKey *end_key_;
     // Position that we left off during last round of ckpt scan.
     // pause_pos_.first is the key that we stopped at (has not been scanned
     // though), bool is if this core has finished scanning all keys already.
@@ -2877,6 +2987,9 @@ private:
     // commit_ts same as ckpt_ts. Note: This flag only used for RangePartition.
     bool export_base_table_rec_if_need_{false};
     std::vector<RangeSliceId> slice_ids_;
+
+    // This is used for scan during add index txm.
+    bool skip_archived_key_{false};
 #endif
 
     template <typename KeyT, typename ValueT>
@@ -4393,4 +4506,224 @@ private:
     std::condition_variable cv_;
     bool finished_{false};
 };
+
+struct UploadBatchCc
+    : public TemplatedCcRequest<UploadBatchCc, UploadBatchResult>
+{
+    using WriteEntryTuple = std::
+        tuple<const std::string &, const std::string &, const std::string &>;
+
+public:
+    UploadBatchCc() = default;
+
+    UploadBatchCc(const UploadBatchCc &rhs) = delete;
+    UploadBatchCc(UploadBatchCc &&rhs) = delete;
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
+        }
+
+        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
+        if (ccm == nullptr)
+        {
+            assert(!table_name_->IsMeta());
+            const CatalogEntry *catalog_entry =
+                ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
+            if (catalog_entry == nullptr)
+            {
+                // The local node does not contain the table's schema
+                // instance. The FetchCatalog() method will send an
+                // async request toward the data store to fetch the
+                // catalog. After fetching is finished, this cc request
+                // is re-enqueued for re-execution.
+                return false;
+            }
+            else
+            {
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    // The local node (LocalCcShards) contains a schema
+                    // instance, which indicates that the table has been
+                    // dropped. Returns the request with an error.
+                    SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                    return true;
+                }
+
+                ccm = ccs.GetCcm(*table_name_, node_group_id_);
+            }
+        }
+
+        assert(ccm != nullptr);
+        return ccm->Execute(*this);
+    }
+
+    void Reset(const TableName &table_name,
+               txservice::NodeGroupId ng_id,
+               int64_t ng_term,
+               size_t core_cnt,
+               size_t batch_size,
+               size_t start_key_idx,
+               const std::vector<WriteEntry *> &entry_vec,
+               CcHandlerResult<UploadBatchResult> &hd_res)
+    {
+        TemplatedCcRequest<UploadBatchCc, UploadBatchResult>::Reset(
+            &table_name,
+            &hd_res,
+            ng_id,
+            0,
+            CcProtocol::OCC,
+            IsolationLevel::ReadCommitted,
+            ng_term);
+
+        is_remote_ = false;
+        batch_size_ = batch_size;
+        start_key_idx_ = start_key_idx;
+        entry_vector_ = &entry_vec;
+        unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
+        err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0));
+    }
+
+    void Reset(const TableName &table_name,
+               txservice::NodeGroupId ng_id,
+               int64_t ng_term,
+               size_t core_cnt,
+               uint32_t batch_size,
+               const WriteEntryTuple &entry_tuple,
+               CcHandlerResult<UploadBatchResult> &hd_res)
+    {
+        TemplatedCcRequest<UploadBatchCc, UploadBatchResult>::Reset(
+            &table_name,
+            &hd_res,
+            ng_id,
+            0,
+            CcProtocol::OCC,
+            IsolationLevel::ReadCommitted,
+            ng_term);
+
+        is_remote_ = true;
+        batch_size_ = batch_size;
+        start_key_idx_ = 0;
+        entry_tuples_ = &entry_tuple;
+        unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
+        err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0));
+    }
+
+    bool SetFinish()
+    {
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            int64_t expect_term = -1;
+            bool succeed = res_->Value().term_.compare_exchange_strong(
+                expect_term, ng_term_, std::memory_order_acq_rel);
+            if (!succeed && expect_term != ng_term_)
+            {
+                res_->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            }
+            else if (err_code_.load(std::memory_order_relaxed) !=
+                     CcErrorCode::NO_ERROR)
+            {
+                res_->SetError(err_code_.load(std::memory_order_relaxed));
+            }
+            else
+            {
+                res_->SetFinished();
+            }
+            return true;
+        }
+        return false;
+    }
+
+    bool SetError(CcErrorCode err_code)
+    {
+        CcErrorCode no_error = CcErrorCode::NO_ERROR;
+        err_code_.compare_exchange_strong(
+            no_error, err_code, std::memory_order_acq_rel);
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            res_->SetError(err_code_.load(std::memory_order_relaxed));
+            return true;
+        }
+        return false;
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        DLOG(ERROR) << "Abort this uploadbatch request with error: "
+                    << CcErrorMessage(err_code);
+        if (SetError(err_code))
+        {
+            Free();
+        }
+    }
+
+    int64_t CcNgTerm() const
+    {
+        return ng_term_;
+    }
+
+    uint32_t BatchSize() const
+    {
+        return batch_size_;
+    }
+
+    const std::vector<WriteEntry *> *EntryVector() const
+    {
+        return is_remote_ ? nullptr : entry_vector_;
+    }
+
+    const WriteEntryTuple *EntryTuple() const
+    {
+        return is_remote_ ? entry_tuples_ : nullptr;
+    }
+
+    void SetPausedPosition(uint16_t core_id,
+                           size_t key_index,
+                           size_t key_off,
+                           size_t rec_off,
+                           size_t ts_off)
+    {
+        auto &key_pos = paused_pos_.at(core_id);
+        std::get<0>(key_pos) = key_index;
+        std::get<1>(key_pos) = key_off;
+        std::get<2>(key_pos) = rec_off;
+        std::get<3>(key_pos) = ts_off;
+    }
+
+    const std::tuple<size_t, size_t, size_t, size_t> &GetPausedPosition(
+        uint16_t core_id) const
+    {
+        return paused_pos_.at(core_id);
+    }
+
+    size_t StartKeyIndex() const
+    {
+        return start_key_idx_;
+    }
+
+private:
+    bool is_remote_{false};
+    uint32_t batch_size_{0};
+    size_t start_key_idx_{0};
+    union
+    {
+        // for local request
+        const std::vector<WriteEntry *> *entry_vector_;
+        // for remote request
+        const WriteEntryTuple *entry_tuples_;
+    };
+
+    // This two variables may be accessed by multi-cores.
+    std::atomic<size_t> unfinished_cnt_{0};
+    std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
+    // key index, key offset, record offset, ts offset
+    std::vector<std::tuple<size_t, size_t, size_t, size_t>> paused_pos_;
+};
+
 }  // namespace txservice

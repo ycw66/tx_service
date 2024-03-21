@@ -1153,8 +1153,23 @@ void TransactionExecution::ProcessTxRequest(
                      ::txlog::SchemaOpMessage::Stage::
                          SchemaOpMessage_Stage_PrepareIndexTable)
             {
-                index_op_->prepare_log_for_sk_op_.hd_result_.SetFinished();
+                if (schema_op.last_key_type() ==
+                    ::txlog::SchemaOpMessage::LastKeyType::
+                        SchemaOpMessage_LastKeyType_PosInfKey)
+                {
+                    // The positive inf key
+                    index_op_->last_finished_end_key_ = nullptr;
+                    index_op_->is_last_finished_key_str_ = false;
+                }
+                else
+                {
+                    index_op_->last_finished_end_key_str_ =
+                        &schema_op.last_key_value();
+                    index_op_->is_last_finished_key_str_ = true;
+                }
+
                 index_op_->op_ = &index_op_->prepare_log_for_sk_op_;
+                index_op_->prepare_log_for_sk_op_.hd_result_.SetFinished();
             }
             else
             {
@@ -1378,7 +1393,6 @@ void TransactionExecution::Process(ReadOperation &read)
     if (read.read_type_ == ReadType::Inside)
     {
         const TableName &table_name = *read.read_tx_req_->tab_name_;
-        const TxKey &key = *read.read_tx_req_->key_;
         TxRecord &rec = *read.read_tx_req_->rec_;
         const uint64_t ts = read.read_tx_req_->ts_;
         bool is_covering_keys = read.read_tx_req_->is_covering_keys_;
@@ -1403,20 +1417,41 @@ void TransactionExecution::Process(ReadOperation &read)
             }
             read.protocol_ = CcProtocol::Locking;
 
-            bool finished = cc_handler_->ReadLocal(
-                table_name,
-                key,
-                rec,
-                read.read_type_,
-                tx_number_.load(std::memory_order_relaxed),
-                tx_term_,
-                command_id_.load(std::memory_order_relaxed),
-                start_ts_,
-                read.hd_result_,
-                read.iso_level_,
-                read.protocol_,
-                read.read_tx_req_->is_for_write_,
-                read.read_tx_req_->is_recovering_);
+            bool finished = true;
+            if (!read.read_tx_req_->is_str_key_)
+            {
+                finished = cc_handler_->ReadLocal(
+                    table_name,
+                    *read.read_tx_req_->key_,
+                    rec,
+                    read.read_type_,
+                    tx_number_.load(std::memory_order_relaxed),
+                    tx_term_,
+                    command_id_.load(std::memory_order_relaxed),
+                    start_ts_,
+                    read.hd_result_,
+                    read.iso_level_,
+                    read.protocol_,
+                    read.read_tx_req_->is_for_write_,
+                    read.read_tx_req_->is_recovering_);
+            }
+            else
+            {
+                finished = cc_handler_->ReadLocal(
+                    table_name,
+                    *read.read_tx_req_->key_str_,
+                    rec,
+                    read.read_type_,
+                    tx_number_.load(std::memory_order_relaxed),
+                    tx_term_,
+                    command_id_.load(std::memory_order_relaxed),
+                    start_ts_,
+                    read.hd_result_,
+                    read.iso_level_,
+                    read.protocol_,
+                    read.read_tx_req_->is_for_write_,
+                    read.read_tx_req_->is_recovering_);
+            }
 
             if (finished)
             {
@@ -1425,6 +1460,8 @@ void TransactionExecution::Process(ReadOperation &read)
         }
         else
         {
+            assert(!read.read_tx_req_->is_str_key_);
+            const TxKey &key = *read.read_tx_req_->key_;
             if (!read.local_cache_miss_)
             {
                 // Step 1: fast path if key is update by the same tx.

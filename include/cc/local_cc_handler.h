@@ -178,6 +178,20 @@ public:
                    bool is_recovering = false,
                    bool execute_immediately = true) override;
 
+    bool ReadLocal(const TableName &table_name,
+                   const std::string &key_str,
+                   TxRecord &record,
+                   ReadType read_type,
+                   uint64_t tx_number,
+                   int64_t tx_term,
+                   uint16_t command_id,
+                   const uint64_t ts,
+                   CcHandlerResult<ReadKeyResult> &hres,
+                   IsolationLevel iso_level = IsolationLevel::RepeatableRead,
+                   CcProtocol proto = CcProtocol::Locking,
+                   bool is_for_write = false,
+                   bool is_recovring = false) override;
+
     void ScanOpen(const TableName &table_name,
                   ScanIndexType index_type,
                   const TxKey &start_key,

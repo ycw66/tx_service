@@ -177,7 +177,6 @@ enum struct CcErrorCode
     ACQUIRE_LEADER_TERM_ERR,
     ESTABLISH_NODE_CHANNEL_FAILED,
     //
-    INIT_TX_ERR,
     PACK_SK_ERR,
     UPLOAD_RECORD_TO_CCMAP_ERR,
 
@@ -247,6 +246,9 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED,
      "ESTABLISH_NODE_CHANNEL_FAILED"},
 
+    {CcErrorCode::PACK_SK_ERR, "PACK_SK_ERROR"},
+    {CcErrorCode::UPLOAD_RECORD_TO_CCMAP_ERR, "UPLOAD_SK_TO_CCMAP_ERROR"},
+
     // Error when call system handler, like ReloadCacheCc.
     {CcErrorCode::SYSTEM_HANDLER_ERR, "SYSTEM_HANDLER_ERR"},
 
@@ -258,4 +260,13 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},
 };
 
+static inline const std::string CcErrorMessage(CcErrorCode error_code)
+{
+    auto it = cc_error_messages.find(error_code);
+    if (it != cc_error_messages.end())
+    {
+        return it->second;
+    }
+    return "CcErrorCode:" + std::to_string(static_cast<int>(error_code));
+}
 }  // namespace txservice

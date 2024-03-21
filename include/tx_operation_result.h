@@ -493,4 +493,37 @@ struct ObjectCommandResult
     // Only used for remote request deserializes the received command result.
     TxCommandResult *cmd_result_{nullptr};
 };
+
+struct UploadBatchResult
+{
+    UploadBatchResult() = default;
+
+    UploadBatchResult(const UploadBatchResult &rhs) = delete;
+    UploadBatchResult(UploadBatchResult &&rhs) noexcept
+        : term_(rhs.term_.load(std::memory_order_relaxed)),
+          node_group_id_(rhs.node_group_id_)
+    {
+    }
+
+    UploadBatchResult &operator=(const UploadBatchResult &rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        term_ = rhs.term_.load(std::memory_order_relaxed);
+        node_group_id_ = rhs.node_group_id_;
+        return *this;
+    }
+
+    void Reset()
+    {
+        term_ = -1;
+        node_group_id_ = 0;
+    }
+
+    std::atomic<int64_t> term_{-1};
+    NodeGroupId node_group_id_{0};
+};
 }  // namespace txservice

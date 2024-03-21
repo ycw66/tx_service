@@ -187,6 +187,91 @@ public:
     std::atomic_size_t next_bucket_idx_;
     std::atomic_size_t unfinished_worker_;
 };
+
+struct GenerateSkStatus
+{
+    enum struct Status
+    {
+        Ongoing,
+        Terminating,
+        Finished
+    };
+
+    explicit GenerateSkStatus(int64_t tx_term)
+        : tx_term_(tx_term),
+          task_status_(Status::Finished),
+          tx_term_changed_(false)
+    {
+    }
+
+    GenerateSkStatus(const GenerateSkStatus &rhs) = delete;
+    GenerateSkStatus(GenerateSkStatus &&rhs) = delete;
+
+    bool StartGenerateSk(int64_t tx_term)
+    {
+        std::unique_lock<std::mutex> lk(status_mux_);
+        if (task_status_ == Status::Ongoing ||
+            task_status_ == Status::Terminating)
+        {
+            if (tx_term_ <= tx_term)
+            {
+                // Terminate the current task.
+                tx_term_changed_ = true;
+                status_cv_.wait(
+                    lk, [this]() { return task_status_ == Status::Finished; });
+
+                // update the task status
+                task_status_ = Status::Ongoing;
+                tx_term_ = tx_term;
+                tx_term_changed_ = false;
+            }
+            else
+            {
+                // The @@tx_term is expired, terminate it directly.
+                return false;
+            }
+        }
+        else
+        {
+            task_status_ = Status::Ongoing;
+            tx_term_ = tx_term;
+            tx_term_changed_ = false;
+        }
+        return true;
+    }
+
+    void TerminateGenerateSk()
+    {
+        std::unique_lock<std::mutex> lk(status_mux_);
+        task_status_ = Status::Terminating;
+    }
+
+    void FinishGenerateSk()
+    {
+        std::unique_lock<std::mutex> lk(status_mux_);
+        task_status_ = Status::Finished;
+        status_cv_.notify_all();
+    }
+
+    bool CheckTxTermStatus()
+    {
+        std::unique_lock<std::mutex> lk(status_mux_);
+        return !(tx_term_changed_);
+    }
+
+    Status TaskStatus()
+    {
+        std::unique_lock<std::mutex> lk(status_mux_);
+        return task_status_;
+    }
+
+private:
+    int64_t tx_term_;
+    Status task_status_;
+    bool tx_term_changed_;
+    std::mutex status_mux_;
+    std::condition_variable status_cv_;
+};
 class LocalCcShards
 {
 public:
@@ -796,6 +881,15 @@ public:
     // Memory limit of heap memory allocated by range slices info.
     // 5% of the total memory limit.
     const uint64_t range_slice_memory_limit_;
+
+    GenerateSkStatus *GetGenerateSkStatus(NodeGroupId ng_id,
+                                          uint64_t tx_number,
+                                          int32_t partition_id,
+                                          int64_t tx_term);
+    void ClearGenerateSkStatus(NodeGroupId ng_id,
+                               uint64_t tx_number,
+                               int32_t partition_id);
+
     store::DataStoreHandler *const store_hd_;
 
     /*
@@ -1205,6 +1299,14 @@ private:
 
     WorkerThreadContext statistics_worker_ctx_;
     void SyncTableStatisticsWorker();
+    /**
+     * Generate sk from pk
+     */
+    std::mutex generate_sk_mux_;
+    using RangeGenerateSkStatus = std::unordered_map<int32_t, GenerateSkStatus>;
+    using TxGenerateSkStatus =
+        std::unordered_map<uint64_t, RangeGenerateSkStatus>;
+    std::unordered_map<NodeGroupId, TxGenerateSkStatus> generate_sk_status_;
 
     WorkerThreadContext defragment_worker_ctx_;
     void DefragmentWorker();

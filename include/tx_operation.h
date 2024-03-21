@@ -580,8 +580,6 @@ struct AsyncOp : public TransactionOperation
     std::function<void()> op_func_;
     CcHandlerResult<ResultType> hd_result_;
     std::thread worker_thread_;
-    bool handle_timeout_{false};
-    uint32_t wait_secs_{10};
 };
 
 struct SchemaOp : public TransactionOperation

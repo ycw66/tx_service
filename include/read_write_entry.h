@@ -144,4 +144,34 @@ struct CmdSetEntry
     bool has_overwrite_{};
 };
 
+struct WriteEntry
+{
+    WriteEntry() = delete;
+    WriteEntry(TxKey::Uptr key, TxRecord::Uptr rec, uint64_t commit_ts)
+        : key_(std::move(key)), rec_(std::move(rec)), commit_ts_(commit_ts)
+    {
+    }
+
+    WriteEntry(const WriteEntry &rhs) = delete;
+    WriteEntry(WriteEntry &&rhs)
+    {
+        key_ = std::move(rhs.key_);
+        rec_ = std::move(rhs.rec_);
+        commit_ts_ = rhs.commit_ts_;
+    }
+
+    WriteEntry &operator=(WriteEntry &&rhs)
+    {
+        key_ = std::move(rhs.key_);
+        rec_ = std::move(rhs.rec_);
+        commit_ts_ = rhs.commit_ts_;
+
+        return *this;
+    }
+
+    TxKey::Uptr key_;
+    TxRecord::Uptr rec_;
+    uint64_t commit_ts_;
+};
+
 }  // namespace txservice

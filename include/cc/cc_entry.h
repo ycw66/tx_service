@@ -880,6 +880,8 @@ public:
      * @param export_base_table_record_if_need - True means If no larger version
      * exists, we need to export the data which commit_ts same as ckpt_ts. Note:
      * This flag only used for RangePartition.
+     * @param skip_archived_key - True means there is no need to scan the
+     * archive data. This is used for scan during add index txm.
      * @return the number of exported version records.
      */
     size_t ExportForCkpt(const KeyT &key,
@@ -892,7 +894,8 @@ public:
                          TableType tbl_type,
                          bool mvcc_enabled,
                          size_t &ckpt_vec_size,
-                         bool export_base_table_record_if_need) const
+                         bool export_base_table_record_if_need,
+                         bool skip_archived_key) const
     {
         // `export_store_record_if_need` - True means If no larger version needs
         // to be flushed(commit_ts > ckpt_ts && commit_ts <= to_ts), we need to
@@ -997,7 +1000,7 @@ public:
             exported_count++;
         }
 
-        if (!mvcc_enabled)
+        if (!mvcc_enabled || skip_archived_key)
         {
             return exported_count;
         }

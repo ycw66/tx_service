@@ -1,88 +1,12 @@
 #pragma once
 
 #include "cc_req_pool.h"
+#include "rpc_closure.h"
 #include "store/data_store_scanner.h"
 #include "tx_operation.h"
 
 namespace txservice
 {
-
-/*
- * RPC closure
- */
-template <typename ResultType, typename ResponseType>
-class RPCClosure : public ::google::protobuf::Closure
-{
-public:
-    using RPCResponse_Uptr = std::unique_ptr<ResponseType>;
-
-    RPCClosure() = default;
-    ~RPCClosure() = default;
-
-    RPCClosure(const RPCClosure &rhs) = delete;
-    RPCClosure(RPCClosure &&rhs)
-    {
-        response_uptr_ = std::move(rhs.response_uptr_);
-        hd_result_ = rhs.hd_result_;
-        rhs.hd_result_ = nullptr;
-        rhs.cntl_.Reset();
-        channel_ = std::move(rhs.channel_);
-        node_id_ = rhs.node_id_;
-    }
-
-    void Reset(CcHandlerResult<ResultType> *hd_res,
-               RPCResponse_Uptr response,
-               std::shared_ptr<brpc::Channel> channel,
-               uint32_t node_id)
-    {
-        cntl_.Reset();
-        hd_result_ = hd_res;
-        response_uptr_ = std::move(response);
-        channel_ = channel;
-        node_id_ = node_id;
-    }
-
-    // Run() will be called when rpc request is processed by cc node service.
-    void Run() override
-    {
-        if (cntl_.Failed())
-        {
-            // RPC failed.
-            LOG(ERROR) << "Failed to process the RPC request with Error code: "
-                       << cntl_.ErrorCode()
-                       << ". Error Msg: " << cntl_.ErrorText();
-            hd_result_->SetError(CcErrorCode::REQUEST_LOST);
-            Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
-            channel_ = nullptr;
-            return;
-        }
-        channel_ = nullptr;
-
-        if (post_lambda_)
-        {
-            post_lambda_(hd_result_, response_uptr_.get());
-        }
-
-        response_uptr_.reset(nullptr);
-    }
-
-    brpc::Controller *Controller()
-    {
-        return &cntl_;
-    }
-
-private:
-    brpc::Controller cntl_;
-    RPCResponse_Uptr response_uptr_;
-    CcHandlerResult<ResultType> *hd_result_{nullptr};
-    std::shared_ptr<brpc::Channel> channel_;
-    uint32_t node_id_;
-
-public:
-    std::function<void(CcHandlerResult<ResultType> *, ResponseType *)>
-        post_lambda_;
-};
-
 struct KickoutDataAllOp : public TransactionOperation
 {
     explicit KickoutDataAllOp(TransactionExecution *txm);
@@ -158,6 +82,7 @@ struct UpsertTableIndexOp : public SchemaOp
      * binary representation of the catalog in the data store.
      */
     DsUpsertTableOp upsert_kv_table_op_;
+#ifndef RANGE_PARTITION_ENABLED
     /**
      * @brief Flush the old tuples whose commit timestamp less than the new
      * table schema's version of the base table ccmap on all nodes into data
@@ -194,6 +119,27 @@ struct UpsertTableIndexOp : public SchemaOp
      * write lock which will block checkpointer(acquire read lock).
      */
     WriteToLogOp prepare_log_for_sk_op_;
+#else
+    /**
+     * @brief Generate sk record from pk record parallelly. The parallel
+     * granularity of the operation is range.
+     */
+    AsyncOp<Void> generate_sk_parallel_op_;
+    /**
+     * @brief Flush the index data of the old tuples into data store. Consist of
+     * scan, flush.
+     *
+     * NOTE: table_name is the index table name.
+     */
+    AsyncOp<Void> flush_all_old_tuples_sk_op_;
+    /**
+     * @brief Flushes the log to the log service. This log confirms that the
+     * index data operation of the old tuples succeeds. In term of recovery,
+     * this log ensure that write intent is hold before this log, rather than
+     * write lock which will block checkpointer(acquire read lock).
+     */
+    WriteToLogOp prepare_log_for_sk_op_;
+#endif
     /**
      * @brief Upgrades acquired write intents to write locks in all nodes.
      */
@@ -218,6 +164,14 @@ struct UpsertTableIndexOp : public SchemaOp
     CcHandlerResult<ReadKeyResult> read_cluster_result_;
     ClusterConfigRecord cluster_conf_rec_;
 
+    // The last finished end key.
+    union
+    {
+        const TxKey *last_finished_end_key_;
+        const std::string *last_finished_end_key_str_;
+    };
+    bool is_last_finished_key_str_;
+
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);
     void FillPrepareIndexTableLogRequest(TransactionExecution *txm);
@@ -230,7 +184,7 @@ private:
                                 uint64_t data_sync_ts,
                                 bool is_dirty,
                                 CcHandlerResult<Void> &hres,
-                                int64_t ng_term = -1);
+                                int64_t ng_term = INIT_TERM);
 
     // Acquire and release range read lock.
     bool AcquireRangeReadLocks(TransactionExecution *acquire_lock_txm,
@@ -239,9 +193,12 @@ private:
                                bool is_success);
     // Acquire and reset node group leader term
     void ResetLeaderTerms();
-    bool AcquireLeaderTermsIfNecessary(TransactionExecution *txm);
-    void AcquireNodeGroupLeaderTerm(
-        NodeGroupId ng_id, CcHandlerResult<std::vector<int64_t>> &hd_res);
+    CcErrorCode AcquireLeaderTermsIfNecessary(TransactionExecution *txm);
+    void AcquireNodeGroupLeaderTerm(NodeGroupId ng_id,
+                                    std::mutex &request_mux,
+                                    std::condition_variable &request_cv,
+                                    uint32_t &finished_req_cnt,
+                                    CcErrorCode &request_res);
 
     // Upload sk record from local write set into sk ccmap
     void UploadRecord(TxNumber tx_number,
@@ -271,6 +228,45 @@ private:
         std::unique_ptr<store::DataStoreScanner> &ds_scanner);
 
     void FetchTuplesAndUploadPackedKey(TransactionExecution *txm);
+
+    bool NeedTriggerFlushSkOp()
+    {
+        return (scanned_pk_range_count_ % 60 == 0) ||
+               (last_scanned_end_key_ == nullptr ||
+                last_scanned_end_key_->Type() == KeyType::PositiveInf);
+    }
+    void DispatchRangeTask(TransactionExecution *upsert_index_txm,
+                           CcHandlerResult<Void> &hd_res);
+    void HandleRangeTask(
+        const TableName &base_table_name,
+        int32_t partition_id,
+        const TxKey *range_start_key,
+        const TxKey *range_end_key,
+        NodeGroupId range_owner,
+        uint64_t scan_ts,
+        uint64_t tx_number,
+        int64_t tx_term,
+        std::mutex &task_mux,
+        std::condition_variable &task_cv,
+        uint32_t &unfinished_task_cnt,
+        bool &all_task_started,
+        uint32_t &total_pk_items_count,
+        uint32_t &dispatched_task_count,
+        CcErrorCode &task_res,
+        std::function<void(const TxKey *batch_range_start_key,
+                           const TxKey *batch_range_end_key,
+                           const std::string *batch_range_start_key_str,
+                           const std::string *batch_range_end_key_str,
+                           const TxKey *&last_scanned_end_key,
+                           bool &is_last_scanned_key_str,
+                           size_t batch_range_cnt,
+                           uint32_t &actual_task_cnt)> &dispatch_func);
+
+    void UpdateBatchRangeSize()
+    {
+        uint8_t new_batch_size = scan_batch_range_size_ * 0.8;
+        scan_batch_range_size_ = new_batch_size > 1 ? new_batch_size : 1;
+    }
 
 #if WITH_KV_STORAGE != KV_CASS
     // Scan pk from ccmap
@@ -311,31 +307,38 @@ private:
     uint8_t scan_batch_cnt_;
 #endif
 
-    uint16_t flush_data_timeout_{600};
-    static const uint32_t OpLoopCnt = 10000;
-
     // This variable have two roles:
     // 1) deserialize as AlterTableInfo object. 2) save into log.
     std::string alter_table_info_image_str_{""};
     AlterTableInfo alter_table_info_;
 
     // Store the node group leader terms after acquired them.
-    CcHandlerResult<std::vector<int64_t>> acquire_terms_result_;
+    std::vector<int64_t> leader_terms_;
     CcHandlerResult<PostProcessResult> post_write_result_;
 
     // Due to term or other error, called ForceToFinish to terminate this
     // operation
     bool is_force_finished_{false};
 
-    std::vector<RPCClosure<Void, remote::FlushDataAllResponse>>
-        flush_data_all_closures_;
-    std::vector<
-        RPCClosure<std::vector<int64_t>, remote::AcquireNodeGroupTermResponse>>
-        acquire_leader_term_closures_;
-    bool waiting_to_retry_op_{false};
-    uint64_t start_waiting_{0};
-    uint32_t op_forward_cnt_{0};
     CcRequestPool<PostWriteCc> upload_pool_;
+
+#ifdef NDEBUG
+    uint8_t scan_batch_range_size_{10};
+#else
+    uint8_t scan_batch_range_size_{3};
+#endif
+
+    union
+    {
+        const TxKey *last_scanned_end_key_;
+        const std::string *last_scanned_end_key_str_;
+    };
+    bool is_last_scanned_key_str_;
+    std::vector<TableName> new_indexes_name_;
+    std::vector<std::thread> local_task_workers_;
+    size_t scanned_pk_range_count_{0};
+    size_t finished_pk_range_count_{0};
+    size_t total_scanned_pk_items_count_{0};
 };
 
 }  // namespace txservice

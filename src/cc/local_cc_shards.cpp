@@ -2562,7 +2562,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         if (scan_cc.IsError())
         {
             LOG(INFO) << "DataSync scan failed on table "
-                      << table_name.StringView();
+                      << table_name.StringView() << " with error code: "
+                      << static_cast<uint32_t>(scan_cc.ErrorCode());
             // Update the table data sync status.
             range_entry->TrySetDataSync(false);
 
@@ -4165,5 +4166,66 @@ void LocalCcShards::DefragmentWorker()
 
         worker_lk.lock();
     }
+}
+
+GenerateSkStatus *LocalCcShards::GetGenerateSkStatus(NodeGroupId ng_id,
+                                                     uint64_t tx_number,
+                                                     int32_t partition_id,
+                                                     int64_t tx_term)
+{
+    std::unique_lock<std::mutex> lk(generate_sk_mux_);
+
+    auto ng_it = generate_sk_status_.find(ng_id);
+    if (ng_it == generate_sk_status_.end())
+    {
+        auto insert_it = generate_sk_status_.emplace(
+            std::piecewise_construct,
+            std::forward_as_tuple(ng_id),
+            std::forward_as_tuple(TxGenerateSkStatus()));
+
+        ng_it = insert_it.first;
+    }
+
+    TxGenerateSkStatus &tx_status = ng_it->second;
+    auto tx_it = tx_status.find(tx_number);
+    if (tx_it == tx_status.end())
+    {
+        auto insert_it =
+            tx_status.emplace(std::piecewise_construct,
+                              std::forward_as_tuple(tx_number),
+                              std::forward_as_tuple(RangeGenerateSkStatus()));
+
+        tx_it = insert_it.first;
+    }
+
+    RangeGenerateSkStatus &range_status = tx_it->second;
+    auto range_it = range_status.find(partition_id);
+    if (range_it == range_status.end())
+    {
+        auto insert_it =
+            range_status.emplace(std::piecewise_construct,
+                                 std::forward_as_tuple(partition_id),
+                                 std::forward_as_tuple(tx_term));
+        range_it = insert_it.first;
+    }
+
+    return &(range_it->second);
+}
+
+void LocalCcShards::ClearGenerateSkStatus(NodeGroupId ng_id,
+                                          uint64_t tx_number,
+                                          int32_t partition_id)
+{
+    std::unique_lock<std::mutex> lk(generate_sk_mux_);
+
+    auto ng_it = generate_sk_status_.find(ng_id);
+    assert(ng_it != generate_sk_status_.end());
+
+    TxGenerateSkStatus &tx_status = ng_it->second;
+    auto tx_it = tx_status.find(tx_number);
+    assert(tx_it != tx_status.end());
+
+    RangeGenerateSkStatus &range_status = tx_it->second;
+    range_status.erase(partition_id);
 }
 }  // namespace txservice

@@ -2920,8 +2920,7 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
         }
         txm->PostProcess(*this);
     }
-    else if (handle_timeout_ && txm->IsTimeOut(wait_secs_) &&
-             hd_result_.SetResultByTimeoutThread())
+    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -2938,15 +2937,12 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
         // estimate the proper op time out secs, and the dsop will finished
         // anyway
 
-        DLOG(INFO) << "Timeout for AyncOp after: " << wait_secs_ << "s.";
-        bool succ = hd_result_.ForceError();
-        if (succ)
-        {
-            // Can not use the worker thread if the async operation will deal
-            // with the timeout.
-            assert(!worker_thread_.joinable());
-            txm->PostProcess(*this);
-        }
+        // bool succ = hd_result_.ForceError();
+        // if (succ)
+        // {
+        //     txm->PostProcess(*this);
+        // }
+        DLOG(INFO) << "timeout for ayncop.";
     }
 }
 
@@ -2954,8 +2950,6 @@ template <typename ResultType>
 void AsyncOp<ResultType>::Reset()
 {
     hd_result_.Reset();
-    handle_timeout_ = false;
-    wait_secs_ = 10;
     if (worker_thread_.joinable())
     {
         worker_thread_.join();
@@ -4348,7 +4342,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         // Insert new ranges into data store range table. Update
         // range slice size of the old range.
-        ds_upsert_range_op_.handle_timeout_ = false;
         ds_upsert_range_op_.op_func_ =
             [&table_name = table_name_,
              range_info = std::move(splitted_range_info),
@@ -5521,7 +5514,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
 
         ACTION_FAULT_INJECTOR("cluster_config_after_cluster_config_log");
         // flush the new cluster config to kv storage
-        flush_new_cluster_config_op_.handle_timeout_ = false;
         flush_new_cluster_config_op_.op_func_ =
             [&ng_config = new_ng_config_,
              version = txm->commit_ts_,

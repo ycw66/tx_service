@@ -5,6 +5,7 @@
 #include "cc/local_cc_shards.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
+#include "sk_generator.h"
 #include "tx_request.h"
 #include "tx_service.h"
 
@@ -368,12 +369,7 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
 
     uint64_t data_sync_ts = request->data_sync_ts();
     bool is_dirty = request->is_dirty();
-
-    if (table_type == TableType::Primary)
-    {
-        ACTION_FAULT_INJECTOR("term_FlushDataAllRPC_PK_crashed");
-    }
-    else if (table_type == TableType::Secondary)
+    if (table_type == TableType::Secondary)
     {
         ACTION_FAULT_INJECTOR("term_FlushDataAllRPC_SK_crashed");
     }
@@ -418,7 +414,7 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
             ng_term = ng_term < 0 ? leader_term : ng_term;
             DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
                        << ", with node group term: " << ng_term
-                       << ". And flush table:" << table_name.String();
+                       << ". And flush table:" << table_name.Trace();
 
             std::shared_ptr<DataSyncStatus> status =
                 std::make_shared<DataSyncStatus>();
@@ -453,7 +449,7 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
     worker_thd.join();
     DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
                << ", with node group term: " << ng_term
-               << " finished with error: " << (int32_t) error_code;
+               << " finished with error: " << CcErrorMessage(error_code);
 }
 
 void CcNodeService::InitDataMigration(
@@ -708,5 +704,253 @@ void CcNodeService::GetClusterNodes(
     commit_req.Wait();
     response->set_error(false);
 }
+
+void CcNodeService::GenerateSkFromPk(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::GenerateSkFromPkRequest *request,
+    ::txservice::remote::GenerateSkFromPkResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    // This object helps to call done->Run() in RAII style. If you need to
+    // process the request asynchronously, pass done_guard.release().
+    brpc::ClosureGuard done_guard(done);
+
+    NodeGroupId ng_id = request->node_group_id();
+    uint64_t scan_ts = request->scan_ts();
+
+    std::string_view table_name_sv{request->table_name_str()};
+    TableName base_table_name = TableName(table_name_sv, TableType::Primary);
+
+    int32_t partition_id = request->partition_id();
+    const std::string &end_key_str = request->end_key();
+    const std::string &start_key_str = request->start_key();
+
+    std::vector<TableName> new_indexes_name;
+    new_indexes_name.reserve(request->new_sk_name_str_size());
+    for (int idx = 0; idx < request->new_sk_name_str_size(); ++idx)
+    {
+        std::string_view table_name_sv{request->new_sk_name_str(idx)};
+        new_indexes_name.emplace_back(TableName(
+            table_name_sv,
+            ToLocalType::ConvertCcTableType(request->new_sk_type(idx))));
+    }
+
+    uint64_t tx_number = request->tx_number();
+    int64_t tx_term = request->tx_term();
+
+    bthread::Mutex bthd_mux;
+    bthread::ConditionVariable bthd_cv;
+    bool is_finished = false;
+    uint32_t scanned_pk_items_count = 0;
+    int res_code = 0;
+    std::vector<int64_t> ng_terms_vec;
+    std::thread worker_thd = std::thread(
+        [&base_table_name,
+         &ng_id,
+         &scan_ts,
+         &partition_id,
+         &start_key_str,
+         &end_key_str,
+         &new_indexes_name,
+         &bthd_mux,
+         &bthd_cv,
+         &is_finished,
+         &scanned_pk_items_count,
+         &res_code,
+         &ng_terms_vec,
+         tx_number,
+         tx_term]()
+        {
+            while (Sharder::Instance().LeaderTerm(ng_id) < 0 &&
+                   Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
+            {
+                // The RPC server can receive the remote request, but this
+                // node has not finish log replay, including data(.pk) log and
+                // catalog(.table range info) log, so should wait until log
+                // replay finished.
+                LOG(WARNING) << "CcNodeService GenerateSkFromPk of ng#" << ng_id
+                             << " for partition id: " << partition_id
+                             << " waiting log replay finished.";
+                std::this_thread::sleep_for(3s);
+            }
+
+            if (Sharder::Instance().LeaderTerm(ng_id) < 0)
+            {
+                LOG(WARNING) << "CcNodeService GenerateSkFromPk non-leader "
+                             << "node receive this task of ng#" << ng_id
+                             << " for partition id: " << partition_id;
+                std::unique_lock<bthread::Mutex> lk(bthd_mux);
+                res_code =
+                    static_cast<int>(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                is_finished = true;
+                bthd_cv.notify_all();
+                return;
+            }
+            DLOG(INFO) << "CcNodeService GenerateSkFromPk RPC of ng#" << ng_id
+                       << " for partition id: " << partition_id
+                       << ". Base table:" << base_table_name.Trace();
+
+            LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
+
+            // Check the task status
+            auto task_status = cc_shards->GetGenerateSkStatus(
+                ng_id, tx_number, partition_id, tx_term);
+            if (!task_status->StartGenerateSk(tx_term))
+            {
+                // Terminate itself
+                LOG(WARNING) << "Terminate this generate sk task of ng#"
+                             << ng_id << " for partition id: " << partition_id
+                             << " caused by the tx term is expired.";
+                std::unique_lock<bthread::Mutex> lk(bthd_mux);
+                res_code = static_cast<int>(CcErrorCode::TX_NODE_NOT_LEADER);
+                is_finished = true;
+                bthd_cv.notify_all();
+                return;
+            }
+
+            SkGenerator sk_generator;
+            CcErrorCode res = CcErrorCode::NO_ERROR;
+            sk_generator.RemoteGenerateSkFromPk(base_table_name,
+                                                partition_id,
+                                                start_key_str,
+                                                end_key_str,
+                                                ng_id,
+                                                scan_ts,
+                                                new_indexes_name,
+                                                scanned_pk_items_count,
+                                                res,
+                                                *task_status);
+
+            auto result = task_status->TaskStatus();
+            task_status->FinishGenerateSk();
+            if (result == GenerateSkStatus::Status::Terminating)
+            {
+                LOG(ERROR) << "Terminate this generate sk task of ng#" << ng_id
+                           << " for partition id: " << partition_id
+                           << " caused by TX_NODE_NOT_LEADER";
+                std::unique_lock<bthread::Mutex> lk(bthd_mux);
+                res_code = static_cast<int>(CcErrorCode::TX_NODE_NOT_LEADER);
+                is_finished = true;
+                bthd_cv.notify_all();
+                return;
+            }
+            if (res != CcErrorCode::NO_ERROR)
+            {
+                LOG(ERROR) << "Finish this generate sk task of ng#" << ng_id
+                           << " for partition id: " << partition_id
+                           << " caused by error: " << CcErrorMessage(res);
+                std::unique_lock<bthread::Mutex> lk(bthd_mux);
+                is_finished = true;
+                res_code = static_cast<int>(res);
+                bthd_cv.notify_one();
+                return;
+            }
+
+            auto &terms = sk_generator.NodeGroupTerms();
+            size_t ng_cnt = terms.size();
+            ng_terms_vec.resize(ng_cnt, INIT_TERM);
+            for (size_t idx = 0; idx < ng_cnt; ++idx)
+            {
+                ng_terms_vec.at(idx) = terms.at(idx);
+            }
+
+            std::unique_lock<bthread::Mutex> lk(bthd_mux);
+            res_code = static_cast<int>(res);
+            is_finished = true;
+            bthd_cv.notify_all();
+        });
+
+    std::unique_lock<bthread::Mutex> lk(bthd_mux);
+    while (!is_finished)
+    {
+        bthd_cv.wait(lk);
+    }
+
+    response->set_error_code(res_code);
+    response->set_pk_items_count(scanned_pk_items_count);
+    for (size_t idx = 0; idx < ng_terms_vec.size(); ++idx)
+    {
+        response->add_ng_terms(ng_terms_vec.at(idx));
+    }
+
+    worker_thd.join();
+    DLOG(INFO) << "CcNodeService GenerateSkFromPk RPC of ng#" << ng_id
+               << " for partition id: " << partition_id
+               << " finished with error: "
+               << CcErrorMessage(static_cast<CcErrorCode>(res_code));
+}
+
+void CcNodeService::UploadBatch(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::UploadBatchRequest *request,
+    ::txservice::remote::UploadBatchResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    // This object helps to call done->Run() in RAII style. If you need to
+    // process the request asynchronously, pass done_guard.release().
+    brpc::ClosureGuard done_guard(done);
+
+    NodeGroupId ng_id = request->node_group_id();
+    int64_t ng_term = request->node_group_term();
+
+    std::string_view table_name_sv{request->table_name_str()};
+    TableType table_type =
+        ToLocalType::ConvertCcTableType(request->table_type());
+    TableName table_name = TableName(table_name_sv, table_type);
+
+    DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+               << " for table:" << table_name.Trace();
+
+    LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
+    size_t core_cnt = cc_shards->Count();
+    uint32_t batch_size = request->batch_size();
+
+    auto write_entry_tuple = UploadBatchCc::WriteEntryTuple(
+        request->keys(), request->records(), request->commit_ts());
+
+    size_t finished_req = 0;
+    bthread::Mutex upload_mux;
+    bthread::ConditionVariable upload_cv;
+    CcHandlerResult<UploadBatchResult> upload_batch_res(nullptr);
+    upload_batch_res.post_lambda_ =
+        [&upload_mux, &upload_cv, &finished_req](
+            CcHandlerResult<UploadBatchResult> *hd_res)
+    {
+        std::unique_lock<bthread::Mutex> lk(upload_mux);
+        ++finished_req;
+        upload_cv.notify_one();
+    };
+
+    upload_batch_res.Reset();
+
+    UploadBatchCc req;
+    req.Use();
+    req.Reset(table_name,
+              ng_id,
+              ng_term,
+              core_cnt,
+              batch_size,
+              write_entry_tuple,
+              upload_batch_res);
+    for (size_t core = 0; core < core_cnt; ++core)
+    {
+        cc_shards->EnqueueToCcShard(core, &req);
+    }
+
+    std::unique_lock<bthread::Mutex> lk(upload_mux);
+    while (finished_req != 1 || req.InUse())
+    {
+        upload_cv.wait_for(lk, 1000000);
+    }
+
+    auto &res = upload_batch_res.Value();
+    response->set_error_code(
+        ToRemoteType::ConvertCcErrorCode(upload_batch_res.ErrorCode()));
+    response->set_ng_term(res.term_);
+
+    DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+               << " finished with error: " << upload_batch_res.ErrorMsg();
+}
+
 }  // namespace remote
 }  // namespace txservice

@@ -127,6 +127,45 @@ message AcquireNodeGroupTermResponse{
     int64 node_group_term = 2;
 }
 
+message GenerateSkFromPkRequest
+{
+    string table_name_str = 1;
+    uint32 node_group_id = 2;
+    uint64 tx_number = 3;
+    int64 tx_term = 4;
+    uint64 scan_ts = 5;
+    int32 partition_id = 6;
+    bytes start_key = 7;
+    bytes end_key = 8;
+    repeated string new_sk_name_str = 9;
+    repeated CcTableType new_sk_type = 10;
+}
+
+message GenerateSkFromPkResponse
+{
+    uint32 error_code = 1;
+    uint32 pk_items_count = 2;
+    repeated int64 ng_terms = 3;
+}
+
+message UploadBatchRequest
+{
+    string table_name_str = 1;
+    CcTableType table_type = 2;
+    uint32 node_group_id = 3;
+    int64 node_group_term = 4;
+    uint32 batch_size = 5;
+    bytes keys = 6;
+    bytes records = 7;
+    bytes commit_ts = 8;
+}
+
+message UploadBatchResponse
+{
+    uint32 error_code = 1;
+    int64 ng_term = 3;
+}
+
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -143,6 +182,8 @@ service CcRpcService {
     rpc AcquireNodeGroupLeaderTerm(AcquireNodeGroupTermRequest) returns (AcquireNodeGroupTermResponse);
     rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
     rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);
+    rpc GenerateSkFromPk(GenerateSkFromPkRequest) returns (GenerateSkFromPkResponse);
+    rpc UploadBatch(UploadBatchRequest) returns (UploadBatchResponse);
 }
 
 message TxId_msg {

@@ -222,7 +222,20 @@ public:
         CcErrorCode err_code;
         // Rather than looking for an exact match, looks up the floor key
         // that represents the range containing the input key.
-        const KeyT *look_key = static_cast<const KeyT *>(req.Key());
+        const KeyT *look_key = nullptr;
+        KeyT decoded_key;
+        if (req.Key() != nullptr)
+        {
+            look_key = static_cast<const KeyT *>(req.Key());
+        }
+        else
+        {
+            assert(req.KeyBlob() != nullptr);
+            size_t offset = 0;
+            decoded_key.Deserialize(req.KeyBlob()->data(), offset, KeySchema());
+            look_key = &decoded_key;
+        }
+
         auto it = Floor(*look_key);
         CcEntry<KeyT, RangeRecord> *floor_cce = it->second;
         CcPage<KeyT, RangeRecord> *range_page = it.GetPage();

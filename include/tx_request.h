@@ -176,6 +176,7 @@ public:
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           tab_name_(tab_name),
           key_(key),
+          is_str_key_(false),
           rec_(rec),
           is_for_write_(is_for_write),
           is_for_share_(is_for_share),
@@ -198,6 +199,29 @@ public:
     {
         tab_name_ = tab_name;
         key_ = key;
+        is_str_key_ = false;
+        rec_ = rec;
+        is_for_write_ = is_for_write;
+        is_for_share_ = is_for_share;
+        read_local_ = read_local;
+        ts_ = ts;
+        is_covering_keys_ = is_covering_keys;
+        is_recovering_ = is_recovering;
+    }
+
+    void Set(const TableName *tab_name,
+             const std::string *key_str,
+             TxRecord *rec,
+             bool is_for_write = false,
+             bool is_for_share = false,
+             bool read_local = false,
+             uint64_t ts = 0,
+             bool is_covering_keys = false,
+             bool is_recovering = false)
+    {
+        tab_name_ = tab_name;
+        key_str_ = key_str;
+        is_str_key_ = true;
         rec_ = rec;
         is_for_write_ = is_for_write;
         is_for_share_ = is_for_share;
@@ -208,7 +232,12 @@ public:
     }
 
     const TableName *tab_name_;
-    const TxKey *key_;
+    union
+    {
+        const TxKey *key_;
+        const std::string *key_str_;
+    };
+    bool is_str_key_;
     TxRecord *rec_;
     bool is_for_write_;  // used for "select ... for update".
     bool is_for_share_;  // used for "select ... lock in share mode".

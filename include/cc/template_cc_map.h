@@ -1777,19 +1777,8 @@ public:
             // TODO: TxExecution and runtime also use this new value as read
             // result to avoid future PostRead abort.
 
-            // NOTE: Check if really need to wait for post write. There is no
-            // need to wait for post write for the below case which also match
-            // this condition `cce->commit_ts_ < req.ReadTimestamp()`:
-            // The commit_ts of sk data generated from pk data during add index
-            // txm is the commit_ts of add index txm, so those cce's commit_ts
-            // also large than corresponding pk's commit_ts.
-            NonBlockingLock *key_lock = cce->GetKeyLock();
-            bool wait_for_post_write =
-                (key_lock != nullptr && key_lock->HasWriteLock() &&
-                 key_lock->WriteLockTx() != req.Txn());
             if (req.Isolation() == IsolationLevel::ReadCommitted &&
-                cce->CommitTs() > 0 && cce->CommitTs() < req.ReadTimestamp() &&
-                wait_for_post_write)
+                cce->CommitTs() > 0 && cce->CommitTs() < req.ReadTimestamp())
             {
                 // When backtracking the content of primary key record according
                 // to the secondary index key, if the commit_ts of this
@@ -1799,6 +1788,9 @@ public:
                 // PostWriteCc request waiting to be executed. So, this read
                 // should wait for the PostWriteCc completed.
                 req.SetIsWaitForPostWrite(true);
+                NonBlockingLock *key_lock = cce->GetKeyLock();
+                assert(key_lock != nullptr && key_lock->HasWriteLock() &&
+                       key_lock->WriteLockTx() != req.Txn());
                 // Put the request to top of key lock's blocking queue with
                 // acquring readlock. And then should release the readlock
                 // before handling this requst when PostWriteCc finished.
@@ -4666,13 +4658,6 @@ public:
             return false;
         }
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            return false;
-        }
-
         auto &pause_key_and_is_drained = req.PausePos(shard_->core_id_);
 
         // Slice_id is not set, We need to pin slice.
@@ -4704,7 +4689,7 @@ public:
                 RangeSliceId new_slice_id =
                     shard_->PinRangeSlice(table_name_,
                                           req.NodeGroupId(),
-                                          ng_term,
+                                          req.NodeGroupTerm(),
                                           KeySchema(),
                                           RecordSchema(),
                                           schema_ts_,
@@ -4714,7 +4699,7 @@ public:
                                           &req,
                                           pin_status,
                                           true,
-                                          0);
+                                          32);
 
                 switch (pin_status)
                 {
@@ -4875,7 +4860,7 @@ public:
         }
 
         uint64_t recycle_ts = 1U;
-        if (shard_->EnableMvcc())
+        if (shard_->EnableMvcc() && !req.skip_archived_key_)
         {
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
@@ -4918,7 +4903,7 @@ public:
                 }
             }
 
-            if (shard_->EnableMvcc())
+            if (shard_->EnableMvcc() && !req.skip_archived_key_)
             {
                 cce->KickOutArchiveRecords(recycle_ts);
             }
@@ -4938,7 +4923,7 @@ public:
                         RangeSliceId slice_id = shard_->PinRangeSlice(
                             table_name_,
                             req.NodeGroupId(),
-                            ng_term,
+                            req.NodeGroupTerm(),
                             KeySchema(),
                             RecordSchema(),
                             schema_ts_,
@@ -5014,6 +4999,7 @@ public:
                             Type(),
                             shard_->EnableMvcc(),
                             req.accumulated_scan_cnt_[shard_->core_id_],
+                            false,
                             false);
                     }
                 }
@@ -5030,7 +5016,8 @@ public:
                                    Type(),
                                    shard_->EnableMvcc(),
                                    req.accumulated_scan_cnt_[shard_->core_id_],
-                                   true);
+                                   true,
+                                   req.skip_archived_key_);
             }
 
             // Forward iterator
@@ -5061,7 +5048,7 @@ public:
                     RangeSliceId new_slice_id =
                         shard_->PinRangeSlice(table_name_,
                                               req.NodeGroupId(),
-                                              ng_term,
+                                              req.NodeGroupTerm(),
                                               KeySchema(),
                                               RecordSchema(),
                                               schema_ts_,
@@ -5071,7 +5058,7 @@ public:
                                               &req,
                                               pin_status,
                                               true,
-                                              0);
+                                              32);
 
                     switch (pin_status)
                     {
@@ -5266,10 +5253,10 @@ public:
             }
         }
 
-        // Since we might skip the page that end_it is on if it's not updated
-        // since last ckpt, it might skip end_it. If the last page is skipped it
-        // will be set as the first entry on the next page. Also check if (it ==
-        // end_it_next_page_it).
+        // Since we might skip the page that end_it is on if it's not
+        // updated since last ckpt, it might skip end_it. If the last
+        // page is skipped it will be set as the first entry on the next
+        // page. Also check if (it == end_it_next_page_it).
         Iterator end_it_next_page_it = end_it;
         if (end_it_next_page_it != End())
         {
@@ -5291,9 +5278,9 @@ public:
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
 
-        // Only scan for updates after given from ts. previous_ckpt_ts_ is
-        // used during regular ckpt, and previous_scan_ts_ is used during range
-        // split explicitly.
+        // Only scan for updates after given from ts. previous_ckpt_ts_
+        // is used during regular ckpt, and previous_scan_ts_ is used
+        // during range split explicitly.
         uint64_t from_ts = req.previous_ckpt_ts_;
 
         // DataSyncScanCc is running on TxProcessor thread. To avoid
@@ -5313,7 +5300,8 @@ public:
 
             if (ccp->last_dirty_commit_ts_ <= from_ts)
             {
-                // Skip the pages that have no updates since last data sync.
+                // Skip the pages that have no updates since last data
+                // sync.
                 if (ccp->next_page_ == PagePosInf())
                 {
                     it = End();
@@ -5344,6 +5332,7 @@ public:
                                    Type(),
                                    shard_->EnableMvcc(),
                                    req.accumulated_scan_cnt_[shard_->core_id_],
+                                   false,
                                    false);
             }
 
@@ -5499,14 +5488,16 @@ public:
             assert(req.next_pin_slice_idx_ == 0);
         }
 
-        // Pin-slice is necessary. On one hand, pin-slice would guarantee enough
-        // samples, even if the amount of sampled slice is very few. On the
-        // other hand, pin-slice would help estimating average bytes of records.
+        // Pin-slice is necessary. On one hand, pin-slice would
+        // guarantee enough samples, even if the amount of sampled slice
+        // is very few. On the other hand, pin-slice would help
+        // estimating average bytes of records.
         //
-        // Capacity of slice sample pool cannot be too small. Otherwise the
-        // final sampled keys could not reflect original key distribution.
-        // Capacity of slice sample pool cannot be too large. Otherwise too many
-        // pin-slice calls can lead to too many accesses to storage.
+        // Capacity of slice sample pool cannot be too small. Otherwise
+        // the final sampled keys could not reflect original key
+        // distribution. Capacity of slice sample pool cannot be too
+        // large. Otherwise too many pin-slice calls can lead to too
+        // many accesses to storage.
         if (req.next_pin_slice_idx_ < slice_sample_pool->SampleKeys().size())
         {
             const auto [range_id, store_slice] =
@@ -5696,16 +5687,16 @@ public:
         TX_TRACE_DUMP(&req);
 
         KeyT key;
-        // A psuedo record that is used to deserialize and move forward the
-        // record that is not sharded to the core.
+        // A psuedo record that is used to deserialize and move forward
+        // the record that is not sharded to the core.
         ValueT rec;
         size_t offset = 0;
         uint16_t next_core = UINT16_MAX;
         const std::string_view &log_blob = req.LogContentView();
 
-        // If the log record's commit ts is smaller than that of the cc map,
-        // this record is generated before the latest schema of the table
-        // and hence should skip the replay process.
+        // If the log record's commit ts is smaller than that of the cc
+        // map, this record is generated before the latest schema of the
+        // table and hence should skip the replay process.
         if (req.CommitTs() < schema_ts_)
         {
             req.SetFinish();
@@ -5727,8 +5718,8 @@ public:
             uint16_t core_id = (key.Hash() & 0x3FF) % shard_->core_cnt_;
             if (core_id != shard_->core_id_)
             {
-                // Skips the key in the log record that is not sharded to this
-                // core.
+                // Skips the key in the log record that is not sharded
+                // to this core.
                 if (op_type == OperationType::Insert ||
                     op_type == OperationType::Update)
                 {
@@ -5758,7 +5749,8 @@ public:
             {
                 int32_t new_range_id =
                     range_entry->GetRangeInfo()->GetKeyNewRangeId(&key);
-                // If range is splitting, check if new range belongs to this ng.
+                // If range is splitting, check if new range belongs to
+                // this ng.
                 if (new_range_id >= 0)
                 {
                     const BucketInfo *new_bucket_info = shard_->GetBucketInfo(
@@ -5783,9 +5775,9 @@ public:
 
             if (cce == nullptr)
             {
-                // Since we're not holding any range lock that would block
-                // data sync during replay, just keep retrying until we have
-                // free space in cc map.
+                // Since we're not holding any range lock that would
+                // block data sync during replay, just keep retrying
+                // until we have free space in cc map.
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
                 return false;
             }
@@ -5793,11 +5785,11 @@ public:
             if (cce->CommitTs() >= req.CommitTs())
             {
                 // If the key exists in the cc map and its commit ts is
-                // greater than that of the log record, and if (1) mvcc is
-                // enabled, then install  the log record into archives; (2)
-                // mvcc is not enabled, then skips installing the log record
-                // in the cc map and moves to the next key in the log
-                // record.
+                // greater than that of the log record, and if (1) mvcc
+                // is enabled, then install  the log record into
+                // archives; (2) mvcc is not enabled, then skips
+                // installing the log record in the cc map and moves to
+                // the next key in the log record.
                 if (shard_->EnableMvcc())
                 {
 #ifndef ON_KEY_OBJECT
@@ -5880,12 +5872,13 @@ public:
                 NonBlockingLock *key_lock = cce->GetKeyLock();
                 if (key_lock != nullptr && key_lock->HasWriteLock())
                 {
-                    // If the record in the log has a commit ts greater than
-                    // that of the cc entry and the cc entry has a write
-                    // lock, the lock's owner must be the tx that commits
-                    // the log record.
+                    // If the record in the log has a commit ts greater
+                    // than that of the cc entry and the cc entry has a
+                    // write lock, the lock's owner must be the tx that
+                    // commits the log record.
                     // TODO: it is safer if we ship the tx ID with the
-                    // recovering message and match it against the lock holder.
+                    // recovering message and match it against the lock
+                    // holder.
                     TxNumber txn = key_lock->WriteLockTx();
                     ReleaseCceLock(key_lock,
                                    cce,
@@ -5946,6 +5939,7 @@ public:
                                        Type(),
                                        shard_->EnableMvcc(),
                                        tmp_ckpt_vec_size,
+                                       false,
                                        false);
 
                     assert(tmp_ckpt_vec_size <= 1);
@@ -5970,8 +5964,8 @@ public:
                                                          tmp_akv_vec,
                                                          only_archives);
                     assert(res == true);
-                    // This silences the -Wunused-but-set-variable warning
-                    // without any runtime overhead.
+                    // This silences the -Wunused-but-set-variable
+                    // warning without any runtime overhead.
                     (void) res;
                 }
                 if (only_archives)
@@ -6109,8 +6103,8 @@ public:
 
             if (cce->CommitTs() <= 1)
             {
-                // This is a new inserted key that the tx has not finished
-                // post-processing.
+                // This is a new inserted key that the tx has not
+                // finished post-processing.
                 continue;
             }
 
@@ -6132,8 +6126,9 @@ public:
                     data_store_size = 0;
                 }
 
-                // This entry is not going to be flushed in this checkpoint,
-                // so the data store size before and post ckpt are the same.
+                // This entry is not going to be flushed in this
+                // checkpoint, so the data store size before and post
+                // ckpt are the same.
 
                 item_vec[next_vec_idx++].Reset(
                     cce_key, data_store_size, data_store_size, true);
@@ -6186,9 +6181,9 @@ public:
         LruPage *lru_page;
         if (req.ResumeKey(shard_->core_id_) != nullptr)
         {
-            // resume key is the first key we need to start with, find the
-            // floor key of it in case resume key has already been kicked
-            // out.
+            // resume key is the first key we need to start with, find
+            // the floor key of it in case resume key has already been
+            // kicked out.
             const KeyT *resume_key =
                 static_cast<const KeyT *>(req.ResumeKey(shard_->core_id_));
             Iterator it = Floor(*resume_key);
@@ -6217,8 +6212,8 @@ public:
         CcPage<KeyT, ValueT> *ccp =
             static_cast<CcPage<KeyT, ValueT> *>(lru_page);
 
-        // To avoid occupy the TxProcessor thread for a long time, only process
-        // KickoutPageBatchSize number of pages in each round.
+        // To avoid occupy the TxProcessor thread for a long time, only
+        // process KickoutPageBatchSize number of pages in each round.
         size_t scan_page_cnt = 0;
         bool is_success = true;
         while (scan_page_cnt < KickoutCcEntryCc::KickoutPageBatchSize &&
@@ -6253,6 +6248,292 @@ public:
         }
     }
 
+    bool Execute(UploadBatchCc &req) override
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"term\":")
+                    .append(std::to_string(req.CcNgTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
+        auto entry_vec = req.EntryVector();
+        auto entry_tuples = req.EntryTuple();
+        size_t batch_size = req.BatchSize();
+        size_t start_key_index = req.StartKeyIndex();
+
+        const TxKey *req_key = nullptr;
+        const TxRecord *req_rec = nullptr;
+
+        const KeyT *key = nullptr;
+        KeyT decoded_key;
+        const ValueT *commit_val = nullptr;
+        ValueT decoded_rec;
+        uint64_t commit_ts = 0;
+
+        auto &resume_pos = req.GetPausedPosition(shard_->core_id_);
+        size_t key_pos = std::get<0>(resume_pos);
+        size_t key_offset = std::get<1>(resume_pos);
+        size_t rec_offset = std::get<2>(resume_pos);
+        size_t ts_offset = std::get<3>(resume_pos);
+        size_t hash = 0;
+#ifdef RANGE_PARTITION_ENABLED
+        RangeSliceId current_slice_id;
+        const KeyT *slice_end_key = nullptr;
+#endif
+        Iterator it;
+        CcEntry<KeyT, ValueT> *cce;
+        const KeyT *write_key = nullptr;
+        CcPage<KeyT, ValueT> *cc_page = nullptr;
+        size_t key_idx = 0;
+        size_t next_key_offset = 0;
+        size_t next_rec_offset = 0;
+        size_t next_ts_offset = 0;
+        for (; key_pos < batch_size; ++key_pos)
+        {
+            next_key_offset = key_offset;
+            next_rec_offset = rec_offset;
+            next_ts_offset = ts_offset;
+            if (entry_vec != nullptr)
+            {
+                key_idx = start_key_index + key_pos;
+                // get key
+                req_key = entry_vec->at(key_idx)->key_.get();
+                key = static_cast<const KeyT *>(req_key);
+                // get record
+                req_rec = entry_vec->at(key_idx)->rec_.get();
+                commit_val = static_cast<const ValueT *>(req_rec);
+                // get commit ts
+                commit_ts = entry_vec->at(key_idx)->commit_ts_;
+            }
+            else
+            {
+                auto [key_str, rec_str, ts_str] = *entry_tuples;
+                // deserialize key
+                decoded_key.Deserialize(
+                    key_str.data(), next_key_offset, KeySchema());
+                key = &decoded_key;
+                // deserialize rec
+                decoded_rec.Deserialize(rec_str.data(), next_rec_offset);
+                commit_val = &decoded_rec;
+                // deserialize commit ts
+                commit_ts = *((uint64_t *) (ts_str.data() + next_ts_offset));
+                next_ts_offset += sizeof(uint64_t);
+            }
+
+            hash = key->Hash();
+            size_t core_idx = (hash & 0x3FF) % shard_->core_cnt_;
+            if (!(core_idx == shard_->core_id_) || commit_ts <= 1)
+            {
+                // Skip the key that does not belong to this core or
+                // commit ts does not greater than 1. Move to next key.
+                key_offset = next_key_offset;
+                rec_offset = next_rec_offset;
+                ts_offset = next_ts_offset;
+                continue;
+            }
+
+#ifdef RANGE_PARTITION_ENABLED
+            if (current_slice_id.Slice() != nullptr && *slice_end_key <= *key)
+            {
+                // Move to next slice.
+                current_slice_id.Unpin();
+                current_slice_id.Reset();
+            }
+            if (current_slice_id.Slice() == nullptr)
+            {
+                RangeSliceOpStatus pin_status;
+                current_slice_id =
+                    shard_->PinRangeSlice(table_name_,
+                                          req.NodeGroupId(),
+                                          req.CcNgTerm(),
+                                          KeySchema(),
+                                          RecordSchema(),
+                                          schema_ts_,
+                                          table_schema_->GetKVCatalogInfo(),
+                                          *key,
+                                          true,
+                                          &req,
+                                          pin_status,
+                                          false,
+                                          0);
+                if (pin_status == RangeSliceOpStatus::Successful)
+                {
+                    slice_end_key =
+                        current_slice_id.Slice()->EndKey() != nullptr
+                            ? static_cast<const KeyT *>(
+                                  current_slice_id.Slice()->EndKey())
+                            : PositiveInfinity<KeyT>::Instance();
+                }
+                else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
+                {
+                    // set the paused key.
+                    req.SetPausedPosition(shard_->core_id_,
+                                          key_pos,
+                                          key_offset,
+                                          rec_offset,
+                                          ts_offset);
+                    return false;
+                }
+                else if (pin_status == RangeSliceOpStatus::Retry)
+                {
+                    // set the paused key
+                    req.SetPausedPosition(shard_->core_id_,
+                                          key_pos,
+                                          key_offset,
+                                          rec_offset,
+                                          ts_offset);
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+                }
+                else if (pin_status == RangeSliceOpStatus::Delay)
+                {
+                    if (current_slice_id.Range()->HasLock())
+                    {
+                        return req.SetError(CcErrorCode::OUT_OF_MEMORY);
+                    }
+                    else
+                    {
+                        // set the paused key
+                        req.SetPausedPosition(shard_->core_id_,
+                                              key_pos,
+                                              key_offset,
+                                              rec_offset,
+                                              ts_offset);
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
+                    }
+                }
+                else
+                {
+                    return req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                }
+            }
+#endif
+            it = FindEmplace(*key);
+            cce = it->second;
+            cc_page = it.GetPage();
+            if (cce == nullptr)
+            {
+#ifdef RANGE_PARTITION_ENABLED
+                if (current_slice_id.Slice() != nullptr)
+                {
+                    current_slice_id.Unpin();
+                    current_slice_id.Reset();
+                }
+#endif
+
+                DLOG(WARNING) << "!!!WARNING!!! UploadBatchCc OOM on core: "
+                              << shard_->core_id_ << ". Txn: " << req.Txn()
+                              << ", table name: " << this->table_name_.Trace();
+                // This cc shard has reached max memory limit. We didn't write
+                // data log for this upload batch req, but we have acquired
+                // range read lock for this key. If we do not return error and
+                // release the range read lock, it might block range split from
+                // finishing. We should return error here so that coordinator
+                // can release range read lock and retry later.
+                return req.SetError(CcErrorCode::OUT_OF_MEMORY);
+            }
+            write_key = it->first;
+
+#ifdef RANGE_PARTITION_ENABLED
+            if (cce->PayloadStatus() == RecordStatus::Unknown)
+            {
+                // After pin slice, the key with Unknown status must not
+                // existed.
+                RecordStatus new_status = RecordStatus::Deleted;
+                cce->SetCommitTsPayloadStatus(1U, new_status);
+                cce->SetCkptTs(1U);
+                cce->data_store_size_.store(0, std::memory_order_relaxed);
+            }
+            else
+            {
+                // So far, UploadBatchCc is use exclusively for
+                // secondary key encoded by primary key during add index
+                // txm. If the target key already exists, it must be
+                // newer than this encoded key, so the old value should
+                // be discarded directly.
+                assert(cce->CommitTs() > 1 && cce->CommitTs() >= commit_ts);
+                key_offset = next_key_offset;
+                rec_offset = next_rec_offset;
+                ts_offset = next_ts_offset;
+                continue;
+            }
+#endif
+
+            assert(commit_ts > 1);
+            if (cce->CommitTs() >= commit_ts)
+            {
+                // Concurrent upsert_tx has write the latest value, so discard
+                // the old value directly. For example, during add index
+                // transaction, we will write the packed sk data that generate
+                // from old pk records into the new sk ccmap, and before this
+                // post write request, we do not acquire the write lock on this
+                // TxKey, so this value has been updated by a concurrent
+                // transaction.
+                key_offset = next_key_offset;
+                rec_offset = next_rec_offset;
+                ts_offset = next_ts_offset;
+                continue;
+            }
+
+            // Now, all versions of non-unique SecondaryIndex key shared
+            // the unpack info in current version's payload, though the
+            // unpack info will not be used for deleted key, we must not
+            // change the payload of secondary key ccentry if it is not
+            // null.
+            if (Type() != TableType::Secondary || cce->payload_ == nullptr)
+            {
+                if (cce->payload_.use_count() == 1)
+                {
+                    *(cce->payload_) = *commit_val;
+                }
+                else
+                {
+                    cce->payload_ = std::make_shared<ValueT>(*commit_val);
+                }
+            }
+
+            // Currently, this request is only used during add index
+            // which will upload non-deleted records.
+            cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Normal);
+            DLOG_IF(INFO, TRACE_OCC_ERR)
+                << "UploadBatchCc, txn:" << req.Txn() << " ,cce: " << cce
+                << " ,commit_ts: " << commit_ts;
+
+            if (commit_ts > last_dirty_commit_ts_)
+            {
+                last_dirty_commit_ts_ = commit_ts;
+            }
+            if (commit_ts > cc_page->last_dirty_commit_ts_)
+            {
+                cc_page->last_dirty_commit_ts_ = commit_ts;
+            }
+
+            if (shard_->realtime_sampling_ && sample_pool_)
+            {
+                assert(write_key != nullptr);
+                sample_pool_->OnInsert(*write_key, table_schema_);
+            }
+
+            // update the key offset
+            key_offset = next_key_offset;
+            rec_offset = next_rec_offset;
+            ts_offset = next_ts_offset;
+        }
+#ifdef RANGE_PARTITION_ENABLED
+        if (current_slice_id.Slice() != nullptr)
+        {
+            current_slice_id.Unpin();
+        }
+#endif
+        return req.SetFinish();
+    }
+
     bool Execute(ApplyCc &req) override
     {
         return true;
@@ -6270,15 +6551,15 @@ public:
      * @param clean_type
      * @param kickout_cc [optional]
      * @param is_success [optional]
-     * @return result pair of which the first is free count and the scond is the
-     * next page which will be cleaned. If clean type is CleanForFree, the next
-     * page is the lru_next_ of the page. Otherwise, the value of the next page
-     * is setted depending on clean status:
-     * When clean successfully, return the current page's next page in the below
-     * cases: page is empty; no borrow or merge; borrow from previous; merge
-     * with previous. Return the current page in the below cases: borrow from
-     * next; merge with next.
-     * When clean failed, return the current page always.
+     * @return result pair of which the first is free count and the
+     * scond is the next page which will be cleaned. If clean type is
+     * CleanForFree, the next page is the lru_next_ of the page.
+     * Otherwise, the value of the next page is setted depending on
+     * clean status: When clean successfully, return the current page's
+     * next page in the below cases: page is empty; no borrow or merge;
+     * borrow from previous; merge with previous. Return the current
+     * page in the below cases: borrow from next; merge with next. When
+     * clean failed, return the current page always.
      */
     std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *lru_page,
@@ -6323,19 +6604,22 @@ public:
         }
         else if (page->Size() >= CcPage<KeyT, ValueT>::merge_threshold_)
         {
-            // page is still half full, no redistribution or merge needed
+            // page is still half full, no redistribution or merge
+            // needed
             auto page_it = ccmp_.find(old_page_key);
             assert(page_it != ccmp_.end());
             TryUpdatePageKey(page_it);
 
             if (kickout_cc != nullptr && !success)
             {
-                // If the caller care the clean status, reset the value of
+                // If the caller care the clean status, reset the value
+                // of
                 // @@next_page depending on the clean result:
-                // 1) When the current page has been cleaned successfully, there
-                // is no need to reset the value of @@next_page.
-                // 2) When this current page has not been cleaned successfully,
-                // should set the current page as the next_page.
+                // 1) When the current page has been cleaned
+                // successfully, there is no need to reset the value of
+                // @@next_page. 2) When this current page has not been
+                // cleaned successfully, should set the current page as
+                // the next_page.
                 next_page = page;
             }
         }
@@ -6364,9 +6648,9 @@ public:
             {
                 // map needs to be updated through iterator
                 auto page_it = ccmp_.find(old_page_key);
-                // the two pages whose entries need to be redistributed are
-                // identified by page1 and page2, page1 is the page with smaller
-                // key
+                // the two pages whose entries need to be redistributed
+                // are identified by page1 and page2, page1 is the page
+                // with smaller key
                 auto page1_it = page_it;
                 auto page2_it = page_it;
                 if (can_borrow_from_prev)
@@ -6385,13 +6669,15 @@ public:
                 if (kickout_cc != nullptr &&
                     ((success && page == &page1_it->second) || !success))
                 {
-                    // If the caller care the clean status, reset the value of
+                    // If the caller care the clean status, reset the
+                    // value of
                     // @@next_page depending on the clean result:
-                    // 1) When the current page has been cleaned successfully,
-                    // if borrow from the next(that's mean page == page1),
-                    // should set the current page as the @@next_page.
-                    // 2) When this current page has not been cleaned
-                    // successfully, should return the current page as the
+                    // 1) When the current page has been cleaned
+                    // successfully, if borrow from the next(that's mean
+                    // page == page1), should set the current page as
+                    // the @@next_page. 2) When this current page has
+                    // not been cleaned successfully, should return the
+                    // current page as the
                     // @@next_page.
                     next_page = page;
                 }
@@ -6400,8 +6686,8 @@ public:
             {
                 // map needs to be updated through iterator
                 auto page_it = ccmp_.find(old_page_key);
-                // the two pages to be merged are identified by page1 and page2,
-                // page1 is the page with smaller key
+                // the two pages to be merged are identified by page1
+                // and page2, page1 is the page with smaller key
                 auto page1_it = page_it;
                 auto page2_it = page_it;
 
@@ -6423,13 +6709,14 @@ public:
 
                 if (kickout_cc == nullptr && next_page == discarded_page)
                 {
-                    // For this case, the next page to be cleaned comes from the
-                    // lru list.
-                    // The next_page is current page's lru_next_, and if the
-                    // next_page == discarded_page, the discarded_page must be
-                    // the next page of the current page, that is to say, the
-                    // current page will merge with the next. So the current
-                    // page must equal to the merged page, and should set the
+                    // For this case, the next page to be cleaned comes
+                    // from the lru list. The next_page is current
+                    // page's lru_next_, and if the next_page ==
+                    // discarded_page, the discarded_page must be the
+                    // next page of the current page, that is to say,
+                    // the current page will merge with the next. So the
+                    // current page must equal to the merged page, and
+                    // should set the
                     // @@next_page is merged page.
                     assert(page == merged_page);
                     next_page = merged_page;
@@ -6440,16 +6727,16 @@ public:
 
                 if (kickout_cc != nullptr)
                 {
-                    // For this case, should set the value of @@next_page
-                    // depending on the clean result:
-                    // 1) When the current page has been cleaned successfully,
-                    // if merged with previous page, set the value is the
-                    // merged_page's next_page_; if merged with next page, set
-                    // the value is the merged_page itself.
-                    // 2) When the current page has not been cleaned
-                    // successfully. Should set the value is the merged_page
-                    // itself no matter merged with previous page or merged
-                    // with next page.
+                    // For this case, should set the value of
+                    // @@next_page depending on the clean result: 1)
+                    // When the current page has been cleaned
+                    // successfully, if merged with previous page, set
+                    // the value is the merged_page's next_page_; if
+                    // merged with next page, set the value is the
+                    // merged_page itself. 2) When the current page has
+                    // not been cleaned successfully. Should set the
+                    // value is the merged_page itself no matter merged
+                    // with previous page or merged with next page.
                     next_page = (real_merge_with_prev && success)
                                     ? merged_page->next_page_
                                     : merged_page;
@@ -6519,7 +6806,8 @@ public:
     }
 
     /**
-     * Used for debug to verify the map_link is complete and keys are in order.
+     * Used for debug to verify the map_link is complete and keys are in
+     * order.
      */
     size_t VerifyOrdering() override
     {
@@ -6530,8 +6818,8 @@ public:
             const KeyT &page_key = it->first;
             CcPage<KeyT, ValueT> *page = &it->second;
             assert(page_key == page->FirstKey());
-            // This silences the -Wunused-but-set-variable warning without any
-            // runtime overhead.
+            // This silences the -Wunused-but-set-variable warning
+            // without any runtime overhead.
             (void) page_key;
             assert(page->prev_page_ == prev_page &&
                    prev_page->next_page_ == page);
@@ -6539,8 +6827,8 @@ public:
         }
         assert(prev_page->next_page_ == &pos_inf_page_ &&
                pos_inf_page_.prev_page_ == prev_page);
-        // This silences the -Wunused-but-set-variable warning without any
-        // runtime overhead.
+        // This silences the -Wunused-but-set-variable warning without
+        // any runtime overhead.
         (void) prev_page;
         // verify key order in all pages
         Iterator ccm_it = Begin();
@@ -6552,8 +6840,8 @@ public:
         {
             const KeyT *key = ccm_it->first;
             assert(*prev_key < *key);
-            // This silences the -Wunused-but-set-variable warning without any
-            // runtime overhead.
+            // This silences the -Wunused-but-set-variable warning
+            // without any runtime overhead.
             (void) prev_key;
             prev_key = key;
             ++cnt;
@@ -6697,15 +6985,15 @@ protected:
         {
             if (current_.first == NegativeInfinity<KeyT>::Instance())
             {
-                // The iterator points to negative infinity. Increments the
-                // iterator to the first page in the map, if the map is not
-                // empty.
+                // The iterator points to negative infinity. Increments
+                // the iterator to the first page in the map, if the map
+                // is not empty.
                 CcPage<KeyT, ValueT> *next_page = current_page_->next_page_;
                 if (next_page->IsPosInf())
                 {
-                    // If the next page is the positive infinity page, the map
-                    // is empty. The advanced iterator points to positive
-                    // infinity.
+                    // If the next page is the positive infinity page,
+                    // the map is empty. The advanced iterator points to
+                    // positive infinity.
                     current_.first = PositiveInfinity<KeyT>::Instance();
                     current_.second = nullptr;
                     current_page_ = next_page;
@@ -6740,8 +7028,8 @@ protected:
                     UpdateCurrent();
                 }
             }
-            // If the iterator points to positive infinity, keeps the iterator
-            // unchanged.
+            // If the iterator points to positive infinity, keeps the
+            // iterator unchanged.
 
             return *this;
         }
@@ -6751,15 +7039,15 @@ protected:
         {
             if (current_.first == PositiveInfinity<KeyT>::Instance())
             {
-                // The iterator points to positive infinity. Decrements the
-                // iterator to the last entry in the map, if the map is not
-                // empty.
+                // The iterator points to positive infinity. Decrements
+                // the iterator to the last entry in the map, if the map
+                // is not empty.
                 CcPage<KeyT, ValueT> *prev_page = current_page_->prev_page_;
                 if (prev_page->IsNegInf())
                 {
-                    // If the previous page is the negative infinity page, the
-                    // map is empty. The advanced iterator points to negative
-                    // infinity.
+                    // If the previous page is the negative infinity
+                    // page, the map is empty. The advanced iterator
+                    // points to negative infinity.
                     current_.first = NegativeInfinity<KeyT>::Instance();
                     current_.second = neg_inf_cce_;
                     current_page_ = prev_page;
@@ -6910,13 +7198,13 @@ protected:
             return true;
         }
 
-        // catalog and range ccmap bypass shard memory limit. since checkpointer
-        // may emplace ccentry into ccmap.
+        // catalog and range ccmap bypass shard memory limit. since
+        // checkpointer may emplace ccentry into ccmap.
         if (shard_->Full())
         {
-            // The shard has reached the maximal capacity. Tries to clean cc
-            // entries that have been checkpointed but are not being
-            // accessed by active tx's.
+            // The shard has reached the maximal capacity. Tries to
+            // clean cc entries that have been checkpointed but are not
+            // being accessed by active tx's.
             shard_->Clean();
             if (shard_->Full() && !shard_->TryHeapCollect() &&
                 !table_name_.IsMeta() && !force_emplace)
@@ -6935,14 +7223,16 @@ protected:
                 data_item.is_deleted_ ? 0
                                       : data_item.key_->Size() + record->Size();
 
-            // If the in-memory version is from a upload request (i.e. generated
-            // sk record from pk), the data store version might be newer. Only
-            // overwrite if in memory version is newer.
+            // If the in-memory version is from a upload request (i.e.
+            // generated sk record from pk), the data store version
+            // might be newer. Only overwrite if in memory version is
+            // newer.
             const uint64_t cce_version = cce->CommitTs();
             if (cce_version > 1 && data_item.version_ts_ <= cce_version)
             {
 #ifdef RANGE_PARTITION_ENABLED
-                // Initialize the data store size if it is unspecified before
+                // Initialize the data store size if it is unspecified
+                // before
                 if (cce->data_store_size_.load(std::memory_order_acquire) ==
                     INT32_MAX)
                 {
@@ -6964,8 +7254,8 @@ protected:
                 cce->SetCkptTs(data_item.version_ts_);
 
                 // The cc entry's commit ts is 1 when it is initialized.
-                // Commit ts greater than 1 means that the key is already
-                // cached in memory.
+                // Commit ts greater than 1 means that the key is
+                // already cached in memory.
                 return;
             }
 
@@ -7122,8 +7412,8 @@ protected:
                     assert(new_keys.empty());
                     assert(new_key_item_idxs.empty());
 
-                    // target page is full, choose the next page if `key` can be
-                    // inserted into next page
+                    // target page is full, choose the next page if
+                    // `key` can be inserted into next page
                     target_iter++;
                     if (target_iter == ccmp_.end())
                     {
@@ -7188,8 +7478,8 @@ protected:
                     }
                 }
 
-                // We will insert these keys into the page later. This is to
-                // avoid frequent moving of data during insertion
+                // We will insert these keys into the page later. This
+                // is to avoid frequent moving of data during insertion
                 new_keys.emplace_back(*target_key);
                 new_key_item_idxs.emplace_back(item_idx);
 
@@ -7245,13 +7535,13 @@ protected:
             return End();
         }
 
-        // catalog and range ccmap bypass shard memory limit. since checkpointer
-        // may emplace ccentry into ccmap.
+        // catalog and range ccmap bypass shard memory limit. since
+        // checkpointer may emplace ccentry into ccmap.
         if (shard_->Full())
         {
-            // The shard has reached the maximal capacity. Tries to clean cc
-            // entries that have been checkpointed but are not being
-            // accessed by active tx's.
+            // The shard has reached the maximal capacity. Tries to
+            // clean cc entries that have been checkpointed but are not
+            // being accessed by active tx's.
             shard_->Clean();
             if (shard_->Full() && !shard_->TryHeapCollect() &&
                 !table_name_.IsMeta() && !force_emplace)
@@ -7266,12 +7556,13 @@ protected:
             auto [it, inserted] =
                 ccmp_.try_emplace(key, this, &neg_inf_page_, &pos_inf_page_);
             assert(inserted);
-            // This silences the -Wunused-but-set-variable warning without any
-            // runtime overhead.
+            // This silences the -Wunused-but-set-variable warning
+            // without any runtime overhead.
             (void) inserted;
         }
 
-        // First locate target page, then find or emplace `key` in the page.
+        // First locate target page, then find or emplace `key` in the
+        // page.
         auto ub_it = ccmp_.upper_bound(key);
         auto target_it = ub_it;
         if (target_it != ccmp_.begin())
@@ -7289,7 +7580,8 @@ protected:
             return iterator;
         }
 
-        // not found, emplace key into target page, split the page if it's full
+        // not found, emplace key into target page, split the page if
+        // it's full
         if (target_page->Full() && target_page->LastKey() < key)
         {
             // target page is full, choose the next page if `key` can be
@@ -7379,9 +7671,9 @@ protected:
     }
 
     /**
-     * Whether ScanGap or ScanBoth depends on whether this is range_cc_map
-     * scan. For template_cc_map, start from it's gap; for range_cc_map,
-     * start from it's key and gap.
+     * Whether ScanGap or ScanBoth depends on whether this is
+     * range_cc_map scan. For template_cc_map, start from it's gap; for
+     * range_cc_map, start from it's key and gap.
      * @param it
      * @param is_include_floor_cce
      * @return
@@ -7395,9 +7687,10 @@ protected:
     }
 
     /**
-     * Find lower bound of @param key in map, i.e. the first entry whose key is
-     * equal to or greater than @param key. Return an Iterator pointing to this
-     * entry, if no such entry, return Begin() which points to neg_inf_.
+     * Find lower bound of @param key in map, i.e. the first entry whose
+     * key is equal to or greater than @param key. Return an Iterator
+     * pointing to this entry, if no such entry, return Begin() which
+     * points to neg_inf_.
      * @param key
      * @return
      */
@@ -7408,8 +7701,8 @@ protected:
             return Begin();
         }
 
-        // ccmp_ key is each page's smallest key, so the lower bound of `key`
-        // might fall into either of two adjacent pages
+        // ccmp_ key is each page's smallest key, so the lower bound of
+        // `key` might fall into either of two adjacent pages
         auto lb_it = ccmp_.lower_bound(key);
         CcPage<KeyT, ValueT> *page1 = nullptr;
         CcPage<KeyT, ValueT> *page2 = nullptr;
@@ -7435,30 +7728,31 @@ protected:
         }
         else if (page1 != nullptr && key <= page1->LastKey())
         {
-            // page1->FirstKey < key <= page1->LastKey(), the lower bound of
-            // `key` must locate in page1
+            // page1->FirstKey < key <= page1->LastKey(), the lower
+            // bound of `key` must locate in page1
             size_t idx_in_page = page1->LowerBound(key);
             return Iterator(page1, idx_in_page, &neg_inf_);
         }
         else
         {
-            // page1->LastKey() < key <= page2->FirstKey(), the lower bound of
-            // `key` must be the first key of page2
+            // page1->LastKey() < key <= page2->FirstKey(), the lower
+            // bound of `key` must be the first key of page2
             return Iterator(page2, 0, &neg_inf_);
         }
     }
 
     /**
-     * Find upper bound of @param key in map, i.e. the first entry whose key is
-     * greater than @param key. Return an Iterator pointing to this entry, if
-     * no such entry, return End() which points to pos_inf_.
+     * Find upper bound of @param key in map, i.e. the first entry whose
+     * key is greater than @param key. Return an Iterator pointing to
+     * this entry, if no such entry, return End() which points to
+     * pos_inf_.
      * @param key
      * @return
      */
     Iterator UpperBound(const KeyT &key)
     {
-        // ccmp_ key is each page's smallest key, so the upper bound of `key`
-        // might fall into either of two adjacent pages
+        // ccmp_ key is each page's smallest key, so the upper bound of
+        // `key` might fall into either of two adjacent pages
         auto ub_it = ccmp_.upper_bound(key);
         CcPage<KeyT, ValueT> *page1 = nullptr;
         CcPage<KeyT, ValueT> *page2 = nullptr;
@@ -7484,28 +7778,29 @@ protected:
         }
         else if (page1 != nullptr && key < page1->LastKey())
         {
-            // page1->FirstKey <= key < page1->LastKey(), the upper bound of
-            // `key` must locate in page1
+            // page1->FirstKey <= key < page1->LastKey(), the upper
+            // bound of `key` must locate in page1
             size_t idx_in_page = page1->UpperBound(key);
             return Iterator(page1, idx_in_page, &neg_inf_);
         }
         else
         {
-            // page1->LastKey() <= key < page2->FirstKey(), the upper bound of
-            // `key` must be the first key of page2
+            // page1->LastKey() <= key < page2->FirstKey(), the upper
+            // bound of `key` must be the first key of page2
             return Iterator(page2, 0, &neg_inf_);
         }
     }
 
     /**
-     * @brief Finds the greatest cc entry whose key is less than or equal to
-     * the input key. If the map is empty, the floor key is negative
-     * infinity.
+     * @brief Finds the greatest cc entry whose key is less than or
+     * equal to the input key. If the map is empty, the floor key is
+     * negative infinity.
      *
      * @param key The input key
-     * @return The Iterator pointing to the cc entry whose key is the greatest
-     * key less than or equal to the input key. If `key` is positive infinity,
-     * the Iterator points to the last key in the map.
+     * @return The Iterator pointing to the cc entry whose key is the
+     * greatest key less than or equal to the input key. If `key` is
+     * positive infinity, the Iterator points to the last key in the
+     * map.
      */
     Iterator Floor(const KeyT &key)
     {
@@ -7513,8 +7808,8 @@ protected:
         if (*it->first != key ||
             it == End())  // special case for positive infinity
         {
-            // lower bound of a non-negative infinity key should never be
-            // Begin()
+            // lower bound of a non-negative infinity key should never
+            // be Begin()
             assert(it != Begin());
             it--;
         }
@@ -7525,14 +7820,15 @@ protected:
      * @brief Searches the start cc entry of a forward scan.
      *
      * @param key Search key
-     * @param inclusive Whether or not the start key is included in the scan
-     * @param is_include_floor_cce This param is used only by range_cc_map
-     * scan, and is always true. Range scan searches for the floor of the
-     * search key and returns both its key and gap.
+     * @param inclusive Whether or not the start key is included in the
+     * scan
+     * @param is_include_floor_cce This param is used only by
+     * range_cc_map scan, and is always true. Range scan searches for
+     * the floor of the search key and returns both its key and gap.
      * @return std::pair<typename std::map<KeyT, CcEntry<KeyT,
-     * ValueT>>::const_iterator, ScanType> A pair of a forward map iterator
-     * starting from the start cc entry and whether the scan includes the
-     * start cc entry's key or gap or both.
+     * ValueT>>::const_iterator, ScanType> A pair of a forward map
+     * iterator starting from the start cc entry and whether the scan
+     * includes the start cc entry's key or gap or both.
      */
     std::pair<Iterator, ScanType> ForwardScanStart(
         const KeyT &key, bool inclusive, bool is_include_floor_cce = false)
@@ -7554,7 +7850,8 @@ protected:
             if (lb_it == End() || !(*lb_it->first == key))
             {
                 // for template_cc_map, start from previous entry's gap;
-                // for range_cc_map, start from previous entry's key and gap
+                // for range_cc_map, start from previous entry's key and
+                // gap
                 if (lb_it == Begin())
                 {
                     return MakeForwardScanPair(lb_it, is_include_floor_cce);
@@ -7567,8 +7864,8 @@ protected:
             }
             else
             {
-                // lb_it's key is exactly equal to `key`, start from lb_it and
-                // its gap, but not including previous key gap
+                // lb_it's key is exactly equal to `key`, start from
+                // lb_it and its gap, but not including previous key gap
                 return std::make_pair(lb_it, ScanType::ScanBoth);
             }
         }
@@ -7592,11 +7889,12 @@ protected:
      * @brief Searches the start cc entry of a backward scan.
      *
      * @param key Search key
-     * @param inclusive Whether or not the start key is included in the scan
+     * @param inclusive Whether or not the start key is included in the
+     * scan
      * @return std::pair<typename std::map<KeyT, CcEntry<KeyT,
-     * ValueT>>::const_iterator, ScanType> A pair of a backward map iterator
-     * starting from the start cc entry and whether the scan includes the
-     * start cc entry's key or gap or both.
+     * ValueT>>::const_iterator, ScanType> A pair of a backward map
+     * iterator starting from the start cc entry and whether the scan
+     * includes the start cc entry's key or gap or both.
      */
     std::pair<Iterator, ScanType> BackwardScanStart(const KeyT &key,
                                                     bool inclusive)
@@ -7621,14 +7919,15 @@ protected:
             Iterator ub_it = UpperBound(key);
             if (ub_it == Begin())
             {
-                // map empty or every key in map is greater than `key`, return
-                // neg_inf_'s gap
+                // map empty or every key in map is greater than `key`,
+                // return neg_inf_'s gap
                 return std::make_pair(ub_it, ScanType::ScanGap);
             }
             else
             {
                 ub_it--;
-                // now, ub_it is the greatest entry equal to or less than `key`
+                // now, ub_it is the greatest entry equal to or less
+                // than `key`
 
                 if (!(*ub_it->first == key))
                 {
@@ -7647,8 +7946,8 @@ protected:
             Iterator lb_it = LowerBound(key);
             if (lb_it == Begin())
             {
-                // map empty or every key in ccm_ is greater than or equal to
-                // `key`, return neg_inf_ gap
+                // map empty or every key in ccm_ is greater than or
+                // equal to `key`, return neg_inf_ gap
                 return std::make_pair(lb_it, ScanType::ScanGap);
             }
             else
@@ -7681,12 +7980,12 @@ protected:
             cce->MvccGet(read_ts, Type(), shard_->LastReadTs(), v_rec);
 
 #ifdef RANGE_PARTITION_ENABLED
-            // For snapshot reads, only if the visible version's record status
-            // is deleted and no lock has been put on it, should the record be
-            // skipped in the result set. Note that if the visible version is
-            // mising in memory, the key still needs to be returned. Runtime
-            // will use the key to retrieve the visible version from the data
-            // store.
+            // For snapshot reads, only if the visible version's record
+            // status is deleted and no lock has been put on it, should
+            // the record be skipped in the result set. Note that if the
+            // visible version is mising in memory, the key still needs
+            // to be returned. Runtime will use the key to retrieve the
+            // visible version from the data store.
             if (v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
             {
                 return;
@@ -7708,8 +8007,8 @@ protected:
                 if (v_rec.payload_ptr_ != nullptr)
                 {
                     tuple->SetRecord(v_rec.payload_ptr_);
-                    // We're only copying the shared_ptr here so we exclude the
-                    // actual payload size.
+                    // We're only copying the shared_ptr here so we
+                    // exclude the actual payload size.
                 }
             }
             tuple->key_ts_ = v_rec.commit_ts_;
@@ -7748,8 +8047,8 @@ protected:
                     // TemplateCcMap::ScanKey() on local ccmp may be called, and
                     // it need not set record.
 #endif
-                    // We're only copying the shared_ptr here so we exclude the
-                    // actual payload size.
+                    // We're only copying the shared_ptr here so we
+                    // exclude the actual payload size.
                 }
             }
             tuple->rec_status_ = rec_status;
@@ -7783,12 +8082,12 @@ protected:
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, Type(), shard_->LastReadTs(), v_rec);
 
-            // For snapshot reads, only if the visible version's record status
-            // is deleted and no lock has been put on it, should the record be
-            // skipped in the result set. Note that if the visible version is
-            // mising in memory, the key still needs to be returned. Runtime
-            // will use the key to retrieve the visible version from the data
-            // store.
+            // For snapshot reads, only if the visible version's record
+            // status is deleted and no lock has been put on it, should
+            // the record be skipped in the result set. Note that if the
+            // visible version is mising in memory, the key still needs
+            // to be returned. Runtime will use the key to retrieve the
+            // visible version from the data store.
             if (v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
             {
                 return;
@@ -7856,8 +8155,8 @@ protected:
 
         remote_cache->cce_ptr_.push_back(reinterpret_cast<uint64_t>(cce));
         remote_cache->term_.push_back(ng_term);
-        // For remote scans, the returned cc entries' node group ID is set
-        // on the sender side when the sender receives the response.
+        // For remote scans, the returned cc entries' node group ID is
+        // set on the sender side when the sender receives the response.
 
         remote_cache->cache_mem_size_ += tuple_size;
     }
@@ -7882,12 +8181,12 @@ protected:
             cce->MvccGet(read_ts, Type(), shard_->LastReadTs(), v_rec);
 
 #ifdef RANGE_PARTITION_ENABLED
-            // For snapshot reads, only if the visible version's record status
-            // is deleted and no lock has been put on it, should the record be
-            // skipped in the result set. Note that if the visible version is
-            // mising in memory, the key still needs to be returned. Runtime
-            // will use the key to retrieve the visible version from the data
-            // store.
+            // For snapshot reads, only if the visible version's record
+            // status is deleted and no lock has been put on it, should
+            // the record be skipped in the result set. Note that if the
+            // visible version is mising in memory, the key still needs
+            // to be returned. Runtime will use the key to retrieve the
+            // visible version from the data store.
             if (v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
             {
                 return;
@@ -7972,8 +8271,8 @@ protected:
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
         cce_addr->set_term(ng_term);
-        // For remote scans, the returned cc entries' node group ID is set
-        // on the sender side when the sender receives the response.
+        // For remote scans, the returned cc entries' node group ID is
+        // set on the sender side when the sender receives the response.
 
         remote_cache->cache_mem_size_ += tuple_size;
     }
@@ -8004,8 +8303,8 @@ protected:
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
         cce_addr->set_term(ng_term);
 
-        // For remote scans, the returned cc entries' node group ID is set
-        // on the sender side when the sender receives the response.
+        // For remote scans, the returned cc entries' node group ID is
+        // set on the sender side when the sender receives the response.
     }
 
     void ScanGap(const KeyT *key,
@@ -8019,13 +8318,13 @@ protected:
         cache->cce_ptr_.push_back(reinterpret_cast<uint64_t>(cce));
         cache->term_.push_back(ng_term);
 
-        // For remote scans, the returned cc entries' node group ID is set
-        // on the sender side when the sender receives the response.
+        // For remote scans, the returned cc entries' node group ID is
+        // set on the sender side when the sender receives the response.
     }
 
     /**
-     * @brief If key is in range of [start key, end key), left inclusive right
-     * open.
+     * @brief If key is in range of [start key, end key), left inclusive
+     * right open.
      *
      * @param key
      * @param start_key
@@ -8052,8 +8351,8 @@ protected:
     }
 
     /**
-     * If the a record is according to the conditions, return true, or return
-     * false to neglect this record.
+     * If the a record is according to the conditions, return true, or
+     * return false to neglect this record.
      */
     virtual bool FilterRecord(const KeyT *key,
                               const CcEntry<KeyT, ValueT> *cce,
@@ -8084,10 +8383,11 @@ protected:
      * @param page
      * @param free_cnt
      * @param clean_type
-     * @return The bool value stand for the clean status, if return false, it
-     * mean that the target ccentry can not be clean, the caller should retry
-     * the kickout request. Currently, only when clean_type is
-     * CleanForSplitRange and CleanForAlterTable care this status.
+     * @return The bool value stand for the clean status, if return
+     * false, it mean that the target ccentry can not be clean, the
+     * caller should retry the kickout request. Currently, only when
+     * clean_type is CleanForSplitRange and CleanForAlterTable care this
+     * status.
      */
     bool CleanPage(CcPage<KeyT, ValueT> *page,
                    size_t &free_cnt,
@@ -8109,7 +8409,8 @@ protected:
 
         uint64_t last_commit_ts = 0;
 
-        // Whether all ccentries whose commit_ts < @ckpt_ts have been cleaned.
+        // Whether all ccentries whose commit_ts < @ckpt_ts have been
+        // cleaned.
         bool clean_success = true;
         auto key_it = keys.begin();
         auto entry_it = entries.begin();
@@ -8150,18 +8451,19 @@ protected:
                     table_name_, cc_ng_id_, *key_it);
                 if (!kick_ret)
                 {
-                    // If the slice is being loaded or pinned, do not clean
-                    // it.
+                    // If the slice is being loaded or pinned, do not
+                    // clean it.
                     *key_insert_it = std::move(*key_it);
                     *entry_insert_it = std::move(*entry_it);
                     key_insert_it++;
                     entry_insert_it++;
-                    // record the commit_ts if the entry cannot be cleaned.
+                    // record the commit_ts if the entry cannot be
+                    // cleaned.
                     last_commit_ts = std::max(last_commit_ts, cce->CommitTs());
-                    // The ccentry that expect to clean cannot be kick out.
-                    // In this branch, only when clean_type is
-                    // CleanForSplitRange or CleanForAlterTable care this clean
-                    // status
+                    // The ccentry that expect to clean cannot be kick
+                    // out. In this branch, only when clean_type is
+                    // CleanForSplitRange or CleanForAlterTable care
+                    // this clean status
                     if (clean_type == CleanType::CleanForSplitRange ||
                         clean_type == CleanType::CleanForAlterTable)
                     {
@@ -8181,10 +8483,11 @@ protected:
             else
             {
                 // The ccentry that expect to clean cannot be kick out.
-                // In this branch, only when clean_type is CleanForAlterTable
-                // care this clean status. For CleanForSplitRange, if
-                // can_be_clean is false, it mean that this ccentry is not the
-                // target one, so it do not care this clean status.
+                // In this branch, only when clean_type is
+                // CleanForAlterTable care this clean status. For
+                // CleanForSplitRange, if can_be_clean is false, it mean
+                // that this ccentry is not the target one, so it do not
+                // care this clean status.
                 if (clean_type == CleanType::CleanForAlterTable &&
                     cce->CommitTs() <= kickout_cc->CkptTs() &&
                     cce->CommitTs() > 1)
@@ -8204,8 +8507,9 @@ protected:
         }
         keys.erase(key_insert_it, keys.end());
         entries.erase(entry_insert_it, entries.end());
-        // During range split kickout, we might clean cc entries that are still
-        // dirty from page. So the max dirty ts might decrease.
+        // During range split kickout, we might clean cc entries that
+        // are still dirty from page. So the max dirty ts might
+        // decrease.
         page->last_dirty_commit_ts_ =
             std::min(last_commit_ts, page->last_dirty_commit_ts_);
 
@@ -8213,9 +8517,10 @@ protected:
     }
 
     /**
-     * Redistribute entries between page1 and page2. This happens when one page
-     * is cleaned and its size is below merge threshold and it needs to borrow
-     * entries from its siblings to keep the tree balanced.
+     * Redistribute entries between page1 and page2. This happens when
+     * one page is cleaned and its size is below merge threshold and it
+     * needs to borrow entries from its siblings to keep the tree
+     * balanced.
      *
      * @param page1_it
      * @param page2_it
@@ -8241,7 +8546,8 @@ protected:
             page1.keys_.erase(page1.keys_.begin() + move_pos,
                               page1.keys_.end());
 
-            // Updates the parent page of the locks of the to-be-moved entries.
+            // Updates the parent page of the locks of the to-be-moved
+            // entries.
             for (auto page1_it = page1.entries_.begin() + move_pos;
                  page1_it != page1.entries_.end();
                  ++page1_it)
@@ -8269,7 +8575,8 @@ protected:
             page2.keys_.erase(page2.keys_.begin(),
                               page2.keys_.begin() + move_idx);
 
-            // Updates the parent page of the locks of the to-be-moved entries.
+            // Updates the parent page of the locks of the to-be-moved
+            // entries.
             for (auto page2_it = page2.entries_.begin();
                  page2_it != page2.entries_.begin() + move_idx;
                  ++page2_it)
@@ -8287,7 +8594,8 @@ protected:
                                                    page2.last_dirty_commit_ts_);
         }
 
-        // The locks of cc entries of a page should point to the same page.
+        // The locks of cc entries of a page should point to the same
+        // page.
         assert(
             [&]()
             {
@@ -8322,9 +8630,9 @@ protected:
         TryUpdatePageKey(page2_it);
 
         // update LRU list
-        // after redistribution, the two pages should be seen as one in the LRU
-        // list, insert the less recently used page after the more recently used
-        // one
+        // after redistribution, the two pages should be seen as one in
+        // the LRU list, insert the less recently used page after the
+        // more recently used one
         LruPage *less_recently_used = nullptr, *more_recently_used = nullptr;
         if (page1.last_access_ts_ > page2.last_access_ts_)
         {
@@ -8414,12 +8722,12 @@ protected:
         map_next->prev_page_ = merged_page;
 
         // Update the LRU list.
-        // the merged page should take the more recently used page's position in
-        // the LRU list
+        // the merged page should take the more recently used page's
+        // position in the LRU list
         if (page1->lru_next_ == page2 || page1->lru_prev_ == page2)
         {
-            // corner case: the two pages are adjacent in LRU list, just detach
-            // the discarded page
+            // corner case: the two pages are adjacent in LRU list, just
+            // detach the discarded page
             if (discarded_page->lru_next_ != nullptr)
             {
                 shard_->DetachLru(discarded_page);
@@ -8458,7 +8766,8 @@ protected:
             merged_page->last_access_ts_ = merge_last_access_ts;
         }
 
-        // last_dirty_commit_ts_ of merged page will inherit the larger one.
+        // last_dirty_commit_ts_ of merged page will inherit the larger
+        // one.
         merged_page->last_dirty_commit_ts_ =
             std::max(merged_page->last_dirty_commit_ts_,
                      discarded_page->last_dirty_commit_ts_);

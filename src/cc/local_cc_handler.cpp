@@ -649,6 +649,112 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     return finished;
 }
 
+bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
+                                          const std::string &key_str,
+                                          TxRecord &record,
+                                          ReadType read_type,
+                                          uint64_t tx_number,
+                                          int64_t tx_term,
+                                          uint16_t command_id,
+                                          const uint64_t ts,
+                                          CcHandlerResult<ReadKeyResult> &hres,
+                                          IsolationLevel iso_level,
+                                          CcProtocol proto,
+                                          bool is_for_write,
+                                          bool is_recovering)
+{
+    ReadKeyResult &read_result = hres.Value();
+    read_result.rec_ = &record;
+    read_result.rec_status_ = RecordStatus::Unknown;
+    read_result.ts_ = 0;
+    read_result.is_local_ = true;
+    CcEntryAddr &cce_addr = read_result.cce_addr_;
+
+    CcShard *ccs;
+    if (table_name == cluster_config_ccm_name)
+    {
+        // cluster config map is only initialized on core 0. If we're
+        // visiting cluster config ccm, we need to send a regular read
+        // req to another core.
+        ccs = cc_shards_.cc_shards_[0].get();
+    }
+    else
+    {
+        ccs = cc_shards_.cc_shards_[thd_id_].get();
+    }
+    int64_t term;
+    uint32_t shard_code = tx_number >> 32L;
+    uint32_t cc_ng_id = shard_code >> 10;
+    if (is_recovering)
+    {
+        term = Sharder::Instance().CandidateLeaderTerm(cc_ng_id);
+    }
+
+    if (term < 0)
+    {
+        term = Sharder::Instance().LeaderTerm(cc_ng_id);
+    }
+    cce_addr.SetNodeGroupId(cc_ng_id);
+    cce_addr.SetCce(0, term, 0);
+
+    if (term < 0)
+    {
+        // When a tx starts, the tx can only be bound to a native cc node who is
+        // the leader. Since a read local request is dispatched to the same
+        // shard to which the tx is bound, if the native cc node is not the
+        // leader now, returns an error.
+        hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        return true;
+    }
+
+    ReadCc *read_req = read_pool.NextRequest();
+    read_req->Reset(&table_name,
+                    key_str,
+                    shard_code,
+                    &record,
+                    read_type,
+                    tx_number,
+                    tx_term,
+                    ts,
+                    &hres,
+                    iso_level,
+                    proto,
+                    is_for_write,
+                    false,
+                    nullptr);
+    TX_TRACE_ACTION(this, read_req);
+    TX_TRACE_DUMP(read_req);
+
+    CcMap *ccm = ccs->GetCcm(table_name, cc_ng_id);
+    bool finished = false;
+
+    if (ccm != nullptr && thd_id_ == ccs->core_id_)
+    {
+        //__catalog table will be preloaded when ccshard constructed
+        finished = ccm->Execute(*read_req);
+        if (finished)
+        {
+            read_req->Free();
+        }
+#ifdef EXT_TX_PROC_ENABLED
+        else
+        {
+            hres.SetToBlock();
+        }
+#endif
+    }
+    else
+    {
+#ifdef EXT_TX_PROC_ENABLED
+        hres.SetToBlock();
+#endif
+        // otherwise, let the TemplateCcRequest load in the data
+        ccs->Enqueue(read_req);
+    }
+
+    return finished;
+}
+
 void txservice::LocalCcHandler::ScanOpen(
     const TableName &table_name,
     ScanIndexType index_type,

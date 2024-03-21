@@ -17,6 +17,7 @@
 #include "log_type.h"
 #include "non_blocking_lock.h"
 #include "raft_log.pb.h"
+#include "range_cc_map.h"
 #include "sharder.h"
 #include "template_cc_map.h"
 
@@ -1113,6 +1114,14 @@ public:
                 shard_->CreateOrUpdatePkCcMap(
                     table_name, old_schema, req.NodeGroupId());
 
+                // Pk range table ccmap
+                const TableName base_range_name{table_name.StringView(),
+                                                TableType::RangePartition};
+                shard_->CreateOrUpdateRangeCcMap(base_range_name,
+                                                 old_schema,
+                                                 req.NodeGroupId(),
+                                                 catalog_entry->Version());
+
                 // Old sk table ccmap using old schema.
                 std::vector<TableName> old_index_names =
                     old_schema->IndexNames();
@@ -1120,6 +1129,13 @@ public:
                 {
                     shard_->CreateOrUpdateSkCcMap(
                         old_index_name, old_schema, req.NodeGroupId());
+                    // old sk range table ccmap
+                    const TableName old_index_range_name{
+                        old_index_name.StringView(), TableType::RangePartition};
+                    shard_->CreateOrUpdateRangeCcMap(old_index_range_name,
+                                                     old_schema,
+                                                     req.NodeGroupId(),
+                                                     catalog_entry->Version());
                 }
 
                 // New sk table ccmap using new schema
@@ -1199,7 +1215,11 @@ public:
         case ::txlog::SchemaOpMessage_Stage::
             SchemaOpMessage_Stage_PrepareIndexTable:
         {
+#ifdef RANGE_PARTITION_ENABLED
+            lock_type = LockType::WriteIntent;
+#else
             lock_type = LockType::WriteLock;
+#endif
             break;
         }
         case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema:

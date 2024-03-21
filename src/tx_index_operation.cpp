@@ -8,6 +8,7 @@
 #include "local_cc_shards.h"
 #include "log_type.h"
 #include "remote/remote_type.h"
+#include "sk_generator.h"
 #include "tx_execution.h"
 #include "tx_request.h"
 #include "tx_service.h"
@@ -98,18 +99,23 @@ UpsertTableIndexOp::UpsertTableIndexOp(
       downgrade_all_lock_to_intent_op_(txm),
       unlock_cluster_config_op_(txm),
       upsert_kv_table_op_(&table_key_.Name(), op_type, txm),
+#ifndef RANGE_PARTITION_ENABLED
       flush_all_old_tuples_pk_op_(txm),
       fetch_old_tuples_from_kv_gen_sk_data_upload_op_(txm),
       flush_all_old_tuples_sk_op_(txm),
       kickout_data_all_op_(txm),
       prepare_log_for_sk_op_(txm),
+#else
+      generate_sk_parallel_op_(txm),
+      flush_all_old_tuples_sk_op_(txm),
+      prepare_log_for_sk_op_(txm),
+#endif
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
       post_all_lock_op_(txm),
       clean_log_op_(txm),
       read_cluster_result_(txm),
       alter_table_info_image_str_(alter_table_info_image),
-      acquire_terms_result_(txm),
       post_write_result_(txm)
 {
     assert(op_type_ == OperationType::AddIndex ||
@@ -151,19 +157,33 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
 
     is_force_finished_ = false;
-    waiting_to_retry_op_ = false;
-    start_waiting_ = 0;
-    op_forward_cnt_ = 0;
 
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-    for (uint32_t id = 0; id < ng_cnt; ++id)
+    new_indexes_name_.reserve(alter_table_info_.index_add_count_);
+    for (auto index_it = alter_table_info_.index_add_names_.cbegin();
+         index_it != alter_table_info_.index_add_names_.cend();
+         ++index_it)
     {
-        flush_data_all_closures_.emplace_back(
-            RPCClosure<Void, remote::FlushDataAllResponse>());
-        acquire_leader_term_closures_.emplace_back(
-            RPCClosure<std::vector<int64_t>,
-                       remote::AcquireNodeGroupTermResponse>());
+        new_indexes_name_.emplace_back(index_it->first.StringView(),
+                                       index_it->first.Type());
     }
+
+    const TxKey *neg_key = Sharder::Instance()
+                               .GetLocalCcShards()
+                               ->GetCatalogFactory()
+                               ->NegativeInfKey();
+    last_scanned_end_key_ = neg_key;
+    is_last_scanned_key_str_ = false;
+    scanned_pk_range_count_ = 0;
+    last_finished_end_key_ = neg_key;
+    is_last_finished_key_str_ = false;
+    finished_pk_range_count_ = 0;
+    total_scanned_pk_items_count_ = 0;
+#ifdef NDEBUG
+    scan_batch_range_size_ = 10;
+#else
+    scan_batch_range_size_ = 3;
+#endif
+    ResetLeaderTerms();
 
     TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
     TX_TRACE_ASSOCIATE(this,
@@ -174,6 +194,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
                        &downgrade_all_lock_to_intent_op_,
                        "downgrade_all_lock_to_intent_op_");
     TX_TRACE_ASSOCIATE(this, &upsert_kv_table_op_, "upsert_kv_table_op_");
+#ifndef RANGE_PARTITION_ENABLED
     TX_TRACE_ASSOCIATE(
         this, &flush_all_old_tuples_pk_op_, "flush_all_old_tuples_pk_op_");
     TX_TRACE_ASSOCIATE(this,
@@ -181,8 +202,15 @@ UpsertTableIndexOp::UpsertTableIndexOp(
                        "fetch_old_tuples_from_kv_gen_sk_data_upload_op_");
     TX_TRACE_ASSOCIATE(
         this, &flush_all_old_tuples_sk_op_, "flush_all_old_tuples_sk_op_");
-    TX_TRACE_ASSOCIATE(this, &prepare_log_for_sk_op_, "prepare_log_for_sk_op_");
     TX_TRACE_ASSOCIATE(this, &kickout_data_all_op_, "kickout_data_all_op_");
+    TX_TRACE_ASSOCIATE(this, &prepare_log_for_sk_op_, "prepare_log_for_sk_op_");
+#else
+    TX_TRACE_ASSOCIATE(
+        this, &generate_sk_parallel_op_, "generate_sk_parallel_op_");
+    TX_TRACE_ASSOCIATE(
+        this, &flush_all_old_tuples_sk_op_, "flush_all_old_tuples_sk_op_");
+    TX_TRACE_ASSOCIATE(this, &prepare_log_for_sk_op_, "prepare_log_for_sk_op_");
+#endif
     TX_TRACE_ASSOCIATE(this, &acquire_all_lock_op_, "acquire_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
     TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
@@ -242,8 +270,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
             0)
         {
-            LOG(ERROR) << "Upsert index for table: "
-                       << table_key_.Name().String()
+            LOG(ERROR) << "Alter Table Index for table: "
+                       << table_key_.Name().Trace()
                        << ", acquire write intent failed, txn: "
                        << txm->TxNumber();
             txm->upsert_resp_->SetErrorCode(
@@ -277,8 +305,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         if (upgrade_all_intent_to_lock_op_.fail_cnt_.load(
                 std::memory_order_relaxed) > 0)
         {
-            LOG(ERROR) << "Upsert index for table: "
-                       << table_key_.Name().String()
+            LOG(ERROR) << "Alter Table Index for table: "
+                       << table_key_.Name().Trace()
                        << ", upgrade write lock failed, txn: "
                        << txm->TxNumber();
             // Set the commit ts to 0 to signal that the following post write
@@ -329,8 +357,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 // itself is no longer leader
                 if (txm->CheckLeaderTerm())
                 {
-                    LOG(WARNING) << "Upsert index for table: "
-                                 << table_key_.Name().String()
+                    LOG(WARNING) << "Alter Table Index for table: "
+                                 << table_key_.Name().Trace()
                                  << ", write prepare log result unknown, txn: "
                                  << txm->TxNumber() << ", keep retrying";
                     // set retry flag and retry prepare log
@@ -349,8 +377,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                LOG(ERROR) << "Upsert index for table: "
-                           << table_key_.Name().String()
+                LOG(ERROR) << "Alter Table Index for table: "
+                           << table_key_.Name().Trace()
                            << ", write prepare log failed with error message: "
                            << prepare_log_op_.hd_result_.ErrorMsg()
                            << ", txn: " << txm->TxNumber();
@@ -487,8 +515,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 }
                 else
                 {
-                    LOG(ERROR) << "Upsert index for table: "
-                               << table_key_.Name().String()
+                    LOG(ERROR) << "Alter Table Index for table: "
+                               << table_key_.Name().Trace()
                                << ", Failed to create tables in kv store"
                                << ". Txn: " << txm->TxNumber();
 
@@ -534,9 +562,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
         }
+#ifndef RANGE_PARTITION_ENABLED
         else
         {
-#if WITH_KV_STORAGE == KV_CASS
             if (txm->TxStatus() == TxnStatus::Recovering &&
                 Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) > 0)
             {
@@ -552,11 +580,6 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                       << ", and tx term: " << txm->TxTerm();
             assert(op_type_ == OperationType::AddIndex);
 
-            CODE_FAULT_INJECTOR("term_FlushDataAllOp_Timeout",
-                                { flush_data_timeout_ = 10; });
-
-            flush_all_old_tuples_pk_op_.handle_timeout_ = true;
-            flush_all_old_tuples_pk_op_.wait_secs_ = flush_data_timeout_;
             flush_all_old_tuples_pk_op_.op_func_ =
                 [this, txm, &hd_res = flush_all_old_tuples_pk_op_.hd_result_]
             {
@@ -571,9 +594,6 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                     FlushDataIntoDataStore(
                         table_key_.Name(), nid, txm->commit_ts_, false, hd_res);
                 }
-
-                // Start timing.
-                txm->StartTiming();
             };
 
             op_ = &flush_all_old_tuples_pk_op_;
@@ -588,27 +608,25 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             if (txm->CheckLeaderTerm())
             {
                 LOG(ERROR)
-                    << "Upsert index for table: "
-                    << table_key_.Name().StringView()
+                    << "Alter Table Index for table: "
+                    << table_key_.Name().Trace()
                     << ", flush all old pk tuples failed with error message: "
                     << flush_all_old_tuples_pk_op_.hd_result_.ErrorMsg()
                     << ", txn: " << txm->TxNumber()
                     << ". Retry flush all old pk data.";
-                flush_all_old_tuples_pk_op_.retry_num_ = 1;
-                txm->PushOperation(&flush_all_old_tuples_pk_op_);
+                txm->PushOperation(&flush_all_old_tuples_pk_op_, 1);
                 flush_all_old_tuples_pk_op_.ReRunOp(txm);
             }
             else
             {
-                LOG(WARNING) << "Upsert index: Flush all old pk tuples on "
-                                "non-leader node, terminate directly for txn: "
+                LOG(WARNING) << "Alter Table Index flush all old pk tuples on "
+                             << "non-leader node, terminate directly for txn: "
                              << txm->TxNumber();
                 ForceToFinish(txm);
             }
         }
         else
         {
-#endif
             LOG(INFO) << "Alter Table Index transaction fetch all old pk data"
                       << " from data store and generate new sk data for new"
                       << " added index and upload new sk data into ccmap,"
@@ -617,8 +635,6 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // Reset the node group leader terms.
             ResetLeaderTerms();
 
-            fetch_old_tuples_from_kv_gen_sk_data_upload_op_.handle_timeout_ =
-                false;
             fetch_old_tuples_from_kv_gen_sk_data_upload_op_.op_func_ =
                 [this, txm]
             {
@@ -648,10 +664,10 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             if (txm->CheckLeaderTerm())
             {
                 LOG(WARNING)
-                    << "Upsert index: For table: " << table_key_.Name().String()
+                    << "Alter Table Index for table: "
+                    << table_key_.Name().Trace()
                     << ", retry fetch old pk tuples from kv and upload packed "
-                       "sk failed, txn: "
-                    << txm->TxNumber();
+                    << "sk failed, txn: " << txm->TxNumber();
                 if (fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
                         .ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                 {
@@ -663,8 +679,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                LOG(WARNING) << "Upsert index: Generate packed sk data on "
-                                "non-leader node, terminate directly for txn: "
+                LOG(WARNING) << "Alter Table Index generate packed sk data on "
+                             << "non-leader node, terminate directly for txn: "
                              << txm->TxNumber();
                 ForceToFinish(txm);
             }
@@ -701,19 +717,13 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                   << " from new added index ccmap into data store, txn: "
                   << txm->TxNumber() << ", and commit ts: " << txm->commit_ts_;
 
-        CODE_FAULT_INJECTOR("term_FlushDataAllOp_Timeout",
-                            { flush_data_timeout_ = 10; });
-        flush_all_old_tuples_sk_op_.handle_timeout_ = true;
-        flush_all_old_tuples_sk_op_.wait_secs_ = flush_data_timeout_;
         flush_all_old_tuples_sk_op_.op_func_ =
             [this, txm, &hd_res = flush_all_old_tuples_sk_op_.hd_result_]
         {
-            std::vector<int64_t> &expected_ng_terms =
-                this->acquire_terms_result_.Value();
             // Send the flush data request to the node groups to which
             // the new packed sk data sharding, so obtain the node group
-            // count from the @@expected_ng_terms.
-            uint32_t ng_cnt = expected_ng_terms.size();
+            // count from the @@leader_terms_.
+            uint32_t ng_cnt = this->leader_terms_.size();
 
             auto &new_index_names = this->alter_table_info_.index_add_names_;
             size_t table_cnt = new_index_names.size();
@@ -728,7 +738,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
 
             for (uint32_t nid = 0; nid < ng_cnt; ++nid)
             {
-                int64_t expected_term = expected_ng_terms.at(nid);
+                int64_t expected_term = this->leader_terms_.at(nid);
                 for (add_index_it = new_index_names.cbegin();
                      add_index_it != new_index_names.cend();
                      ++add_index_it)
@@ -741,9 +751,6 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                                            expected_term);
                 }
             }
-
-            // Start timing.
-            txm->StartTiming();
         };
 
         op_ = &flush_all_old_tuples_sk_op_;
@@ -762,16 +769,15 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                         CcErrorCode::REQUEST_LOST)
                 {
                     LOG(WARNING)
-                        << "Upsert table index flush all old sk tuples failed "
-                           "because of leader transferred. Retry generate "
-                           "packed sk data, txn: "
-                        << txm->TxNumber();
+                        << "Alter Table Index flush all old sk tuples failed "
+                        << "because of leader transferred. Retry generate "
+                        << "packed sk data, txn: " << txm->TxNumber();
                     // For this stage, should re-execute from the previous stage
                     // if leader transferred.
                     ResetLeaderTerms();
                     op_ = &fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
                     txm->PushOperation(
-                        &fetch_old_tuples_from_kv_gen_sk_data_upload_op_, 3);
+                        &fetch_old_tuples_from_kv_gen_sk_data_upload_op_, 1);
                     // To sleep serval seconds.
                     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.ReRunOp(
                         txm);
@@ -779,8 +785,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 else
                 {
                     LOG(WARNING)
-                        << "Upsert table index flush all old sk tuples failed "
-                           "with error message: "
+                        << "Alter Table Index flush all old sk tuples failed "
+                        << "with error message: "
                         << flush_all_old_tuples_sk_op_.hd_result_.ErrorMsg()
                         << ". Retry flush old sk operation, txn: "
                         << txm->TxNumber();
@@ -792,8 +798,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                LOG(INFO) << "Upsert table index flush all old sk tuples on "
-                             "non-leader node, termiate directly for txn: "
+                LOG(INFO) << "Alter Table Index flush all old sk tuples on "
+                          << "non-leader node, termiate directly for txn: "
                           << txm->TxNumber();
                 ForceToFinish(txm);
             }
@@ -833,8 +839,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             if (txm->CheckLeaderTerm())
             {
                 LOG(WARNING)
-                    << "Upsert table index kickout old tuples sk failed, with "
-                       "error message: "
+                    << "Alter Table Index kickout old tuples sk failed, with "
+                    << "error message: "
                     << kickout_data_all_op_.hd_result_.ErrorMsg()
                     << ". Retry kickout data, txn: " << txm->TxNumber();
 
@@ -843,8 +849,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                LOG(ERROR) << "Upsert index: Kickout sk data on non-leader "
-                              "node, terminate directly for txn: "
+                LOG(ERROR) << "Alter Table Index kickout sk data on non-leader "
+                           << "node, terminate directly for txn: "
                            << txm->TxNumber();
                 ForceToFinish(txm);
             }
@@ -892,6 +898,340 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             txm->Process(lock_cluster_config_op_);
         }
     }
+#else
+        else
+        {
+            if (txm->TxStatus() == TxnStatus::Recovering &&
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) > 0)
+            {
+                // If this txm is in the recovering state, should wait until the
+                // data log replay finished to avoid data lost.
+                return;
+            }
+
+            LOG(INFO) << "Alter Table Index transaction start generate sk "
+                      << "with the parallelism: "
+                      << static_cast<uint32_t>(scan_batch_range_size_)
+                      << " of each node group for table: "
+                      << table_key_.Name().Trace() << " with the start key: "
+                      << (is_last_finished_key_str_
+                              ? *last_finished_end_key_str_
+                              : last_finished_end_key_->ToString())
+                      << ", txn: " << txm->TxNumber();
+
+            if (is_last_finished_key_str_)
+            {
+                last_scanned_end_key_str_ = last_finished_end_key_str_;
+            }
+            else
+            {
+                last_scanned_end_key_ = last_finished_end_key_;
+            }
+            is_last_scanned_key_str_ = is_last_finished_key_str_;
+            ResetLeaderTerms();
+            generate_sk_parallel_op_.Reset();
+            generate_sk_parallel_op_.op_func_ = [this, txm]()
+            {
+                generate_sk_parallel_op_.worker_thread_ = std::thread(
+                    [this, txm]()
+                    {
+                        auto &hd_res = generate_sk_parallel_op_.hd_result_;
+                        hd_res.Reset();
+                        this->DispatchRangeTask(txm, hd_res);
+                    });
+            };
+            op_ = &generate_sk_parallel_op_;
+            txm->PushOperation(&generate_sk_parallel_op_);
+            txm->Process(generate_sk_parallel_op_);
+        }
+    }
+    else if (op_ == &generate_sk_parallel_op_)
+    {
+        if (generate_sk_parallel_op_.hd_result_.IsError())
+        {
+            LOG(ERROR)
+                << "Alter Table Index generate sk parallel failed for table: "
+                << table_key_.Name().Trace() << " with error: "
+                << generate_sk_parallel_op_.hd_result_.ErrorMsg()
+                << ", txn:" << txm->TxNumber();
+            if (txm->CheckLeaderTerm())
+            {
+                // Retry from the last finished end key.
+                assert(generate_sk_parallel_op_.hd_result_.ErrorCode() ==
+                           CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+                       generate_sk_parallel_op_.hd_result_.ErrorCode() ==
+                           CcErrorCode::PIN_RANGE_SLICE_FAILED ||
+                       generate_sk_parallel_op_.hd_result_.ErrorCode() ==
+                           CcErrorCode::ACQUIRE_LOCK_BLOCKED ||
+                       generate_sk_parallel_op_.hd_result_.ErrorCode() ==
+                           CcErrorCode::DATA_STORE_ERR ||
+                       generate_sk_parallel_op_.hd_result_.ErrorCode() ==
+                           CcErrorCode::OUT_OF_MEMORY ||
+                       generate_sk_parallel_op_.hd_result_.ErrorCode() ==
+                           CcErrorCode::REQUEST_LOST);
+                // Reset last end key.
+                if (is_last_finished_key_str_)
+                {
+                    last_scanned_end_key_str_ = last_finished_end_key_str_;
+                }
+                else
+                {
+                    last_scanned_end_key_ = last_finished_end_key_;
+                }
+                is_last_scanned_key_str_ = is_last_finished_key_str_;
+                // Reset scanned pk range count.
+                scanned_pk_range_count_ = finished_pk_range_count_;
+                ResetLeaderTerms();
+                generate_sk_parallel_op_.Reset();
+                txm->PushOperation(&generate_sk_parallel_op_, 1);
+                // To sleep serval seconds.
+                generate_sk_parallel_op_.ReRunOp(txm);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+            return;
+        }
+
+        if (total_scanned_pk_items_count_ == 0)
+        {
+            // There is no pk items in batch range task, and no sk items
+            // generated, therefore there is no need to flush sk.
+            op_ = &prepare_log_for_sk_op_;
+            prepare_log_for_sk_op_.hd_result_.SetFinished();
+            // Update the last finished end key.
+            last_finished_end_key_ = last_scanned_end_key_;
+            is_last_finished_key_str_ = false;
+            finished_pk_range_count_ = scanned_pk_range_count_;
+            DLOG(INFO) << "Alter Table Indedx no need to perform flush sk "
+                       << "operation for this batch range task for base table: "
+                       << table_key_.Name().Trace()
+                       << ". Txn: " << txm->TxNumber();
+            Forward(txm);
+            return;
+        }
+
+        CODE_FAULT_INJECTOR(
+            "term_AlterTableIndex_GeneratePackedSkOp_Continue", {
+                static uint64_t count = 0;
+                if (count++ % 1000000 == 0)
+                {
+                    DLOG(INFO) << "FaultInject term_AlterTableIndex_Generate"
+                                  "PackedSkOp_Continue";
+                }
+                return;
+            });
+        ACTION_FAULT_INJECTOR("term_AlterTableIndex_FlushNewPackedSKOp");
+        assert(op_type_ == OperationType::AddIndex);
+        assert(alter_table_info_.index_add_count_ ==
+               alter_table_info_.index_add_names_.size());
+
+        LOG(INFO) << "Alter Table Index transaction flush old sk record "
+                  << "for base table: " << table_key_.Name().Trace()
+                  << ". Already scanned " << scanned_pk_range_count_
+                  << " pk ranges. Txn: " << txm->TxNumber()
+                  << ", and commit ts: " << txm->commit_ts_;
+
+        flush_all_old_tuples_sk_op_.op_func_ =
+            [this, txm, &hd_res = flush_all_old_tuples_sk_op_.hd_result_]
+        {
+            // Send the flush data request to the node groups to which
+            // the new packed sk data sharding, so obtain the node group
+            // count from the @@expected_ng_terms.
+            auto &new_index_names = this->alter_table_info_.index_add_names_;
+            size_t table_cnt = new_index_names.size();
+            auto add_index_it = new_index_names.cbegin();
+            assert(add_index_it != new_index_names.cend());
+
+            uint32_t ng_cnt = leader_terms_.size();
+            hd_res.Reset();
+            hd_res.SetRefCnt(ng_cnt * table_cnt);
+
+            for (uint32_t nid = 0; nid < ng_cnt; ++nid)
+            {
+                int64_t expected_term = leader_terms_.at(nid);
+                for (add_index_it = new_index_names.cbegin();
+                     add_index_it != new_index_names.cend();
+                     ++add_index_it)
+                {
+                    this->FlushDataIntoDataStore(add_index_it->first,
+                                                 nid,
+                                                 txm->commit_ts_,
+                                                 true,
+                                                 hd_res,
+                                                 expected_term);
+                }
+            }
+        };
+
+        op_ = &flush_all_old_tuples_sk_op_;
+        txm->PushOperation(&flush_all_old_tuples_sk_op_);
+        txm->Process(flush_all_old_tuples_sk_op_);
+    }
+    else if (op_ == &flush_all_old_tuples_sk_op_)
+    {
+        if (flush_all_old_tuples_sk_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                if (flush_all_old_tuples_sk_op_.hd_result_.ErrorCode() ==
+                        CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+                    flush_all_old_tuples_sk_op_.hd_result_.ErrorCode() ==
+                        CcErrorCode::REQUEST_LOST)
+                {
+                    LOG(WARNING)
+                        << "Alter table index flush all old sk tuples failed "
+                        << "for table: " << table_key_.Name().Trace()
+                        << " because of leader transferred. Retry generate "
+                        << "packed sk data, txn: " << txm->TxNumber();
+                    // For this stage, should re-execute from the previous stage
+                    // if leader transferred.
+                    // Reset last end key.
+                    if (is_last_finished_key_str_)
+                    {
+                        last_scanned_end_key_str_ = last_finished_end_key_str_;
+                    }
+                    else
+                    {
+                        last_scanned_end_key_ = last_finished_end_key_;
+                    }
+                    is_last_scanned_key_str_ = is_last_finished_key_str_;
+                    // Reset scanned pk count.
+                    scanned_pk_range_count_ = finished_pk_range_count_;
+                    ResetLeaderTerms();
+                    generate_sk_parallel_op_.Reset();
+                    op_ = &generate_sk_parallel_op_;
+                    txm->PushOperation(&generate_sk_parallel_op_, 1);
+                    // To sleep serval seconds.
+                    generate_sk_parallel_op_.ReRunOp(txm);
+                }
+                else
+                {
+                    LOG(WARNING)
+                        << "Alter table index flush all old sk tuples failed "
+                        << "for table: " << table_key_.Name().Trace()
+                        << " with error message: "
+                        << flush_all_old_tuples_sk_op_.hd_result_.ErrorMsg()
+                        << ". Retry flush old sk operation, txn: "
+                        << txm->TxNumber();
+
+                    op_ = &flush_all_old_tuples_sk_op_;
+                    txm->PushOperation(&flush_all_old_tuples_sk_op_);
+                    txm->Process(flush_all_old_tuples_sk_op_);
+                }
+            }
+            else
+            {
+                LOG(INFO) << "Alter table index flush all old sk tuples on "
+                          << "non-leader node, terminate directly for txn: "
+                          << txm->TxNumber();
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            ACTION_FAULT_INJECTOR(
+                "term_AlterTableIndex_FlushPrepareIndexTableLogOp");
+            // Update the last finished end key.
+            last_finished_end_key_ = last_scanned_end_key_;
+            is_last_finished_key_str_ = false;
+            finished_pk_range_count_ = scanned_pk_range_count_;
+            LOG(INFO) << "Alter Table Index transaction write prepare index"
+                      << " log with last finished end key: "
+                      << (last_finished_end_key_ != nullptr
+                              ? last_finished_end_key_->ToString()
+                              : "PositiveInf")
+                      << ". Base table: " << table_key_.Name().Trace()
+                      << ". Txn: " << txm->TxNumber();
+            op_ = &prepare_log_for_sk_op_;
+            FillPrepareIndexTableLogRequest(txm);
+            txm->PushOperation(&prepare_log_for_sk_op_);
+            txm->Process(prepare_log_for_sk_op_);
+        }
+    }
+    else if (op_ == &prepare_log_for_sk_op_)
+    {
+        if (prepare_log_for_sk_op_.hd_result_.IsError())
+        {
+            // Fails to flush the prepare flush log. Retries the operation if
+            // the tx node is still the leader or the tx is in the recovery
+            // mode and the cc node is a leader candidate.
+            if (txm->CheckLeaderTerm())
+            {
+                // set retry flag and retry commit log
+                ::txlog::WriteLogRequest *log_req =
+                    prepare_log_for_sk_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&prepare_log_for_sk_op_);
+                txm->Process(prepare_log_for_sk_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+
+            return;
+        }
+
+        if (txm->TxStatus() == TxnStatus::Recovering &&
+            Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) > 0)
+        {
+            // If this txm is in the recovering state, should wait until the
+            // data log replay finished to avoid data lost.
+            return;
+        }
+
+        if (!is_last_finished_key_str_ &&
+            (last_finished_end_key_ == nullptr ||
+             last_finished_end_key_->Type() == KeyType::PositiveInf))
+        {
+            // Reach the end.
+            LOG(INFO) << "Alter Table Index transaction lock cluster config"
+                      << ", txn: " << txm->TxNumber();
+            op_ = &lock_cluster_config_op_;
+            txm->PushOperation(&lock_cluster_config_op_);
+            txm->Process(lock_cluster_config_op_);
+        }
+        else
+        {
+            // Next batch range task
+            LOG(INFO) << "Alter Table Index transaction continue to generate "
+                      << "sk parallel for table: " << table_key_.Name().Trace()
+                      << " with the start key: "
+                      << (is_last_finished_key_str_
+                              ? *last_finished_end_key_str_
+                              : last_finished_end_key_->ToString())
+                      << ". Txn: " << txm->TxNumber();
+            // Reset last end key.
+            if (is_last_finished_key_str_)
+            {
+                last_scanned_end_key_str_ = last_finished_end_key_str_;
+            }
+            else
+            {
+                last_scanned_end_key_ = last_finished_end_key_;
+            }
+            is_last_scanned_key_str_ = is_last_finished_key_str_;
+            ResetLeaderTerms();
+            generate_sk_parallel_op_.Reset();
+            generate_sk_parallel_op_.op_func_ = [this, txm]()
+            {
+                generate_sk_parallel_op_.worker_thread_ = std::thread(
+                    [this, txm]()
+                    {
+                        auto &hd_res = generate_sk_parallel_op_.hd_result_;
+                        hd_res.Reset();
+                        this->DispatchRangeTask(txm, hd_res);
+                    });
+            };
+            op_ = &generate_sk_parallel_op_;
+            txm->PushOperation(&generate_sk_parallel_op_);
+            txm->Process(generate_sk_parallel_op_);
+        }
+    }
+#endif
     else if (op_ == &acquire_all_lock_op_)
     {
         if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_relaxed) > 0)
@@ -908,7 +1248,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 if (acquire_all_lock_op_.IsDeadlock())
                 {
                     LOG(INFO) << "Alter Table Index transaction deadlocks with "
-                                 "other transaction, downgrade write lock"
+                              << "other transaction, downgrade write lock"
                               << ", txn: " << txm->TxNumber();
                     post_all_lock_op_.write_type_ =
                         PostWriteType::DowngradeLock;
@@ -1160,7 +1500,6 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
 
     // 3. Reset UpsertTableIndexOp
     op_ = nullptr;
-    flush_data_timeout_ = 600;
 
     read_cluster_result_.Reset();
     read_cluster_result_.ResetTxm(txm);
@@ -1183,12 +1522,18 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     downgrade_all_lock_to_intent_op_.Reset(node_group_cnt);
     unlock_cluster_config_op_.Reset();
     upsert_kv_table_op_.Reset();
+#ifndef RANGE_PARTITION_ENABLED
     flush_all_old_tuples_pk_op_.Reset();
     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.Reset();
     flush_all_old_tuples_sk_op_.Reset();
     kickout_data_all_op_.Reset(node_group_cnt, 1);
     kickout_data_all_op_.Clear();
     prepare_log_for_sk_op_.Reset();
+#else
+    generate_sk_parallel_op_.Reset();
+    flush_all_old_tuples_sk_op_.Reset();
+    prepare_log_for_sk_op_.Reset();
+#endif
     acquire_all_lock_op_.Reset(node_group_cnt);
     commit_log_op_.Reset();
     post_all_lock_op_.Reset(node_group_cnt);
@@ -1231,35 +1576,51 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     downgrade_all_lock_to_intent_op_.ResetHandlerTxm(txm);
     unlock_cluster_config_op_.ResetHandlerTxm(txm);
     upsert_kv_table_op_.ResetHandlerTxm(txm);
+#ifndef RANGE_PARTITION_ENABLED
     flush_all_old_tuples_pk_op_.ResetHandlerTxm(txm);
     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.ResetHandlerTxm(txm);
     flush_all_old_tuples_sk_op_.ResetHandlerTxm(txm);
     kickout_data_all_op_.ResetHandlerTxm(txm);
     prepare_log_for_sk_op_.ResetHandlerTxm(txm);
+#else
+    generate_sk_parallel_op_.ResetHandlerTxm(txm);
+    flush_all_old_tuples_sk_op_.ResetHandlerTxm(txm);
+    prepare_log_for_sk_op_.ResetHandlerTxm(txm);
+#endif
     acquire_all_lock_op_.ResetHandlerTxm(txm);
     commit_log_op_.ResetHandlerTxm(txm);
     post_all_lock_op_.ResetHandlerTxm(txm);
     clean_log_op_.ResetHandlerTxm(txm);
-    acquire_terms_result_.ResetTxm(txm);
     post_write_result_.ResetTxm(txm);
     is_force_finished_ = false;
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-    uint32_t old_cnt = flush_data_all_closures_.size();
-    for (uint32_t id = old_cnt; id < ng_cnt; ++id)
+
+    new_indexes_name_.clear();
+    new_indexes_name_.reserve(alter_table_info_.index_add_count_);
+    for (auto index_it = alter_table_info_.index_add_names_.cbegin();
+         index_it != alter_table_info_.index_add_names_.cend();
+         ++index_it)
     {
-        flush_data_all_closures_.emplace_back(
-            RPCClosure<Void, remote::FlushDataAllResponse>());
+        new_indexes_name_.emplace_back(index_it->first.StringView(),
+                                       index_it->first.Type());
     }
-    old_cnt = acquire_leader_term_closures_.size();
-    for (uint32_t id = old_cnt; id < ng_cnt; ++id)
-    {
-        acquire_leader_term_closures_.emplace_back(
-            RPCClosure<std::vector<int64_t>,
-                       remote::AcquireNodeGroupTermResponse>());
-    }
-    waiting_to_retry_op_ = false;
-    start_waiting_ = 0;
-    op_forward_cnt_ = 0;
+
+    ResetLeaderTerms();
+    const TxKey *neg_inf = Sharder::Instance()
+                               .GetLocalCcShards()
+                               ->GetCatalogFactory()
+                               ->NegativeInfKey();
+    last_scanned_end_key_ = neg_inf;
+    is_last_scanned_key_str_ = false;
+    scanned_pk_range_count_ = 0;
+    last_finished_end_key_ = neg_inf;
+    is_last_finished_key_str_ = false;
+    finished_pk_range_count_ = 0;
+    total_scanned_pk_items_count_ = 0;
+#ifdef NDEBUG
+    scan_batch_range_size_ = 10;
+#else
+    scan_batch_range_size_ = 3;
+#endif
 }
 
 void UpsertTableIndexOp::FillPrepareLogRequest(TransactionExecution *txm)
@@ -1302,6 +1663,24 @@ void UpsertTableIndexOp::FillPrepareIndexTableLogRequest(
         prepare_log_for_sk_rec->mutable_log_content()->mutable_schema_log();
     prepare_schema_for_sk_msg->set_stage(
         ::txlog::SchemaOpMessage_Stage_PrepareIndexTable);
+
+    if (last_finished_end_key_ == nullptr ||
+        last_finished_end_key_->Type() == KeyType::PositiveInf)
+    {
+        // reach the last range
+        prepare_schema_for_sk_msg->set_last_key_type(
+            txlog::SchemaOpMessage::LastKeyType::
+                SchemaOpMessage_LastKeyType_PosInfKey);
+        prepare_schema_for_sk_msg->mutable_last_key_value()->append("00");
+    }
+    else
+    {
+        prepare_schema_for_sk_msg->set_last_key_type(
+            txlog::SchemaOpMessage::LastKeyType::
+                SchemaOpMessage_LastKeyType_NormalKey);
+        last_finished_end_key_->Serialize(
+            *prepare_schema_for_sk_msg->mutable_last_key_value());
+    }
 
     prepare_log_for_sk_rec->mutable_node_terms()->clear();
 }
@@ -1348,9 +1727,14 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
 
     if (dest_node_id == local_cc_shards->NodeId())
     {
-        if (ng_term < 0)
+        if (ng_term < 0 &&
+            (ng_term = Sharder::Instance().LeaderTerm(ng_id)) < 0)
         {
-            ng_term = Sharder::Instance().LeaderTerm(ng_id);
+            LOG(ERROR)
+                << "FlushData operation: request node not the leader of ng#"
+                << ng_id;
+            hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return;
         }
         if (ng_term < 0)
         {
@@ -1383,49 +1767,27 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
         }
 
         remote::CcRpcService_Stub stub(channel.get());
-        remote::FlushDataAllRequest request;
-        request.set_table_name_str(table_name.String());
-        request.set_table_type(
+
+        FlushDataAllClosure *flush_data_closure =
+            new FlushDataAllClosure(&hres);
+        flush_data_closure->SetChannel(dest_node_id, channel);
+
+        remote::FlushDataAllRequest *req_ptr =
+            flush_data_closure->FlushDataAllRequest();
+        req_ptr->set_table_name_str(table_name.String());
+        req_ptr->set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
-        request.set_node_group_id(ng_id);
-        request.set_node_group_term(ng_term);
-        request.set_data_sync_ts(data_sync_ts);
-        request.set_is_dirty(is_dirty);
-        // This will be deleted after the response been handled.
-        std::unique_ptr<remote::FlushDataAllResponse> response =
-            std::make_unique<remote::FlushDataAllResponse>();
-        remote::FlushDataAllResponse *resp_ptr = response.get();
+        req_ptr->set_node_group_id(ng_id);
+        req_ptr->set_node_group_term(ng_term);
+        req_ptr->set_data_sync_ts(data_sync_ts);
+        req_ptr->set_is_dirty(is_dirty);
 
-        flush_data_all_closures_.at(ng_id).Reset(
-            &hres, std::move(response), channel, dest_node_id);
-        flush_data_all_closures_.at(ng_id).post_lambda_ =
-            [ng_id](CcHandlerResult<Void> *hd_res,
-                    remote::FlushDataAllResponse *resp)
-        {
-            if (resp->error_code())
-            {
-                CcErrorCode error_code =
-                    static_cast<CcErrorCode>(resp->error_code());
-                LOG(ERROR) << "Handle flush data all response of ng#" << ng_id
-                           << ". Failed with error message: "
-                           << cc_error_messages.at(error_code);
-                hd_res->SetError(error_code);
-            }
-            else
-            {
-                DLOG(INFO)
-                    << "Handle flush data all response successfully of ng#"
-                    << ng_id;
-                hd_res->SetFinished();
-            }
-        };
-
-        brpc::Controller *cntl =
-            flush_data_all_closures_.at(ng_id).Controller();
-        cntl->set_timeout_ms(flush_data_timeout_ * 1000);
+        remote::FlushDataAllResponse *resp_ptr =
+            flush_data_closure->FlushDataAllResponse();
+        brpc::Controller *cntl = flush_data_closure->Controller();
+        cntl->set_timeout_ms(-1);
         // Asynchronous mode
-        stub.FlushDataAll(
-            cntl, &request, resp_ptr, &flush_data_all_closures_.at(ng_id));
+        stub.FlushDataAll(cntl, req_ptr, resp_ptr, flush_data_closure);
         DLOG(INFO) << "Acquire FlushDataAll service of ng#" << ng_id << ".";
     }
 }
@@ -1433,21 +1795,20 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
 void UpsertTableIndexOp::ResetLeaderTerms()
 {
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-    auto &ng_leader_terms = acquire_terms_result_.Value();
-    ng_leader_terms.reserve(ng_cnt);
-    size_t old_cnt = ng_leader_terms.size();
-    for (size_t idx = 0; idx < old_cnt; ++idx)
+    leader_terms_.resize(ng_cnt);
+    size_t cnt = leader_terms_.size();
+    for (size_t idx = 0; idx < cnt; ++idx)
     {
-        ng_leader_terms.at(idx) = INIT_TERM;
-    }
-    for (size_t new_idx = old_cnt; new_idx < ng_cnt; ++new_idx)
-    {
-        ng_leader_terms.push_back(INIT_TERM);
+        leader_terms_.at(idx) = INIT_TERM;
     }
 }
 
 void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
-    NodeGroupId ng_id, CcHandlerResult<std::vector<int64_t>> &hd_res)
+    NodeGroupId ng_id,
+    std::mutex &request_mux,
+    std::condition_variable &request_cv,
+    uint32_t &finished_req_cnt,
+    CcErrorCode &request_res)
 {
     int64_t term = INIT_TERM;
     uint32_t leader_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -1458,17 +1819,19 @@ void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
         term = Sharder::Instance().LeaderTerm(ng_id);
         if (term > 0)
         {
-            auto &ng_leader_terms = hd_res.Value();
-            ng_leader_terms.at(ng_id) = term;
-
-            hd_res.SetFinished();
+            leader_terms_[ng_id] = term;
         }
         else
         {
             LOG(WARNING) << "Node[" << leader_node_id
                          << "] is not the leader for ng#" << ng_id;
-            hd_res.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
+        std::unique_lock<std::mutex> lk(request_mux);
+        ++finished_req_cnt;
+        request_res = request_res == CcErrorCode::NO_ERROR
+                          ? CcErrorCode::REQUESTED_NODE_NOT_LEADER
+                          : request_res;
+        request_cv.notify_one();
     }
     else
     {
@@ -1479,55 +1842,35 @@ void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
             // Fail to establish the channel to the tx node. Do not update the
             // leader term of input node group.
             LOG(ERROR) << "Acquire leader term: Fail to init the channel to the"
-                          " leader of ng#"
-                       << ng_id;
-            hd_res.SetError(CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED);
+                       << " leader of ng#" << ng_id;
+            std::unique_lock<std::mutex> lk(request_mux);
+            ++finished_req_cnt;
+            request_res = request_res == CcErrorCode::NO_ERROR
+                              ? CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED
+                              : request_res;
+            request_cv.notify_one();
             return;
         }
 
         remote::CcRpcService_Stub stub(channel.get());
-        remote::AcquireNodeGroupTermRequest request;
-        request.set_node_group_id(ng_id);
+        AcquireTermClosure *closure = new AcquireTermClosure(ng_id,
+                                                             request_mux,
+                                                             request_cv,
+                                                             finished_req_cnt,
+                                                             request_res,
+                                                             leader_terms_);
+        closure->SetChannel(leader_node_id, channel);
+        remote::AcquireNodeGroupTermRequest *request_ptr =
+            closure->AcquireTermRequest();
+        request_ptr->set_node_group_id(ng_id);
         // This will be deleted after the response been handled.
-        std::unique_ptr<remote::AcquireNodeGroupTermResponse> response =
-            std::make_unique<remote::AcquireNodeGroupTermResponse>();
-        remote::AcquireNodeGroupTermResponse *resp_ptr = response.get();
-
-        acquire_leader_term_closures_.at(ng_id).Reset(
-            &hd_res, std::move(response), channel, leader_node_id);
-        acquire_leader_term_closures_.at(ng_id).post_lambda_ =
-            [](CcHandlerResult<std::vector<int64_t>> *hd_res,
-               remote::AcquireNodeGroupTermResponse *resp)
-        {
-            uint32_t ng_id = resp->node_group_id();
-            int64_t term = resp->node_group_term();
-            if (term < 0)
-            {
-                LOG(ERROR)
-                    << "Handle acquire node group leader term response of ng#"
-                    << ng_id << ", request node not leader.";
-                hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            }
-            else
-            {
-                LOG(INFO)
-                    << "Handle acquire node group leader term response of ng#"
-                    << ng_id << " with term: " << term;
-                auto &ng_leader_terms = hd_res->Value();
-                ng_leader_terms.at(ng_id) = term;
-                hd_res->SetFinished();
-            }
-        };
-
-        brpc::Controller *cntl_ptr =
-            acquire_leader_term_closures_.at(ng_id).Controller();
+        remote::AcquireNodeGroupTermResponse *response_ptr =
+            closure->AcquireTermResponse();
+        brpc::Controller *cntl_ptr = closure->Controller();
         cntl_ptr->set_timeout_ms(1000);
         // Asynchronous mode
         stub.AcquireNodeGroupLeaderTerm(
-            cntl_ptr,
-            &request,
-            resp_ptr,
-            &acquire_leader_term_closures_.at(ng_id));
+            cntl_ptr, request_ptr, response_ptr, closure);
         DLOG(INFO) << "Acquire AcquireNodeGroupLeaderTerm service of ng#"
                    << ng_id << ".";
     }
@@ -1597,40 +1940,29 @@ bool UpsertTableIndexOp::AcquireRangeReadLocks(
 void UpsertTableIndexOp::ReleaseRangeReadLocks(
     TransactionExecution *acquire_lock_txm, bool is_success)
 {
-    if (is_success)
-    {
-        CommitTxRequest commit_req;
-        acquire_lock_txm->Execute(&commit_req);
-        commit_req.Wait();
-    }
-    else
-    {
-        // Abort the acquire lock txm
-        AbortTxRequest abort_req;
-        acquire_lock_txm->Execute(&abort_req);
-        abort_req.Wait();
-    }
+    CommitTxRequest commit_req;
+    commit_req.to_commit_ = is_success;
+    acquire_lock_txm->CommitTx(commit_req);
 }
 
-bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
+CcErrorCode UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
     TransactionExecution *txm)
 {
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-    auto &ng_leader_terms = acquire_terms_result_.Value();
-    uint32_t old_ng_cnt = ng_leader_terms.size();
+    uint32_t old_ng_cnt = leader_terms_.size();
     if (ng_cnt > old_ng_cnt)
     {
         // During the index addition transaction, cluster expansion
         // occurred.
-        ng_leader_terms.insert(
-            ng_leader_terms.end(), (ng_cnt - old_ng_cnt), INIT_TERM);
+        leader_terms_.insert(
+            leader_terms_.end(), (ng_cnt - old_ng_cnt), INIT_TERM);
     }
     // Find the node group id that need to acquire the leader term.
     uint32_t request_count = 0;
     std::vector<NodeGroupId> target_ng_ids;
-    for (size_t idx = 0; idx < ng_leader_terms.size(); ++idx)
+    for (size_t idx = 0; idx < leader_terms_.size(); ++idx)
     {
-        if (ng_leader_terms.at(idx) == INIT_TERM)
+        if (leader_terms_.at(idx) == INIT_TERM)
         {
             target_ng_ids.push_back(idx);
             ++request_count;
@@ -1641,44 +1973,37 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
     {
         std::mutex acquire_terms_mutex;
         std::condition_variable acquire_terms_cv;
-        bool acquire_terms_finished = false;
-
-        acquire_terms_result_.post_lambda_ =
-            [&acquire_terms_finished, &acquire_terms_mutex, &acquire_terms_cv](
-                CcHandlerResult<std::vector<int64_t>> *hd_res)
-        {
-            std::unique_lock<std::mutex> lk(acquire_terms_mutex);
-            acquire_terms_finished = true;
-            acquire_terms_cv.notify_one();
-        };
+        uint32_t finished_request_count = 0;
+        CcErrorCode request_res = CcErrorCode::NO_ERROR;
 
         uint8_t retry_times = RETRY_NUM;
         do
         {
             assert(request_count == target_ng_ids.size());
-            acquire_terms_result_.Reset();
-            acquire_terms_result_.SetRefCnt(request_count);
-            acquire_terms_finished = false;
-
+            finished_request_count = 0;
+            request_res = CcErrorCode::NO_ERROR;
             for (auto ng_id : target_ng_ids)
             {
-                AcquireNodeGroupLeaderTerm(ng_id, acquire_terms_result_);
+                AcquireNodeGroupLeaderTerm(ng_id,
+                                           acquire_terms_mutex,
+                                           acquire_terms_cv,
+                                           finished_request_count,
+                                           request_res);
             }
 
             {
                 std::unique_lock<std::mutex> acq_terms_lk(acquire_terms_mutex);
-                acquire_terms_cv.wait_for(acq_terms_lk,
-                                          std::chrono::seconds(3),
-                                          [&acquire_terms_finished]
-                                          { return acquire_terms_finished; });
+                acquire_terms_cv.wait_for(
+                    acq_terms_lk,
+                    std::chrono::seconds(2),
+                    [&request_count, &finished_request_count]
+                    { return request_count == finished_request_count; });
             }
 
-            if (!acquire_terms_finished &&
-                acquire_terms_result_.SetResultByTimeoutThread())
+            if (finished_request_count != request_count)
             {
                 // Handle the timeout.
-                LOG(ERROR) << "Acquire node group leader terms timeout for 3s.";
-                acquire_terms_result_.ForceError();
+                LOG(ERROR) << "Acquire node group leader terms timeout for 2s.";
             }
 
             // Check txm leader and abort if leader has been transferred.
@@ -1686,33 +2011,28 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
             {
                 LOG(ERROR)
                     << "Acquire node group leader terms on non-leader node.";
-                acquire_terms_result_.Reset();
-                acquire_terms_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-                return false;
+                return CcErrorCode::TX_NODE_NOT_LEADER;
             }
 
-            if (acquire_terms_result_.IsError())
+            if (request_res != CcErrorCode::NO_ERROR)
             {
                 // Handle the error.
                 if (retry_times > 0)
                 {
                     LOG(ERROR) << "Acquire node group leader terms failed with "
-                                  "error message: "
-                               << acquire_terms_result_.ErrorMsg();
-                    if (acquire_terms_result_.ErrorCode() ==
-                            CcErrorCode::REQUEST_LOST ||
-                        acquire_terms_result_.ErrorCode() ==
-                            CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                               << "error code: " << (uint32_t) request_res;
+                    if (request_res == CcErrorCode::REQUEST_LOST ||
+                        request_res == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                     {
                         // Wait a moment to retry this request.
                         std::this_thread::sleep_for(8s);
                     }
-                    auto &terms = acquire_terms_result_.Value();
+
                     auto new_it = target_ng_ids.begin();
                     auto old_it = target_ng_ids.begin();
                     for (; old_it != target_ng_ids.end(); ++old_it)
                     {
-                        if (terms.at(*old_it) > 0)
+                        if (leader_terms_.at(*old_it) > 0)
                         {
                             // Have already get the term of this node group
                             // leader.
@@ -1730,14 +2050,14 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
                 else
                 {
                     LOG(ERROR) << "Acquire node group leader terms failed "
-                                  "finally with error message: "
-                               << acquire_terms_result_.ErrorMsg();
-                    return false;
+                               << "finally with error code: "
+                               << (uint32_t) request_res;
+                    return request_res;
                 }
             }
-        } while (acquire_terms_result_.IsError());
+        } while (request_res != CcErrorCode::NO_ERROR);
     }
-    return true;
+    return CcErrorCode::NO_ERROR;
 }
 
 void UpsertTableIndexOp::UploadRecord(TxNumber tx_number,
@@ -1836,8 +2156,6 @@ void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
         post_write_cv.notify_one();
     };
 
-    auto &expected_ng_terms = acquire_terms_result_.Value();
-
     do
     {
         // Handle the write set
@@ -1859,7 +2177,7 @@ void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
 
                 uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(
                     write_entry.key_shard_code_);
-                int64_t expected_term = expected_ng_terms.at(ng_id);
+                int64_t expected_term = leader_terms_.at(ng_id);
                 assert(expected_term > 0);
 
                 UploadRecord(txm->tx_number_.load(std::memory_order_relaxed),
@@ -1883,7 +2201,7 @@ void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
                         Sharder::Instance().ShardToCcNodeGroup(
                             forward_shard_code);
                     int64_t forward_expected_term =
-                        expected_ng_terms.at(forward_ng_id);
+                        leader_terms_.at(forward_ng_id);
                     assert(forward_expected_term > 0);
 
                     UploadRecord(
@@ -1985,20 +2303,21 @@ bool UpsertTableIndexOp::UploadWithoutDataLog(TransactionExecution *upload_txm)
     {
         LOG(ERROR)
             << "UploadWithoutDataLog: Upload data on the non-leader node.";
+        // todo: release range lock.
         post_write_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
         return false;
     }
 
     // 2. Acquire node group term
-    if (!AcquireLeaderTermsIfNecessary(upload_txm))
+    CcErrorCode res_code = AcquireLeaderTermsIfNecessary(upload_txm);
+    if (res_code != CcErrorCode::NO_ERROR)
     {
         LOG(ERROR) << "UploadWithoutDataLog: Acquire leader terms failed with "
-                      "error message: "
-                   << acquire_terms_result_.ErrorMsg();
+                   << "error code: " << (uint32_t) res_code;
 #ifdef RANGE_PARTITION_ENABLED
-        ReleaseRangeReadLocks(acquire_range_lock_txm, false);
+        ReleaseRangeReadLocks(acquire_range_lock_txm, true);
 #endif
-        post_write_result_.SetError(acquire_terms_result_.ErrorCode());
+        post_write_result_.SetError(res_code);
         return false;
     }
 
@@ -2251,6 +2570,7 @@ void UpsertTableIndexOp::FinishScanFromDataStore(
     ds_scanner = nullptr;
 }
 
+#ifndef RANGE_PARTITION_ENABLED
 void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
     TransactionExecution *txm)
 {
@@ -2564,4 +2884,569 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
         << txm->TxNumber();
     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetFinished();
 }
+#endif
+
+void UpsertTableIndexOp::DispatchRangeTask(
+    TransactionExecution *upsert_index_txm, CcHandlerResult<Void> &hd_res)
+{
+    LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
+    const TableName &base_table_name = table_key_.Name();
+    const TableName &range_table_name =
+        TableName(base_table_name.StringView(), TableType::RangePartition);
+    uint32_t local_ng_id = Sharder::Instance().NodeId();
+    uint64_t tx_number = upsert_index_txm->TxNumber();
+    int64_t tx_term = upsert_index_txm->TxTerm();
+    const TxKey *target_range_end_key =
+        cc_shards->GetCatalogFactory()->PositiveInfKey();
+    const TxKey *target_range_start_key = last_scanned_end_key_;
+
+    uint32_t node_group_cnt = 0;
+    size_t batch_range_cnt = 0;
+    // Protect the task result.
+    std::mutex task_mux;
+    std::condition_variable task_cv;
+    bool all_task_started = false;
+    uint32_t unfinished_task_cnt = 1;
+    CcErrorCode task_res = CcErrorCode::NO_ERROR;
+    uint32_t pk_items_count = 0;
+    uint32_t dispatched_task_count = 0;
+
+    std::function<void(const TxKey *batch_range_start_key,
+                       const TxKey *batch_range_end_key,
+                       const std::string *batch_range_start_key_str,
+                       const std::string *batch_range_end_key_str,
+                       const TxKey *&last_scanned_end_key,
+                       bool &is_last_scanned_key_str,
+                       size_t batch_range_cnt,
+                       uint32_t &actual_task_cnt)>
+        dispatch_batch_tasks;
+
+    dispatch_batch_tasks =
+        [this,
+         &base_table_name,
+         &range_table_name,
+         &local_ng_id,
+         cc_shards,
+         &tx_number,
+         &tx_term,
+         scan_ts = upsert_index_txm->commit_ts_,
+         &task_mux,
+         &task_cv,
+         &all_task_started,
+         &unfinished_task_cnt,
+         &task_res,
+         &pk_items_count,
+         &dispatched_task_count,
+         &dispatch_batch_tasks](const TxKey *batch_range_start_key,
+                                const TxKey *batch_range_end_key,
+                                const std::string *batch_range_start_key_str,
+                                const std::string *batch_range_end_key_str,
+                                const TxKey *&last_scanned_end_key,
+                                bool &is_last_scanned_key_str,
+                                size_t batch_range_cnt,
+                                uint32_t &actual_task_cnt)
+    {
+        TransactionExecution *acq_range_lock_txm = nullptr;
+        InitTxRequest init_req;
+        acq_range_lock_txm = cc_shards->GetTxService()->NewTx();
+        init_req.iso_level_ = IsolationLevel::RepeatableRead;
+        init_req.protocol_ = CcProtocol::Locking;
+        init_req.tx_ng_id_ = local_ng_id;
+        // Init the txm until succeed or the txm node is not leader.
+        do
+        {
+            init_req.Reset();
+            acq_range_lock_txm->Execute(&init_req);
+            init_req.Wait();
+            if (init_req.IsError())
+            {
+                if (!Sharder::Instance().CheckLeaderTerm(local_ng_id, tx_term))
+                {
+                    LOG(ERROR)
+                        << "DispatchRangeTask: Transaction node not leader.";
+                    std::unique_lock<std::mutex> lk(task_mux);
+                    task_res = CcErrorCode::TX_NODE_NOT_LEADER;
+                    return;
+                }
+                LOG(WARNING)
+                    << "Init acquire range txm failed for table: "
+                    << range_table_name.Trace() << " of ng#" << local_ng_id
+                    << ", with error: " << init_req.ErrorMsg()
+                    << ". Retry after 3s.";
+                std::this_thread::sleep_for(3s);
+            }
+        } while (init_req.IsError());
+
+        ReadTxRequest read_range_req;
+        RangeRecord range_rec;
+        const TxKey *curr_range_start_key = batch_range_start_key;
+        const TxKey *curr_range_end_key = nullptr;
+        int32_t partition_id = 0;
+        NodeGroupId range_owner = 0;
+        size_t idx = 0;
+        bool acquire_next_range = false;
+        std::string log_info;
+
+        do
+        {
+            if (!is_last_scanned_key_str)
+            {
+                read_range_req.Set(&range_table_name,
+                                   curr_range_start_key,
+                                   &range_rec,
+                                   false,
+                                   false,
+                                   true);
+            }
+            else
+            {
+                read_range_req.Set(&range_table_name,
+                                   batch_range_start_key_str,
+                                   &range_rec,
+                                   false,
+                                   false,
+                                   true);
+            }
+            // Acquire range read lock.
+            read_range_req.Reset();
+            acq_range_lock_txm->Execute(&read_range_req);
+            read_range_req.Wait();
+            if (read_range_req.IsError())
+            {
+                // This read operation might fail if it's blocked by a write
+                // lock acquired by range split.
+                LOG(ERROR) << "Acquire range read lock failed for table: "
+                           << range_table_name.Trace() << " of ng#"
+                           << local_ng_id
+                           << ", with error: " << read_range_req.ErrorMsg();
+                break;
+            }
+
+            curr_range_start_key = range_rec.GetRangeInfo()->StartKey();
+            curr_range_end_key = range_rec.GetRangeInfo()->EndKey();
+            partition_id = range_rec.GetRangeInfo()->PartitionId();
+            range_owner = range_rec.GetRangeOwnerNg()->BucketOwner();
+            if (curr_range_start_key == nullptr)
+            {
+                curr_range_start_key =
+                    cc_shards->GetCatalogFactory()->NegativeInfKey();
+            }
+            if (curr_range_end_key == nullptr)
+            {
+                curr_range_end_key =
+                    cc_shards->GetCatalogFactory()->PositiveInfKey();
+            }
+
+            HandleRangeTask(base_table_name,
+                            partition_id,
+                            curr_range_start_key,
+                            curr_range_end_key,
+                            range_owner,
+                            scan_ts,
+                            tx_number,
+                            tx_term,
+                            task_mux,
+                            task_cv,
+                            unfinished_task_cnt,
+                            all_task_started,
+                            pk_items_count,
+                            dispatched_task_count,
+                            task_res,
+                            dispatch_batch_tasks);
+            ++actual_task_cnt;
+
+            if (batch_range_cnt > 0)
+            {
+                acquire_next_range =
+                    ++idx < batch_range_cnt &&
+                    curr_range_end_key->Type() == KeyType::Normal;
+            }
+            else
+            {
+                if (batch_range_end_key)
+                {
+                    acquire_next_range =
+                        *curr_range_end_key < *batch_range_end_key;
+                }
+                else
+                {
+                    assert(batch_range_end_key_str);
+                    std::string serialized_end_key;
+                    if (curr_range_end_key->Type() == KeyType::Normal)
+                    {
+                        curr_range_end_key->Serialize(serialized_end_key);
+                    }
+                    acquire_next_range =
+                        serialized_end_key.length() !=
+                            batch_range_end_key_str->length() ||
+                        serialized_end_key.compare(*batch_range_end_key_str);
+                }
+            }
+            // Update the last range end key
+            is_last_scanned_key_str = false;
+            last_scanned_end_key = curr_range_end_key;
+            // Read the next range.
+            curr_range_start_key = curr_range_end_key;
+            log_info.append(std::to_string(partition_id)).append(",");
+        } while (acquire_next_range);
+
+        LOG(INFO) << "Process this batch task for table: "
+                  << base_table_name.Trace() << " of range ids: " << log_info
+                  << ". Acquire range lock txn: "
+                  << acq_range_lock_txm->TxNumber();
+        // Relase the range locks.
+        CommitTxRequest commit_req;
+        acq_range_lock_txm->CommitTx(commit_req);
+    };
+
+    // Begin to dispatch pk range task until flush sk is needed.
+    do
+    {
+        node_group_cnt = Sharder::Instance().NodeGroupCount();
+        batch_range_cnt = node_group_cnt * scan_batch_range_size_;
+        target_range_start_key = last_scanned_end_key_;
+        all_task_started = false;
+        unfinished_task_cnt = 1;
+        task_res = CcErrorCode::NO_ERROR;
+        pk_items_count = 0;
+        dispatched_task_count = 0;
+        uint32_t actual_task_cnt = 0;
+
+        dispatch_batch_tasks(
+            target_range_start_key,
+            target_range_end_key,
+            (is_last_scanned_key_str_ ? last_scanned_end_key_str_ : nullptr),
+            nullptr,
+            last_scanned_end_key_,
+            is_last_scanned_key_str_,
+            batch_range_cnt,
+            actual_task_cnt);
+
+        // Wait the result
+        std::unique_lock<std::mutex> lk(task_mux);
+        dispatched_task_count += actual_task_cnt;
+        all_task_started = true;
+        --unfinished_task_cnt;
+        task_cv.wait(lk,
+                     [&all_task_started, &unfinished_task_cnt]()
+                     { return all_task_started && unfinished_task_cnt == 0; });
+
+        for (auto &workers : local_task_workers_)
+        {
+            workers.join();
+        }
+        local_task_workers_.clear();
+
+        if (task_res != CcErrorCode::NO_ERROR)
+        {
+            LOG(ERROR) << "Generate sk task failed for table: "
+                       << base_table_name.Trace()
+                       << ", with error: " << CcErrorMessage(task_res);
+            hd_res.SetError(task_res);
+            return;
+        }
+        else
+        {
+            // Update the scanned pk range count.
+            scanned_pk_range_count_ += dispatched_task_count;
+            total_scanned_pk_items_count_ += pk_items_count;
+            DLOG(INFO) << "Generate sk task successfully for this batch ranges."
+                       << " Base table: " << base_table_name.Trace();
+        }
+    } while (!NeedTriggerFlushSkOp());
+    DLOG(INFO) << "Generate sk batch task finished."
+               << " Base table: " << base_table_name.Trace();
+    hd_res.SetFinished();
+}
+
+void UpsertTableIndexOp::HandleRangeTask(
+    const TableName &base_table_name,
+    int32_t partition_id,
+    const TxKey *range_start_key,
+    const TxKey *range_end_key,
+    NodeGroupId range_owner,
+    uint64_t scan_ts,
+    uint64_t tx_number,
+    int64_t tx_term,
+    std::mutex &task_mux,
+    std::condition_variable &task_cv,
+    uint32_t &unfinished_task_cnt,
+    bool &all_task_started,
+    uint32_t &total_pk_items_count,
+    uint32_t &dispatched_task_count,
+    CcErrorCode &task_res,
+    std::function<void(const TxKey *batch_range_start_key,
+                       const TxKey *batch_range_end_key,
+                       const std::string *batch_range_start_key_str,
+                       const std::string *batch_range_end_key_str,
+                       const TxKey *&last_scanned_end_key,
+                       bool &is_last_scanned_key_str,
+                       size_t batch_range_cnt,
+                       uint32_t &actual_task_cnt)> &dispatch_func)
+{
+    uint32_t local_node_id = Sharder::Instance().NodeId();
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(range_owner);
+    if (dest_node_id == local_node_id)
+    {
+        local_task_workers_.push_back(std::thread(
+            [this,
+             &base_table_name,
+             partition_id,
+             range_start_key,
+             range_end_key,
+             range_owner,
+             scan_ts,
+             tx_number,
+             tx_term,
+             &ng_terms = leader_terms_,
+             &sk_names = new_indexes_name_,
+             &task_mux,
+             &task_cv,
+             &unfinished_task_cnt,
+             &all_task_started,
+             &total_pk_items_count,
+             &dispatched_task_count,
+             &task_res,
+             &dispatch_func]()
+            {
+                while (Sharder::Instance().LeaderTerm(range_owner) < 0 &&
+                       Sharder::Instance().CandidateLeaderTerm(range_owner) > 0)
+                {
+                    // Waiting until log replay finished on this node group.
+                    // Including data(.pk) log and and catalog(.table range
+                    // info) log.
+                    LOG(WARNING) << "GenerateSkFromPk of ng#" << range_owner
+                                 << " for partition id: " << partition_id
+                                 << " waiting log replay finished.";
+                    std::this_thread::sleep_for(3s);
+                }
+
+                LocalCcShards *cc_shards =
+                    Sharder::Instance().GetLocalCcShards();
+
+                // Check the task status
+                auto task_status = cc_shards->GetGenerateSkStatus(
+                    range_owner, tx_number, partition_id, tx_term);
+                if (!task_status->StartGenerateSk(tx_term))
+                {
+                    // Terminate itself
+                    LOG(WARNING)
+                        << "Terminate this generate sk task of ng#"
+                        << range_owner << " for partition id: " << partition_id
+                        << " with end key: " << range_end_key->ToString()
+                        << " caused by the tx term is expired.";
+                    std::unique_lock<std::mutex> lk(task_mux);
+                    --unfinished_task_cnt;
+                    task_res = CcErrorCode::TX_NODE_NOT_LEADER;
+                    task_cv.notify_one();
+                    return;
+                }
+
+                SkGenerator sk_generator;
+                uint32_t scanned_pk_items_count = 0;
+                CcErrorCode res_code = CcErrorCode::NO_ERROR;
+                sk_generator.GenerateSkFromPk(base_table_name,
+                                              partition_id,
+                                              range_start_key,
+                                              range_end_key,
+                                              range_owner,
+                                              scan_ts,
+                                              sk_names,
+                                              scanned_pk_items_count,
+                                              res_code,
+                                              *task_status);
+
+                auto result = task_status->TaskStatus();
+                task_status->FinishGenerateSk();
+                if (result == GenerateSkStatus::Status::Terminating)
+                {
+                    LOG(ERROR)
+                        << "Terminate this generate sk task of ng#"
+                        << range_owner << " for partition id: " << partition_id
+                        << "  caused by TX_NODE_NOT_LEADER";
+                    std::unique_lock<std::mutex> lk(task_mux);
+                    --unfinished_task_cnt;
+                    task_res = CcErrorCode::TX_NODE_NOT_LEADER;
+                    task_cv.notify_one();
+                    return;
+                }
+                if (res_code == CcErrorCode::GET_RANGE_ID_ERR)
+                {
+                    LOG(WARNING)
+                        << "Terminate this generate sk task of ng#"
+                        << range_owner << " for partition id: " << partition_id
+                        << " for table: " << base_table_name.Trace()
+                        << " caused by the boundary of partition mismatch.";
+
+                    // Update the task status
+                    {
+                        std::lock_guard<std::mutex> task_lk(task_mux);
+                        all_task_started = false;
+                        --unfinished_task_cnt;
+                    }
+
+                    // Re-dispatch this range task.
+                    const TxKey *last_scanned_end_key = range_start_key;
+                    bool is_last_scanned_key_str = false;
+                    uint32_t actual_task_cnt = 0;
+                    do
+                    {
+                        dispatch_func(range_start_key,
+                                      range_end_key,
+                                      nullptr,
+                                      nullptr,
+                                      last_scanned_end_key,
+                                      is_last_scanned_key_str,
+                                      0,
+                                      actual_task_cnt);
+                        {
+                            std::lock_guard<std::mutex> task_lk(task_mux);
+                            if (task_res == CcErrorCode::TX_NODE_NOT_LEADER)
+                            {
+                                all_task_started = true;
+                                task_cv.notify_one();
+                                return;
+                            }
+                        }
+                    } while (*last_scanned_end_key < *range_end_key);
+
+                    // Update the task status
+                    {
+                        std::lock_guard<std::mutex> task_lk(task_mux);
+                        dispatched_task_count += (actual_task_cnt - 1);
+                        all_task_started = true;
+                        task_cv.notify_one();
+                    }
+                    return;
+                }
+
+                if (res_code != CcErrorCode::NO_ERROR)
+                {
+                    LOG(ERROR)
+                        << "Finish this generate sk task of ng#" << range_owner
+                        << " for partition id: " << partition_id
+                        << " caused by error: " << CcErrorMessage(res_code);
+                    std::unique_lock<std::mutex> lk(task_mux);
+                    --unfinished_task_cnt;
+                    task_res =
+                        task_res == CcErrorCode::NO_ERROR ? res_code : task_res;
+                    task_cv.notify_one();
+                    return;
+                }
+
+                // check the terms
+                auto &terms = sk_generator.NodeGroupTerms();
+                std::unique_lock<std::mutex> lk(task_mux);
+                for (size_t idx = 0; idx < terms.size(); ++idx)
+                {
+                    auto &term = terms.at(idx);
+                    if (term < 0)
+                    {
+                        continue;
+                    }
+
+                    auto &ng_term = ng_terms.at(idx);
+                    if (ng_term < 0)
+                    {
+                        ng_term = term;
+                    }
+                    else if (ng_term > 0 && ng_term != term)
+                    {
+                        LOG(ERROR) << "Generate sk from pk failed of ng#"
+                                   << range_owner
+                                   << " for partition id: " << partition_id
+                                   << " caused by leader transferred.";
+                        --unfinished_task_cnt;
+                        task_res = task_res == CcErrorCode::NO_ERROR
+                                       ? CcErrorCode::REQUESTED_NODE_NOT_LEADER
+                                       : task_res;
+                        task_cv.notify_one();
+                        return;
+                    }
+                    else
+                    {
+                        assert(ng_term == term);
+                    }
+                }
+
+                --unfinished_task_cnt;
+                total_pk_items_count += scanned_pk_items_count;
+                task_cv.notify_one();
+            }));
+    }
+    else
+    {
+        // remote node
+        std::shared_ptr<brpc::Channel> channel =
+            Sharder::Instance().GetCcNodeServiceChannel(dest_node_id);
+        if (channel == nullptr)
+        {
+            // Fail to establish the channel to the tx node.
+            LOG(ERROR) << "Acquire GenerateSkFromPk failed to init the "
+                          "channel of ng#"
+                       << range_owner;
+            std::unique_lock<std::mutex> lk(task_mux);
+            task_res = task_res == CcErrorCode::NO_ERROR
+                           ? CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED
+                           : task_res;
+            task_cv.notify_one();
+            return;
+        }
+
+        remote::CcRpcService_Stub stub(channel.get());
+
+        GenerateSkFromPkClosure *closure =
+            new GenerateSkFromPkClosure(task_mux,
+                                        task_cv,
+                                        leader_terms_,
+                                        unfinished_task_cnt,
+                                        all_task_started,
+                                        total_pk_items_count,
+                                        dispatched_task_count,
+                                        task_res,
+                                        dispatch_func);
+        closure->SetChannel(dest_node_id, channel);
+
+        brpc::Controller *cntl_ptr = closure->Controller();
+        cntl_ptr->set_timeout_ms(-1);
+        auto req_ptr = closure->GenerateSkFromPkRequest();
+        req_ptr->set_table_name_str(base_table_name.String());
+        req_ptr->set_node_group_id(range_owner);
+        req_ptr->set_tx_number(tx_number);
+        req_ptr->set_tx_term(tx_term);
+        req_ptr->set_scan_ts(scan_ts);
+        req_ptr->set_partition_id(partition_id);
+        assert(range_start_key != nullptr && range_end_key != nullptr);
+        if (range_start_key->Type() == KeyType::Normal)
+        {
+            range_start_key->Serialize(*req_ptr->mutable_start_key());
+        }
+        if (range_end_key->Type() == KeyType::Normal)
+        {
+            range_end_key->Serialize(*req_ptr->mutable_end_key());
+        }
+
+        for (size_t idx = 0; idx < new_indexes_name_.size(); ++idx)
+        {
+            req_ptr->add_new_sk_name_str(new_indexes_name_.at(idx).String());
+            req_ptr->add_new_sk_type(remote::ToRemoteType::ConvertTableType(
+                new_indexes_name_.at(idx).Type()));
+        }
+
+        auto resp_ptr = closure->GenerateSkFromPkResponse();
+        // Asynchronous mode
+        stub.GenerateSkFromPk(cntl_ptr, req_ptr, resp_ptr, closure);
+        DLOG(INFO) << "Acquire GenerateSkFromPk service for partition id: "
+                   << partition_id
+                   << " with start key: " << range_start_key->ToString()
+                   << " and end key: " << range_end_key->ToString() << " of ng#"
+                   << range_owner;
+    }
+
+    {
+        std::lock_guard<std::mutex> task_lk(task_mux);
+        ++unfinished_task_cnt;
+    }
+}
+
 }  // namespace txservice
