@@ -1169,6 +1169,7 @@ public:
             // locks. So, the acquire operation should always succeed.
             assert(lock_pair.first == LockType::WriteLock &&
                    lock_pair.second == CcErrorCode::NO_ERROR);
+            (void) lock_pair;
 
             // Register the range owner bucket for the new ranges
             auto bucket_map = static_cast<RangeBucketCcMap *>(

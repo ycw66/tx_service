@@ -1,3 +1,3 @@
-[submodule "log_service"]
-	path = log_service
-	url = git@github.com:monographdb/log_service.git
+[submodule "tx-log-protos"]
+	path = tx-log-protos
+	url = git@github.com:monographdb/tx-log-protos.git

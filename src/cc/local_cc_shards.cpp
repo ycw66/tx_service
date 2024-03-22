@@ -83,6 +83,7 @@ LocalCcShards::LocalCcShards(
         {
             auto ins_res = prebuilt_tables_.try_emplace(table, image);
             assert(ins_res.second);
+            (void) ins_res;
         }
 
         InitPrebuiltTables(node_id);
@@ -403,6 +404,7 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                                           base_table_name.Type()),
                     std::forward_as_tuple(false));
                 assert(ins_it.second);
+                (void) ins_it;
                 for (const txservice::TableName &index_table_name :
                      catalog_entry.schema_->IndexNames())
                 {

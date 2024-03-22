@@ -5359,6 +5359,7 @@ public:
                 it->second->GetOrCreateKeyLock(shard_, this, it.GetPage())
                     .AcquireReadIntent(req.Txn());
             assert(add_intent);
+            (void) add_intent;
             shard_->UpsertLockHoldingTx(req.Txn(),
                                         req.node_group_term_,
                                         it->second,
@@ -7224,9 +7225,11 @@ protected:
             const ValueT *record =
                 static_cast<const ValueT *>(data_item.record_.get());
 
+#ifdef RANGE_PARTITION_ENABLED
             uint32_t rec_store_size =
                 data_item.is_deleted_ ? 0
                                       : data_item.key_->Size() + record->Size();
+#endif
 
             // If the in-memory version is from a upload request (i.e.
             // generated sk record from pk), the data store version

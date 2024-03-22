@@ -253,6 +253,7 @@ void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
     assert(thd_id < thd_token_.size());
     bool ret = cc_queue_.enqueue(thd_token_.at(thd_id), req);
     assert(ret == true);
+    (void) ret;
 
     // Wakes up the tx processor dedicated to this shard when it is asleep. The
     // notify function internally uses a std::mutex before notifying via the
@@ -641,18 +642,26 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
             // no need to check and recover local txn, it must be ongoing
             return;
         }
-        LOG(WARNING) << "orphan lock detected, lock holding txn: "
-                     << lock_holding_txn << ", try to recover";
-        Sharder::Instance().RecoverTx(lock_holding_txn,
-                                      lk_info.tx_coord_term_,
-                                      lk_info.wlock_ts_,
-                                      cc_ng_id,
-                                      cc_ng_term);
+        if (!txservice_skip_wal)
+        {
+            LOG(WARNING) << "orphan lock detected, lock holding txn: "
+                         << lock_holding_txn << ", try to recover";
+            Sharder::Instance().RecoverTx(lock_holding_txn,
+                                          lk_info.tx_coord_term_,
+                                          lk_info.wlock_ts_,
+                                          cc_ng_id,
+                                          cc_ng_term);
 
-        // Updates the last_recover_ts field, so that following
-        // conflicting tx's will not try recovery immediately,
-        // avoiding a flood of recovery requests.
-        lk_info.last_recover_ts_ = now_ts;
+            // Updates the last_recover_ts field, so that following
+            // conflicting tx's will not try recovery immediately,
+            // avoiding a flood of recovery requests.
+            lk_info.last_recover_ts_ = now_ts;
+        }
+        else
+        {
+            // clear the lock when log service is not enabled
+            ClearTx(lock_holding_txn);
+        }
     }
 }
 

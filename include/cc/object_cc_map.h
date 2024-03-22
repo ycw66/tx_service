@@ -345,6 +345,7 @@ public:
                 // Read only commands should never proceed if object doesn't
                 // exist.
                 assert(!proceed);
+                (void) proceed;
                 obj_result.rec_status_ = RecordStatus::Deleted;
                 obj_result.commit_ts_ = cce->CommitTs();
                 hd_res->SetFinished();
@@ -585,6 +586,7 @@ public:
         uint64_t commit_ts = req.CommitTs();
         OperationType op_type = req.GetOperationType();
         assert(op_type == OperationType::CommitCommands);
+        (void) op_type;
 
         const CcEntryAddr *cce_addr = req.CceAddr();
 
@@ -811,6 +813,7 @@ public:
                     // The lock is newly assigned, recycle must succeed.
                     assert(lock_recycled);
                 }
+                (void) lock_recycled;
             }
             else
             {

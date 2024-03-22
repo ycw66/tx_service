@@ -857,6 +857,7 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
 
     size_t comma_pos = ip_addr.find(':');
     assert(comma_pos != std::string::npos);
+    (void) comma_pos;
     int err;
     err = channel.Init(ip_addr.c_str(), &options);
     if (err != 0)

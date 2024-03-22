@@ -3922,6 +3922,11 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
         return;
     }
 
+    if (txservice_skip_wal)
+    {
+        write_log.hd_result_.SetFinished();
+    }
+
     if (metrics::enable_tx_service_metrics)
     {
         auto meter = tx_processor_->GetMeter();
@@ -3944,7 +3949,6 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
     write_log.hd_result_.SetToBlock();
     std::atomic_thread_fence(std::memory_order_release);
 #endif
-
     txlog_->WriteLog(write_log.log_group_id_,
                      write_log.log_closure_.Controller(),
                      write_log.log_closure_.LogRequest(),

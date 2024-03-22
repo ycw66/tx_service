@@ -23,7 +23,6 @@
 #include <utility>
 #include <vector>
 
-#include "../log_service/include/fault_inject.h"
 #include "cc/cc_map.h"
 #include "cc/cc_shard.h"
 #include "cc/ccm_scanner.h"
@@ -3707,7 +3706,6 @@ public:
     {
         txservice::FaultInject::Instance().InjectFault(*fault_name_,
                                                        *fault_paras_);
-        txlog::FaultInject::Instance().InjectFault(*fault_name_, *fault_paras_);
         res_->SetFinished();
         return true;
     }
