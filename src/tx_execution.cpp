@@ -3922,11 +3922,6 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
         return;
     }
 
-    if (txservice_skip_wal)
-    {
-        write_log.hd_result_.SetFinished();
-    }
-
     if (metrics::enable_tx_service_metrics)
     {
         auto meter = tx_processor_->GetMeter();

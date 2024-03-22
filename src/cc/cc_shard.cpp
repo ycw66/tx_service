@@ -642,26 +642,18 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
             // no need to check and recover local txn, it must be ongoing
             return;
         }
-        if (!txservice_skip_wal)
-        {
-            LOG(WARNING) << "orphan lock detected, lock holding txn: "
-                         << lock_holding_txn << ", try to recover";
-            Sharder::Instance().RecoverTx(lock_holding_txn,
-                                          lk_info.tx_coord_term_,
-                                          lk_info.wlock_ts_,
-                                          cc_ng_id,
-                                          cc_ng_term);
+        LOG(WARNING) << "orphan lock detected, lock holding txn: "
+                     << lock_holding_txn << ", try to recover";
+        Sharder::Instance().RecoverTx(lock_holding_txn,
+                                      lk_info.tx_coord_term_,
+                                      lk_info.wlock_ts_,
+                                      cc_ng_id,
+                                      cc_ng_term);
 
-            // Updates the last_recover_ts field, so that following
-            // conflicting tx's will not try recovery immediately,
-            // avoiding a flood of recovery requests.
-            lk_info.last_recover_ts_ = now_ts;
-        }
-        else
-        {
-            // clear the lock when log service is not enabled
-            ClearTx(lock_holding_txn);
-        }
+        // Updates the last_recover_ts field, so that following
+        // conflicting tx's will not try recovery immediately,
+        // avoiding a flood of recovery requests.
+        lk_info.last_recover_ts_ = now_ts;
     }
 }
 
