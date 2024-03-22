@@ -228,8 +228,8 @@ int Sharder::Init(
 
 #ifdef ON_KEY_OBJECT
     brpc::ServerOptions server_options;
-    // server_options.num_threads at least 4
-    server_options.num_threads = 4;
+    // server_options.num_threads 0 means use default bthread worker count.
+    server_options.num_threads = 0;
     if (cc_node_server_.Start(
             GET_CCNODE_RPC_PORT(
                 cluster_config_->ng_configs_.at(node_id_).front().port_),
@@ -1144,8 +1144,8 @@ void Sharder::StartCcStreamReceiver()
     // Sharder::Init().
 #ifdef ON_KEY_OBJECT
     brpc::ServerOptions server_options;
-    // server_options.num_threads at least 4
-    server_options.num_threads = 4;
+    // server_options.num_threads 0 means use default bthread worker count.
+    server_options.num_threads = 0;
     if (cc_stream_server_.Start(
             cluster_config_->ng_configs_.at(node_id_).front().port_,
             &server_options) != 0)
