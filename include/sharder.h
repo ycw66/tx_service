@@ -145,7 +145,7 @@ public:
         return ng_leader_cache_[cc_ng_id].load(std::memory_order_relaxed);
     }
 
-    uint32_t ShardCode(uint64_t hash_code) const
+    uint32_t ShardCode(uint64_t hash_code)
     {
         // Uses the lower 10 bits to shard the key across CPU cores in a node.
         uint32_t residual = hash_code & 0x3FF;
@@ -187,14 +187,10 @@ public:
         return hash_val % total_range_buckets;
     }
 
-    uint32_t NodeGroupCount() const
+    uint32_t NodeGroupCount()
     {
-#ifdef ON_KEY_OBJECT
-        return node_group_count_.load(std::memory_order_acquire);
-#else
-        auto cpy = std::atomic_load(&cluster_config_);
-        return cpy->ng_configs_.size();
-#endif
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        return cluster_config_.ng_configs_.size();
     }
 
     /**
@@ -376,14 +372,10 @@ public:
         return cc_stream_sender_ != nullptr ? cc_stream_sender_.get() : nullptr;
     }
 
-    uint32_t GetNodeCount() const
+    uint32_t GetNodeCount()
     {
-#ifdef ON_KEY_OBJECT
-        return node_group_count_.load(std::memory_order_acquire);
-#else
-        auto cpy = std::atomic_load(&cluster_config_);
-        return cpy->ng_configs_.size();
-#endif
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        return cluster_config_.ng_configs_.size();
     }
 
     uint32_t NodeId() const
@@ -466,17 +458,10 @@ public:
         CcRequestBase *cc_req,
         CcShard *cc_shard);
 
-    uint64_t ClusterConfigVersion() const
+    uint64_t ClusterConfigVersion()
     {
-        auto cluster_config = std::atomic_load(&cluster_config_);
-        if (cluster_config)
-        {
-            return cluster_config->version_;
-        }
-        else
-        {
-            return 0;
-        }
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        return cluster_config_.version_;
     }
 
     /**
@@ -506,11 +491,11 @@ private:
 private:
     uint32_t node_id_;
 
+    std::shared_mutex cluster_cnf_mux_;
     // Stores the current cluster config. It contains the mapping relation
     // between node group id and node group members, current node group leader
-    // etc. We use copy on write to update cluster_config_ so that we don't need
-    // mutex protection when reading it.
-    std::shared_ptr<ClusterConfig> cluster_config_;
+    // etc.
+    ClusterConfig cluster_config_;
     // The replicate number of node group.
     uint16_t rep_group_cnt_;
 
@@ -519,9 +504,6 @@ private:
     std::atomic<uint32_t> ng_leader_cache_[1000];
     std::atomic<int32_t> leader_term_cache_[1000];
     std::atomic<int32_t> candidate_leader_term_cache_[1000];
-#ifdef ON_KEY_OBJECT
-    std::atomic<uint32_t> node_group_count_{};
-#endif
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
 

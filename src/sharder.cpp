@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 
 #include "cc_req_base.h"
 #include "cc_shard.h"
@@ -78,8 +79,8 @@ void Sharder::CloseStreamSender()
 
 void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
 {
-    auto cluster_config = std::atomic_load(&cluster_config_);
-    if (node_id >= cluster_config->ng_configs_.size())
+    std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
+    if (node_id >= cluster_config_.ng_configs_.size())
     {
         // Node is already removed from cluster
         ip = "";
@@ -87,8 +88,8 @@ void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
         return;
     }
 
-    ip = cluster_config->ng_configs_.at(node_id).front().host_name_;
-    port = cluster_config->ng_configs_.at(node_id).front().port_;
+    ip = cluster_config_.ng_configs_.at(node_id).front().host_name_;
+    port = cluster_config_.ng_configs_.at(node_id).front().port_;
 }
 
 int Sharder::Init(
@@ -109,94 +110,91 @@ int Sharder::Init(
     local_shards_ = local_shards;
     log_agent_ = std::move(log_agent);
 
-    std::atomic_store(&cluster_config_, std::make_shared<ClusterConfig>());
-    for (uint32_t nid = 0; nid < 1000; nid++)
     {
-        ng_leader_cache_[nid].store(nid);
-        leader_term_cache_[nid].store(-1);
-        candidate_leader_term_cache_[nid].store(-1);
-    }
-    if (ng_configs != nullptr)
-    {
-        for (const auto &pair : *ng_configs)
+        std::lock_guard<std::shared_mutex> lk(cluster_cnf_mux_);
+        for (uint32_t nid = 0; nid < 1000; nid++)
         {
-            std::vector<NodeConfig> group_config;
-            for (const auto &config : pair.second)
-            {
-                group_config.emplace_back(config);
-            }
-            cluster_config_->ng_configs_.try_emplace(pair.first,
-                                                     std::move(group_config));
+            ng_leader_cache_[nid].store(nid);
+            leader_term_cache_[nid].store(-1);
+            candidate_leader_term_cache_[nid].store(-1);
         }
-        cluster_config_->version_ = config_version;
-    }
-    else
-    {
-        cluster_config_->ng_configs_.try_emplace(0);
-        cluster_config_->version_ = config_version;
-    }
-#ifdef ON_KEY_OBJECT
-    node_group_count_.store(cluster_config_->ng_configs_.size(),
-                            std::memory_order_release);
-#endif
+        if (ng_configs != nullptr)
+        {
+            for (const auto &pair : *ng_configs)
+            {
+                std::vector<NodeConfig> group_config;
+                for (const auto &config : pair.second)
+                {
+                    group_config.emplace_back(config);
+                }
+                cluster_config_.ng_configs_.try_emplace(
+                    pair.first, std::move(group_config));
+            }
+            cluster_config_.version_ = config_version;
+        }
+        else
+        {
+            cluster_config_.ng_configs_.try_emplace(0);
+            cluster_config_.version_ = config_version;
+        }
 
-    if (txlog_ips != nullptr)
-    {
-        txlog_ips_ = *txlog_ips;
-        txlog_ports_ = *txlog_ports;
-    }
+        if (txlog_ips != nullptr)
+        {
+            txlog_ips_ = *txlog_ips;
+            txlog_ports_ = *txlog_ports;
+        }
 
-    if (log_agent_ != nullptr)
-    {
-        log_agent_->Init(txlog_ips_, txlog_ports_, 0);
-    }
+        if (log_agent_ != nullptr)
+        {
+            log_agent_->Init(txlog_ips_, txlog_ports_, 0);
+        }
 
 #ifdef EXT_TX_PROC_ENABLED
-    tx_worker_pool_ = std::make_unique<TxWorkerPool>(
-        local_shards_->Count() >= 2 ? local_shards_->Count() / 2 : 1);
+        tx_worker_pool_ = std::make_unique<TxWorkerPool>(
+            local_shards_->Count() >= 2 ? local_shards_->Count() / 2 : 1);
 #else
-    tx_worker_pool_ = std::make_unique<TxWorkerPool>(local_shards_->Count());
+        tx_worker_pool_ =
+            std::make_unique<TxWorkerPool>(local_shards_->Count());
 #endif
-    sharder_worker_ = std::make_unique<TxWorkerPool>(1);
-    // there shouldn't be any concurrent visit before Init retruns so we
-    // can directly modify ng_configs_ without doing copy on write.
-    // construct log_replay_service_ before cc_nodes_
-    log_replay_service_ = std::make_unique<fault::ReplayService>(
-        *local_shards_,
-        GetLogAgent(),
-        cluster_config_->ng_configs_.at(node_id_).front().host_name_,
-        GET_LOG_REPLAY_RPC_PORT(
-            cluster_config_->ng_configs_.at(node_id_).front().port_));
-    if (log_replay_server_.AddService(log_replay_service_.get(),
-                                      brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
-    {
-        LOG(FATAL) << "Fail to start add the log replay service to the log "
-                      "replay server.";
-        return -1;
-    }
-
-    for (uint32_t ng_id = 0; ng_id < cluster_config_->ng_configs_.size();
-         ++ng_id)
-    {
-        for (size_t idx = 0;
-             idx < cluster_config_->ng_configs_.at(ng_id).size();
-             ++idx)
+        sharder_worker_ = std::make_unique<TxWorkerPool>(1);
+        log_replay_service_ = std::make_unique<fault::ReplayService>(
+            *local_shards_,
+            GetLogAgent(),
+            cluster_config_.ng_configs_.at(node_id_).front().host_name_,
+            GET_LOG_REPLAY_RPC_PORT(
+                cluster_config_.ng_configs_.at(node_id_).front().port_));
+        if (log_replay_server_.AddService(log_replay_service_.get(),
+                                          brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
         {
-            if (cluster_config_->ng_configs_.at(ng_id).at(idx).node_id_ ==
-                node_id_)
+            LOG(FATAL) << "Fail to start add the log replay service to the log "
+                          "replay server.";
+            return -1;
+        }
+
+        for (uint32_t ng_id = 0; ng_id < cluster_config_.ng_configs_.size();
+             ++ng_id)
+        {
+            for (size_t idx = 0;
+                 idx < cluster_config_.ng_configs_.at(ng_id).size();
+                 ++idx)
             {
-                cluster_config_->cc_nodes_.try_emplace(
-                    ng_id,
-                    std::make_shared<fault::CcNode>(
+                if (cluster_config_.ng_configs_.at(ng_id).at(idx).node_id_ ==
+                    node_id_)
+                {
+                    cluster_config_.cc_nodes_.try_emplace(
                         ng_id,
-                        node_id_,
-                        *local_shards_,
-                        log_replay_service_.get(),
-                        log_agent_->LogGroupCount()));
+                        std::make_shared<fault::CcNode>(
+                            ng_id,
+                            node_id_,
+                            *local_shards_,
+                            log_replay_service_.get(),
+                            log_agent_->LogGroupCount()));
+                }
             }
         }
     }
 
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
     cc_nodes_init_.store(true, std::memory_order_release);
 
     // Initialize cc stream related structs. Even we do not need it if cluster
@@ -213,7 +211,7 @@ int Sharder::Init(
     }
 
     cc_stream_sender_ = std::make_unique<remote::CcStreamSender>(msg_pool_);
-    cc_stream_sender_->UpdateRemoteNodes(cluster_config_->ng_configs_);
+    cc_stream_sender_->UpdateRemoteNodes(cluster_config_.ng_configs_);
 
     cc_node_service_ = std::make_unique<remote::CcNodeService>(*local_shards_);
     if (cc_node_server_.AddService(cc_node_service_.get(),
@@ -232,7 +230,7 @@ int Sharder::Init(
     server_options.num_threads = 0;
     if (cc_node_server_.Start(
             GET_CCNODE_RPC_PORT(
-                cluster_config_->ng_configs_.at(node_id_).front().port_),
+                cluster_config_.ng_configs_.at(node_id_).front().port_),
             &server_options) != 0)
     {
         LOG(FATAL) << "Fail to start the cc node server.";
@@ -241,7 +239,7 @@ int Sharder::Init(
 #else
     if (cc_node_server_.Start(
             GET_CCNODE_RPC_PORT(
-                cluster_config_->ng_configs_.at(node_id_).front().port_),
+                cluster_config_.ng_configs_.at(node_id_).front().port_),
             NULL) != 0)
     {
         LOG(FATAL) << "Fail to start the cc node server.";
@@ -255,7 +253,7 @@ int Sharder::Init(
 #ifdef ON_KEY_OBJECT
     if (log_replay_server_.Start(
             GET_LOG_REPLAY_RPC_PORT(
-                cluster_config_->ng_configs_.at(node_id_).front().port_),
+                cluster_config_.ng_configs_.at(node_id_).front().port_),
             &server_options) != 0)
     {
         LOG(FATAL) << "Fail to start the log replay server.";
@@ -264,7 +262,7 @@ int Sharder::Init(
 #else
     if (log_replay_server_.Start(
             GET_LOG_REPLAY_RPC_PORT(
-                cluster_config_->ng_configs_.at(node_id_).front().port_),
+                cluster_config_.ng_configs_.at(node_id_).front().port_),
             nullptr) != 0)
     {
         LOG(FATAL) << "Fail to start the log replay server.";
@@ -318,7 +316,7 @@ int Sharder::Init(
         remote::StartNodeResponse response;
         req.set_node_id(node_id_);
         req.set_config_version(config_version);
-        for (const auto &ng_config : cluster_config_->ng_configs_)
+        for (const auto &ng_config : cluster_config_.ng_configs_)
         {
             auto node_buf = req.add_node_configs();
             auto &node_config = ng_config.second.front();
@@ -355,7 +353,7 @@ int Sharder::Init(
     }
     else
     {
-        cluster_config_->cc_nodes_.at(node_id_)->OnLeaderStart(1);
+        cluster_config_.cc_nodes_.at(node_id_)->OnLeaderStart(1);
     }
 
     return 0;
@@ -491,8 +489,8 @@ int64_t Sharder::CandidateLeaderTerm(uint32_t ng_id) const
 
 void Sharder::UpdateLeaders()
 {
-    auto cluster_config = std::atomic_load(&cluster_config_);
-    for (const auto &ng_pair : cluster_config->ng_configs_)
+    std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
+    for (const auto &ng_pair : cluster_config_.ng_configs_)
     {
         UpdateLeader(ng_pair.first);
     }
@@ -533,10 +531,10 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
                               uint32_t latest_txn_no,
                               uint64_t last_ckpt_ts)
 {
-    auto cluster_config = std::atomic_load(&cluster_config_);
+    std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
 
-    auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
-    if (find_it == cluster_config->cc_nodes_.end())
+    auto find_it = cluster_config_.cc_nodes_.find(cc_ng_id);
+    if (find_it == cluster_config_.cc_nodes_.end())
     {
         return;
     }
@@ -550,10 +548,10 @@ bool Sharder::CheckLogGroupReplayFinished(uint32_t cc_ng_id,
                                           uint32_t log_group_id,
                                           int64_t cc_ng_term)
 {
-    auto cluster_config = std::atomic_load(&cluster_config_);
+    std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
 
-    auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
-    if (find_it == cluster_config->cc_nodes_.end())
+    auto find_it = cluster_config_.cc_nodes_.find(cc_ng_id);
+    if (find_it == cluster_config_.cc_nodes_.end())
     {
         return false;
     }
@@ -570,8 +568,8 @@ void Sharder::WaitClusterReady()
         std::unique_lock<std::mutex> lk(recovery_state_mux_);
         // cluster_config_ might be updated during replay. We need
         // to obtain the latest cluster_config_ before checking in every loop.
-        auto cluster_config = std::atomic_load(&cluster_config_);
-        for (auto &pair : cluster_config->ng_configs_)
+        std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
+        for (auto &pair : cluster_config_.ng_configs_)
         {
             uint32_t ng_id = pair.first;
             if (recovered_leader_set_.find(ng_id) ==
@@ -602,14 +600,14 @@ void Sharder::WaitClusterReady()
                 }
             }
         }
+        size_t ng_cnt = cluster_config_.ng_configs_.size();
+        cnf_lk.unlock();
 
         recovery_all_finished = recovery_state_cv_.wait_for(
             lk,
             1s,
-            [this, cluster_config]() {
-                return recovered_leader_set_.size() ==
-                       cluster_config->ng_configs_.size();
-            });
+            [this, ng_cnt]()
+            { return recovered_leader_set_.size() == ng_cnt; });
     } while (!recovery_all_finished);
 }
 
@@ -631,21 +629,21 @@ void Sharder::RecoverTx(uint64_t lock_tx_number,
 
 void Sharder::OnLeaderStart(uint32_t ng_id, int64_t term)
 {
-    auto cluster_config = cluster_config_;
-    auto find_it = cluster_config->cc_nodes_.find(ng_id);
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+    auto find_it = cluster_config_.cc_nodes_.find(ng_id);
     // TODO: is this always true when cluster config is changed?
-    assert(find_it != cluster_config->cc_nodes_.end());
+    assert(find_it != cluster_config_.cc_nodes_.end());
 
     return find_it->second->OnLeaderStart(term);
 }
 
 void Sharder::OnLeaderStop(uint32_t ng_id)
 {
-    auto cluster_config = std::atomic_load(&cluster_config_);
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
 
-    auto find_it = cluster_config->cc_nodes_.find(ng_id);
+    auto find_it = cluster_config_.cc_nodes_.find(ng_id);
     // TODO: is this always true when cluster config is changed?
-    assert(find_it != cluster_config->cc_nodes_.end());
+    assert(find_it != cluster_config_.cc_nodes_.end());
 
     return find_it->second->OnLeaderStop();
 }
@@ -668,8 +666,8 @@ void Sharder::NotifyCheckPointer()
 std::vector<uint32_t> Sharder::LocalNodeGroups()
 {
     std::vector<uint32_t> ngs;
-    auto cluster_config = std::atomic_load(&cluster_config_);
-    for (auto &pair : cluster_config->cc_nodes_)
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+    for (auto &pair : cluster_config_.cc_nodes_)
     {
         ngs.push_back(pair.first);
     }
@@ -678,10 +676,10 @@ std::vector<uint32_t> Sharder::LocalNodeGroups()
 
 int64_t Sharder::TryPinNodeGroupData(uint32_t cc_ng_id)
 {
-    auto cluster_config = std::atomic_load(&cluster_config_);
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
 
-    auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
-    if (find_it != cluster_config->cc_nodes_.end())
+    auto find_it = cluster_config_.cc_nodes_.find(cc_ng_id);
+    if (find_it != cluster_config_.cc_nodes_.end())
     {
         return find_it->second->PinData();
     }
@@ -690,10 +688,10 @@ int64_t Sharder::TryPinNodeGroupData(uint32_t cc_ng_id)
 
 void Sharder::UnpinNodeGroupData(uint32_t cc_ng_id)
 {
-    auto cluster_config = std::atomic_load(&cluster_config_);
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
 
-    auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
-    if (find_it != cluster_config->cc_nodes_.end())
+    auto find_it = cluster_config_.cc_nodes_.find(cc_ng_id);
+    if (find_it != cluster_config_.cc_nodes_.end())
     {
         find_it->second->UnpinData();
     }
@@ -701,10 +699,10 @@ void Sharder::UnpinNodeGroupData(uint32_t cc_ng_id)
 
 uint64_t Sharder::GetNodeGroupCkptTs(uint32_t cc_ng_id)
 {
-    auto cluster_config = std::atomic_load(&cluster_config_);
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
 
-    auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
-    if (find_it != cluster_config->cc_nodes_.end())
+    auto find_it = cluster_config_.cc_nodes_.find(cc_ng_id);
+    if (find_it != cluster_config_.cc_nodes_.end())
     {
         return find_it->second->GetCkptTs();
     }
@@ -713,10 +711,10 @@ uint64_t Sharder::GetNodeGroupCkptTs(uint32_t cc_ng_id)
 
 bool Sharder::UpdateNodeGroupCkptTs(uint32_t cc_ng_id, uint64_t ckpt_ts)
 {
-    auto cluster_config = std::atomic_load(&cluster_config_);
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
 
-    auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
-    if (find_it != cluster_config->cc_nodes_.end())
+    auto find_it = cluster_config_.cc_nodes_.find(cc_ng_id);
+    if (find_it != cluster_config_.cc_nodes_.end())
     {
         return find_it->second->UpdateCkptTs(ckpt_ts);
     }
@@ -740,15 +738,15 @@ size_t Sharder::GetLocalCcShardsCount()
 std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
     std::vector<std::pair<std::string, uint16_t>> &new_nodes)
 {
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
     // Make a copy of the current ng configs.
-    auto cluster_config = std::atomic_load(&cluster_config_);
     std::unordered_map<uint32_t, std::vector<NodeConfig>> new_ng_configs(
-        cluster_config->ng_configs_);
+        cluster_config_.ng_configs_);
 
     uint32_t rep_group_cnt =
-        rep_group_cnt_ < new_nodes.size() + cluster_config->ng_configs_.size()
+        rep_group_cnt_ < new_nodes.size() + cluster_config_.ng_configs_.size()
             ? rep_group_cnt_
-            : new_nodes.size() + cluster_config->ng_configs_.size();
+            : new_nodes.size() + cluster_config_.ng_configs_.size();
     // Add a new node group for each new added node, and assign the nodes
     // that are in least number of node groups as the member of new node
     // groups.
@@ -817,15 +815,15 @@ std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
 std::unordered_map<uint32_t, std::vector<NodeConfig>>
 Sharder::RemoveNodeFromCluster(uint16_t removed_node_count)
 {
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
     // Make a copy of the current ng configs.
-    auto cluster_config = std::atomic_load(&cluster_config_);
     std::unordered_map<uint32_t, std::vector<NodeConfig>> new_ng_configs(
-        cluster_config->ng_configs_);
+        cluster_config_.ng_configs_);
 
     uint32_t rep_group_cnt =
-        rep_group_cnt_ < cluster_config->ng_configs_.size() - removed_node_count
+        rep_group_cnt_ < cluster_config_.ng_configs_.size() - removed_node_count
             ? rep_group_cnt_
-            : cluster_config->ng_configs_.size() - removed_node_count;
+            : cluster_config_.ng_configs_.size() - removed_node_count;
     assert(rep_group_cnt > 0);
     // Remove the nodes with greatest node id.
     NodeGroupId largest_node_id = new_ng_configs.size() - 1;
@@ -917,7 +915,7 @@ void Sharder::UpdateClusterConfig(
     //        [this, new_ng_configs, cc_req, cc_shard, version]
     //        {
     //            auto cluster_config = std::atomic_load(&cluster_config_);
-    //            if (cluster_config->version_ >= version)
+    //            if (cluster_config_.version_ >= version)
     //            {
     //                // If the given version is older than current version, do
     //                // nothing.
@@ -925,7 +923,7 @@ void Sharder::UpdateClusterConfig(
     //                return;
     //            }
     //            // Shutdown the cc nodes for the deleted node groups.
-    //            for (auto &pair : cluster_config->cc_nodes_)
+    //            for (auto &pair : cluster_config_.cc_nodes_)
     //            {
     //                auto ng_iter = new_ng_configs.find(pair.first);
     //                if (ng_iter == new_ng_configs.end())
@@ -957,8 +955,8 @@ void Sharder::UpdateClusterConfig(
     //
     //            std::shared_ptr<ClusterConfig> dirty_cluster_config =
     //                std::make_shared<ClusterConfig>();
-    //            dirty_cluster_config->version_ = version;
-    //            dirty_cluster_config->ng_configs_ = new_ng_configs;
+    //            dirty_cluster_config_.version_ = version;
+    //            dirty_cluster_config_.ng_configs_ = new_ng_configs;
     //            bool braft_group_updated = false;
     //
     //            for (auto &ng_pair : new_ng_configs)
@@ -977,18 +975,19 @@ void Sharder::UpdateClusterConfig(
     //                cluster
     //                // config
     //                auto find_it =
-    //                cluster_config->ng_configs_.find(ng_pair.first); if
-    //                (find_it != cluster_config->ng_configs_.end())
+    //                cluster_config_.ng_configs_.find(ng_pair.first); if
+    //                (find_it != cluster_config_.ng_configs_.end())
     //                {
     //                    if (is_member)
     //                    {
     //                        auto cc_node_it =
-    //                            cluster_config->cc_nodes_.find(ng_pair.first);
-    //                        if (cc_node_it != cluster_config->cc_nodes_.end())
+    //                            cluster_config_.cc_nodes_.find(ng_pair.first);
+    //                        if (cc_node_it !=
+    //                        cluster_config_.cc_nodes_.end())
     //                        {
     //                            // Reuse original cc_node_ object
     //                            auto ins_pair =
-    //                                dirty_cluster_config->cc_nodes_.try_emplace(
+    //                                dirty_cluster_config_.cc_nodes_.try_emplace(
     //                                    ng_pair.first, cc_node_it->second);
     //
     //                            // Use cc node port + 1 for cc node raft port
@@ -1033,7 +1032,7 @@ void Sharder::UpdateClusterConfig(
     //                                group_ips.emplace_back(config.host_name_);
     //                            }
     //                            auto ins_pair =
-    //                                dirty_cluster_config->cc_nodes_.try_emplace(
+    //                                dirty_cluster_config_.cc_nodes_.try_emplace(
     //                                    ng_pair.first,
     //                                    std::make_shared<fault::CcNode>(
     //                                        ng_pair.first,
@@ -1080,7 +1079,7 @@ void Sharder::UpdateClusterConfig(
     //                            group_ips.emplace_back(config.host_name_);
     //                        }
     //                        auto ins_pair =
-    //                            dirty_cluster_config->cc_nodes_.try_emplace(
+    //                            dirty_cluster_config_.cc_nodes_.try_emplace(
     //                                ng_pair.first,
     //                                std::make_shared<fault::CcNode>(
     //                                    ng_pair.first,
@@ -1108,9 +1107,9 @@ void Sharder::UpdateClusterConfig(
     //            }
     //
     //            cc_stream_sender_->UpdateRemoteNodes(
-    //                dirty_cluster_config->ng_configs_);
+    //                dirty_cluster_config_.ng_configs_);
     //
-    //            ConfigRouteTable(dirty_cluster_config->ng_configs_);
+    //            ConfigRouteTable(dirty_cluster_config_.ng_configs_);
     //
     //            // Wait until braft node group config update is done
     //            // before actually switching the cluster config.
@@ -1131,7 +1130,7 @@ void Sharder::UpdateClusterConfig(
     //            // Make the copy on write switch
     //            std::atomic_store(&cluster_config_, dirty_cluster_config);
     // #ifdef ON_KEY_OBJECT
-    //            node_group_count_.store(cluster_config_->ng_configs_.size(),
+    //            node_group_count_.store(cluster_config_.ng_configs_.size(),
     //                                    std::memory_order_release);
     // #endif
     //            cc_shard->Enqueue(cc_req);
@@ -1147,14 +1146,14 @@ void Sharder::StartCcStreamReceiver()
     // server_options.num_threads 0 means use default bthread worker count.
     server_options.num_threads = 0;
     if (cc_stream_server_.Start(
-            cluster_config_->ng_configs_.at(node_id_).front().port_,
+            cluster_config_.ng_configs_.at(node_id_).front().port_,
             &server_options) != 0)
     {
         LOG(FATAL) << "Fail to start the cc stream server.";
     }
 #else
     if (cc_stream_server_.Start(
-            cluster_config_->ng_configs_.at(node_id_).front().port_, NULL) != 0)
+            cluster_config_.ng_configs_.at(node_id_).front().port_, NULL) != 0)
     {
         LOG(FATAL) << "Fail to start the cc stream server.";
     }
