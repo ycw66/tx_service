@@ -299,28 +299,42 @@ void CcNode::OnLeaderStart(int64_t term)
 
     if (!local_cc_shards_.IsRangeBucketsInitialized(ng_id_))
     {
-        // We need to initialize range bucket info for new ng
-        // before replaying.
-        std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
-        uint64_t version;
-        int32_t seed;
-        bool uninitialized;
-        // read ng config from kv store
-        while (!local_cc_shards_.store_hd_->ReadClusterConfig(
-            ng_configs, version, seed, uninitialized))
+        if (txservice_skip_kv)
         {
-            ng_configs.clear();
-            assert(!uninitialized);
+            // TODO: HARDCORE SEED
+            // If kv is not enabled, just copy bucket info from preferred ng.
+            local_cc_shards_.InitRangeBuckets(
+                ng_id_,
+                Sharder::Instance().NodeGroupCount(),
+                Sharder::Instance().ClusterConfigVersion(),
+                9001);
         }
-        local_cc_shards_.InitRangeBuckets(
-            ng_id_, ng_configs.size(), version, seed);
-        if (Sharder::Instance().ClusterConfigVersion() < version)
+        else
         {
-            // Use a dummy cc request that returns once it's put into cc queue.
-            RunOnTxProcessorCc cc([](CcShard &ccs) {});
-            Sharder::Instance().UpdateClusterConfig(
-                ng_configs, version, &cc, local_cc_shards_.GetCcShard(0));
-            cc.Wait();
+            // We need to initialize range bucket info for new ng
+            // before replaying.
+            std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
+            uint64_t version;
+            int32_t seed;
+            bool uninitialized;
+            // read ng config from kv store
+            while (!local_cc_shards_.store_hd_->ReadClusterConfig(
+                ng_configs, version, seed, uninitialized))
+            {
+                ng_configs.clear();
+                assert(!uninitialized);
+            }
+            local_cc_shards_.InitRangeBuckets(
+                ng_id_, ng_configs.size(), version, seed);
+            if (Sharder::Instance().ClusterConfigVersion() < version)
+            {
+                // Use a dummy cc request that returns once it's put into cc
+                // queue.
+                RunOnTxProcessorCc cc([](CcShard &ccs) {});
+                Sharder::Instance().UpdateClusterConfig(
+                    ng_configs, version, &cc, local_cc_shards_.GetCcShard(0));
+                cc.Wait();
+            }
         }
     }
     local_cc_shards_.InitPrebuiltTables(ng_id_);

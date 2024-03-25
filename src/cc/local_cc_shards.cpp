@@ -817,7 +817,7 @@ void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id)
     for (auto &[table, image] : prebuilt_tables_)
     {
         auto table_it = table_catalogs_.try_emplace(table);
-        auto ng_it = table_it.first->second.try_emplace(node_id_);
+        auto ng_it = table_it.first->second.try_emplace(ng_id);
         if (ng_it.second)
         {
             ng_it.first->second.InitSchema(
