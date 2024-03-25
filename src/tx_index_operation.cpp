@@ -937,6 +937,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                     {
                         auto &hd_res = generate_sk_parallel_op_.hd_result_;
                         hd_res.Reset();
+#ifdef EXT_TX_PROC_ENABLED
+                        hd_res.SetToBlock();
+#endif
                         this->DispatchRangeTask(txm, hd_res);
                     });
             };
@@ -1223,6 +1226,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                     {
                         auto &hd_res = generate_sk_parallel_op_.hd_result_;
                         hd_res.Reset();
+#ifdef EXT_TX_PROC_ENABLED
+                        hd_res.SetToBlock();
+#endif
                         this->DispatchRangeTask(txm, hd_res);
                     });
             };
@@ -1724,6 +1730,10 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
 {
     LocalCcShards *local_cc_shards = Sharder::Instance().GetLocalCcShards();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
 
     if (dest_node_id == local_cc_shards->NodeId())
     {
