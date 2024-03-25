@@ -143,6 +143,17 @@ public:
     void Serialize(std::string &str) const override;
     size_t SerializedLength() const override;
     void Deserialize(const char *buf, size_t &offset, const Schema *) override;
+#ifdef ON_KEY_OBJECT
+    std::string_view KVSerialize() const override
+    {
+        assert(false);
+        return std::string_view();
+    }
+    void KVDeserialize(const char *buf, size_t len)
+    {
+        assert(false);
+    }
+#endif
     TxKey::Uptr Clone() const override;
     std::string ToString() const override;
     void Copy(const TxKey &rhs) override;

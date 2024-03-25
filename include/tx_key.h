@@ -42,7 +42,14 @@ public:
     virtual TxKey::Uptr Clone() const = 0;
     virtual std::string ToString() const = 0;
     virtual void Copy(const TxKey &rhs) = 0;
-
+#ifdef ON_KEY_OBJECT
+    // Only used for single string field key, they do not need create a new
+    // buffer and convert the value's type, then copy into new buffer.
+    virtual std::string_view KVSerialize() const = 0;
+    // Deserialize the key from buffer. The buffer does not include the length
+    // of key's . Here should use len as buffer's length.
+    virtual void KVDeserialize(const char *buf, size_t len) = 0;
+#endif
     /**
      * To estimate log length.
      * @return
@@ -498,6 +505,18 @@ struct VoidKey : public TxKey
                      const Schema *key_schema) override
     {
     }
+
+#ifdef ON_KEY_OBJECT
+    std::string_view KVSerialize() const override
+    {
+        assert(false);
+        return std::string_view();
+    }
+    void KVDeserialize(const char *buf, size_t len)
+    {
+        assert(false);
+    }
+#endif
 
     TxKey::Uptr Clone() const override
     {
