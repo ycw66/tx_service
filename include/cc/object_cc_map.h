@@ -127,16 +127,16 @@ public:
         }
         else
         {
-            if (req.OwnCommand())
+            if (req.HasCommand())
             {
-                cmd = req.remote_input_.cmd_uptr_.get();
+                cmd = req.remote_input_.cmd_;
             }
             else
             {
                 std::unique_ptr<TxCommand> cmd_uptr =
                     CreateTxCommand(*req.CommandImage());
                 cmd = cmd_uptr.get();
-                req.SetCommand(std::move(cmd_uptr));
+                req.SetCommand(cmd_uptr.release());
             }
         }
 
@@ -370,7 +370,17 @@ public:
         // object.
         if (dirty_payload_status == RecordStatus::Uncreated)
         {
-            std::unique_ptr<TxCommand> pending_cmd = cce->PendingCmd();
+            auto var_cmd = cce->PendingCmd();
+            TxCommand *pending_cmd = nullptr;
+            if (std::holds_alternative<TxCommand *>(var_cmd))
+            {
+                pending_cmd = std::get<TxCommand *>(var_cmd);
+            }
+            else
+            {
+                pending_cmd =
+                    std::get<std::unique_ptr<TxCommand>>(var_cmd).get();
+            }
             std::unique_ptr<ValueT> dirty_payload = cce->DirtyPayload();
             // Since pending_cmd_ exists, the payload must also exist.
             // Otherwise, the dirty payload should have already been created by
@@ -474,8 +484,7 @@ public:
             // The dirty payload does not exist. This is the first command.
             // Execute and copy the command. The command will be committed
             // in PostWriteCc if the txn commits.
-            std::unique_ptr<TxCommand> pending_cmd = cce->PendingCmd();
-            assert(pending_cmd == nullptr);
+            assert(cce->IsNullPendingCmd());
             ValueT &object = *cce->payload_;
             cmd_success = cmd->ExecuteOn(object);
 
@@ -483,7 +492,31 @@ public:
             {
                 // Copy the command to be committed in PostWriteCc or when
                 // executing subsequent commands of the same txn.
-                cce->SetPendingCmd(cmd->Clone());
+                if (req.IsLocal())
+                {
+                    if (cmd->IsVolatile())
+                    {
+                        // If this command is volatile, it will need to clone a
+                        // new instance to ensure it can be commit in
+                        // PostWriteCc.
+                        cce->SetPendingCmd(cmd->Clone());
+                    }
+                    else
+                    {
+                        // If the command is exist until transaction committed,
+                        // it does not need to clone a new instance and use
+                        // original cmd in PostWriteCc.
+                        cce->SetPendingCmd(cmd);
+                    }
+                }
+                else
+                {
+                    // For remote ApplyCC, it will transfer the ownership from
+                    // ApplyCC into pending cmd, so ApplyCC does not need to
+                    // release this command.
+                    cce->SetPendingCmd(std::unique_ptr<TxCommand>(cmd));
+                    req.RemoveOwnership();
+                }
 
                 // The object is being modified, set dirty_payload_status_ to
                 // Uncreated so that a temporary object will be created when
@@ -616,7 +649,18 @@ public:
             else
             {
                 // Commit the pending command.
-                std::unique_ptr<TxCommand> pending_cmd = cce->PendingCmd();
+                auto var_cmd = cce->PendingCmd();
+                TxCommand *pending_cmd = nullptr;
+                if (std::holds_alternative<TxCommand *>(var_cmd))
+                {
+                    pending_cmd = std::get<TxCommand *>(var_cmd);
+                }
+                else
+                {
+                    pending_cmd =
+                        std::get<std::unique_ptr<TxCommand>>(var_cmd).get();
+                }
+
                 if (pending_cmd != nullptr)
                 {
                     assert(cce->payload_ != nullptr);

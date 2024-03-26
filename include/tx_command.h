@@ -83,6 +83,13 @@ public:
     {
         return true;
     }
+    // If this command will be existing until the transaction committed.
+    // True: It will be destroy after execute and need to clone for commit.
+    // False: It will always exist until commited.
+    virtual bool IsVolatile() = 0;
+    // The default value is not need to clone, for lua, it should call this
+    // method to set Volatile to true
+    virtual void SetVolatile() = 0;
 };
 
 /**

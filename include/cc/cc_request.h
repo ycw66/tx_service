@@ -4230,7 +4230,10 @@ private:
     {
         const std::string *key_str_{};
         const std::string *cmd_str_{};
-        std::unique_ptr<TxCommand> cmd_uptr_;
+        TxCommand *cmd_{nullptr};
+        // To say if ApplyCC owner this command, if TRUE, it should release it
+        // manually, if FALSE, does not need to release here.
+        bool is_owner_{false};
     };
 
 public:
@@ -4244,7 +4247,11 @@ public:
     {
         if (!is_local_)
         {
-            remote_input_.cmd_uptr_ = nullptr;
+            if (remote_input_.is_owner_)
+            {
+                delete remote_input_.cmd_;
+            }
+            remote_input_.cmd_ = nullptr;
         }
     };
 
@@ -4253,8 +4260,12 @@ public:
         in_use_.store(false, std::memory_order_release);
         if (!is_local_)
         {
-            //  release uptrs on ApplyCc finish, instead of reuse
-            remote_input_.cmd_uptr_ = nullptr;
+            //  delete cmd_ after ApplyCc finish for reuse
+            if (remote_input_.is_owner_)
+            {
+                delete remote_input_.cmd_;
+            }
+            remote_input_.cmd_ = nullptr;
         }
     }
 
@@ -4281,7 +4292,11 @@ public:
 
         if (!is_local_)
         {
-            remote_input_.cmd_uptr_ = nullptr;
+            if (remote_input_.is_owner_)
+            {
+                delete remote_input_.cmd_;
+            }
+            remote_input_.cmd_ = nullptr;
         }
 
         is_local_ = true;
@@ -4318,7 +4333,11 @@ public:
 
         if (!is_local_)
         {
-            remote_input_.cmd_uptr_ = nullptr;
+            if (remote_input_.is_owner_)
+            {
+                delete remote_input_.cmd_;
+            }
+            remote_input_.cmd_ = nullptr;
         }
 
         is_local_ = false;
@@ -4349,8 +4368,8 @@ public:
             return local_input_.cmd_ == nullptr ||
                    local_input_.cmd_->IsReadOnly();
         }
-        return remote_input_.cmd_uptr_ == nullptr ||
-               remote_input_.cmd_uptr_->IsReadOnly();
+        return remote_input_.cmd_ == nullptr ||
+               remote_input_.cmd_->IsReadOnly();
     }
 
     const TxKey *Key() const
@@ -4373,21 +4392,23 @@ public:
         return is_local_ ? nullptr : remote_input_.cmd_str_;
     }
 
-    bool OwnCommand() const
+    bool HasCommand() const
     {
-        return !is_local_ && remote_input_.cmd_uptr_ != nullptr;
+        return !is_local_ && remote_input_.cmd_ != nullptr;
     }
 
-    void SetCommand(std::unique_ptr<TxCommand> cmd)
+    void SetCommand(TxCommand *cmd)
     {
-        assert(!is_local_);
-        remote_input_.cmd_uptr_ = std::move(cmd);
-    }
+        assert(!is_local_ && remote_input_.cmd_ == nullptr);
 
-    std::unique_ptr<TxCommand> ReleaseCommand()
+        remote_input_.cmd_ = cmd;
+        remote_input_.is_owner_ = true;
+    }
+    // For remote update command, if NOT apply_and_commit_, it will need move
+    // the ownership into ccentry PendingCmd for executing in PostWriteCc.
+    void RemoveOwnership()
     {
-        assert(!is_local_);
-        return std::move(remote_input_.cmd_uptr_);
+        remote_input_.is_owner_ = false;
     }
 
     LruEntry *CcePtr() const

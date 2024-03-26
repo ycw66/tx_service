@@ -510,16 +510,23 @@ public:
     }
 
 #ifdef ON_KEY_OBJECT
-    std::unique_ptr<TxCommand> PendingCmd()
+    std::variant<TxCommand *, std::unique_ptr<TxCommand>> PendingCmd()
     {
         assert(cc_lock_and_extra_ != nullptr);
         return cc_lock_and_extra_->PendingCmd();
     }
 
-    void SetPendingCmd(std::unique_ptr<TxCommand> cmd_uptr)
+    void SetPendingCmd(
+        std::variant<TxCommand *, std::unique_ptr<TxCommand>> cmd)
     {
         assert(cc_lock_and_extra_ != nullptr);
-        cc_lock_and_extra_->SetPendingCmd(std::move(cmd_uptr));
+        cc_lock_and_extra_->SetPendingCmd(std::move(cmd));
+    }
+
+    bool IsNullPendingCmd()
+    {
+        return cc_lock_and_extra_ == nullptr ||
+               cc_lock_and_extra_->IsNullPendingCmd();
     }
 
     std::unique_ptr<ValueT> DirtyPayload()

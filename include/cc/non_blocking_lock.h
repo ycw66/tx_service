@@ -357,7 +357,11 @@ public:
         {
             // There must be no pending command and dirty payload if lock is
             // empty.
-            assert(pending_cmd_ == nullptr && dirty_payload_ == nullptr &&
+            assert((std::holds_alternative<TxCommand *>(pending_cmd_)
+                        ? std::get<TxCommand *>(pending_cmd_) == nullptr
+                        : std::get<std::unique_ptr<TxCommand>>(pending_cmd_) ==
+                              nullptr) &&
+                   dirty_payload_ == nullptr &&
                    dirty_payload_status_ == RecordStatus::NonExistent);
         }
 #endif
@@ -365,16 +369,23 @@ public:
     }
 
 #ifdef ON_KEY_OBJECT
-    std::unique_ptr<TxCommand> PendingCmd()
+    std::variant<TxCommand *, std::unique_ptr<TxCommand>> PendingCmd()
     {
         return std::move(pending_cmd_);
     }
 
-    void SetPendingCmd(std::unique_ptr<TxCommand> cmd_uptr)
+    void SetPendingCmd(
+        std::variant<TxCommand *, std::unique_ptr<TxCommand>> cmd)
     {
-        pending_cmd_ = std::move(cmd_uptr);
+        pending_cmd_ = std::move(cmd);
     }
-
+    bool IsNullPendingCmd()
+    {
+        return std::holds_alternative<TxCommand *>(pending_cmd_)
+                   ? std::get<TxCommand *>(pending_cmd_) == nullptr
+                   : std::get<std::unique_ptr<TxCommand>>(pending_cmd_) ==
+                         nullptr;
+    }
     std::unique_ptr<TxObject> DirtyPayload()
     {
         return std::move(dirty_payload_);
@@ -419,7 +430,7 @@ private:
     LruPage *page_{nullptr};
 
 #ifdef ON_KEY_OBJECT
-    std::unique_ptr<TxCommand> pending_cmd_;
+    std::variant<TxCommand *, std::unique_ptr<TxCommand>> pending_cmd_{nullptr};
     // temporary object to process subsequent commands in the same txn
     std::unique_ptr<TxObject> dirty_payload_;
     // status of temporary object

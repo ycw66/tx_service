@@ -1746,10 +1746,10 @@ txservice::remote::RemoteApplyCc::RemoteApplyCc()
 
             assert(!is_local_);
             std::string *cmd_res_str = resp->mutable_cmd_result();
-            assert(remote_input_.cmd_uptr_ != nullptr);
-            if (remote_input_.cmd_uptr_->GetResult() != nullptr)
+            assert(remote_input_.cmd_ != nullptr);
+            if (remote_input_.cmd_->GetResult() != nullptr)
             {
-                remote_input_.cmd_uptr_->GetResult()->Serialize(*cmd_res_str);
+                remote_input_.cmd_->GetResult()->Serialize(*cmd_res_str);
             }
         }
 
