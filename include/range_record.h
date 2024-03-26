@@ -326,8 +326,7 @@ public:
               std::move(start_key), end_key, version_ts, partition_id)),
           mux_(),
           range_slices_(std::move(slices)),
-          fetch_range_slices_req_(nullptr),
-          sync_info_(nullptr)
+          fetch_range_slices_req_(nullptr)
     {
     }
 
@@ -441,62 +440,18 @@ public:
     uint64_t GetLastSyncTs()
     {
         std::shared_lock<std::shared_mutex> lk(mux_);
-        if (sync_info_)
-        {
-            return sync_info_->last_sync_ts_;
-        }
-        else
-        {
-            return 0;
-        }
+        return last_sync_ts_;
     }
 
-    bool TrySetDataSync(bool ongoing,
-                        std::shared_ptr<DataSyncTask> task = nullptr,
-                        uint64_t last_sync_ts = 0)
+    void UpdateLastDataSyncTS(uint64_t last_sync_ts)
     {
         std::unique_lock<std::shared_mutex> lk(mux_);
-        if (!sync_info_)
-        {
-            // Only initialize sync_info_ when it is needed.
-            // If we're setting ongoing to false that means
-            // sync_info_ is deleted when data sync worker tries
-            // to sync this range, which means either term has
-            // changed or range is migrated away.
-            if (!ongoing)
-            {
-                return true;
-            }
-            sync_info_ = std::make_unique<RangeSyncInfo>();
-        }
-        if (ongoing && sync_info_->sync_ongoing_)
-        {
-            // Another task is processing this range.
-            // To avoid the possible busy loop when there are fewer tasks, put
-            // this task into `pending_task` instead of put back into
-            // `data_sync_task_queue_`.
-            sync_info_->pending_sync_task_.push(task);
-            return false;
-        }
-        if (!ongoing && last_sync_ts > sync_info_->last_sync_ts_)
+
+        if (last_sync_ts > last_sync_ts_)
         {
             // data sync succeeded, update last sync ts
-            sync_info_->last_sync_ts_ = last_sync_ts;
+            last_sync_ts_ = last_sync_ts;
         }
-        sync_info_->sync_ongoing_ = ongoing;
-        return true;
-    }
-
-    void PopPendingSyncTask();
-
-    void PushPendingSyncTask(std::shared_ptr<DataSyncTask> task)
-    {
-        std::unique_lock<std::shared_mutex> lk(mux_);
-        if (!sync_info_)
-        {
-            sync_info_ = std::make_unique<RangeSyncInfo>();
-        }
-        sync_info_->pending_sync_task_.emplace(task);
     }
 
     void FetchRangeSlices(const TableName &range_tbl_name,
@@ -515,17 +470,11 @@ private:
     {
         return range_slices_.get();
     }
-    struct RangeSyncInfo
-    {
-        bool sync_ongoing_{false};
-        uint64_t last_sync_ts_{0};
-        // Multiple tasks on the same range are executed sequentially, so the
-        // subsequence tasks for this range should wait here.
-        std::queue<std::shared_ptr<DataSyncTask>> pending_sync_task_;
-    };
+
+    uint64_t last_sync_ts_{0};
     std::unique_ptr<RangeInfo> range_info_{nullptr};
 
-    // Protects range_slices_, fetch_range_slices_cc_ and sync_info_
+    // Protects range_slices_, fetch_range_slices_cc_
     // Any update on these pointers requres unique lock on mux. But updating
     // the object that these pointers point to only requires shared lock.
     std::shared_mutex mux_;
@@ -538,7 +487,6 @@ private:
     // 2. mutex lock is acquried on TableRangeEntry.mux_.
     std::unique_ptr<StoreRange> range_slices_{nullptr};
     std::unique_ptr<FetchRangeSlicesReq> fetch_range_slices_req_{nullptr};
-    std::unique_ptr<RangeSyncInfo> sync_info_{nullptr};
 
     template <typename KeyT>
     friend class RangeCcMap;

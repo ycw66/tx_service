@@ -39,6 +39,42 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
                << " ,ckpt_delay_seconds: " << ckpt_delay_seconds;
 }
 
+std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
+    uint32_t node_group_id, bool is_last_ckpt)
+{
+    size_t core_cnt = local_shards_.Count();
+    CkptTsCc ckpt_req(core_cnt, node_group_id);
+
+    // Find minimum ckpt_ts from all the ccshards in parallel. ckpt_ts is
+    // the minimum timestamp minus 1 among all the active transactions, thus
+    // it's safe to flush all the entries smaller than or equal to ckpt_ts.
+    for (auto &ccs : local_shards_.cc_shards_)
+    {
+        ccs->Enqueue(&ckpt_req);
+    }
+    ckpt_req.Wait();
+
+    uint64_t ckpt_ts = UINT64_MAX;
+    ckpt_ts = ckpt_req.GetCkptTs();
+
+    if (local_shards_.EnableMvcc() && !is_last_ckpt)
+    {
+        uint64_t min_si_tx_ts =
+            TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
+        uint64_t delayed_ckpt_ts = ckpt_req.GetCkptTs() - ckpt_delay_time_;
+        if (min_si_tx_ts < delayed_ckpt_ts)
+        {
+            ckpt_ts = delayed_ckpt_ts;
+        }
+        else if (min_si_tx_ts < ckpt_req.GetCkptTs())
+        {
+            ckpt_ts = min_si_tx_ts;
+        }
+    }
+
+    return {ckpt_ts, ckpt_req.GetMemUsage()};
+}
+
 void Checkpointer::Ckpt(bool is_last_ckpt)
 {
     if (local_shards_.Count() == 0 || store_hd_ == nullptr)
@@ -55,46 +91,21 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         {
             continue;
         }
-        size_t shard_cnt = local_shards_.Count();
-        CkptTsCc ckpt_req(shard_cnt, node_group);
 
-        // Find minimum ckpt_ts from all the ccshards in parallel. ckpt_ts is
-        // the minimum timestamp minus 1 among all the active transactions, thus
-        // it's safe to flush all the entries smaller than or equal to ckpt_ts.
-        for (auto &ccs : local_shards_.cc_shards_)
-        {
-            ccs->Enqueue(&ckpt_req);
-        }
-        ckpt_req.Wait();
-
-        uint64_t ckpt_ts = UINT64_MAX;
-        ckpt_ts = ckpt_req.GetCkptTs();
-
-        if (local_shards_.EnableMvcc() && !is_last_ckpt)
-        {
-            uint64_t min_si_tx_ts =
-                TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
-            uint64_t delayed_ckpt_ts = ckpt_req.GetCkptTs() - ckpt_delay_time_;
-            if (min_si_tx_ts < delayed_ckpt_ts)
-            {
-                ckpt_ts = delayed_ckpt_ts;
-            }
-            else if (min_si_tx_ts < ckpt_req.GetCkptTs())
-            {
-                ckpt_ts = min_si_tx_ts;
-            }
-        }
+        auto [ckpt_ts, mem_usage] =
+            GetNewCheckpointTs(node_group, is_last_ckpt);
         uint64_t last_ckpt_ts =
             Sharder::Instance().GetNodeGroupCkptTs(node_group);
+
         if (ckpt_ts <= last_ckpt_ts)
         {
             // skip checkpoint for this node group
             Sharder::Instance().UnpinNodeGroupData(node_group);
             continue;
         }
+
         LOG(INFO) << "Begin checkpoint with timestamp: " << ckpt_ts
-                  << ". The memory usage of node is: " << ckpt_req.GetMemUsage()
-                  << " KB.";
+                  << ". The memory usage of node is: " << mem_usage << " KB.";
 
         // Get table names in this node group, checkpointer should be TableName
         // string owner.
@@ -102,11 +113,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             local_shards_.GetCatalogTableNameSnapshot(node_group, ckpt_ts);
 
         std::shared_ptr<DataSyncStatus> status =
-            std::make_shared<DataSyncStatus>();
+            std::make_shared<DataSyncStatus>(true);
 
-#ifdef ON_KEY_OBJECT
         uint64_t last_succ_ckpt_ts = UINT64_MAX;
-#endif
+        bool can_be_skipped = (is_last_ckpt == false);
 
         // Iterate all the tables and execute CkptScanCc requests on this node
         // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
@@ -123,20 +133,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             // This should correspond to CcShard::ActiveTxMinTs.
             if (!table_name.IsMeta())
             {
-#ifdef ON_KEY_OBJECT
-                // Since some of the data sync tasks might be skipped due to
-                // newer task in queue, causing data sync task always errors
-                // out, check the smallest valid synced ts of all tables and use
-                // it to truncate log.
-                CatalogEntry *catalog_entry =
-                    local_shards_.GetCatalog(table_name, node_group);
-                uint64_t table_synced_ts = catalog_entry->GetLastSyncTs();
-                if (table_synced_ts > 0)
-                {
-                    last_succ_ckpt_ts =
-                        std::min(table_synced_ts, last_succ_ckpt_ts);
-                }
-#endif
                 if (!is_dirty)
                 {
                     // Skip the table if it's not updated since last sync ts.
@@ -153,15 +149,31 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                         continue;
                     }
                 }
+
+                uint64_t table_last_synced_ts = 0;
                 local_shards_.EnqueueDataSyncTaskForTable(table_name,
                                                           node_group,
                                                           leader_term,
                                                           ckpt_ts,
-                                                          true,
+                                                          table_last_synced_ts,
                                                           is_dirty,
+                                                          can_be_skipped,
                                                           status);
+
+                // Maybe we couldn't truncate log in this round of checkpoint.
+                // Since some of the data sync tasks might be skipped due to
+                // another task in queue. So we have no way of knowing if
+                // the table or range was successfully flushed into storage in
+                // this round of checkpoint. Check the smallest valid synced ts
+                // of all tables and use it to truncate log.
+                if (table_last_synced_ts > 0)
+                {
+                    last_succ_ckpt_ts =
+                        std::min(last_succ_ckpt_ts, table_last_synced_ts);
+                }
             }
         }
+
         if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
         {
             // Skip the node groups that are no longer on this node.
@@ -169,7 +181,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             continue;
         }
 
-#ifdef ON_KEY_OBJECT
         if (last_succ_ckpt_ts != UINT64_MAX && last_succ_ckpt_ts > last_ckpt_ts)
         {
             assert(last_succ_ckpt_ts != 0);
@@ -179,7 +190,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                                                       last_succ_ckpt_ts);
             NotifyLogOfCkptTs(node_group, leader_term, last_succ_ckpt_ts);
         }
-#endif
 
         {
             std::unique_lock<std::mutex> task_sender_lk(status->mux_);
@@ -192,14 +202,24 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                                  [&status]
                                  { return status->unfinished_tasks_ == 0; });
             }
-            if (status->unfinished_tasks_ == 0 &&
+            if (status->need_truncate_log_ && status->unfinished_tasks_ == 0 &&
                 status->err_code_ == CcErrorCode::NO_ERROR)
             {
                 // Truncate redo log
                 LOG(INFO) << "Checkpoint of node group #" << node_group
-                          << " succeeded with timestamp: " << ckpt_ts;
-                Sharder::Instance().UpdateNodeGroupCkptTs(node_group, ckpt_ts);
-                NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
+                          << " succeeded with timestamp: "
+                          << status->truncate_log_ts_;
+
+                // Note: `status->truncate_log_ts_ may larger than `ckpt_ts`. So
+                // we use `status->truncate_log_ts_` to truncate log.
+                if (status->truncate_log_ts_ > last_ckpt_ts)
+                {
+                    assert(status->truncate_log_ts_ >= ckpt_ts);
+                    Sharder::Instance().UpdateNodeGroupCkptTs(
+                        node_group, status->truncate_log_ts_);
+                    NotifyLogOfCkptTs(
+                        node_group, leader_term, status->truncate_log_ts_);
+                }
             }
         }
 

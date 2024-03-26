@@ -3,6 +3,7 @@
 #include <brpc/channel.h>
 
 #include <algorithm>
+#include <memory>
 
 #include "error_messages.h"
 #include "local_cc_shards.h"
@@ -1753,13 +1754,16 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
             return;
         }
         assert(ng_term > 0);
+        uint64_t table_last_synced_ts = 0;
+        auto status = std::make_shared<DataSyncStatus>(false);
         local_cc_shards->EnqueueDataSyncTaskForTable(table_name,
                                                      ng_id,
                                                      ng_term,
                                                      data_sync_ts,
-                                                     false,
+                                                     table_last_synced_ts,
                                                      is_dirty,
-                                                     nullptr,
+                                                     false,
+                                                     status,
                                                      &hres);
     }
     else

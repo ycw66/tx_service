@@ -11,17 +11,6 @@ namespace txservice
 
 TableRangeEntry::~TableRangeEntry()
 {
-    std::unique_lock<std::shared_mutex> lk(mux_);
-    if (sync_info_)
-    {
-        while (!sync_info_->pending_sync_task_.empty())
-        {
-            sync_info_->pending_sync_task_.front()->SetError(
-                CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            sync_info_->pending_sync_task_.pop();
-        }
-        sync_info_ = nullptr;
-    }
 }
 
 bool TableRangeEntry::DropStoreRangeAndSyncInfo(size_t &mem_decreased)
@@ -49,30 +38,8 @@ bool TableRangeEntry::DropStoreRangeAndSyncInfo(size_t &mem_decreased)
         // current fetch req is finished.
         return false;
     }
-    if (sync_info_)
-    {
-        assert(sync_info_->sync_ongoing_ == false);
-        while (!sync_info_->pending_sync_task_.empty())
-        {
-            sync_info_->pending_sync_task_.front()->SetError(
-                CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            sync_info_->pending_sync_task_.pop();
-        }
-        sync_info_ = nullptr;
-    }
-    return true;
-}
 
-void TableRangeEntry::PopPendingSyncTask()
-{
-    std::unique_lock<std::shared_mutex> lk(mux_);
-    assert(sync_info_ != nullptr);
-    if (!sync_info_->pending_sync_task_.empty())
-    {
-        sync_info_->pending_sync_task_.front()->on_remove_pending_queue_lambda_(
-            sync_info_->pending_sync_task_.front());
-        sync_info_->pending_sync_task_.pop();
-    }
+    return true;
 }
 
 void TableRangeEntry::FetchRangeSlices(const TableName &range_tbl_name,

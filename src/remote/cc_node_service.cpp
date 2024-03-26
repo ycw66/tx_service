@@ -422,15 +422,17 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
                        << ", with node group term: " << ng_term
                        << ". And flush table:" << table_name.Trace();
 
+            uint64_t table_last_synced_ts = 0;
             std::shared_ptr<DataSyncStatus> status =
-                std::make_shared<DataSyncStatus>();
+                std::make_shared<DataSyncStatus>(false);
 
             local_shards.EnqueueDataSyncTaskForTable(table_name,
                                                      ng_id,
                                                      ng_term,
                                                      data_sync_ts,
-                                                     false,
+                                                     table_last_synced_ts,
                                                      is_dirty,
+                                                     false,
                                                      status);
 
             std::unique_lock<std::mutex> lk(status->mux_);

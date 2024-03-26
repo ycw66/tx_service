@@ -640,7 +640,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         {
             ckpt_size = 0;
         }
-        size_t shard_index = (hash_value & 0x3FF) & (core_cnt - 1);
+        size_t shard_index = (hash_value & 0x3FF) % core_cnt;
         ckpt_cce_raw_ptr_vecs_inmut[shard_index].push_back(
             reinterpret_cast<uintptr_t>(flush_vec[idx].cce_));
         slice_change_info_vecs[core_cnt].emplace_back(

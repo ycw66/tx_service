@@ -163,104 +163,24 @@ struct CatalogEntry
     }
 
 #ifndef RANGE_PARTITION_ENABLED
-    struct TableSyncInfo
-    {
-        bool sync_ongoing_{false};
-        uint64_t last_sync_ts_{0};
-        // The largest sync ts of all pending task. All tasks with sync ts
-        // smaller than this number will be skipped by worker.
-        uint64_t latest_pending_task_ts_{0};
-        // Multiple tasks on the same range are executed sequentially, so the
-        // subsequence tasks for this range should wait here.
-        std::queue<std::shared_ptr<DataSyncTask>> pending_sync_task_;
-    };
 
-    std::unique_ptr<TableSyncInfo> sync_info_{nullptr};
+    uint64_t last_sync_ts_{0};
 
     uint64_t GetLastSyncTs()
     {
         std::shared_lock<std::shared_mutex> lk(s_mux_);
-        if (sync_info_)
-        {
-            return sync_info_->last_sync_ts_;
-        }
-        else
-        {
-            return 0;
-        }
+        return last_sync_ts_;
     }
 
-    uint64_t GetLatestPendingTs()
-    {
-        std::shared_lock<std::shared_mutex> lk(s_mux_);
-        if (sync_info_)
-        {
-            return sync_info_->latest_pending_task_ts_;
-        }
-        else
-        {
-            return 0;
-        }
-    }
-
-    void UpdateLastPendingTs(uint64_t ts)
+    void UpdateLastDataSyncTS(uint64_t last_sync_ts)
     {
         std::unique_lock<std::shared_mutex> lk(s_mux_);
-        if (!sync_info_)
-        {
-            sync_info_ = std::make_unique<TableSyncInfo>();
-        }
 
-        sync_info_->latest_pending_task_ts_ =
-            std::max(ts, sync_info_->latest_pending_task_ts_);
-    }
-
-    bool TrySetDataSync(bool ongoing,
-                        std::shared_ptr<DataSyncTask> task = nullptr,
-                        uint64_t last_sync_ts = 0)
-    {
-        std::unique_lock<std::shared_mutex> lk(s_mux_);
-        if (!sync_info_)
-        {
-            // Only initialize sync_info_ when it is needed.
-            // If we're setting ongoing to false that means
-            // sync_info_ is deleted when data sync worker tries
-            // to sync this range, which means either term has
-            // changed or range is migrated away.
-            if (!ongoing)
-            {
-                return true;
-            }
-            sync_info_ = std::make_unique<TableSyncInfo>();
-        }
-        if (ongoing && sync_info_->sync_ongoing_)
-        {
-            // Another task is processing this range.
-            // To avoid the possible busy loop when there are fewer tasks, put
-            // this task into `pending_task` instead of put back into
-            // `data_sync_task_queue_`.
-            sync_info_->pending_sync_task_.push(task);
-            return false;
-        }
-        if (!ongoing && last_sync_ts > sync_info_->last_sync_ts_)
+        if (last_sync_ts > last_sync_ts_)
         {
             // data sync succeeded, update last sync ts
-            sync_info_->last_sync_ts_ = last_sync_ts;
+            last_sync_ts_ = last_sync_ts;
         }
-        sync_info_->sync_ongoing_ = ongoing;
-        return true;
-    }
-
-    void PopPendingSyncTask();
-
-    void PushPendingSyncTask(std::shared_ptr<DataSyncTask> task)
-    {
-        std::unique_lock<std::shared_mutex> lk(s_mux_);
-        if (!sync_info_)
-        {
-            sync_info_ = std::make_unique<TableSyncInfo>();
-        }
-        sync_info_->pending_sync_task_.emplace(task);
     }
 
 #endif

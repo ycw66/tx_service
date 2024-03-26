@@ -381,18 +381,6 @@ CatalogEntry::~CatalogEntry()
 {
     {
         std::unique_lock<std::shared_mutex> lk(s_mux_);
-#ifndef RANGE_PARTITION_ENABLED
-        if (sync_info_)
-        {
-            while (!sync_info_->pending_sync_task_.empty())
-            {
-                sync_info_->pending_sync_task_.front()->SetError(
-                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                sync_info_->pending_sync_task_.pop();
-            }
-            sync_info_ = nullptr;
-        }
-#endif
         committing_ = false;
     }
     cv_.notify_all();
@@ -400,19 +388,5 @@ CatalogEntry::~CatalogEntry()
     std::unique_lock<std::shared_mutex> lk(s_mux_);
     cv_.wait(lk, [this] { return waiting_thd_cnt_ == 0; });
 }
-
-#ifndef RANGE_PARTITION_ENABLED
-void CatalogEntry::PopPendingSyncTask()
-{
-    std::unique_lock<std::shared_mutex> lk(s_mux_);
-    assert(sync_info_ != nullptr);
-    if (!sync_info_->pending_sync_task_.empty())
-    {
-        sync_info_->pending_sync_task_.front()->on_remove_pending_queue_lambda_(
-            sync_info_->pending_sync_task_.front());
-        sync_info_->pending_sync_task_.pop();
-    }
-}
-#endif
 
 }  // namespace txservice

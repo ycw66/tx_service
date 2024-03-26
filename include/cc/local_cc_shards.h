@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -20,6 +21,7 @@
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc_shard.h"
+#include "error_messages.h"
 #include "local_cc_handler.h"
 #include "raft_log.pb.h"
 #include "range_record.h"
@@ -40,11 +42,23 @@ class TxService;
 
 struct DataSyncStatus
 {
-    DataSyncStatus() = default;
+    explicit DataSyncStatus(bool need_truncate_log)
+        : need_truncate_log_(need_truncate_log)
+    {
+    }
 
-    uint32_t unfinished_tasks_{0};
+    void SetNoTruncateLog()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        need_truncate_log_ = false;
+    }
+
+    int32_t unfinished_tasks_{0};
     bool all_task_started_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
+    // True if need to truncate redo log when all tasks succeed.
+    bool need_truncate_log_{true};
+    uint64_t truncate_log_ts_{0};
     std::mutex mux_;
     std::condition_variable cv_;
 };
@@ -58,10 +72,8 @@ public:
                  int64_t ng_term,
                  uint64_t data_sync_ts,
                  std::shared_ptr<DataSyncStatus> status,
-                 bool need_truncate_log,
                  bool is_dirty,
-                 std::function<void(std::shared_ptr<DataSyncTask> task)>
-                     on_remove_pending_queue_lambda,
+                 bool need_adjust_ts,
                  CcHandlerResult<Void> *hres = nullptr)
         : table_name_(table_name),
           range_id_(range_id),
@@ -70,9 +82,8 @@ public:
           node_group_term_(ng_term),
           data_sync_ts_(data_sync_ts),
           status_(status),
-          need_truncate_log_(need_truncate_log),
           is_dirty_(is_dirty),
-          on_remove_pending_queue_lambda_(on_remove_pending_queue_lambda),
+          need_adjust_ts_(need_adjust_ts),
           task_res_(hres)
     {
     }
@@ -81,18 +92,34 @@ public:
     {
         std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
         status_->unfinished_tasks_--;
+        // The default value of `truncate_log_ts_` is `0`.
+        if (status_->truncate_log_ts_ == 0)
+        {
+            status_->truncate_log_ts_ = data_sync_ts_;
+        }
+        else
+        {
+            // Update minimum checkpoint timestamp. We use this timestamp to
+            // truncate log at the end.
+            status_->truncate_log_ts_ =
+                std::min(status_->truncate_log_ts_, data_sync_ts_);
+        }
+
         if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
         {
-            if (need_truncate_log_ &&
+            if (status_->need_truncate_log_ &&
                 status_->err_code_ == CcErrorCode::NO_ERROR)
             {
                 // Truncate redo log
                 LOG(INFO) << "Checkpoint of node group #" << node_group_id_
-                          << " succeeded with timestamp: " << data_sync_ts_;
-                Sharder::Instance().UpdateNodeGroupCkptTs(node_group_id_,
-                                                          data_sync_ts_);
+                          << " succeeded with timestamp: "
+                          << status_->truncate_log_ts_;
+                Sharder::Instance().UpdateNodeGroupCkptTs(
+                    node_group_id_, status_->truncate_log_ts_);
                 Sharder::Instance().GetLogAgent()->UpdateCheckpointTs(
-                    node_group_id_, node_group_term_, data_sync_ts_);
+                    node_group_id_,
+                    node_group_term_,
+                    status_->truncate_log_ts_);
             }
 
             if (task_res_)
@@ -114,6 +141,19 @@ public:
         std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
         status_->unfinished_tasks_--;
         status_->err_code_ = err_code;
+        // The default value of `truncate_log_ts_` is `0`.
+        if (status_->truncate_log_ts_ == 0)
+        {
+            status_->truncate_log_ts_ = data_sync_ts_;
+        }
+        else
+        {
+            // Update minimum checkpoint timestamp. We use this timestamp to
+            // truncate log at the end.
+            status_->truncate_log_ts_ =
+                std::min(status_->truncate_log_ts_, data_sync_ts_);
+        }
+
         if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
         {
             if (task_res_)
@@ -123,10 +163,21 @@ public:
             status_->cv_.notify_all();
         }
     }
+
     void SetErrorCode(CcErrorCode err_code)
     {
         std::unique_lock<std::mutex> lk(status_->mux_);
         status_->err_code_ = err_code;
+    }
+
+    bool NeedAdjustTs() const
+    {
+        return need_adjust_ts_;
+    }
+
+    void SetNoNeedAdjustTs()
+    {
+        need_adjust_ts_ = false;
     }
 
     const TableName table_name_;
@@ -154,12 +205,9 @@ public:
 #endif
 
     std::shared_ptr<DataSyncStatus> status_{nullptr};
-    // True if need to truncate redo log when all tasks succeed.
-    bool need_truncate_log_{true};
     // True if need to use the dirty schema.
     bool is_dirty_{false};
-    std::function<void(std::shared_ptr<DataSyncTask> task)>
-        on_remove_pending_queue_lambda_;
+    bool need_adjust_ts_{true};
     // Indicate the single task result.
     CcHandlerResult<Void> *task_res_{nullptr};
 };
@@ -708,13 +756,15 @@ public:
                    CcHandlerResult<Void> &hres,
                    bool delay_update_ckpt_ts);
 
+    // Return last succ ckpt timestamp on table.
     void EnqueueDataSyncTaskForTable(
         const TableName &table_name,
         uint32_t ng_id,
         int64_t ng_term,
         uint64_t data_sync_ts,
-        bool need_truncate_log = true,
+        uint64_t &last_data_sync_ts,
         bool is_dirty = false,
+        bool can_be_skipped = false,
         std::shared_ptr<DataSyncStatus> status = nullptr,
         CcHandlerResult<Void> *hres = nullptr);
 
@@ -968,15 +1018,24 @@ private:
     BucketInfo *GetRangeOwnerInternal(int32_t range_id,
                                       const NodeGroupId ng_id) const;
 
-    bool EnqueueDataSyncTask(const TableName &table_name,
-                             uint32_t ng_id,
-                             int64_t ng_term,
-                             const TableRangeEntry *range_entry,
-                             uint64_t data_sync_ts,
-                             bool need_truncate_log,
-                             bool is_dirty,
-                             std::shared_ptr<DataSyncStatus> status,
-                             CcHandlerResult<Void> *hres);
+    bool EnqueueRangeDataSyncTask(const TableName &table_name,
+                                  uint32_t ng_id,
+                                  int64_t ng_term,
+                                  TableRangeEntry *range_entry,
+                                  uint64_t data_sync_ts,
+                                  bool is_dirty,
+                                  bool can_be_skipped,
+                                  std::shared_ptr<DataSyncStatus> status,
+                                  CcHandlerResult<Void> *hres);
+
+    void PopPendingTask(NodeGroupId ng_id,
+                        const TableName &table_name,
+                        uint32_t range_id = 0);
+
+    void ClearAllPendingTasks(NodeGroupId ng_id,
+                              const TableName &table_name,
+                              uint32_t range_id = 0);
+
 #ifndef RANGE_PARTITION_ENABLED
     void PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                                  TransactionExecution *data_sync_txm,
@@ -1104,6 +1163,99 @@ private:
     WorkerThreadContext data_sync_worker_ctx_;
     std::deque<std::shared_ptr<DataSyncTask>> data_sync_task_queue_;
 
+    struct DataSyncTaskLimiter
+    {
+        // 0 means no pending task
+        uint64_t latest_pending_task_ts_{0};
+        std::queue<std::shared_ptr<DataSyncTask>> pending_tasks_;
+
+        uint64_t UnsetLatestPendingTs()
+        {
+            uint64_t ts = latest_pending_task_ts_;
+            latest_pending_task_ts_ = 0;
+            return ts;
+        }
+    };
+
+    struct TaskLimiterKey
+    {
+#ifdef RANGE_PARTITION_ENABLED
+        explicit TaskLimiterKey(NodeGroupId node_group_id,
+                                std::string_view table_name,
+                                TableType table_type,
+                                uint32_t range_id)
+            : node_group_id_(node_group_id),
+              table_name_(table_name, table_type),
+              range_id_(range_id)
+        {
+        }
+#else
+        explicit TaskLimiterKey(NodeGroupId node_group_id,
+                                std::string_view table_name,
+                                TableType table_type)
+            : node_group_id_(node_group_id), table_name_(table_name, table_type)
+        {
+        }
+#endif
+
+        TaskLimiterKey(const TaskLimiterKey &rhs)
+            : node_group_id_(rhs.node_group_id_),
+              table_name_(rhs.table_name_.StringView().data(),
+                          rhs.table_name_.StringView().size(),
+                          rhs.table_name_.Type())
+#ifdef RANGE_PARTITION_ENABLED
+              ,
+              range_id_(rhs.range_id_)
+#endif
+        {
+        }
+
+        TaskLimiterKey &operator=(const TaskLimiterKey &) = delete;
+        TaskLimiterKey(TaskLimiterKey &&) = delete;
+        TaskLimiterKey &operator=(TaskLimiterKey &&) = delete;
+
+        bool operator==(const TaskLimiterKey &other) const
+        {
+#ifdef RANGE_PARTITION_ENABLED
+            return node_group_id_ == other.node_group_id_ &&
+                   table_name_ == other.table_name_ &&
+                   range_id_ == other.range_id_;
+#else
+            return node_group_id_ == other.node_group_id_ &&
+                   table_name_ == other.table_name_;
+#endif
+        }
+
+        NodeGroupId node_group_id_;
+        TableName table_name_;
+#ifdef RANGE_PARTITION_ENABLED
+        uint32_t range_id_;
+#endif
+    };
+
+    struct LimiterKeyHasher
+    {
+        size_t operator()(const TaskLimiterKey &key) const
+        {
+#ifdef RANGE_PARTITION_ENABLED
+            size_t h1 = std::hash<NodeGroupId>()(key.node_group_id_);
+            size_t h2 = std::hash<TableName>()(key.table_name_);
+            size_t h3 = std::hash<uint32_t>()(key.range_id_);
+            return h1 ^ (h2 << 1) ^ (h3 << 5);
+#else
+            size_t h1 = std::hash<NodeGroupId>()(key.node_group_id_);
+            size_t h2 = std::hash<TableName>()(key.table_name_);
+            return (h1 ^ (h2 << 1)) | (h2 >> (sizeof(size_t) - 1));
+#endif
+        }
+    };
+
+    std::mutex task_limiter_mux_;
+    std::unordered_map<TaskLimiterKey,
+                       std::shared_ptr<DataSyncTaskLimiter>,
+                       LimiterKeyHasher>
+        task_limiters_;
+
     void DataSyncWorker();
 
     void DataSync(std::unique_lock<std::mutex> &task_worker_lk);
@@ -1221,10 +1373,10 @@ private:
     /**
      * FlushData Operation Interface
      */
-    struct FlushDataWork
+    struct FlushDataTask
     {
     public:
-        FlushDataWork(std::shared_ptr<DataSyncTask> data_sync_task,
+        FlushDataTask(std::shared_ptr<DataSyncTask> data_sync_task,
                       const TableSchema *schema,
                       std::unique_ptr<std::vector<FlushRecord>> &&data_sync_vec,
                       std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
@@ -1247,7 +1399,7 @@ private:
         {
         }
 
-        FlushDataWork(uint32_t node_group_id,
+        FlushDataTask(uint32_t node_group_id,
                       int64_t node_group_term,
                       uint64_t data_sync_ts,
                       const TableName &table_name,
@@ -1293,7 +1445,7 @@ private:
     // For flush data work
     WorkerThreadContext flush_data_worker_ctx_;
     // Flush work from data sync, and split range
-    std::vector<FlushDataWork> pending_flush_work_;
+    std::vector<FlushDataTask> pending_flush_work_;
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
