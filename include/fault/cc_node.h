@@ -32,7 +32,6 @@ public:
     CcNode(const uint32_t ng_id,
            const uint32_t node_id,
            LocalCcShards &local_shards,
-           fault::ReplayService *replay_service,
            uint32_t log_group_cnt);
 
     int64_t Term() const
@@ -106,9 +105,6 @@ private:
     std::condition_variable pinning_threads_cv_;
 
     LocalCcShards &local_cc_shards_;
-
-    // for replay log and recover txn
-    fault::ReplayService *replay_service_;
 
     // recovered_log_groups_ records the log groups which have finished the
     // recovery.

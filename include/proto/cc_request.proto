@@ -214,6 +214,9 @@ message StartNodeRequest
 	repeated NodegroupConfigBuf cluster_config = 2;
 	repeated NodeConfigBuf node_configs = 3;
 	uint64 config_version = 4;
+    repeated string log_ips = 5;
+    repeated int32 log_ports = 6;
+    int32 log_replica_num = 7;
 }
 
 message StartNodeResponse

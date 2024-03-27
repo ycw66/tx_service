@@ -550,7 +550,7 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
         {
             if (retry_num_ == 0)
             {
-                // Sharder::Instance().UpdateLeaders();
+                Sharder::Instance().UpdateLeaders();
             }
             else if (retry_num_ > 0)
             {
@@ -799,40 +799,50 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        // For DML transactions, the coordinator must keep retrying the
-        // WriteLog request until getting a clear response, either success
-        // or failure, or the coordinator itself is no longer leader. In the
-        // last case, the committing process interrupts with an unknown
-        // result, and an error message "Log service is unreachable,
-        // transaction status is unknown" is returned. For these result
-        // unknown txns, The coordinator must skip the PostProcess and the
-        // locks on participants remain. The participants ccnodes will do
-        // the PostProcess individually via orphan lock recovery mechanism.
-        if (hd_result_.ErrorCode() ==
-                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR &&
-            log_type_ == TxLogType::DATA &&
+        if (log_type_ == TxLogType::DATA &&
             Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) > 0)
         {
-            CODE_FAULT_INJECTOR("write_log_result_unknown", {
-                LOG(INFO) << "skipping to updatetxn";
-                txm->PostProcess(*this);
+            if (hd_result_.ErrorCode() ==
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
+            {
+                // For DML transactions, the coordinator must keep retrying the
+                // WriteLog request until getting a clear response, either
+                // success or failure, or the coordinator itself is no longer
+                // leader. In the last case, the committing process interrupts
+                // with an unknown result, and an error message "Log service is
+                // unreachable, transaction status is unknown" is returned. For
+                // these result unknown txns, The coordinator must skip the
+                // PostProcess and the locks on participants remain. The
+                // participants ccnodes will do the PostProcess individually via
+                // orphan lock recovery mechanism.
+                CODE_FAULT_INJECTOR("write_log_result_unknown", {
+                    LOG(INFO) << "skipping to updatetxn";
+                    txm->PostProcess(*this);
+                    return;
+                });
+
+                LOG(WARNING)
+                    << "Write Log Request result unknown, retrying, tx_number: "
+                    << txm->TxNumber();
+                // log request return unknown status, we need to set retry flag
+                // to inform log service that this is a retried request
+                ::txlog::LogRequest &log_req = log_closure_.LogRequest();
+                ::txlog::WriteLogRequest *log_rec =
+                    log_req.mutable_write_log_request();
+                log_rec->set_retry(true);
+                // ReRunOp sleep for 2 seconds
+                retry_num_ = 4;
+
+                ReRunOp(txm);
                 return;
-            });
-
-            LOG(WARNING)
-                << "Write Log Request result unknown, retrying, tx_number: "
-                << txm->TxNumber();
-            // log request return unknown status, we need to set retry flag
-            // to inform log service that this is a retried request
-            ::txlog::LogRequest &log_req = log_closure_.LogRequest();
-            ::txlog::WriteLogRequest *log_rec =
-                log_req.mutable_write_log_request();
-            log_rec->set_retry(true);
-            // ReRunOp sleep for 2 seconds
-            retry_num_ = 4;
-
-            ReRunOp(txm);
-            return;
+            }
+            else if (hd_result_.ErrorCode() == CcErrorCode::WRITE_LOG_FAILED)
+            {
+                // Log group leader might be outdated. Wait for the leader
+                // refresh and retry.
+                ReRunOp(txm);
+                return;
+            }
         }
 
         txm->PostProcess(*this);
@@ -1276,8 +1286,8 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         {
             if (retry_num_ == 0)
             {
-                // Sharder::Instance().UpdateLeader(
-                //     hd_result_.Value().node_group_id_);
+                Sharder::Instance().UpdateLeader(
+                    hd_result_.Value().node_group_id_);
             }
             else if (retry_num_ > 0)
             {
@@ -1683,6 +1693,11 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
+        if (hd_result_.IsError() &&
+            hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+        {
+            Sharder::Instance().UpdateLeaders();
+        }
         txm->PostProcess(*this);
     }
     else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(4))

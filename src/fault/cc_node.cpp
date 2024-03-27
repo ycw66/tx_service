@@ -10,7 +10,6 @@ namespace txservice::fault
 CcNode::CcNode(const uint32_t ng_id,
                const uint32_t node_id,
                LocalCcShards &local_shards,
-               fault::ReplayService *replay_service,
                uint32_t log_group_cnt)
     : ng_id_(ng_id),
       node_id_(node_id),
@@ -19,7 +18,6 @@ CcNode::CcNode(const uint32_t ng_id,
       last_ckpt_ts_(0),
       pinning_threads_(0),
       local_cc_shards_(local_shards),
-      replay_service_(replay_service),
       log_group_cnt_(log_group_cnt)
 {
 }
@@ -180,7 +178,7 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
             // returns. The tx will be recovered again by next
             // conflicting tx.
             LOG(ERROR) << "Fail to init the channel to the leader of ng#"
-                       << leader_ng_id << " for tx lock recovery.";
+                       << leader_ng_id << " to notify leader start.";
             continue;
         }
 
@@ -345,13 +343,8 @@ void CcNode::OnLeaderStart(int64_t term)
                   << " with the term " << term;
         Sharder::Instance().SetCandidateTerm(ng_id_, -1);
         Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
+        NotifyNewLeaderStart(ng_id_, node_id_);
     }
-    else
-    {
-        replay_service_->ReplayLog(ng_id_, term);
-    }
-
-    NotifyNewLeaderStart(ng_id_, node_id_);
 }
 
 void CcNode::OnLeaderStop()

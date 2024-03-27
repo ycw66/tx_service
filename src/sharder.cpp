@@ -187,7 +187,6 @@ int Sharder::Init(
                             ng_id,
                             node_id_,
                             *local_shards_,
-                            log_replay_service_.get(),
                             log_agent_->LogGroupCount()));
                 }
             }
@@ -316,6 +315,25 @@ int Sharder::Init(
         remote::StartNodeResponse response;
         req.set_node_id(node_id_);
         req.set_config_version(config_version);
+        if (log_agent_)
+        {
+            req.set_log_replica_num(log_agent_->LogGroupReplicaNum());
+            assert(txlog_ips && txlog_ports);
+            for (auto &ip : *txlog_ips)
+            {
+                req.add_log_ips(ip);
+            }
+            for (auto port : *txlog_ports)
+            {
+                req.add_log_ports(port);
+            }
+        }
+        else
+        {
+            req.clear_log_replica_num();
+            req.clear_log_ips();
+            req.clear_log_ports();
+        }
         for (const auto &ng_config : cluster_config_.ng_configs_)
         {
             auto node_buf = req.add_node_configs();
@@ -500,18 +518,21 @@ void Sharder::UpdateLeader(uint32_t ng_id)
 {
     if (!hm_ip_.empty())
     {
-        brpc::Controller cntl;
-        remote::GetLeaderRequest req;
-        req.set_ng_id(ng_id);
-        remote::GetLeaderResponse resp;
-        remote::HostMangerService_Stub stub(&hm_channel_);
-        // TODO: make this async
-        stub.GetLeader(&cntl, &req, &resp, nullptr);
-        if (!cntl.Failed() && !resp.error())
-        {
-            ng_leader_cache_[ng_id].store(resp.node_id(),
-                                          std::memory_order_release);
-        }
+        Sharder::Instance().sharder_worker_->SubmitWork(
+            [ng_id, this]
+            {
+                brpc::Controller cntl;
+                remote::GetLeaderRequest req;
+                req.set_ng_id(ng_id);
+                remote::GetLeaderResponse resp;
+                remote::HostMangerService_Stub stub(&hm_channel_);
+                stub.GetLeader(&cntl, &req, &resp, nullptr);
+                if (!cntl.Failed() && !resp.error())
+                {
+                    ng_leader_cache_[ng_id].store(resp.node_id(),
+                                                  std::memory_order_release);
+                }
+            });
     }
 }
 
@@ -520,8 +541,6 @@ void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id)
     DLOG(INFO) << "ccnode group ng" << ng_id
                << " updates leader to node_id:" << node_id;
 
-    // leader cache update is atomic by itself so we don't need to copy on
-    // write.
     ng_leader_cache_[ng_id].store(node_id, std::memory_order_release);
 }
 

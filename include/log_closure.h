@@ -60,6 +60,11 @@ public:
         {
             hd_result_->SetFinished();
         }
+        else if (response_.response_status() ==
+                 ::txlog::LogResponse_ResponseStatus_Fail)
+        {
+            hd_result_->SetError(CcErrorCode::WRITE_LOG_FAILED);
+        }
         else
         {
             hd_result_->SetError(CcErrorCode::UNDEFINED_ERR);
