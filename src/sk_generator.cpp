@@ -608,7 +608,8 @@ std::pair<size_t, CcErrorCode> SkGenerator::ScanPkAndGenerateSk(
     TableSchema *table_schema =
         const_cast<TableSchema *>(catalog_entry->dirty_schema_.get());
     assert(table_schema != nullptr && new_indexes_name.size() > 0);
-    SkEncoder::uptr sk_encoder = nullptr;
+    std::vector<SkEncoder::uptr> sk_encoder_vec;
+    sk_encoder_vec.reserve(new_indexes_name.size());
     const TxKey *target_key = nullptr;
     const TxRecord *target_rec = nullptr;
     uint64_t version_ts = 0;
@@ -631,10 +632,7 @@ std::pair<size_t, CcErrorCode> SkGenerator::ScanPkAndGenerateSk(
         {
             LOG(ERROR) << "Scan pk records failed on table "
                        << table_name.StringView() << " of ng#" << range_owner;
-            if (sk_encoder != nullptr)
-            {
-                sk_encoder.reset(nullptr);
-            }
+            sk_encoder_vec.clear();
             return std::pair<size_t, CcErrorCode>(total_tuples,
                                                   scan_req.ErrorCode());
         }
@@ -660,17 +658,20 @@ std::pair<size_t, CcErrorCode> SkGenerator::ScanPkAndGenerateSk(
                     }
                     assert(target_key != nullptr && target_rec != nullptr);
 
-                    if (sk_encoder == nullptr)
-                    {
-                        sk_encoder = table_schema->CreateSkEncoder();
-                    }
-
                     for (auto index_it = new_indexes_name.cbegin();
                          index_it != new_indexes_name.cend();
                          ++index_it)
                     {
+                        size_t vec_idx = index_it - new_indexes_name.cbegin();
+                        const SkEncoder *sk_encoder = nullptr;
+                        if (vec_idx >= sk_encoder_vec.size())
+                        {
+                            sk_encoder_vec.emplace_back(std::move(
+                                table_schema->CreateSkEncoder(*index_it)));
+                        }
+                        sk_encoder = sk_encoder_vec[vec_idx].get();
                         auto packed_sk = sk_encoder->GeneratePackedSk(
-                            target_key, target_rec, *index_it);
+                            target_key, target_rec);
 
                         if (packed_sk.first.get() == nullptr)
                         {
@@ -678,7 +679,7 @@ std::pair<size_t, CcErrorCode> SkGenerator::ScanPkAndGenerateSk(
                                 << "Failed to generate packed sk for index: "
                                 << index_it->StringView();
                             // Finish the pack sk operation
-                            sk_encoder.reset(nullptr);
+                            sk_encoder_vec.clear();
                             return std::pair<size_t, CcErrorCode>(
                                 total_tuples, CcErrorCode::PACK_SK_ERR);
                         }
@@ -708,7 +709,7 @@ std::pair<size_t, CcErrorCode> SkGenerator::ScanPkAndGenerateSk(
                         LOG(WARNING)
                             << "Terminate this task cause the tx leader "
                                "transferred.";
-                        sk_encoder.reset(nullptr);
+                        sk_encoder_vec.clear();
                         task_status.TerminateGenerateSk();
                         return std::pair<size_t, CcErrorCode>(
                             total_tuples, CcErrorCode::TX_NODE_NOT_LEADER);
