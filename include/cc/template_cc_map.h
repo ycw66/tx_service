@@ -4157,8 +4157,6 @@ public:
                     {
                         while (scan_cache->Size() > 0)
                         {
-                            --scan_ccm_it;
-
                             const KeyT *last_key =
                                 &scan_cache->Last()->KeyObj();
                             if (*end_key < *last_key ||
@@ -4169,10 +4167,6 @@ public:
                             }
                             else
                             {
-                                // Reset iterator to the key after the last
-                                // scanned tuple since we might need to continue
-                                // scanning if trailing_cnt == 0.
-                                ++scan_ccm_it;
                                 break;
                             }
                         }
@@ -4181,7 +4175,6 @@ public:
                     {
                         while (remote_scan_cache->Size() > 0)
                         {
-                            --scan_ccm_it;
                             // Cc entry pointers here are always valid since
                             // the slices are still pinned so the cce cannot
                             // be kicked from memory regardless of the lock
@@ -4245,9 +4238,16 @@ public:
                     }
                 }
             }
+
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
-            --scan_ccm_it;
+            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
+            {
+                while (scan_ccm_it->second != last_cce)
+                {
+                    --scan_ccm_it;
+                }
+            }
         }
         else
         {
@@ -4471,8 +4471,6 @@ public:
                     {
                         while (scan_cache->Size() > 0)
                         {
-                            ++scan_ccm_it;
-
                             const KeyT *last_key =
                                 &scan_cache->Last()->KeyObj();
                             if (*last_key < *end_key ||
@@ -4483,10 +4481,6 @@ public:
                             }
                             else
                             {
-                                // Reset iterator to the key after the last
-                                // scanned tuple since we might need to continue
-                                // scanning if trailing_cnt == 0.
-                                --scan_ccm_it;
                                 break;
                             }
                         }
@@ -4495,7 +4489,6 @@ public:
                     {
                         while (remote_scan_cache->Size() > 0)
                         {
-                            ++scan_ccm_it;
                             // Cc entry pointers here are always valid since
                             // the slices are still pinned so the cce cannot
                             // be kicked from memory regardless of the lock
@@ -4562,7 +4555,13 @@ public:
 
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
-            ++scan_ccm_it;
+            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
+            {
+                while (scan_ccm_it->second != last_cce)
+                {
+                    ++scan_ccm_it;
+                }
+            }
         }
 
         if (slice_result.slice_position_ == SlicePosition::Middle)
@@ -4571,8 +4570,7 @@ public:
             // acquires the read intent on the last scanned key to prevent
             // if from kicking out. The next scan batch will resume from the
             // last key without searching the cc map.
-            CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache();
-            if (last_cce != nullptr)
+            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
             {
                 CcPage<KeyT, ValueT> *last_ccp = scan_ccm_it.GetPage();
                 bool add_intent =
