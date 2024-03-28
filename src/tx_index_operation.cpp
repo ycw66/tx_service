@@ -2646,11 +2646,11 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
 
     uint32_t upload_batch_cnt = 0;
     uint32_t total_upload_cnt = 0;
-    bool has_initialized = false;
     bool need_move_next = true;
     const TxKey *target_key = nullptr;
     const TxRecord *target_rec = nullptr;
-    SkEncoder::uptr sk_encoder = nullptr;
+    std::vector<SkEncoder::uptr> sk_encoder_vec;
+    sk_encoder_vec.reserve(new_indexes_name_.size());
 
     // 2. Handle tuples one by one
     do
@@ -2689,27 +2689,28 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
             }
         } /* End of need move next */
 
-        if (!has_initialized)
-        {
-            // 2.1 Prepare generate pack sk operation.
-            sk_encoder = table_schema->CreateSkEncoder();
-            has_initialized = true;
-        }
-
         TxErrorCode err = TxErrorCode::NO_ERROR;
         // Pack record for secondary index
-        for (auto index_it = alter_table_info_.index_add_names_.cbegin();
-             index_it != alter_table_info_.index_add_names_.cend();
+        for (auto index_it = new_indexes_name_.cbegin();
+             index_it != new_indexes_name_.cend();
              ++index_it)
         {
+            size_t vec_idx = index_it - new_indexes_name_.cbegin();
+            const SkEncoder *sk_encoder = nullptr;
+            if (vec_idx >= sk_encoder_vec.size())
+            {
+                sk_encoder_vec.emplace_back(
+                    std::move(table_schema->CreateSkEncoder(*index_it)));
+            }
+            sk_encoder = sk_encoder_vec[vec_idx].get();
             // 2.2 Generate packed sk
-            auto packed_sk = sk_encoder->GeneratePackedSk(
-                target_key, target_rec, index_it->first);
+            auto packed_sk =
+                sk_encoder->GeneratePackedSk(target_key, target_rec);
 
             if (packed_sk.first.get() == nullptr)
             {
                 LOG(ERROR) << "Failed to generate packed sk for table: ["
-                           << index_it->first.StringView() << "].";
+                           << index_it->StringView() << "].";
 
 #if WITH_KV_STORAGE != KV_CASS
                 FinishScanFromCcMap(
@@ -2719,7 +2720,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
 #endif
 
                 // Finish the pack sk operation
-                sk_encoder.reset(nullptr);
+                sk_encoder_vec.clear();
                 defer_unpin.reset();
                 fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
                     .SetError(CcErrorCode::PACK_SK_ERR);
@@ -2727,7 +2728,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
             }
 
             // 2.3 Put the record into local write set
-            err = txm->TxUpsert(index_it->first,
+            err = txm->TxUpsert(*index_it,
                                 std::move(packed_sk.first),
                                 std::move(packed_sk.second),
                                 OperationType::Upsert);
@@ -2758,7 +2759,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
                 FinishScanFromDataStore(ds_scanner);
 #endif
                 // Finish the pack sk operation
-                sk_encoder.reset(nullptr);
+                sk_encoder_vec.clear();
                 defer_unpin.reset();
                 LOG(WARNING) << "Generate packed sk and write into sk ccmap on "
                                 "non-leader node for ng#"
@@ -2802,7 +2803,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
                     FinishScanFromDataStore(ds_scanner);
 #endif
                     // Finish the pack sk operation
-                    sk_encoder.reset(nullptr);
+                    sk_encoder_vec.clear();
                     defer_unpin.reset();
                     if (error_code == CcErrorCode::TX_NODE_NOT_LEADER)
                     {
@@ -2860,7 +2861,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
                 FinishScanFromDataStore(ds_scanner);
 #endif
                 // Finish the pack sk operation
-                sk_encoder.reset(nullptr);
+                sk_encoder_vec.clear();
                 defer_unpin.reset();
                 if (error_code == CcErrorCode::TX_NODE_NOT_LEADER)
                 {
@@ -2886,12 +2887,8 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
     FinishScanFromDataStore(ds_scanner);
 #endif
 
-    if (has_initialized)
-    {
-        // Finish the packed sk operation
-        sk_encoder.reset(nullptr);
-    }
-
+    // Finish the packed sk operation
+    sk_encoder_vec.clear();
     defer_unpin.reset();
     LOG(INFO)
         << "Generate packed sk and write into sk ccmap successfully. Txn: "
