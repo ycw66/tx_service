@@ -6292,7 +6292,9 @@ public:
         size_t next_key_offset = 0;
         size_t next_rec_offset = 0;
         size_t next_ts_offset = 0;
-        for (; key_pos < batch_size; ++key_pos)
+        for (size_t cnt = 0;
+             key_pos < batch_size && cnt < UploadBatchCc::UploadBatchBatchSize;
+             ++key_pos, ++cnt)
         {
             next_key_offset = key_offset;
             next_rec_offset = rec_offset;
@@ -6528,6 +6530,16 @@ public:
             key_offset = next_key_offset;
             rec_offset = next_rec_offset;
             ts_offset = next_ts_offset;
+        }
+        if (key_pos < batch_size)
+        {
+            // Only insert UploadBatchBatchSize keys in one round.  set the
+            // paused key to mark resume position and put the request into cc
+            // queue again.
+            req.SetPausedPosition(
+                shard_->core_id_, key_pos, key_offset, rec_offset, ts_offset);
+            shard_->Enqueue(shard_->LocalCoreId(), &req);
+            return false;
         }
 #ifdef RANGE_PARTITION_ENABLED
         if (current_slice_id.Slice() != nullptr)

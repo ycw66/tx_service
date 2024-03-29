@@ -19,6 +19,11 @@ class SkGenerator
 {
     using NGWriteEntry =
         std::unordered_map<NodeGroupId, std::vector<WriteEntry *>>;
+#ifdef NDEBUG
+    static constexpr uint16_t UploadTimeout = 10000;  // ms
+#else
+    static constexpr uint16_t UploadTimeout = 1000;  // ms
+#endif
 
 public:
     SkGenerator() = default;
@@ -69,11 +74,14 @@ private:
     CcErrorCode UploadSkInternal();
     void UploadBatch(const TableName &table_name,
                      NodeGroupId dest_ng_id,
-                     int64_t ng_term,
+                     int64_t &ng_term,
                      const std::vector<WriteEntry *> &write_entry_vec,
                      size_t batch_size,
                      size_t start_key_idx,
-                     CcHandlerResult<UploadBatchResult> &hd_res);
+                     bthread::Mutex &req_mux,
+                     bthread::ConditionVariable &req_cv,
+                     size_t &finished_req_cnt,
+                     CcErrorCode &res_code);
     // Acquire and release range read lock.
     CcErrorCode AcquireRangeReadLocks(TransactionExecution *acq_lock_txm);
     void ReleaseRangeReadLocks(TransactionExecution *acq_lock_txm,
@@ -107,7 +115,6 @@ private:
     std::vector<int64_t> leader_terms_;
     // For each node group, and each index table
     std::vector<std::unique_ptr<UploadBatchCc>> upload_batch_req_vec_;
-    std::vector<CcHandlerResult<UploadBatchResult>> upload_results_;
     uint32_t upload_batch_size_{128};
     uint8_t sleep_duration_{0};
 };

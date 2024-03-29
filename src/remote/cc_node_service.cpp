@@ -906,6 +906,19 @@ void CcNodeService::UploadBatch(
         ToLocalType::ConvertCcTableType(request->table_type());
     TableName table_name = TableName(table_name_sv, table_type);
 
+    CODE_FAULT_INJECTOR("term_UploadBatch_Timeout", {
+        // The rpc timeout.
+        FaultInject::Instance().InjectFault("term_UploadBatch_Timeout",
+                                            "remove");
+        bthread::Mutex b_mux_;
+        bthread::ConditionVariable b_cv_;
+        std::unique_lock<bthread::Mutex> lk(b_mux_);
+        b_cv_.wait_for(lk, 2000000);
+        DLOG(ERROR) << "UploadBatch service timeout for table: "
+                    << table_name.Trace() << " of ng#" << ng_id;
+        return;
+    });
+
     DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
                << " for table:" << table_name.Trace();
 
@@ -917,47 +930,37 @@ void CcNodeService::UploadBatch(
         request->keys(), request->records(), request->commit_ts());
 
     size_t finished_req = 0;
-    bthread::Mutex upload_mux;
-    bthread::ConditionVariable upload_cv;
-    CcHandlerResult<UploadBatchResult> upload_batch_res(nullptr);
-    upload_batch_res.post_lambda_ =
-        [&upload_mux, &upload_cv, &finished_req](
-            CcHandlerResult<UploadBatchResult> *hd_res)
-    {
-        std::unique_lock<bthread::Mutex> lk(upload_mux);
-        ++finished_req;
-        upload_cv.notify_one();
-    };
+    bthread::Mutex req_mux;
+    bthread::ConditionVariable req_cv;
 
-    upload_batch_res.Reset();
-
-    UploadBatchCc req;
-    req.Use();
-    req.Reset(table_name,
-              ng_id,
-              ng_term,
-              core_cnt,
-              batch_size,
-              write_entry_tuple,
-              upload_batch_res);
+    UploadBatchCc req(table_name,
+                      ng_id,
+                      ng_term,
+                      core_cnt,
+                      batch_size,
+                      write_entry_tuple,
+                      req_mux,
+                      req_cv,
+                      finished_req);
     for (size_t core = 0; core < core_cnt; ++core)
     {
         cc_shards->EnqueueToCcShard(core, &req);
     }
 
-    std::unique_lock<bthread::Mutex> lk(upload_mux);
-    while (finished_req != 1 || req.InUse())
     {
-        upload_cv.wait_for(lk, 1000000);
+        std::unique_lock<bthread::Mutex> req_lk(req_mux);
+        while (finished_req != 1)
+        {
+            req_cv.wait(req_lk);
+        }
     }
 
-    auto &res = upload_batch_res.Value();
-    response->set_error_code(
-        ToRemoteType::ConvertCcErrorCode(upload_batch_res.ErrorCode()));
-    response->set_ng_term(res.term_);
+    response->set_error_code(ToRemoteType::ConvertCcErrorCode(req.ErrorCode()));
+    response->set_ng_term(req.CcNgTerm());
 
     DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
-               << " finished with error: " << upload_batch_res.ErrorMsg();
+               << " finished with error: "
+               << static_cast<uint32_t>(req.ErrorCode());
 }
 
 }  // namespace remote

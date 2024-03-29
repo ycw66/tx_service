@@ -158,8 +158,8 @@ void SkGenerator::GenerateSkFromPk(const TableName &table_name,
             {
                 std::this_thread::sleep_for(std::chrono::seconds(sleep_dur));
                 is_waiting = cc_shards->IsWaitingCkpt();
-                LOG(INFO) << "Can retry scan? "
-                          << (!is_waiting ? "YES" : "NO! Continue sleep...");
+                DLOG(INFO) << "Can retry scan? "
+                           << (!is_waiting ? "YES" : "NO! Continue sleep...");
             } while (is_waiting);
             for (auto it = write_entry_set_.begin();
                  it != write_entry_set_.end();
@@ -171,10 +171,10 @@ void SkGenerator::GenerateSkFromPk(const TableName &table_name,
         }
         else
         {
-            LOG(INFO) << "Scan pk records finished of ng#" << range_owner
-                      << " for partition id: " << partition_id
-                      << " with result code: " << CcErrorMessage(res_code)
-                      << ". Base table: " << table_name.StringView();
+            DLOG(INFO) << "Scan pk records finished of ng#" << range_owner
+                       << " for partition id: " << partition_id
+                       << " with result code: " << CcErrorMessage(res_code)
+                       << ". Base table: " << table_name.StringView();
             assert(res_code == CcErrorCode::NO_ERROR);
         }
     } while (res_code != CcErrorCode::NO_ERROR);
@@ -197,9 +197,9 @@ void SkGenerator::GenerateSkFromPk(const TableName &table_name,
         }
 #endif
 
-        LOG(INFO) << "Upload sk generated from pk of ng#" << range_owner
-                  << " for base table: " << table_name.Trace()
-                  << " of the partition id: " << partition_id;
+        DLOG(INFO) << "Upload sk generated from pk of ng#" << range_owner
+                   << " for base table: " << table_name.Trace()
+                   << " of the partition id: " << partition_id;
         do
         {
             res_code = UploadWithoutDataLog(range_owner, task_status);
@@ -247,22 +247,19 @@ void SkGenerator::GenerateSkFromPk(const TableName &table_name,
                     std::this_thread::sleep_for(
                         std::chrono::seconds(sleep_dur));
                     is_waiting = cc_shards->IsWaitingCkpt();
-                    LOG(INFO)
+                    DLOG(INFO)
                         << "Can retry upload? "
                         << (!is_waiting ? "YES" : "NO! Continue sleep...");
                 } while (is_waiting);
-                ng_cnt = Sharder::Instance().NodeGroupCount();
-                leader_terms_.resize(ng_cnt, INIT_TERM);
-                upload_results_.clear();
                 continue;
             }
             else
             {
-                LOG(INFO) << "Upload this batch sk records finished of ng#"
-                          << range_owner
-                          << " for partition id: " << partition_id
-                          << " with result code: " << CcErrorMessage(res_code)
-                          << ". Base table: " << table_name.StringView();
+                DLOG(INFO) << "Upload this batch sk records finished of ng#"
+                           << range_owner
+                           << " for partition id: " << partition_id
+                           << " with result code: " << CcErrorMessage(res_code)
+                           << ". Base table: " << table_name.StringView();
                 assert(res_code == CcErrorCode::NO_ERROR);
             }
         } while (res_code != CcErrorCode::NO_ERROR);
@@ -273,19 +270,9 @@ void SkGenerator::GenerateSkFromPk(const TableName &table_name,
     }
 
     defer_unpin.reset();
-    for (size_t idx = 0; idx < upload_batch_req_vec_.size();)
-    {
-        if (upload_batch_req_vec_[idx]->InUse())
-        {
-            // wait the request finish.
-            std::this_thread::sleep_for(1s);
-            continue;
-        }
-        ++idx;
-    }
-    LOG(INFO) << "Finished generate sk of ng#" << range_owner
-              << ", for partition id: " << partition_id
-              << " with result code: " << CcErrorMessage(res_code);
+    DLOG(INFO) << "Finished generate sk of ng#" << range_owner
+               << ", for partition id: " << partition_id
+               << " with result code: " << CcErrorMessage(res_code);
 }
 
 void SkGenerator::RemoteGenerateSkFromPk(
@@ -469,8 +456,8 @@ void SkGenerator::RemoteGenerateSkFromPk(
             {
                 std::this_thread::sleep_for(std::chrono::seconds(sleep_dur));
                 is_waiting = cc_shards->IsWaitingCkpt();
-                LOG(INFO) << "Can retry scan? "
-                          << (!is_waiting ? "YES" : "NO! Continue sleep...");
+                DLOG(INFO) << "Can retry scan? "
+                           << (!is_waiting ? "YES" : "NO! Continue sleep...");
             } while (is_waiting);
             for (auto it = write_entry_set_.begin();
                  it != write_entry_set_.end();
@@ -482,10 +469,10 @@ void SkGenerator::RemoteGenerateSkFromPk(
         }
         else
         {
-            LOG(INFO) << "Scan pk records finished of ng#" << ng_id
-                      << " for partition id: " << partition_id
-                      << " with result code: " << CcErrorMessage(res_code)
-                      << ". Base table: " << table_name.StringView();
+            DLOG(INFO) << "Scan pk records finished of ng#" << ng_id
+                       << " for partition id: " << partition_id
+                       << " with result code: " << CcErrorMessage(res_code)
+                       << ". Base table: " << table_name.StringView();
             assert(res_code == CcErrorCode::NO_ERROR);
         }
     } while (res_code != CcErrorCode::NO_ERROR);
@@ -508,9 +495,9 @@ void SkGenerator::RemoteGenerateSkFromPk(
         }
 #endif
 
-        LOG(INFO) << "Upload sk generated from pk of ng#" << ng_id
-                  << " for base table: " << table_name.Trace()
-                  << " of the partition id: " << partition_id;
+        DLOG(INFO) << "Upload sk generated from pk of ng#" << ng_id
+                   << " for base table: " << table_name.Trace()
+                   << " of the partition id: " << partition_id;
 
         do
         {
@@ -556,13 +543,10 @@ void SkGenerator::RemoteGenerateSkFromPk(
                     std::this_thread::sleep_for(
                         std::chrono::seconds(sleep_dur));
                     is_waiting = cc_shards->IsWaitingCkpt();
-                    LOG(INFO)
+                    DLOG(INFO)
                         << "Can retry upload? "
                         << (!is_waiting ? "YES" : "NO! Continue sleep...");
                 } while (is_waiting);
-                ng_cnt = Sharder::Instance().NodeGroupCount();
-                leader_terms_.resize(ng_cnt, INIT_TERM);
-                upload_results_.clear();
                 continue;
             }
             else
@@ -581,16 +565,6 @@ void SkGenerator::RemoteGenerateSkFromPk(
     }
 
     defer_unpin.reset();
-    for (size_t idx = 0; idx < upload_batch_req_vec_.size();)
-    {
-        if (upload_batch_req_vec_[idx]->InUse())
-        {
-            // wait the request finish.
-            std::this_thread::sleep_for(1s);
-            continue;
-        }
-        ++idx;
-    }
     DLOG(INFO) << "Finished generate sk of ng#" << ng_id
                << ", for partition id: " << partition_id
                << " with result code: " << CcErrorMessage(res_code);
@@ -821,38 +795,23 @@ CcErrorCode SkGenerator::UploadSkInternal()
 {
     size_t entry_vec_size = 0;
     size_t batch_req_cnt = 0;
-    size_t ng_request_cnt = 0;
-    size_t finished_ng_request = 0;
 
-    upload_results_.reserve(64);
+    upload_batch_req_vec_.clear();
     upload_batch_req_vec_.reserve(1024);
-    std::mutex upload_mux;
-    std::condition_variable upload_cv;
+    bthread::Mutex req_mux;
+    bthread::ConditionVariable req_cv;
+    size_t finished_upload_count = 0;
+    CcErrorCode upload_res_code = CcErrorCode::NO_ERROR;
+    size_t upload_req_count = 0;
     for (auto &[table_name, ng_entries] : ng_write_entry_set_)
     {
-        ng_request_cnt += ng_entries.size();
         for (auto &[ng_id, entry_vec] : ng_entries)
         {
             entry_vec_size = entry_vec.size();
             batch_req_cnt = (entry_vec_size / upload_batch_size_ +
                              (entry_vec_size % upload_batch_size_ ? 1 : 0));
 
-            upload_results_.emplace_back(nullptr);
-            auto &hd_result = upload_results_.back();
-            hd_result.Reset();
-            hd_result.SetRefCnt(batch_req_cnt);
-            hd_result.post_lambda_ =
-                [&upload_mux, &upload_cv, &finished_ng_request](
-                    CcHandlerResult<UploadBatchResult> *hd_res)
-            {
-                std::unique_lock<std::mutex> lk(upload_mux);
-                ++finished_ng_request;
-                upload_cv.notify_one();
-            };
-            hd_result.Value().Reset();
-            hd_result.Value().node_group_id_ = ng_id;
-
-            int64_t expected_term = leader_terms_.at(ng_id);
+            int64_t &expected_term = leader_terms_.at(ng_id);
 
             size_t start_idx = 0;
             size_t end_idx =
@@ -865,7 +824,11 @@ CcErrorCode SkGenerator::UploadSkInternal()
                             entry_vec,
                             (end_idx - start_idx),
                             start_idx,
-                            hd_result);
+                            req_mux,
+                            req_cv,
+                            finished_upload_count,
+                            upload_res_code);
+                ++upload_req_count;
                 // Next batch
                 start_idx = end_idx;
                 end_idx = ((start_idx + upload_batch_size_) > entry_vec_size
@@ -876,40 +839,45 @@ CcErrorCode SkGenerator::UploadSkInternal()
     }
 
     {
-        std::unique_lock<std::mutex> lk(upload_mux);
-        upload_cv.wait(lk,
-                       [&ng_request_cnt, &finished_ng_request]()
-                       { return ng_request_cnt == finished_ng_request; });
+        std::unique_lock<bthread::Mutex> req_lk(req_mux);
+        while (upload_req_count != finished_upload_count)
+        {
+            req_cv.wait(req_lk);
+        }
     }
 
     // Check leader.
-    for (size_t idx = 0; idx < ng_request_cnt; ++idx)
+    for (size_t idx = 0; idx < upload_batch_req_vec_.size(); ++idx)
     {
-        auto &hd_res = upload_results_.at(idx);
-        auto &res_val = hd_res.Value();
-        if (hd_res.IsError())
+        auto &req = upload_batch_req_vec_.at(idx);
+        CcErrorCode res = req->ErrorCode();
+        uint32_t ng_id = req->NodeGroupId();
+        if (res != CcErrorCode::NO_ERROR)
         {
-            LOG(ERROR) << "Upload batch sk record failed of ng#"
-                       << static_cast<uint32_t>(res_val.node_group_id_)
-                       << ", with error: " << hd_res.ErrorMsg();
+            LOG(ERROR) << "Upload batch sk record failed of ng#" << ng_id
+                       << ", with error: "
+                       << static_cast<uint32_t>(req->ErrorCode());
+            upload_res_code = upload_res_code == CcErrorCode::NO_ERROR
+                                  ? res
+                                  : upload_res_code;
             // For OOM, should release sk range read lock; For leader
-            // transferred, should re-execute from the first batch
-            // record.
-            return hd_res.ErrorCode();
+            // transferred, should re-execute from the first batch record.
+            return upload_res_code;
         }
         else
         {
-            NodeGroupId ng_id = res_val.node_group_id_;
             auto &leader_term = leader_terms_.at(ng_id);
-            int64_t cur_term = res_val.term_.load(std::memory_order_relaxed);
-            if (leader_term < 0)
+            int64_t cur_term = req->CcNgTerm();
+            if (leader_term == INIT_TERM)
             {
                 leader_term = cur_term;
             }
             else if (leader_term != cur_term)
             {
                 LOG(ERROR) << "Upload batch sk record failed caused by "
-                           << "leader transferred of ng#" << ng_id;
+                           << "leader transferred of ng#" << ng_id
+                           << ", with expected term: " << leader_term
+                           << " and actual term: " << cur_term;
                 return CcErrorCode::REQUESTED_NODE_NOT_LEADER;
             }
             else
@@ -919,32 +887,36 @@ CcErrorCode SkGenerator::UploadSkInternal()
         }
     }
 
-    return CcErrorCode::NO_ERROR;
+    return upload_res_code;
 }
 
 void SkGenerator::UploadBatch(const TableName &table_name,
                               NodeGroupId dest_ng_id,
-                              int64_t ng_term,
+                              int64_t &ng_term,
                               const std::vector<WriteEntry *> &write_entry_vec,
                               size_t batch_size,
                               size_t start_key_idx,
-                              CcHandlerResult<UploadBatchResult> &hd_res)
+                              bthread::Mutex &req_mux,
+                              bthread::ConditionVariable &req_cv,
+                              size_t &finished_req_cnt,
+                              CcErrorCode &res_code)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(dest_ng_id);
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
     size_t core_cnt = cc_shards->Count();
     if (dest_node_id == cc_shards->NodeId())
     {
-        std::unique_ptr<UploadBatchCc> req = std::make_unique<UploadBatchCc>();
-        req->Use();
-        req->Reset(table_name,
-                   dest_ng_id,
-                   ng_term,
-                   core_cnt,
-                   batch_size,
-                   start_key_idx,
-                   write_entry_vec,
-                   hd_res);
+        std::unique_ptr<UploadBatchCc> req =
+            std::make_unique<UploadBatchCc>(table_name,
+                                            dest_ng_id,
+                                            ng_term,
+                                            core_cnt,
+                                            batch_size,
+                                            start_key_idx,
+                                            write_entry_vec,
+                                            req_mux,
+                                            req_cv,
+                                            finished_req_cnt);
 
         for (size_t core = 0; core < core_cnt; ++core)
         {
@@ -963,14 +935,22 @@ void SkGenerator::UploadBatch(const TableName &table_name,
             // leader term of input node group.
             LOG(ERROR) << "UploadBatch: Failed to init the channel of ng#"
                        << dest_ng_id;
-            hd_res.SetError(CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED);
+            std::unique_lock<bthread::Mutex> req_lk(req_mux);
+            res_code = CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED;
+            ++finished_req_cnt;
+            req_cv.notify_one();
             return;
         }
 
         remote::CcRpcService_Stub stub(channel.get());
 
         UploadBatchClosure *upload_batch_closure =
-            new UploadBatchClosure(&hd_res);
+            new UploadBatchClosure(req_mux,
+                                   req_cv,
+                                   finished_req_cnt,
+                                   res_code,
+                                   ng_term,
+                                   SkGenerator::UploadTimeout);
         upload_batch_closure->SetChannel(dest_node_id, channel);
 
         remote::UploadBatchRequest *req_ptr =
@@ -1003,7 +983,7 @@ void SkGenerator::UploadBatch(const TableName &table_name,
         }
 
         brpc::Controller *cntl_ptr = upload_batch_closure->Controller();
-        cntl_ptr->set_timeout_ms(-1);
+        cntl_ptr->set_timeout_ms(SkGenerator::UploadTimeout);
         remote::UploadBatchResponse *resp_ptr =
             upload_batch_closure->UploadBatchResponse();
         // Asynchronous mode
