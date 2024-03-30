@@ -3253,14 +3253,12 @@ void UpsertTableIndexOp::HandleRangeTask(
                     return;
                 }
 
-                SkGenerator sk_generator;
-                uint32_t scanned_pk_items_count = 0;
+                SkGenerator sk_generator(
+                    base_table_name, range_owner, partition_id);
+                size_t scanned_pk_items_count = 0;
                 CcErrorCode res_code = CcErrorCode::NO_ERROR;
-                sk_generator.GenerateSkFromPk(base_table_name,
-                                              partition_id,
-                                              range_start_key,
+                sk_generator.GenerateSkFromPk(range_start_key,
                                               range_end_key,
-                                              range_owner,
                                               scan_ts,
                                               sk_names,
                                               scanned_pk_items_count,

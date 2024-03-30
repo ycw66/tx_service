@@ -4534,72 +4534,77 @@ struct UploadBatchCc : public CcRequestBase
     static constexpr size_t UploadBatchBatchSize = 128;
 
 public:
-    UploadBatchCc() = delete;
+    UploadBatchCc() = default;
     ~UploadBatchCc() = default;
 
     UploadBatchCc(const UploadBatchCc &rhs) = delete;
     UploadBatchCc(UploadBatchCc &&rhs) = delete;
 
-    UploadBatchCc(const TableName &table_name,
-                  txservice::NodeGroupId ng_id,
-                  int64_t ng_term,
-                  size_t core_cnt,
-                  size_t batch_size,
-                  size_t start_key_idx,
-                  const std::vector<WriteEntry *> &entry_vec,
-                  bthread::Mutex &req_mux,
-                  bthread::ConditionVariable &req_cv,
-                  size_t &finished_req_cnt)
-        : table_name_(&table_name),
-          node_group_id_(ng_id),
-          node_group_term_(ng_term),
-          is_remote_(false),
-          batch_size_(batch_size),
-          start_key_idx_(start_key_idx),
-          entry_vector_(&entry_vec),
-          req_mux_(req_mux),
-          req_cv_(req_cv),
-          finished_req_cnt_(finished_req_cnt),
-          unfinished_cnt_(core_cnt),
-          err_code_(CcErrorCode::NO_ERROR),
-          paused_pos_(core_cnt, std::make_tuple(0, 0, 0, 0))
+    void Reset(const TableName &table_name,
+               txservice::NodeGroupId ng_id,
+               int64_t &ng_term,
+               size_t core_cnt,
+               size_t batch_size,
+               size_t start_key_idx,
+               const std::vector<WriteEntry *> &entry_vec,
+               bthread::Mutex &req_mux,
+               bthread::ConditionVariable &req_cv,
+               size_t &finished_req_cnt,
+               CcErrorCode &req_result)
     {
+        table_name_ = &table_name;
+        node_group_id_ = ng_id;
+        node_group_term_ = &ng_term;
+        is_remote_ = false;
+        batch_size_ = batch_size;
+        start_key_idx_ = start_key_idx;
+        entry_vector_ = &entry_vec;
+        req_mux_ = &req_mux;
+        req_cv_ = &req_cv;
+        finished_req_cnt_ = &finished_req_cnt;
+        req_result_ = &req_result;
+        unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
+        err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0));
     }
 
-    UploadBatchCc(const TableName &table_name,
-                  txservice::NodeGroupId ng_id,
-                  int64_t ng_term,
-                  size_t core_cnt,
-                  uint32_t batch_size,
-                  const WriteEntryTuple &entry_tuple,
-                  bthread::Mutex &req_mux,
-                  bthread::ConditionVariable &req_cv,
-                  size_t &finished_req_cnt)
-        : table_name_(&table_name),
-          node_group_id_(ng_id),
-          node_group_term_(ng_term),
-          is_remote_(true),
-          batch_size_(batch_size),
-          start_key_idx_(0),
-          entry_tuples_(&entry_tuple),
-          req_mux_(req_mux),
-          req_cv_(req_cv),
-          finished_req_cnt_(finished_req_cnt),
-          unfinished_cnt_(core_cnt),
-          err_code_(CcErrorCode::NO_ERROR),
-          paused_pos_(core_cnt, std::make_tuple(0, 0, 0, 0))
+    void Reset(const TableName &table_name,
+               txservice::NodeGroupId ng_id,
+               int64_t &ng_term,
+               size_t core_cnt,
+               uint32_t batch_size,
+               const WriteEntryTuple &entry_tuple,
+               bthread::Mutex &req_mux,
+               bthread::ConditionVariable &req_cv,
+               size_t &finished_req_cnt)
+
     {
+        table_name_ = &table_name;
+        node_group_id_ = ng_id;
+        node_group_term_ = &ng_term;
+        is_remote_ = true;
+        batch_size_ = batch_size;
+        start_key_idx_ = 0;
+        entry_tuples_ = &entry_tuple;
+        req_mux_ = &req_mux;
+        req_cv_ = &req_cv;
+        finished_req_cnt_ = &finished_req_cnt;
+        req_result_ = nullptr;
+        unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
+        err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0));
     }
 
     bool ValidTermCheck()
     {
+        std::lock_guard<bthread::Mutex> req_lk(*req_mux_);
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-        if (node_group_term_ < 0)
+        if (*node_group_term_ < 0)
         {
-            node_group_term_ = cc_ng_term;
+            *node_group_term_ = cc_ng_term;
         }
 
-        if (cc_ng_term < 0 || cc_ng_term != node_group_term_)
+        if (cc_ng_term < 0 || cc_ng_term != *node_group_term_)
         {
             return false;
         }
@@ -4621,7 +4626,7 @@ public:
         {
             assert(!table_name_->IsMeta());
             const CatalogEntry *catalog_entry = ccs.InitCcm(
-                *table_name_, node_group_id_, node_group_term_, this);
+                *table_name_, node_group_id_, *node_group_term_, this);
             if (catalog_entry == nullptr)
             {
                 // The local node does not contain the table's schema
@@ -4653,9 +4658,14 @@ public:
     {
         if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
         {
-            std::unique_lock<bthread::Mutex> req_lk(req_mux_);
-            ++finished_req_cnt_;
-            req_cv_.notify_one();
+            std::unique_lock<bthread::Mutex> req_lk(*req_mux_);
+            ++(*finished_req_cnt_);
+            auto res = err_code_.load(std::memory_order_relaxed);
+            if (req_result_ && res != CcErrorCode::NO_ERROR)
+            {
+                *req_result_ = res;
+            }
+            req_cv_->notify_one();
             return true;
         }
         return false;
@@ -4668,9 +4678,13 @@ public:
             no_error, err_code, std::memory_order_acq_rel);
         if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
         {
-            std::unique_lock<bthread::Mutex> req_lk(req_mux_);
-            ++finished_req_cnt_;
-            req_cv_.notify_one();
+            std::unique_lock<bthread::Mutex> req_lk(*req_mux_);
+            ++(*finished_req_cnt_);
+            if (req_result_)
+            {
+                *req_result_ = err_code_.load(std::memory_order_relaxed);
+            }
+            req_cv_->notify_one();
             return true;
         }
         return false;
@@ -4689,7 +4703,7 @@ public:
 
     int64_t CcNgTerm() const
     {
-        return node_group_term_;
+        return *node_group_term_;
     }
 
     uint32_t NodeGroupId() const
@@ -4744,7 +4758,7 @@ public:
 private:
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_{0};
-    int64_t node_group_term_{-1};
+    int64_t *node_group_term_{nullptr};
     bool is_remote_{false};
     uint32_t batch_size_{0};
     size_t start_key_idx_{0};
@@ -4756,9 +4770,10 @@ private:
         const WriteEntryTuple *entry_tuples_;
     };
 
-    bthread::Mutex &req_mux_;
-    bthread::ConditionVariable &req_cv_;
-    size_t &finished_req_cnt_;
+    bthread::Mutex *req_mux_{nullptr};
+    bthread::ConditionVariable *req_cv_{nullptr};
+    size_t *finished_req_cnt_{nullptr};
+    CcErrorCode *req_result_{nullptr};
     // This two variables may be accessed by multi-cores.
     std::atomic<size_t> unfinished_cnt_{0};
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};

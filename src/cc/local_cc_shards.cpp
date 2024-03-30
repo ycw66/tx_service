@@ -2675,6 +2675,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         // If the range spec has been updated since we create the task,
         // we might miss the data in the new range during data sync scan.
         // So we need to mark this round of data sync as failed.
+        LOG(WARNING) << "DataSync range version mismatch with data sync ts: "
+                     << data_sync_task->data_sync_ts_;
         data_sync_task->SetErrorCode(CcErrorCode::GET_RANGE_ID_ERR);
     }
 

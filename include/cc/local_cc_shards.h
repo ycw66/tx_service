@@ -121,6 +121,13 @@ public:
                     node_group_term_,
                     status_->truncate_log_ts_);
             }
+            else
+            {
+                LOG(INFO) << "Checkpoint of node group #" << node_group_id_
+                          << " finished with timestamp: " << data_sync_ts_
+                          << " with result code: "
+                          << static_cast<uint32_t>(status_->err_code_);
+            }
 
             if (task_res_)
             {
@@ -1124,42 +1131,6 @@ private:
     /**
      * DataSync Operation Interface
      */
-    enum struct WorkerStatus
-    {
-        Active,
-        Terminating,
-        Terminated
-    };
-
-    struct WorkerThreadContext
-    {
-        WorkerThreadContext(int worker_num)
-            : worker_num_(worker_num), status_(WorkerStatus::Active)
-        {
-        }
-
-        void Terminate()
-        {
-            {
-                std::unique_lock<std::mutex> lk(mux_);
-                assert(status_ == WorkerStatus::Active);
-                status_ = WorkerStatus::Terminated;
-                cv_.notify_all();
-            }
-
-            // loop over worker threads and join them
-            for (int i = 0; i < worker_num_; i++)
-            {
-                worker_thd_[i].join();
-            }
-        }
-        const int worker_num_;
-        std::vector<std::thread> worker_thd_;
-        std::mutex mux_;
-        std::condition_variable cv_;
-        WorkerStatus status_;
-    };
-
     WorkerThreadContext data_sync_worker_ctx_;
     std::deque<std::shared_ptr<DataSyncTask>> data_sync_task_queue_;
 

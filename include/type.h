@@ -1,12 +1,15 @@
 #pragma once
 
 #include <cassert>
+#include <condition_variable>
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>  //move
 #include <vector>
@@ -516,6 +519,42 @@ enum struct TxProcessorStatus
     Busy = 0,
     Sleep,
     Standby
+};
+
+enum struct WorkerStatus
+{
+    Active,
+    Terminating,
+    Terminated
+};
+
+struct WorkerThreadContext
+{
+    WorkerThreadContext(int worker_num)
+        : worker_num_(worker_num), status_(WorkerStatus::Active)
+    {
+    }
+
+    void Terminate()
+    {
+        {
+            std::unique_lock<std::mutex> lk(mux_);
+            assert(status_ == WorkerStatus::Active);
+            status_ = WorkerStatus::Terminated;
+            cv_.notify_all();
+        }
+
+        // loop over worker threads and join them
+        for (size_t i = 0; i < worker_thd_.size(); i++)
+        {
+            worker_thd_[i].join();
+        }
+    }
+    const int worker_num_;
+    std::vector<std::thread> worker_thd_;
+    std::mutex mux_;
+    std::condition_variable cv_;
+    WorkerStatus status_;
 };
 }  // namespace txservice
 

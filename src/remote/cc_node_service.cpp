@@ -749,7 +749,7 @@ void CcNodeService::GenerateSkFromPk(
     bthread::Mutex bthd_mux;
     bthread::ConditionVariable bthd_cv;
     bool is_finished = false;
-    uint32_t scanned_pk_items_count = 0;
+    size_t scanned_pk_items_count = 0;
     int res_code = 0;
     std::vector<int64_t> ng_terms_vec;
     std::thread worker_thd = std::thread(
@@ -816,13 +816,10 @@ void CcNodeService::GenerateSkFromPk(
                 return;
             }
 
-            SkGenerator sk_generator;
+            SkGenerator sk_generator(base_table_name, ng_id, partition_id);
             CcErrorCode res = CcErrorCode::NO_ERROR;
-            sk_generator.RemoteGenerateSkFromPk(base_table_name,
-                                                partition_id,
-                                                start_key_str,
+            sk_generator.RemoteGenerateSkFromPk(start_key_str,
                                                 end_key_str,
-                                                ng_id,
                                                 scan_ts,
                                                 new_indexes_name,
                                                 scanned_pk_items_count,
@@ -933,15 +930,16 @@ void CcNodeService::UploadBatch(
     bthread::Mutex req_mux;
     bthread::ConditionVariable req_cv;
 
-    UploadBatchCc req(table_name,
-                      ng_id,
-                      ng_term,
-                      core_cnt,
-                      batch_size,
-                      write_entry_tuple,
-                      req_mux,
-                      req_cv,
-                      finished_req);
+    UploadBatchCc req;
+    req.Reset(table_name,
+              ng_id,
+              ng_term,
+              core_cnt,
+              batch_size,
+              write_entry_tuple,
+              req_mux,
+              req_cv,
+              finished_req);
     for (size_t core = 0; core < core_cnt; ++core)
     {
         cc_shards->EnqueueToCcShard(core, &req);
@@ -949,9 +947,9 @@ void CcNodeService::UploadBatch(
 
     {
         std::unique_lock<bthread::Mutex> req_lk(req_mux);
-        while (finished_req != 1)
+        while (finished_req != 1 || req.InUse())
         {
-            req_cv.wait(req_lk);
+            req_cv.wait_for(req_lk, 1000000);
         }
     }
 
