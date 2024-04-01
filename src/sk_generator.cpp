@@ -125,6 +125,18 @@ void SkGenerator::GenerateSkFromPk(const TxKey *start_key,
 
     // Release the range read locks.
     acq_range_lock_txm->CommitTx(commit_req);
+
+    {
+        std::unique_lock<std::mutex> task_lk(upload_batch_worker_ctx_.mux_);
+        // Wait until no pending task or upload error.
+        upload_batch_worker_ctx_.cv_.wait(
+            task_lk,
+            [this]()
+            {
+                return pending_upload_task_size_ == 0 ||
+                       upload_task_result_ != CcErrorCode::NO_ERROR;
+            });
+    }
     defer_unpin.reset();
     LOG(INFO) << "GenerateSkFromPk: Finished generate sk from range#"
               << partition_id_
@@ -284,6 +296,18 @@ void SkGenerator::RemoteGenerateSkFromPk(
 
     // Release the range read locks.
     acq_range_lock_txm->CommitTx(commit_req);
+
+    {
+        std::unique_lock<std::mutex> task_lk(upload_batch_worker_ctx_.mux_);
+        // Wait until no pending task or upload error.
+        upload_batch_worker_ctx_.cv_.wait(
+            task_lk,
+            [this]()
+            {
+                return pending_upload_task_size_ == 0 ||
+                       upload_task_result_ != CcErrorCode::NO_ERROR;
+            });
+    }
     defer_unpin.reset();
     LOG(INFO) << "RemoteGenerateSkFromPk: Finished generate sk from range#"
               << partition_id_
@@ -544,26 +568,31 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
             }
         } /* End of foreach new_indexes_name */
 
+        scan_pk_finished = scan_data_drained;
         scan_req.Reset();
         scanned_pk_count += batch_tuples;
-        if (batch_tuples > 0 &&
-            upload_batch_worker_ctx_.worker_thd_.size() == 0)
+        if (batch_tuples > 0)
         {
-            // Launch upload task worker.
-            for (int idx = 0; idx < upload_batch_worker_ctx_.worker_num_; ++idx)
+            if (upload_batch_worker_ctx_.worker_thd_.size() == 0)
             {
-                upload_batch_worker_ctx_.worker_thd_.push_back(
-                    std::thread([this]() { UploadBatchWorker(); }));
+                // Launch upload task worker.
+                for (int idx = 0; idx < upload_batch_worker_ctx_.worker_num_;
+                     ++idx)
+                {
+                    upload_batch_worker_ctx_.worker_thd_.push_back(
+                        std::thread([this]() { UploadBatchWorker(); }));
+                }
             }
-        }
 
-        task_lk.lock();
-        scan_pk_finished =
-            scan_data_drained || upload_task_result_ != CcErrorCode::NO_ERROR;
-        new_upload_task.task_status_ = UploadTaskStatus::Pending;
-        upload_task_head_ = free_task_slot;
-        ++pending_upload_task_size_;
-        upload_batch_worker_ctx_.cv_.notify_all();
+            task_lk.lock();
+            scan_pk_finished = scan_pk_finished ||
+                               upload_task_result_ != CcErrorCode::NO_ERROR;
+            new_upload_task.task_status_ = UploadTaskStatus::Pending;
+            upload_task_head_ = free_task_slot;
+            ++pending_upload_task_size_;
+            upload_batch_worker_ctx_.cv_.notify_one();
+            task_lk.unlock();
+        }
     } while (!scan_pk_finished);
 
     sk_encoder_vec.clear();
@@ -1017,6 +1046,10 @@ void SkGenerator::UploadBatchWorker()
         {
             continue;
         }
+        if (upload_task_result_ != CcErrorCode::NO_ERROR)
+        {
+            break;
+        }
 
         auto &upload_task = upload_batch_queue_.at(upload_task_head_);
         if (upload_task.task_status_ == UploadTaskStatus::Pending)
@@ -1115,8 +1148,10 @@ void SkGenerator::UploadBatchWorker()
         worker_lk.lock();
         upload_task.task_status_ = UploadTaskStatus::Free;
         --ongoing_upload_task_size_;
-        upload_task_result_ = res_code;
-        upload_batch_worker_ctx_.cv_.notify_all();
+        upload_task_result_ = (upload_task_result_ == CcErrorCode::NO_ERROR
+                                   ? res_code
+                                   : upload_task_result_);
+        upload_batch_worker_ctx_.cv_.notify_one();
         if (res_code != CcErrorCode::NO_ERROR)
         {
             assert(res_code == CcErrorCode::TX_NODE_NOT_LEADER ||
@@ -1124,6 +1159,14 @@ void SkGenerator::UploadBatchWorker()
             break;
         }
     }
+    DLOG(INFO) << "Finish upload worker for range#" << partition_id_
+               << " with pending upload task size: "
+               << static_cast<uint32_t>(pending_upload_task_size_)
+               << " and upload task result: "
+               << static_cast<uint32_t>(upload_task_result_);
+    assert(pending_upload_task_size_ == 0 ||
+           upload_task_result_ != CcErrorCode::NO_ERROR);
+    worker_lk.unlock();
     for (size_t i = 0; i < upload_req_pool.size();)
     {
         if (upload_req_pool[i]->InUse())
@@ -1134,8 +1177,6 @@ void SkGenerator::UploadBatchWorker()
         ++i;
     }
     upload_req_pool.clear();
-    assert(pending_upload_task_size_ == 0 ||
-           upload_task_result_ != CcErrorCode::NO_ERROR);
 }
 
 }  // namespace txservice
