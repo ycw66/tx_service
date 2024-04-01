@@ -506,6 +506,7 @@ public:
 
     StoreSlice *FindSlice(size_t idx)
     {
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
         return slices_.at(idx).get();
     }
 

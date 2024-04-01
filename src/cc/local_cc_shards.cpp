@@ -2280,7 +2280,6 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     CcHandlerResult<Void> *hres)
 {
 #ifdef RANGE_PARTITION_ENABLED
-    std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     std::shared_ptr<DataSyncStatus> status =
         std::make_shared<DataSyncStatus>(false);

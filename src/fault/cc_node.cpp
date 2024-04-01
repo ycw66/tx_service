@@ -209,65 +209,6 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
     }
 }
 
-bool CcNode::UpdateNodeGroupConfig(const std::vector<std::string> &ng_ips,
-                                   const std::vector<uint16_t> &ng_ports,
-                                   std::mutex &mux,
-                                   std::condition_variable &cv,
-                                   bool &finished,
-                                   bool &succ)
-{
-    // std::unique_lock<std::shared_mutex> lk(config_mux_);
-    // bool ng_updated = false;
-    // if (ng_ips.size() != ng_ips_.size())
-    //{
-    //     ng_updated = true;
-    //     ng_ips_.resize(ng_ips.size());
-    //     ng_ports_.resize(ng_ports.size());
-    // }
-    // for (size_t idx = 0; idx < ng_ips.size(); ++idx)
-    //{
-    //     if (ng_ips[idx] == ip_ && ng_ports[idx] == port_)
-    //     {
-    //         node_idx_ = idx;
-    //     }
-    //     if (ng_ips[idx] != ng_ips_[idx] || ng_ports[idx] != ng_ports_[idx])
-    //     {
-    //         ng_updated = true;
-    //         ng_ips_[idx] = ng_ips[idx];
-    //         ng_ports_[idx] = ng_ports[idx];
-    //     }
-    // }
-
-    //// Update node group config only if node is preferred leader.
-    // if (ng_updated && node_idx_ == 0)
-    //{
-    //     std::string raft_conf;
-    //     for (size_t nid = 0; nid < ng_ips_.size(); ++nid)
-    //     {
-    //         if (nid > 0)
-    //         {
-    //             raft_conf.append(",");
-    //         }
-
-    //        raft_conf.append(ng_ips_.at(nid));
-    //        raft_conf.append(":");
-    //        raft_conf.append(std::to_string(ng_ports_.at(nid)));
-    //        raft_conf.append(":");
-    //        raft_conf.append(std::to_string(nid));
-    //    }
-    //    braft::Configuration braft_config;
-    //    braft_config.parse_from(raft_conf);
-
-    //    // Put the cc req back in queue in the closure callback.
-    //    ChangePeerClosure *closure =
-    //        new ChangePeerClosure(mux, cv, finished, succ, braft_config,
-    //        node_);
-    //    node_->change_peers(braft_config, closure);
-    //    return true;
-    //}
-    return false;
-}
-
 void CcNode::OnLeaderStart(int64_t term)
 {
     // Check if cc node still think it is the owner of node group. If so,

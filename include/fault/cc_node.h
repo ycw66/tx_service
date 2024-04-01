@@ -2,7 +2,6 @@
 
 #include <brpc/channel.h>
 
-#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -70,21 +69,6 @@ public:
 
     void OnLeaderStart(int64_t term);
     void OnLeaderStop();
-
-    /**
-     * Update the node group config in cc_node. If the config changed and
-     * current node is the preferred leader of the ng, update node group in host
-     * manager. The host manager ng update will be an async call, it will put
-     * cc_req back in queue once it is finished.
-     *
-     * @return If async call to update host manager node group is made.
-     */
-    bool UpdateNodeGroupConfig(const std::vector<std::string> &ng_ips,
-                               const std::vector<uint16_t> &ng_ports,
-                               std::mutex &mux,
-                               std::condition_variable &cv,
-                               bool &finished,
-                               bool &succ);
 
 private:
     void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);

@@ -164,6 +164,7 @@ void CcNodeService::ClusterAddNode(
             ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
         return;
     }
+    LOG(INFO) << "received add node request";
 
     std::vector<std::pair<std::string, uint16_t>> delta_nodes;
     for (int i = 0; i < request->host_list_size(); i++)
@@ -240,6 +241,7 @@ void CcNodeService::ClusterRemoveNode(
             ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
         return;
     }
+    LOG(INFO) << "received remove node request";
 
     std::vector<std::pair<std::string, uint16_t>> delta_nodes;
     // Start cluster scale tx and wait for the log is written before

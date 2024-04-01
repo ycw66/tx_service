@@ -256,10 +256,10 @@ message GetLeaderResponse
 
 message UpdateNodeGroupConfigRequest
 {
-	//uint32 ng_id = 1;
-	//repeated NodeGroupConfigBuf new_cluster_config = 2;
-	//repeated NodeConfigBuf new_node_configs = 3;
-	//uint64 config_version = 4;
+	uint32 ng_id = 1;
+	repeated NodegroupConfigBuf new_cluster_config = 2;
+	repeated NodeConfigBuf new_node_configs = 3;
+	uint64 config_version = 4;
 }
 
 message UpdateNodeGroupConfigResponse

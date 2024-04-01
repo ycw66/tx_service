@@ -96,6 +96,15 @@ struct ClusterConfig
         }
     }
 
+    ClusterConfig &operator&=(ClusterConfig &&rhs)
+    {
+        version_ = rhs.version_;
+        ng_configs_ = std::move(rhs.ng_configs_);
+        cc_nodes_ = std::move(rhs.cc_nodes_);
+
+        return *this;
+    }
+
     std::unordered_map<NodeGroupId, std::vector<NodeConfig>> ng_configs_;
     std::unordered_map<NodeGroupId, std::shared_ptr<fault::CcNode>> cc_nodes_;
     uint64_t version_{0};
