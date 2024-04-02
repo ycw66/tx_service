@@ -5186,12 +5186,23 @@ public:
             req.end_key_ ? static_cast<const KeyT *>(req.end_key_)
                          : PositiveInfinity<KeyT>::Instance();
 
+        size_t vec_idx;
+        if (!req.only_scan_one_core_)
+        {
+            vec_idx = shard_->core_id_;
+        }
+        else
+        {
+            assert(req.unfinished_cnt_ == 1);
+            vec_idx = 0;
+        }
+
         Iterator it;
         Iterator end_it;
-        if (req.IsDrained(shard_->core_id_))
+        if (req.IsDrained(vec_idx))
         {
             // scan is already finished on this core
-            req.SetFinish(shard_->core_id_);
+            req.SetFinish(vec_idx);
             return false;
         }
 
@@ -5202,7 +5213,7 @@ public:
             return false;
         }
 
-        auto &pause_pos_and_is_drained = req.PausePos(shard_->core_id_);
+        auto &pause_pos_and_is_drained = req.PausePos(vec_idx);
 
         if (pause_pos_and_is_drained.first == nullptr)
         {
@@ -5286,8 +5297,7 @@ public:
         // CkptScanBatch number of pages in each round.
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
-             req.accumulated_scan_cnt_.at(shard_->core_id_) <
-                 req.scan_batch_size_ &&
+             req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_ &&
              it != end_it && it != end_it_next_page_it;
              scan_cnt++)
         {
@@ -5321,15 +5331,15 @@ public:
             if (cce->NeedCkpt())
             {
                 cce->ExportForCkpt(*key,
-                                   req.DataSyncVec(shard_->core_id_),
-                                   req.ArchiveVec(shard_->core_id_),
-                                   req.MoveBaseIdxVec(shard_->core_id_),
+                                   req.DataSyncVec(vec_idx),
+                                   req.ArchiveVec(vec_idx),
+                                   req.MoveBaseIdxVec(vec_idx),
                                    req.previous_scan_ts_,
                                    req.data_sync_ts_,
                                    recycle_ts,
                                    Type(),
                                    shard_->EnableMvcc(),
-                                   req.accumulated_scan_cnt_[shard_->core_id_],
+                                   req.accumulated_scan_cnt_[vec_idx],
                                    false,
                                    false);
             }
@@ -5344,7 +5354,7 @@ public:
         {
             pause_pos_and_is_drained = {nullptr, true};
             // scan data drained
-            req.SetFinish(shard_->core_id_);
+            req.SetFinish(vec_idx);
             // Access DataSyncScanCc member variable is unsafe after
             // SetFinished(...).
             return false;
@@ -5366,15 +5376,14 @@ public:
                                         table_name_.Type());
             // set the pause_key_ to mark resume position and put the
             // DataSyncScanCc request into CcQueue again.
-            if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
-                req.scan_batch_size_)
+            if (req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_)
             {
                 shard_->Enqueue(&req);
             }
             else
             {
                 // scan data is not drained
-                req.SetFinish(shard_->core_id_);
+                req.SetFinish(vec_idx);
                 return false;
             }
         }

@@ -208,7 +208,9 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 // Truncate redo log
                 LOG(INFO) << "Checkpoint of node group #" << node_group
                           << " succeeded with timestamp: "
-                          << status->truncate_log_ts_;
+                          << (status->truncate_log_ts_ == 0
+                                  ? ckpt_ts
+                                  : status->truncate_log_ts_);
 
                 // Note: `status->truncate_log_ts_ may larger than `ckpt_ts`. So
                 // we use `status->truncate_log_ts_` to truncate log.
@@ -251,8 +253,7 @@ void Checkpointer::Run()
                 return (request_ckpt_ ||
                         std::chrono::high_resolution_clock::now() >=
                             last_checkpoint_ts_ +
-                                std::chrono::seconds(checkpoint_interval_)) &&
-                       local_shards_.IsDataSyncQueueEmpty();
+                                std::chrono::seconds(checkpoint_interval_));
             }))
         {
             // go back to sleep if there's no idle worker.

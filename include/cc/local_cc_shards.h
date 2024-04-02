@@ -62,6 +62,7 @@ struct DataSyncStatus
     std::mutex mux_;
     std::condition_variable cv_;
 };
+
 struct DataSyncTask
 {
 public:
@@ -83,7 +84,7 @@ public:
           data_sync_ts_(data_sync_ts),
           status_(status),
           is_dirty_(is_dirty),
-          need_adjust_ts_(need_adjust_ts),
+          sync_ts_adjustable_(need_adjust_ts),
           task_res_(hres)
     {
     }
@@ -143,6 +144,7 @@ public:
             status_->cv_.notify_all();
         }
     }
+
     void SetError(CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR)
     {
         std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
@@ -177,14 +179,14 @@ public:
         status_->err_code_ = err_code;
     }
 
-    bool NeedAdjustTs() const
+    bool SyncTsAdjustable() const
     {
-        return need_adjust_ts_;
+        return sync_ts_adjustable_;
     }
 
-    void SetNoNeedAdjustTs()
+    void UnsetSyncTsAdjustable()
     {
-        need_adjust_ts_ = false;
+        sync_ts_adjustable_ = false;
     }
 
     const TableName table_name_;
@@ -214,7 +216,12 @@ public:
     std::shared_ptr<DataSyncStatus> status_{nullptr};
     // True if need to use the dirty schema.
     bool is_dirty_{false};
-    bool need_adjust_ts_{true};
+    // The PendingTaskQueue allows only one normal checkpoint task. Subsequent
+    // tasks with larger timestamps will not be added to the PendingTaskqueue.
+    // Instead, it will only update the latest_pending_ts_. When the task in the
+    // queue is executed, the data_sync_ts_ of task will be updated using
+    // latest_pending_ts_.
+    bool sync_ts_adjustable_{true};
     // Indicate the single task result.
     CcHandlerResult<Void> *task_res_{nullptr};
 };
@@ -775,12 +782,6 @@ public:
         std::shared_ptr<DataSyncStatus> status = nullptr,
         CcHandlerResult<Void> *hres = nullptr);
 
-    bool IsDataSyncQueueEmpty()
-    {
-        std::unique_lock<std::mutex> lk(data_sync_worker_ctx_.mux_);
-        return data_sync_task_queue_.empty();
-    }
-
     size_t DecreaseRangeSliceMemUsage(size_t size)
     {
         size_t old_size =
@@ -1037,17 +1038,28 @@ private:
 
     void PopPendingTask(NodeGroupId ng_id,
                         const TableName &table_name,
-                        uint32_t range_id = 0);
+#ifdef RANGE_PARTITION_ENABLED
+                        uint32_t range_id
+#else
+                        uint16_t core_idx
+#endif
+    );
 
     void ClearAllPendingTasks(NodeGroupId ng_id,
                               const TableName &table_name,
-                              uint32_t range_id = 0);
+#ifdef RANGE_PARTITION_ENABLED
+                              uint32_t range_id
+#else
+                              uint16_t core_idx
+#endif
+    );
 
 #ifndef RANGE_PARTITION_ENABLED
     void PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                                  TransactionExecution *data_sync_txm,
                                  CatalogEntry *catalog_entry,
-                                 DataSyncTask::CkptErrorCode ckpt_err);
+                                 DataSyncTask::CkptErrorCode ckpt_err,
+                                 size_t worker_idx);
 #endif
 
     const uint32_t node_id_;
@@ -1132,11 +1144,16 @@ private:
      * DataSync Operation Interface
      */
     WorkerThreadContext data_sync_worker_ctx_;
-    std::deque<std::shared_ptr<DataSyncTask>> data_sync_task_queue_;
 
+#ifdef RANGE_PARTITION_ENABLED
+    std::deque<std::shared_ptr<DataSyncTask>> data_sync_task_queue_;
+#else
+    std::vector<std::deque<std::shared_ptr<DataSyncTask>>>
+        data_sync_task_queue_;
+#endif
     struct DataSyncTaskLimiter
     {
-        // 0 means no pending task
+        // `0` means no pending task
         uint64_t latest_pending_task_ts_{0};
         std::queue<std::shared_ptr<DataSyncTask>> pending_tasks_;
 
@@ -1163,8 +1180,11 @@ private:
 #else
         explicit TaskLimiterKey(NodeGroupId node_group_id,
                                 std::string_view table_name,
-                                TableType table_type)
-            : node_group_id_(node_group_id), table_name_(table_name, table_type)
+                                TableType table_type,
+                                uint16_t core_id)
+            : node_group_id_(node_group_id),
+              table_name_(table_name, table_type),
+              core_id_(core_id)
         {
         }
 #endif
@@ -1177,6 +1197,9 @@ private:
 #ifdef RANGE_PARTITION_ENABLED
               ,
               range_id_(rhs.range_id_)
+#else
+              ,
+              core_id_(rhs.core_id_)
 #endif
         {
         }
@@ -1193,7 +1216,8 @@ private:
                    range_id_ == other.range_id_;
 #else
             return node_group_id_ == other.node_group_id_ &&
-                   table_name_ == other.table_name_;
+                   table_name_ == other.table_name_ &&
+                   core_id_ == other.core_id_;
 #endif
         }
 
@@ -1201,6 +1225,8 @@ private:
         TableName table_name_;
 #ifdef RANGE_PARTITION_ENABLED
         uint32_t range_id_;
+#else
+        uint16_t core_id_;
 #endif
     };
 
@@ -1216,7 +1242,8 @@ private:
 #else
             size_t h1 = std::hash<NodeGroupId>()(key.node_group_id_);
             size_t h2 = std::hash<TableName>()(key.table_name_);
-            return (h1 ^ (h2 << 1)) | (h2 >> (sizeof(size_t) - 1));
+            size_t h3 = std::hash<uint16_t>()(key.core_id_);
+            return h1 ^ (h2 << 1) ^ (h3 << 5);
 #endif
         }
     };
@@ -1227,9 +1254,10 @@ private:
                        LimiterKeyHasher>
         task_limiters_;
 
-    void DataSyncWorker();
+    void DataSyncWorker(size_t worker_idx);
 
-    void DataSync(std::unique_lock<std::mutex> &task_worker_lk);
+    void DataSync(std::unique_lock<std::mutex> &task_worker_lk,
+                  size_t worker_idx);
 
     /**
      * Range & Slice Update Interface
@@ -1353,7 +1381,8 @@ private:
                       std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
                       std::unique_ptr<std::vector<const TxKey *>> &&mv_base_vec,
                       TransactionExecution *data_sync_txm,
-                      bool delay_update_ckpt_ts)
+                      bool delay_update_ckpt_ts,
+                      size_t scan_task_worker_idx)
             : node_group_id_(data_sync_task->node_group_id_),
               node_group_term_(data_sync_task->node_group_term_),
               data_sync_ts_(data_sync_task->data_sync_ts_),
@@ -1364,6 +1393,7 @@ private:
               mv_base_vec_(std::move(mv_base_vec)),
               vec_owner_(true),
               delay_update_ckpt_ts_(delay_update_ckpt_ts),
+              scan_task_worker_idx_(scan_task_worker_idx),
               data_sync_task_(data_sync_task),
               data_sync_txm_(data_sync_txm),
               hand_res_(nullptr)
@@ -1407,6 +1437,7 @@ private:
         std::vector<const TxKey *> *mv_base_vec_ptr_{nullptr};
         bool vec_owner_{true};
         bool delay_update_ckpt_ts_{false};
+        size_t scan_task_worker_idx_{0};
 
         // Increased by worker after finishing the retrieved work.
         std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};

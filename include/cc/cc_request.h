@@ -2673,6 +2673,7 @@ public:
                    uint16_t core_cnt,
                    size_t scan_batch_size,
                    uint64_t txn,
+                   bool only_one_core,
                    const TxKey *target_start_key = nullptr,
                    const TxKey *target_end_key = nullptr
 #ifdef RANGE_PARTITION_ENABLED
@@ -2694,7 +2695,8 @@ public:
           err_(CcErrorCode::NO_ERROR),
           unfinished_cnt_(core_cnt_),
           mux_(),
-          cv_()
+          cv_(),
+          only_scan_one_core_(only_one_core)
 #ifdef RANGE_PARTITION_ENABLED
           ,
           export_base_table_rec_if_need_(export_base_table_rec_if_need),
@@ -2796,10 +2798,10 @@ public:
         return pause_pos_[core_idx].second;
     }
 
-#ifdef ON_KEY_OBJECT
-    std::pair<LruEntry *, bool> &PausePos(size_t core_idx)
-#else
+#ifdef RANGE_PARTITION_ENABLED
     std::pair<TxKey::Uptr, bool> &PausePos(size_t core_idx)
+#else
+    std::pair<LruEntry *, bool> &PausePos(size_t core_idx)
 #endif
     {
         return pause_pos_[core_idx];
@@ -2969,10 +2971,10 @@ private:
     // Position that we left off during last round of ckpt scan.
     // pause_pos_.first is the key that we stopped at (has not been scanned
     // though), bool is if this core has finished scanning all keys already.
-#ifdef ON_KEY_OBJECT
-    std::vector<std::pair<LruEntry *, bool>> pause_pos_;
-#else
+#ifdef RANGE_PARTITION_ENABLED
     std::vector<std::pair<TxKey::Uptr, bool>> pause_pos_;
+#else
+    std::vector<std::pair<LruEntry *, bool>> pause_pos_;
 #endif
     size_t scan_batch_size_;
 
@@ -2980,6 +2982,8 @@ private:
     uint32_t unfinished_cnt_;
     std::mutex mux_;
     std::condition_variable cv_;
+
+    bool only_scan_one_core_{false};
 
 #ifdef RANGE_PARTITION_ENABLED
     // True means If no larger version exists, we need to export the data which

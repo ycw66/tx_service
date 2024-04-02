@@ -56,7 +56,11 @@ LocalCcShards::LocalCcShards(
       enable_mvcc_(enable_mvcc),
       realtime_sampling_(realtime_sampling),
 #ifdef EXT_TX_PROC_ENABLED
+#ifdef RANGE_PARTITION_ENABLED
       data_sync_worker_ctx_(core_cnt >= 2 ? (core_cnt / 2) : 1),
+#else
+      data_sync_worker_ctx_(core_cnt),
+#endif
       slice_update_worker_ctx_(core_cnt),
       flush_data_worker_ctx_(core_cnt >= 2 ? std::min(core_cnt / 2, 10) : 1),
 #else
@@ -137,11 +141,15 @@ void LocalCcShards::StartBackgroudWorkers()
     }
 #endif
 
+#ifndef RANGE_PARTITION_ENABLED
+    data_sync_task_queue_.resize(data_sync_worker_ctx_.worker_num_);
+#endif
+
     // Starts datasync worker threads.
     for (int id = 0; id < data_sync_worker_ctx_.worker_num_; id++)
     {
         data_sync_worker_ctx_.worker_thd_.push_back(
-            std::thread([this] { DataSyncWorker(); }));
+            std::thread([this, id] { DataSyncWorker(id); }));
     }
 
     if (realtime_sampling_)
@@ -2108,52 +2116,92 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         return;
     }
 
-    last_data_sync_ts = catalog_entry->GetLastSyncTs();
+    last_data_sync_ts = catalog_entry->GetMinLastSyncTs();
     // Release `meta_data_mux_`
     meta_lk.unlock();
 
-    auto task_limiter_key =
-        TaskLimiterKey(ng_id, table_name.StringView(), table_name.Type());
+    auto core_count = cc_shards_.size();
+    size_t task_cnt = 0;
 
-    std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
-    auto iter = task_limiters_.find(task_limiter_key);
-    if (iter == task_limiters_.end())
-    {
-        // Create task limiter
-        auto limiter = task_limiters_.emplace(
-            task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
-        // Update `latest_pending_task_ts` to higher ts if this task can be
-        // skipped(also means it's `data_sync_ts_` can be adjusted).
-        if (can_be_skipped)
-        {
-            limiter.first->second->latest_pending_task_ts_ = data_sync_ts;
-        }
-        // Relase `task_limiter_mux_`
-        task_limiter_lk.unlock();
+    bool need_notify_worker = false;
 
-        // Push task to worker task queue.
-        std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
-        data_sync_task_queue_.emplace_back(
-            std::make_shared<DataSyncTask>(table_name,
-                                           0,
-                                           0,
-                                           ng_id,
-                                           ng_term,
-                                           data_sync_ts,
-                                           status,
-                                           is_dirty,
-                                           can_be_skipped,
-                                           hres));
-    }
-    else
+    for (size_t core_idx = 0; core_idx < core_count; ++core_idx)
     {
-        if (can_be_skipped)
+        auto task_limiter_key = TaskLimiterKey(
+            ng_id, table_name.StringView(), table_name.Type(), core_idx);
+        std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
+        auto iter = task_limiters_.find(task_limiter_key);
+        if (iter == task_limiters_.end())
         {
-            assert(hres == nullptr);
-            // '0' means have no pending task on queue.
-            if (iter->second->latest_pending_task_ts_ == 0)
+            // Create task limiter
+            auto limiter = task_limiters_.emplace(
+                task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
+            // Update `latest_pending_task_ts` to higher ts if this task can be
+            // skipped(also means it's `data_sync_ts_` can be adjusted).
+            if (can_be_skipped)
             {
-                iter->second->latest_pending_task_ts_ = data_sync_ts;
+                limiter.first->second->latest_pending_task_ts_ = data_sync_ts;
+            }
+            // Relase `task_limiter_mux_`
+            task_limiter_lk.unlock();
+
+            auto task = std::make_shared<DataSyncTask>(table_name,
+                                                       0,
+                                                       0,
+                                                       ng_id,
+                                                       ng_term,
+                                                       data_sync_ts,
+                                                       status,
+                                                       is_dirty,
+                                                       can_be_skipped,
+                                                       hres);
+
+            // Push task to worker task queue.
+            std::lock_guard<std::mutex> task_worker_lk(
+                data_sync_worker_ctx_.mux_);
+            data_sync_task_queue_[core_idx].emplace_back(task);
+
+            task_cnt++;
+            need_notify_worker = true;
+        }
+        else
+        {
+            if (can_be_skipped)
+            {
+                assert(hres == nullptr);
+                // '0' means have no pending task on queue. so we push this task
+                // to PendingTaskQueue
+                if (iter->second->latest_pending_task_ts_ == 0)
+                {
+                    iter->second->latest_pending_task_ts_ = data_sync_ts;
+                    iter->second->pending_tasks_.push(
+                        std::make_shared<DataSyncTask>(table_name,
+                                                       0,
+                                                       0,
+                                                       ng_id,
+                                                       ng_term,
+                                                       data_sync_ts,
+                                                       status,
+                                                       is_dirty,
+                                                       can_be_skipped,
+                                                       hres));
+                    task_cnt++;
+                }
+                else
+                {
+                    // Already has one pending task on the PendingTaskQueue. We
+                    // just update `latest_pending_task_ts_` to higher ts.
+                    iter->second->latest_pending_task_ts_ = std::max(
+                        iter->second->latest_pending_task_ts_, data_sync_ts);
+                    status->SetNoTruncateLog();
+                }
+            }
+            else
+            {
+                // This task can't be skipped(DataMigration, CraeteIndex,
+                // LastCheckpoint). Because these operations need to explicitly
+                // flush data into storage, rather than relying on other
+                // checkpoint tasks.
                 iter->second->pending_tasks_.push(
                     std::make_shared<DataSyncTask>(table_name,
                                                    0,
@@ -2165,39 +2213,16 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                                                    is_dirty,
                                                    can_be_skipped,
                                                    hres));
+                task_cnt++;
             }
-            else
-            {
-                // Already has one pending task on the pending queue. We just
-                // update `latest_pending_task_ts_`.
-                iter->second->latest_pending_task_ts_ = std::max(
-                    iter->second->latest_pending_task_ts_, data_sync_ts);
-                status->SetNoTruncateLog();
-                return;
-            }
-        }
-        else
-        {
-            // This task can't be skipped(DataMigration, CraeteIndex,
-            // LastCheckpoint). So we push this task to the pending task queue
-            // of `Limiter`
-            iter->second->pending_tasks_.push(
-                std::make_shared<DataSyncTask>(table_name,
-                                               0,
-                                               0,
-                                               ng_id,
-                                               ng_term,
-                                               data_sync_ts,
-                                               status,
-                                               is_dirty,
-                                               can_be_skipped,
-                                               hres));
+
+            task_limiter_lk.unlock();
         }
     }
 
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
-        status->unfinished_tasks_++;
+        status->unfinished_tasks_ += task_cnt;
         if (hres)
         {
             assert(can_be_skipped == false);
@@ -2210,7 +2235,11 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         }
     }
 
-    data_sync_worker_ctx_.cv_.notify_one();
+    if (need_notify_worker)
+    {
+        std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
+        data_sync_worker_ctx_.cv_.notify_all();
+    }
 
 #else
 
@@ -2359,46 +2388,46 @@ void LocalCcShards::Terminate()
     defragment_worker_ctx_.Terminate();
 }
 
-void LocalCcShards::DataSyncWorker()
+void LocalCcShards::DataSyncWorker(size_t worker_idx)
 {
     std::unique_lock<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
 
+#ifdef RANGE_PARTITION_ENABLED
+    auto &task_queue = data_sync_task_queue_;
+    (void) worker_idx;
+#else
+    auto &task_queue = data_sync_task_queue_[worker_idx];
+#endif
+
     while (data_sync_worker_ctx_.status_ == WorkerStatus::Active)
     {
-        if (data_sync_task_queue_.empty() &&
-            data_sync_worker_ctx_.status_ == WorkerStatus::Active)
-        {
-            // Notify checkpointer to start new round
-            // of checkpoint since we've finished all
-            // previous tasks.
-            NotifyCheckPointer(false);
-        }
         data_sync_worker_ctx_.cv_.wait(
             task_worker_lk,
-            [this]
+            [this, &task_queue]
             {
-                return !data_sync_task_queue_.empty() ||
+                return !task_queue.empty() ||
                        data_sync_worker_ctx_.status_ != WorkerStatus::Active;
             });
 
-        if (data_sync_task_queue_.empty())
+        if (task_queue.empty())
         {
             continue;
         }
 
-        DataSync(task_worker_lk);
+        DataSync(task_worker_lk, worker_idx);
     }
 
     // Handle pending tasks.
-    while (!data_sync_task_queue_.empty())
+    while (!task_queue.empty())
     {
-        DataSync(task_worker_lk);
+        DataSync(task_worker_lk, worker_idx);
     }
 }
 
 #ifdef RANGE_PARTITION_ENABLED
 
-void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
+void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
+                             size_t worker_idx)
 {
     std::shared_ptr<void> lock_task_worker(nullptr,
                                            [&task_worker_lk](void *)
@@ -2442,7 +2471,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             GetRangeOwnerInternal(range_id, ng_id)->BucketOwner();
         if (range_ng == ng_id)
         {
-            if (data_sync_task->NeedAdjustTs())
+            if (data_sync_task->SyncTsAdjustable())
             {
                 auto task_limiter_key =
                     TaskLimiterKey(ng_id,
@@ -2456,6 +2485,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                     iter->second->UnsetLatestPendingTs();
                 data_sync_task->data_sync_ts_ = std::max(
                     latest_pending_task_ts, data_sync_task->data_sync_ts_);
+                data_sync_task->UnsetSyncTsAdjustable();
             }
 
             // For dirty tables (create index in process), data older than
@@ -2465,9 +2495,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
             if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
             {
-                PopPendingTask(ng_id, table_name, range_id);
-
                 data_sync_task->SetFinish();
+                PopPendingTask(ng_id, table_name, range_id);
                 assert(need_process == false);
             }
             else
@@ -2477,9 +2506,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         }
         else
         {
-            PopPendingTask(ng_id, table_name, range_id);
             // range no longer belong to this ng.
             data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            PopPendingTask(ng_id, table_name, range_id);
         }
     }
 
@@ -2498,14 +2527,15 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                    << " with leader term: " << ng_term
                    << ", and the expected leader term: " << expected_ng_term;
 
+        // Finish this task and notify the caller.
+        data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         PopPendingTask(ng_id, table_name, range_id);
 
         if (ng_term >= 0)
         {
             Sharder::Instance().UnpinNodeGroupData(ng_id);
         }
-        // Finish this task and notify the caller.
-        data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+
         return;
     }
 
@@ -2535,7 +2565,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     {
         LOG(ERROR) << "DataSync init data sync transaction failed.";
 
-        data_sync_task->SetNoNeedAdjustTs();
         std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
         data_sync_task_queue_.emplace_front(data_sync_task);
         data_sync_worker_ctx_.cv_.notify_one();
@@ -2571,12 +2600,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             LOG(ERROR) << "DataSync try to add read lock on deleted table, "
                           "table name: "
                        << table_key.Name().StringView();
-
-            ClearAllPendingTasks(ng_id, table_name, range_id);
-
             // If table is deleted(!Normal), skip the table. Return finish
             // directly.
             data_sync_task->SetError();
+
+            ClearAllPendingTasks(ng_id, table_name, range_id);
         }
         else
         {
@@ -2587,7 +2615,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             // If read lock acquire failed, retry next time.
             // Put back into the beginning.
 
-            data_sync_task->SetNoNeedAdjustTs();
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
             data_sync_task_queue_.emplace_front(data_sync_task);
@@ -2617,9 +2644,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             LOG(INFO) << "DataSync on the deleted table: " << table_name.Trace()
                       << ". Return finish directly.";
 
+            data_sync_task->SetFinish();
             PopPendingTask(ng_id, table_name, range_id);
 
-            data_sync_task->SetFinish();
             return;
         }
     }
@@ -2645,7 +2672,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         txservice::AbortTx(data_sync_txm);
         // If read lock acquire failed, retry next time.
         // Put back into the beginning.
-        data_sync_task->SetNoNeedAdjustTs();
         std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
         data_sync_task_queue_.emplace_front(data_sync_task);
         data_sync_worker_ctx_.cv_.notify_one();
@@ -2664,9 +2690,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         // Use AbortTxRequest to release read lock.
         txservice::AbortTx(data_sync_txm);
 
+        data_sync_task->SetError();
         PopPendingTask(ng_id, table_name, range_id);
 
-        data_sync_task->SetError();
         return;
     }
     else if (range_entry->Version() != expected_range_version)
@@ -2706,6 +2732,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                            cc_shards_.size(),
                            DATA_SYNC_SCAN_BATCH_SIZE,
                            data_sync_txm->TxNumber(),
+                           false,
                            range_entry->GetRangeInfo()->StartKey(),
                            range_entry->GetRangeInfo()->EndKey());
 
@@ -2725,7 +2752,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 
             txservice::AbortTx(data_sync_txm);
 
-            data_sync_task->SetNoNeedAdjustTs();
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
             data_sync_task_queue_.emplace_front(data_sync_task);
@@ -2847,11 +2873,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                 }
                 else if (cc.ErrorCode() == CcErrorCode::NG_TERM_CHANGED)
                 {
+                    data_sync_task->SetError();
                     PopPendingTask(ng_id, table_name, range_id);
                     // Term is invalid, we are no longer leader. Abort data
                     // sync.
                     txservice::AbortTx(data_sync_txm);
-                    data_sync_task->SetError();
                     return;
                 }
                 else
@@ -2880,12 +2906,12 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             LOG(ERROR) << "Pre-data_sync slice update failed on table "
                        << table_name.StringView();
 
+            data_sync_task->SetError();
             // Handle the pending tasks for the same range
             PopPendingTask(ng_id, table_name, range_id);
 
             range_entry->UnPinStoreRange();
             txservice::AbortTx(data_sync_txm);
-            data_sync_task->SetError();
 
             return;
         }
@@ -2931,7 +2957,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                                          std::move(archive_vec),
                                          std::move(mv_base_vec),
                                          data_sync_txm,
-                                         false);
+                                         false,
+                                         worker_idx);
         flush_data_worker_ctx_.cv_.notify_one();
     }
     else
@@ -2939,12 +2966,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         // Update the task status and last sync ts of this range.
         range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
 
+        data_sync_task->SetFinish();
         PopPendingTask(ng_id, table_name, range_id);
         // Nothing to flush in this range.
         // Commit the data sync txm
         txservice::CommitTx(data_sync_txm);
-
-        data_sync_task->SetFinish();
     }
 }
 #else
@@ -2952,7 +2978,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                                             TransactionExecution *data_sync_txm,
                                             CatalogEntry *catalog_entry,
-                                            DataSyncTask::CkptErrorCode err)
+                                            DataSyncTask::CkptErrorCode err,
+                                            size_t worker_idx)
 {
     std::unique_lock<std::mutex> flight_task_lk(task->flight_task_mux_);
     int64_t flight_task_cnt = --task->flight_task_cnt_;
@@ -2972,51 +2999,51 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
 
     flight_task_lk.unlock();
 
+    // All flush tasks of this task are finished (flight_task_cnt == 0)
     if (flight_task_cnt == 0)
     {
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
+            task->SetFinish();
+            PopPendingTask(task->node_group_id_, task->table_name_, worker_idx);
+
             if (catalog_entry)
             {
-                catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
+                                                    worker_idx);
             }
 
             // Commit the data sync txm
             txservice::CommitTx(data_sync_txm);
-
-            PopPendingTask(task->node_group_id_, task->table_name_);
-
-            task->SetFinish();
         }
         else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
         {
             txservice::AbortTx(data_sync_txm);
 
-            task->SetNoNeedAdjustTs();
-
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_.emplace_front(task);
-            data_sync_worker_ctx_.cv_.notify_one();
+            data_sync_task_queue_[worker_idx].emplace_front(task);
+            data_sync_worker_ctx_.cv_.notify_all();
         }
         else
         {
             assert(task_ckpt_err == DataSyncTask::CkptErrorCode::FLUSH_ERROR);
-
-            txservice::AbortTx(data_sync_txm);
-
-            PopPendingTask(task->node_group_id_, task->table_name_);
-
             CcErrorCode err_code =
                 Sharder::Instance().LeaderTerm(task->node_group_id_) > 0
                     ? CcErrorCode::DATA_STORE_ERR
                     : CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+
             task->SetError(err_code);
+
+            PopPendingTask(task->node_group_id_, task->table_name_, worker_idx);
+
+            txservice::AbortTx(data_sync_txm);
         }
     }
 }
 
-void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
+void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
+                             size_t worker_idx)
 {
     std::shared_ptr<void> lock_task_worker(nullptr,
                                            [&task_worker_lk](void *)
@@ -3031,8 +3058,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                                            });
 
     std::shared_ptr<DataSyncTask> data_sync_task =
-        data_sync_task_queue_.front();
-    data_sync_task_queue_.pop_front();
+        data_sync_task_queue_[worker_idx].front();
+    data_sync_task_queue_[worker_idx].pop_front();
     // Release `worker ctx mux`
     task_worker_lk.unlock();
 
@@ -3054,34 +3081,38 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     if (catalog_entry == nullptr)
     {
         data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-        //
-        ClearAllPendingTasks(ng_id, table_name);
+
+        ClearAllPendingTasks(ng_id, table_name, worker_idx);
     }
     else
     {
-        if (data_sync_task->NeedAdjustTs())
+        if (data_sync_task->SyncTsAdjustable())
         {
             auto task_limiter_key = TaskLimiterKey(
-                ng_id, table_name.StringView(), table_name.Type());
+                ng_id, table_name.StringView(), table_name.Type(), worker_idx);
             std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
             auto iter = task_limiters_.find(task_limiter_key);
             assert(iter != task_limiters_.end());
+            // Now, This task is runing. we call `UnsetLatestPendingTs` to make
+            // anothe task could push to PendingTaskQueue.
             uint64_t lateset_pending_task_ts =
                 iter->second->UnsetLatestPendingTs();
             data_sync_task->data_sync_ts_ = std::max(
                 lateset_pending_task_ts, data_sync_task->data_sync_ts_);
+            data_sync_task->UnsetSyncTsAdjustable();
         }
 
         // For dirty tables (create index in process), data older than
         // last sync ts will be continously written into memory. We cannot
         // rely on last sync ts to determin if there's dirty data that needs
         // to be flushed.
-        last_sync_ts = is_dirty ? 0 : catalog_entry->GetLastSyncTs();
+        last_sync_ts = is_dirty ? 0 : catalog_entry->GetLastSyncTs(worker_idx);
         if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
         {
-            PopPendingTask(ng_id, table_name);
-
             data_sync_task->SetFinish();
+
+            PopPendingTask(ng_id, table_name, worker_idx);
+
             assert(need_process == false);
         }
         else
@@ -3104,15 +3135,16 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         LOG(ERROR) << "DataSync: node is not the leader of ng#" << ng_id
                    << " with leader term: " << ng_term
                    << ", and the expected leader term: " << expected_ng_term;
+        // Finish this task and notify the caller.
+        data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
 
-        PopPendingTask(ng_id, table_name);
+        PopPendingTask(ng_id, table_name, worker_idx);
 
         if (ng_term >= 0)
         {
             Sharder::Instance().UnpinNodeGroupData(ng_id);
         }
-        // Finish this task and notify the caller.
-        data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+
         return;
     }
 
@@ -3142,10 +3174,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     {
         LOG(ERROR) << "DataSync init data sync transaction failed.";
 
-        data_sync_task->SetNoNeedAdjustTs();
         std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
-        data_sync_task_queue_.emplace_front(data_sync_task);
-        data_sync_worker_ctx_.cv_.notify_one();
+        data_sync_task_queue_[worker_idx].emplace_front(data_sync_task);
+        data_sync_worker_ctx_.cv_.notify_all();
         return;
     }
 
@@ -3179,11 +3210,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                           "table name: "
                        << table_key.Name().StringView();
 
-            ClearAllPendingTasks(ng_id, table_name);
-
             // If table is deleted(!Normal), skip the table. Return finish
             // directly.
             data_sync_task->SetError();
+
+            ClearAllPendingTasks(ng_id, table_name, worker_idx);
         }
         else
         {
@@ -3193,11 +3224,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 
             // If read lock acquire failed, retry next time.
             // Put back into the beginning.
-            data_sync_task->SetNoNeedAdjustTs();
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_.emplace_front(data_sync_task);
-            data_sync_worker_ctx_.cv_.notify_one();
+            data_sync_task_queue_[worker_idx].emplace_front(data_sync_task);
+            data_sync_worker_ctx_.cv_.notify_all();
         }
         return;
     }
@@ -3223,9 +3253,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             LOG(INFO) << "DataSync on the deleted table: " << table_name.Trace()
                       << ". Return finish directly.";
 
-            PopPendingTask(ng_id, table_name);
-
             data_sync_task->SetFinish();
+
+            PopPendingTask(ng_id, table_name, worker_idx);
+
             return;
         }
     }
@@ -3252,9 +3283,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                            data_sync_task->data_sync_ts_,
                            ng_id,
                            ng_term,
-                           cc_shards_.size(),
+                           1,
                            DATA_SYNC_SCAN_BATCH_SIZE,
-                           data_sync_txm->TxNumber());
+                           data_sync_txm->TxNumber(),
+                           true);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
@@ -3264,12 +3296,12 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         data_sync_task->flight_task_cnt_ += 1;
     }
 
+    assert(worker_idx < cc_shards_.size());
+
     while (!scan_data_drained)
     {
-        for (size_t i = 0; i < cc_shards_.size(); i++)
-        {
-            EnqueueToCcShard(i, &scan_cc);
-        }
+        EnqueueToCcShard(worker_idx, &scan_cc);
+
         scan_cc.Wait();
 
         if (scan_cc.IsError())
@@ -3280,7 +3312,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             PostProcessDataSyncTask(std::move(data_sync_task),
                                     data_sync_txm,
                                     catalog_entry,
-                                    DataSyncTask::CkptErrorCode::SCAN_ERROR);
+                                    DataSyncTask::CkptErrorCode::SCAN_ERROR,
+                                    worker_idx);
 
             return;
         }
@@ -3288,102 +3321,96 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         {
             scan_data_drained = true;
 
-            for (size_t i = 0; i < cc_shards_.size(); i++)
+            size_t offset = data_sync_vec->size();
+
+            for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_[0]; ++j)
             {
-                size_t offset = data_sync_vec->size();
+                auto &rec = scan_cc.DataSyncVec(0)[j];
+                // Note. Clone key instead of move key. The memory of
+                // rec.Key() will be reused to avoid memory allocation.
+                data_sync_vec->emplace_back(rec.Key()->Clone(),
+                                            rec.GetPayload(),
+                                            rec.payload_status_,
+                                            rec.commit_ts_,
+                                            rec.cce_,
+                                            rec.delta_size_);
+            }
 
-                for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_[i]; ++j)
+            for (size_t j = 0; j < scan_cc.ArchiveVec(0).size(); ++j)
+            {
+                auto &rec = scan_cc.ArchiveVec(0)[j];
+                // Note. We need to ensure the copy constructor of
+                // FlushRecord could not be called.
+                rec.SetKey((*data_sync_vec)[rec.GetKeyIndex() + offset].Key());
+            }
+
+            for (size_t j = 0; j < scan_cc.MoveBaseIdxVec(0).size(); ++j)
+            {
+                size_t key_idx = scan_cc.MoveBaseIdxVec(0)[j];
+                const TxKey *key_raw_ptr =
+                    (*data_sync_vec)[key_idx + offset].Key();
+                mv_base_vec->emplace_back(key_raw_ptr);
+            }
+
+            std::move(scan_cc.ArchiveVec(0).begin(),
+                      scan_cc.ArchiveVec(0).end(),
+                      std::back_inserter(*archive_vec));
+
+            scan_data_drained = scan_cc.IsDrained(0) && scan_data_drained;
+
+            if (data_sync_vec->size() + archive_vec->size() +
+                    mv_base_vec->size() >
+                rec_size_limit)
+            {
                 {
-                    auto &rec = scan_cc.DataSyncVec(i)[j];
-                    // Note. Clone key instead of move key. The memory of
-                    // rec.Key() will be reused to avoid memory allocation.
-                    data_sync_vec->emplace_back(rec.Key()->Clone(),
-                                                rec.GetPayload(),
-                                                rec.payload_status_,
-                                                rec.commit_ts_,
-                                                rec.cce_,
-                                                rec.delta_size_);
-                }
-
-                for (size_t j = 0; j < scan_cc.ArchiveVec(i).size(); ++j)
-                {
-                    auto &rec = scan_cc.ArchiveVec(i)[j];
-                    // Note. We need to ensure the copy constructor of
-                    // FlushRecord could not be called.
-                    rec.SetKey(
-                        (*data_sync_vec)[rec.GetKeyIndex() + offset].Key());
-                }
-
-                for (size_t j = 0; j < scan_cc.MoveBaseIdxVec(i).size(); ++j)
-                {
-                    size_t key_idx = scan_cc.MoveBaseIdxVec(i)[j];
-                    const TxKey *key_raw_ptr =
-                        (*data_sync_vec)[key_idx + offset].Key();
-                    mv_base_vec->emplace_back(key_raw_ptr);
-                }
-
-                std::move(scan_cc.ArchiveVec(i).begin(),
-                          scan_cc.ArchiveVec(i).end(),
-                          std::back_inserter(*archive_vec));
-
-                scan_data_drained = scan_cc.IsDrained(i) && scan_data_drained;
-
-                if (data_sync_vec->size() + archive_vec->size() +
-                        mv_base_vec->size() >
-                    rec_size_limit)
-                {
+                    std::unique_lock<std::mutex> flight_task_lk(
+                        data_sync_task->flight_task_mux_);
+                    if (data_sync_task->ckpt_err_ ==
+                        DataSyncTask::CkptErrorCode::FLUSH_ERROR)
                     {
-                        std::unique_lock<std::mutex> flight_task_lk(
-                            data_sync_task->flight_task_mux_);
-                        if (data_sync_task->ckpt_err_ ==
-                            DataSyncTask::CkptErrorCode::FLUSH_ERROR)
-                        {
-                            break;
-                        }
-
-                        // Since redis clones record out into FlushRecord during
-                        // data sync scan, we want to back pressure data sync
-                        // scan so that it does not alloc too much memory.
-                        while (data_sync_task->flight_task_cnt_ >
-                               flush_data_worker_ctx_.worker_num_ * 3)
-                        {
-                            data_sync_task->flight_task_cv_.wait(
-                                flight_task_lk,
-                                [data_sync_task,
-                                 max_flush_concurrency =
-                                     flush_data_worker_ctx_.worker_num_ * 3] {
-                                    return data_sync_task->flight_task_cnt_ <
-                                           max_flush_concurrency;
-                                });
-                        }
-                        // Flush worker will call PostProcessDataSyncTask() to
-                        // decrement flight task count.
-                        data_sync_task->flight_task_cnt_ += 1;
+                        break;
                     }
 
+                    // Since redis clones record out into FlushRecord during
+                    // data sync scan, we want to back pressure data sync
+                    // scan so that it does not alloc too much memory.
+                    while (data_sync_task->flight_task_cnt_ >
+                           flush_data_worker_ctx_.worker_num_ * 3)
                     {
-                        std::lock_guard<std::mutex> worker_lk(
-                            flush_data_worker_ctx_.mux_);
-                        pending_flush_work_.emplace_back(
-                            data_sync_task,
-                            table_schema,
-                            std::move(data_sync_vec),
-                            std::move(archive_vec),
-                            std::move(mv_base_vec),
-                            data_sync_txm,
-                            false);
-
-                        flush_data_worker_ctx_.cv_.notify_one();
+                        data_sync_task->flight_task_cv_.wait(
+                            flight_task_lk,
+                            [data_sync_task,
+                             max_flush_concurrency =
+                                 flush_data_worker_ctx_.worker_num_ * 3] {
+                                return data_sync_task->flight_task_cnt_ <
+                                       max_flush_concurrency;
+                            });
                     }
-
-                    data_sync_vec =
-                        std::make_unique<std::vector<FlushRecord>>();
-
-                    archive_vec = std::make_unique<std::vector<FlushRecord>>();
-
-                    mv_base_vec =
-                        std::make_unique<std::vector<const TxKey *>>();
+                    // Flush worker will call PostProcessDataSyncTask() to
+                    // decrement flight task count.
+                    data_sync_task->flight_task_cnt_ += 1;
                 }
+
+                {
+                    std::lock_guard<std::mutex> worker_lk(
+                        flush_data_worker_ctx_.mux_);
+                    pending_flush_work_.emplace_back(data_sync_task,
+                                                     table_schema,
+                                                     std::move(data_sync_vec),
+                                                     std::move(archive_vec),
+                                                     std::move(mv_base_vec),
+                                                     data_sync_txm,
+                                                     false,
+                                                     worker_idx);
+
+                    flush_data_worker_ctx_.cv_.notify_one();
+                }
+
+                data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
+
+                archive_vec = std::make_unique<std::vector<FlushRecord>>();
+
+                mv_base_vec = std::make_unique<std::vector<const TxKey *>>();
             }
 
             scan_cc.Reset();
@@ -3407,7 +3434,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                                              std::move(archive_vec),
                                              std::move(mv_base_vec),
                                              data_sync_txm,
-                                             false);
+                                             false,
+                                             worker_idx);
             flush_data_worker_ctx_.cv_.notify_one();
         }
     }
@@ -3415,25 +3443,26 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     PostProcessDataSyncTask(std::move(data_sync_task),
                             data_sync_txm,
                             catalog_entry,
-                            DataSyncTask::CkptErrorCode::NO_ERROR);
+                            DataSyncTask::CkptErrorCode::NO_ERROR,
+                            worker_idx);
 }
 #endif
 
 void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
                                    const TableName &table_name,
-                                   uint32_t range_id)
+#ifdef RANGE_PARTITION_ENABLED
+                                   uint32_t range_id
+#else
+                                   uint16_t core_idx
+#endif
+)
 {
 #ifdef RANGE_PARTITION_ENABLED
-    TableName range_table_name{table_name.StringView(),
-                               TableType::RangePartition};
-    auto task_limiter_key = TaskLimiterKey(ng_id,
-                                           range_table_name.StringView(),
-                                           range_table_name.Type(),
-                                           range_id);
+    auto task_limiter_key = TaskLimiterKey(
+        ng_id, table_name.StringView(), TableType::RangePartition, range_id);
 #else
-
-    auto task_limiter_key =
-        TaskLimiterKey(ng_id, table_name.StringView(), table_name.Type());
+    auto task_limiter_key = TaskLimiterKey(
+        ng_id, table_name.StringView(), table_name.Type(), core_idx);
 #endif
 
     std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
@@ -3448,8 +3477,14 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
         task_limiter_lk.unlock();
 
         std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
+#ifdef RANGE_PARTITION_ENABLED
         data_sync_task_queue_.push_back(std::move(task));
         data_sync_worker_ctx_.cv_.notify_one();
+#else
+
+        data_sync_task_queue_[core_idx].push_back(std::move(task));
+        data_sync_worker_ctx_.cv_.notify_all();
+#endif
     }
     else
     {
@@ -3459,7 +3494,12 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
 
 void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
                                          const TableName &table_name,
-                                         uint32_t range_id)
+#ifdef RANGE_PARTITION_ENABLED
+                                         uint32_t range_id
+#else
+                                         uint16_t core_idx
+#endif
+)
 {
 #ifdef RANGE_PARTITION_ENABLED
     TableName range_table_name{table_name.StringView(),
@@ -3469,8 +3509,8 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
                                            range_table_name.Type(),
                                            range_id);
 #else
-    auto task_limiter_key =
-        TaskLimiterKey(ng_id, table_name.StringView(), table_name.Type());
+    auto task_limiter_key = TaskLimiterKey(
+        ng_id, table_name.StringView(), table_name.Type(), core_idx);
 #endif
 
     std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
@@ -3630,9 +3670,10 @@ void LocalCcShards::SplitFlushRange(
                           "partition id.";
 
             range_entry->UnPinStoreRange();
+            data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
+
             PopPendingTask(node_group, table_name, data_sync_task->range_id_);
             txservice::AbortTx(split_txm);
-            data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
 
             return;
         }
@@ -3684,23 +3725,26 @@ void LocalCcShards::SplitFlushRange(
                    << range_entry->GetRangeInfo()->PartitionId() << " failed.";
 
         range_entry->UnPinStoreRange();
+
+        data_sync_task->SetError();
+
         PopPendingTask(node_group, table_name, data_sync_task->range_id_);
         txservice::AbortTx(split_txm);
-        data_sync_task->SetError();
 
         return;
     }
 
     range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
     range_entry->UnPinStoreRange();
+
+    data_sync_task->SetFinish();
+
     PopPendingTask(node_group, table_name, data_sync_task->range_id_);
 
     LOG(INFO) << "Split range on table " << range_table_name.StringView()
               << " partition " << range_entry->GetRangeInfo()->PartitionId()
               << " succeeded.";
     txservice::CommitTx(split_txm);
-
-    data_sync_task->SetFinish();
 }
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
@@ -3714,6 +3758,11 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 #ifdef RANGE_PARTITION_ENABLED
     uint64_t data_sync_ts = cur_work.data_sync_ts_;
 #endif
+
+#ifndef RANGE_PARTITION_ENABLED
+    size_t scan_task_worker_idx = cur_work.scan_task_worker_idx_;
+#endif
+
     bool is_delay_update_ckpt_ts = cur_work.delay_update_ckpt_ts_;
     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_owner,
         archive_vec_owner;
@@ -3951,8 +4000,11 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             ckpt_err = DataSyncTask::CkptErrorCode::FLUSH_ERROR;
         }
 
-        PostProcessDataSyncTask(
-            std::move(data_sync_task), data_sync_txm, catalog_entry, ckpt_err);
+        PostProcessDataSyncTask(std::move(data_sync_task),
+                                data_sync_txm,
+                                catalog_entry,
+                                ckpt_err,
+                                scan_task_worker_idx);
 #endif
     }
 

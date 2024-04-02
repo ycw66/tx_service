@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "catalog_factory.h"
+#include "sharder.h"
 #include "tx_key.h"
 #include "tx_record.h"
 
@@ -163,23 +164,51 @@ struct CatalogEntry
     }
 
 #ifndef RANGE_PARTITION_ENABLED
+    // FIXME(lokax):
+    std::vector<uint64_t> last_sync_ts_;
 
-    uint64_t last_sync_ts_{0};
-
-    uint64_t GetLastSyncTs()
+    uint64_t GetMinLastSyncTs()
     {
         std::shared_lock<std::shared_mutex> lk(s_mux_);
-        return last_sync_ts_;
+        if (last_sync_ts_.empty())
+        {
+            return 0;
+        }
+
+        uint64_t ts = UINT64_MAX;
+        for (const auto &last_ts : last_sync_ts_)
+        {
+            ts = std::min(ts, last_ts);
+        }
+
+        return ts;
     }
 
-    void UpdateLastDataSyncTS(uint64_t last_sync_ts)
+    uint64_t GetLastSyncTs(size_t worker_idx)
+    {
+        std::shared_lock<std::shared_mutex> lk(s_mux_);
+        if (last_sync_ts_.empty())
+        {
+            return 0;
+        }
+
+        return last_sync_ts_[worker_idx];
+    }
+
+    void UpdateLastDataSyncTS(uint64_t last_sync_ts, size_t worker_idx)
     {
         std::unique_lock<std::shared_mutex> lk(s_mux_);
 
-        if (last_sync_ts > last_sync_ts_)
+        if (last_sync_ts_.empty())
+        {
+            size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+            last_sync_ts_.resize(core_cnt, 0);
+        }
+
+        if (last_sync_ts > last_sync_ts_[worker_idx])
         {
             // data sync succeeded, update last sync ts
-            last_sync_ts_ = last_sync_ts;
+            last_sync_ts_[worker_idx] = last_sync_ts;
         }
     }
 

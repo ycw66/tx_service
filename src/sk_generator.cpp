@@ -342,6 +342,7 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                             core_cnt,
                             scan_batch_size_,
                             tx_number,
+                            false,
                             start_key,
                             end_key
 #ifdef RANGE_PARTITION_ENABLED
