@@ -157,18 +157,28 @@ public:
             // acquire shard ownership before switching heap since heap
             // allocation with mimalloc must be thread exclusive.
 #ifdef EXT_TX_PROC_ENABLED
-            OccupyTxShard();
-            mi_override_thread(
-                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
-            coordi_->ext_tx_proc_heap_ = mi_heap_set_default(
-                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
+            mi_heap_t *shard_heap =
+                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap();
+            bool need_switch = mi_heap_get_default() != shard_heap;
+            if (need_switch)
+            {
+                OccupyTxShard();
+                mi_override_thread(local_cc_shards_.GetCcShard(thd_id_)
+                                       ->GetShardHeapThreadId());
+                coordi_->ext_tx_proc_heap_ = mi_heap_set_default(
+                    local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
+            }
+
 #endif
             tx = std::make_unique<TransactionExecution>(
                 cc_hd_.get(), txlog_hd_, this);
 #ifdef EXT_TX_PROC_ENABLED
-            mi_heap_set_default(coordi_->ext_tx_proc_heap_);
-            mi_restore_default_thread_id();
-            ReleaseTxShardOwnership();
+            if (need_switch)
+            {
+                mi_heap_set_default(coordi_->ext_tx_proc_heap_);
+                mi_restore_default_thread_id();
+                ReleaseTxShardOwnership();
+            }
 #endif
         }
 
