@@ -530,8 +530,7 @@ void Sharder::UpdateLeader(uint32_t ng_id)
                 stub.GetLeader(&cntl, &req, &resp, nullptr);
                 if (!cntl.Failed() && !resp.error())
                 {
-                    ng_leader_cache_[ng_id].store(resp.node_id(),
-                                                  std::memory_order_release);
+                    UpdateLeader(ng_id, resp.node_id());
                 }
             });
     }

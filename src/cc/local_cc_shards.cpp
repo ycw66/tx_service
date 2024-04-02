@@ -4127,78 +4127,20 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
                                      bool flush_res)
 {
     bool success = true;
-    bool range_updated = false;
-    StoreRange *curr_range = nullptr;
-    StoreSlice *curr_slice = nullptr;
-    bool new_slice = true;
+    assert(data_sync_vec.size());
+    // All records in data sync vec should belong to the same range.
+    StoreRange *range =
+        FindRange(table_name, node_group_id, *data_sync_vec[0].Key());
+    assert(range);
 
-    for (size_t idx = 0; idx < data_sync_vec.size(); ++idx)
-    {
-        if (new_slice)
-        {
-            const TxKey &data_sync_key = *data_sync_vec[idx].Key();
+    // Update in-memory slice size
+    bool range_updated = range->UpdateSliceSizeAfterFlush(flush_res);
 
-            if (curr_range == nullptr ||
-                (curr_range->RangeEndKey() != nullptr &&
-                 (*curr_range->RangeEndKey() < data_sync_key ||
-                  *curr_range->RangeEndKey() == data_sync_key)))
-            {
-                if (curr_range != nullptr && flush_res && range_updated)
-                {
-                    bool ret = curr_range->UpdateRangeSlicesInStore(
-                        table_name, schema_ts, true, store_hd_);
-                    success = ret && success;
-                }
-
-                // The current datasync key falls into a new range. Finds
-                // the range.
-                curr_range =
-                    FindRange(table_name, node_group_id, data_sync_key);
-                // TODO: verify bucket info instead of relying on FindRange
-                // result
-                while (curr_range == nullptr)
-                {
-                    // Items that does not belong to this are skipped
-                    // during flush data.
-                    idx++;
-                    if (idx == data_sync_vec.size())
-                    {
-                        return true;
-                    }
-                    curr_range = FindRange(
-                        table_name, node_group_id, *data_sync_vec[idx].Key());
-                }
-                range_updated = false;
-            }
-
-            curr_slice = curr_range->FindSlice(data_sync_key);
-        }
-
-        // Have iterated all flushed data items falling into the
-        // current slice. Re-calculates the slice's size.
-        if (idx == data_sync_vec.size() - 1 ||
-            (curr_slice->EndKey() != nullptr &&
-             !(*data_sync_vec[idx + 1].Key() < *curr_slice->EndKey())))
-        {
-            if (flush_res)
-            {
-                range_updated |= curr_slice->UpdateSize();
-            }
-            else
-            {
-                curr_slice->SetPostCkptSize(UINT64_MAX);
-            }
-
-            // The next entry falls into a new slice.
-            new_slice = true;
-        }
-    }
-
+    // Update data store slice size
     if (flush_res && range_updated)
     {
-        bool ret = curr_range->UpdateRangeSlicesInStore(
+        success = range->UpdateRangeSlicesInStore(
             table_name, schema_ts, true, store_hd_);
-        success = success && ret;
     }
     return success;
 }

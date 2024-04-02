@@ -241,6 +241,9 @@ void txservice::LocalCcHandler::PostWrite(
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
 
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
     if (dest_node_id == cc_shards_.node_id_)
     {
         if (!Sharder::Instance().CheckLeaderTerm(ng_id, cce_addr.Term()))
@@ -251,10 +254,6 @@ void txservice::LocalCcHandler::PostWrite(
             hres.SetFinished();
             return;
         }
-
-#ifdef EXT_TX_PROC_ENABLED
-        hres.SetToBlock();
-#endif
 
         PostWriteCc *req = postwrite_pool.NextRequest();
         req->Reset(&cce_addr,
@@ -270,9 +269,6 @@ void txservice::LocalCcHandler::PostWrite(
     }
     else
     {
-#ifdef EXT_TX_PROC_ENABLED
-        hres.SetToBlock();
-#endif
         hres.Value().is_local_ = false;
         hres.IncrementRemoteRef();
         remote_hd_.PostWrite(cc_shards_.node_id_,
@@ -360,6 +356,9 @@ void txservice::LocalCcHandler::PostRead(
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
 
     if (dest_node_id == cc_shards_.node_id_ || is_local)
     {
@@ -372,9 +371,6 @@ void txservice::LocalCcHandler::PostRead(
             return;
         }
 
-#ifdef EXT_TX_PROC_ENABLED
-        hres.SetToBlock();
-#endif
         PostReadCc *req = postread_pool_.NextRequest();
         req->Reset(&cce_addr, tx_number, commit_ts, key_ts, gap_ts, &hres);
         TX_TRACE_ACTION(this, req);
@@ -383,9 +379,6 @@ void txservice::LocalCcHandler::PostRead(
     }
     else
     {
-#ifdef EXT_TX_PROC_ENABLED
-        hres.SetToBlock();
-#endif
         hres.Value().is_local_ = false;
         hres.IncrementRemoteRef();
         remote_hd_.PostRead(cc_shards_.node_id_,

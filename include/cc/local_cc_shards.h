@@ -1361,7 +1361,8 @@ private:
 
     /**
      * @brief Called after data sync is done. Update data store slice size
-     * in memory and in data store. Reset post ckpt size in store slice.
+     * in memory and in data store. Reset post ckpt size in store slice. It
+     * is expected that flush_batch is in the same range.
      */
     bool UpdateStoreSlice(const TableName &tbl_name,
                           uint64_t schema_ts,

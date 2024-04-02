@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -484,6 +485,29 @@ public:
         std::vector<FlushRecord>::const_iterator range_start_it,
         std::vector<FlushRecord>::const_iterator range_end_it,
         const std::vector<FlushRecord> &flush_vec);
+
+    // Update slice size after data flush. If flush is successful,
+    // update slice size to precalculated post ckpt size. Otherwise,
+    // reset post ckpt size.
+    bool UpdateSliceSizeAfterFlush(bool flush_res)
+    {
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        bool updated = false;
+        // Iterate over all slices
+        for (auto &slice : slices_)
+        {
+            if (flush_res)
+            {
+                updated |= slice->UpdateSize();
+            }
+            else
+            {
+                slice->SetPostCkptSize(UINT64_MAX);
+            }
+        }
+
+        return updated;
+    }
 
     const TxKey *RangeStartKey() const
     {

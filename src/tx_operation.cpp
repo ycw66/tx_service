@@ -231,16 +231,13 @@ void ReadOperation::Forward(TransactionExecution *txm)
             retry_num_ >= 0)
         {
             // The read request was directed to a non-leader node. Updates
-            // the leader cache. Sine UpdateLeader() is a sync call, we only
-            // do it when re-run the operation fails.
+            // the leader cache.
             if (hd_result_.ErrorCode() ==
-                    CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
-                retry_num_ == 0)
+                CcErrorCode::REQUESTED_NODE_NOT_LEADER)
             {
                 Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
-                retry_num_ = -1;
             }
-            else if (retry_num_ > 0)
+            if (retry_num_ > 0)
             {
                 hd_result_.Value().Reset();
                 hd_result_.Reset();
@@ -549,11 +546,8 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
     {
         if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
         {
-            if (retry_num_ == 0)
-            {
-                Sharder::Instance().UpdateLeaders();
-            }
-            else if (retry_num_ > 0)
+            Sharder::Instance().UpdateLeaders();
+            if (retry_num_ > 0)
             {
                 ReRunOp(txm);
                 return;
@@ -1112,15 +1106,9 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
         if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
             retry_num_ > 0)
         {
-            if (retry_num_ == 0)
-            {
-                Sharder::Instance().UpdateLeaders();
-            }
-            else if (retry_num_ > 0)
-            {
-                ReRunOp(txm);
-                return;
-            }
+            Sharder::Instance().UpdateLeaders();
+            ReRunOp(txm);
+            return;
         }
         else
         {
@@ -1216,6 +1204,9 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             {
                 // There is an error when getting the next range's lock and
                 // ID. The scan next operation is set to be errored.
+                DLOG(ERROR) << "Failed to get next range id, "
+                            << lock_range_result_.ErrorMsg() << ", tx "
+                            << txm->TxNumber();
                 slice_hd_result_.SetError(lock_range_result_.ErrorCode());
                 unlock_range_result_.SetFinished();
             }
@@ -1261,12 +1252,8 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         // term changed.
         if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
         {
-            if (retry_num_ == 0)
-            {
-                Sharder::Instance().UpdateLeader(
-                    hd_result_.Value().node_group_id_);
-            }
-            else if (retry_num_ > 0)
+            Sharder::Instance().UpdateLeader(hd_result_.Value().node_group_id_);
+            if (retry_num_ > 0)
             {
                 hd_result_.Reset();
                 ReRunOp(txm);
@@ -1285,12 +1272,13 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
             slice_hd_result_.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED)
         {
-            if (retry_num_ == 0)
+            if (slice_hd_result_.ErrorCode() ==
+                CcErrorCode::REQUESTED_NODE_NOT_LEADER)
             {
                 Sharder::Instance().UpdateLeader(
                     hd_result_.Value().node_group_id_);
             }
-            else if (retry_num_ > 0)
+            if (retry_num_ > 0)
             {
                 slice_hd_result_.Value().Reset();
                 slice_hd_result_.Reset();
@@ -1323,7 +1311,8 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                                                0,
                                                0,
                                                scan_state_->range_cce_addr_,
-                                               unlock_range_result_);
+                                               unlock_range_result_,
+                                               true);
 
                     // After the unlock range request is sent,
                     // lock_range_result_ is reset. When the tx machine is
@@ -1536,11 +1525,8 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                     else if (hd_result.ErrorCode() ==
                              CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                     {
-                        if (retry_num_ == 0)
-                        {
-                            Sharder::Instance().UpdateLeader(nid);
-                        }
-                        else if (retry_num_ > 0)
+                        Sharder::Instance().UpdateLeader(nid);
+                        if (retry_num_ > 0)
                         {
                             ReRunOp(txm);
                             return;
@@ -1600,11 +1586,8 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                     if (hd_result.ErrorCode() ==
                         CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                     {
-                        if (retry_num_ == 0)
-                        {
-                            Sharder::Instance().UpdateLeader(nid);
-                        }
-                        else if (retry_num_ > 0)
+                        Sharder::Instance().UpdateLeader(nid);
+                        if (retry_num_ > 0)
                         {
                             ReRunOp(txm);
                             return;
@@ -5039,13 +5022,9 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
         if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
         {
             // The request was directed to a non-leader node. Updates the
-            // leader cache. Sine UpdateLeader() is a sync call, we only do it
-            // when re-run the operation fails.
-            if (retry_num_ == 0)
-            {
-                Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
-            }
-            else if (retry_num_ > 0)
+            // leader cache.
+            Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
+            if (retry_num_ > 0)
             {
                 ReRunOp(txm);
                 return;
