@@ -3199,9 +3199,10 @@ public:
         std::string_view blob,
         uint64_t commit_ts,
         uint64_t txn,
-        std::mutex &mux,
-        std::condition_variable &cv,
-        uint64_t &finish_cnt,
+        bthread::Mutex &mux,
+        bthread::ConditionVariable &cv,
+        std::atomic<fault::ReplayService::WaitingStatus> &status,
+        std::atomic<size_t> &on_fly_cnt,
         bool &recovery_error,
         std::shared_ptr<std::vector<::txlog::ReplayMessage>> &msg_vec,
         std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr,
@@ -3216,7 +3217,8 @@ public:
         result_.Reset();
         external_mux_ = &mux;
         external_cv_ = &cv;
-        finish_cnt_ = &finish_cnt;
+        external_status_ = &status;
+        external_on_fly_cnt_ = &on_fly_cnt;
         recovery_error_ = &recovery_error;
         msg_vec_ = msg_vec;
         next_core_ = UINT16_MAX;
@@ -3355,9 +3357,18 @@ public:
         // HandlerResult is not used by external caller, hence we don't need to
         // call HandlerResult.SetFinished().
         msg_vec_ = nullptr;
-        std::lock_guard<std::mutex> lk(*external_mux_);
-        ++(*finish_cnt_);
-        external_cv_->notify_all();
+        size_t on_fly_cnt =
+            external_on_fly_cnt_->fetch_sub(1, std::memory_order_acquire) - 1;
+        if (on_fly_cnt <= 200000 &&
+                external_status_->load(std::memory_order_relaxed) ==
+                    fault::ReplayService::WaitingStatus::WaitForMany ||
+            on_fly_cnt == 0 &&
+                external_status_->load(std::memory_order_relaxed) ==
+                    fault::ReplayService::WaitingStatus::WaitForAll)
+        {
+            BAIDU_SCOPED_LOCK(*external_mux_);
+            external_cv_->notify_all();
+        }
     }
 
     void AbortCcRequest(CcErrorCode err_code) override
@@ -3365,10 +3376,22 @@ public:
         assert(err_code != CcErrorCode::NO_ERROR);
 
         msg_vec_ = nullptr;
-        std::lock_guard<std::mutex> lk(*external_mux_);
-        ++(*finish_cnt_);
-        *recovery_error_ = true;
-        external_cv_->notify_all();
+        {
+            BAIDU_SCOPED_LOCK(*external_mux_);
+            *recovery_error_ = true;
+        }
+        size_t on_fly_cnt =
+            external_on_fly_cnt_->fetch_sub(1, std::memory_order_acquire) - 1;
+        if (on_fly_cnt <= 200000 &&
+                external_status_->load(std::memory_order_relaxed) ==
+                    fault::ReplayService::WaitingStatus::WaitForMany ||
+            on_fly_cnt == 0 &&
+                external_status_->load(std::memory_order_relaxed) ==
+                    fault::ReplayService::WaitingStatus::WaitForAll)
+        {
+            BAIDU_SCOPED_LOCK(*external_mux_);
+            external_cv_->notify_all();
+        }
     }
 
     const std::string_view &LogContentView() const
@@ -3448,9 +3471,10 @@ private:
     size_t offset_{0};
     uint64_t commit_ts_;
     CcHandlerResult<Void> result_{nullptr};
-    std::mutex *external_mux_;
-    std::condition_variable *external_cv_;
-    uint64_t *finish_cnt_;
+    bthread::Mutex *external_mux_;
+    bthread::ConditionVariable *external_cv_;
+    std::atomic<fault::ReplayService::WaitingStatus> *external_status_;
+    std::atomic<uint64_t> *external_on_fly_cnt_;
     bool *recovery_error_;
     uint16_t first_core_;
     uint16_t next_core_{UINT16_MAX};

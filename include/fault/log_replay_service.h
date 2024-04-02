@@ -3,6 +3,8 @@
 #include <brpc/channel.h>
 #include <brpc/server.h>
 #include <brpc/stream.h>
+#include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
 
 #include <condition_variable>
 #include <deque>
@@ -80,6 +82,12 @@ class ReplayService : public brpc::StreamInputHandler,
                       public ::txlog::LogReplayService
 {
 public:
+    enum struct WaitingStatus : int8_t
+    {
+        Active = 0,
+        WaitForAll = 1,
+        WaitForMany = 2,
+    };
     ReplayService() = delete;
     ReplayService(LocalCcShards &local_shards,
                   TxLog *log_agent,
@@ -156,11 +164,11 @@ private:
         uint32_t log_group_id_;
         uint32_t cc_ng_id_;
         int64_t cc_ng_term_;
-        uint64_t total_log_msg_cnt_{0};
         // protects finished_cnt_ and recovery_error_.
-        std::mutex mux_;
-        std::condition_variable cv_;
-        uint64_t finished_cnt_{0};
+        bthread::Mutex mux_;
+        bthread::ConditionVariable cv_;
+        std::atomic<WaitingStatus> status_{WaitingStatus::Active};
+        std::atomic<size_t> on_fly_cnt_{0};
         // Only true if this stream is for log replay.
         bool recovering_;
         bool recovery_error_{false};
@@ -174,13 +182,14 @@ private:
     std::mutex inbound_mux_;
     std::condition_variable inbound_cv_;
 
-    void WaitAndClearRequests(brpc::StreamId stream_id,
-                              uint64_t &total_cnt,
-                              std::mutex &mux,
-                              std::condition_variable &cv,
-                              uint64_t &finish_log_cnt,
-                              bool &recovery_error,
-                              bool wait_for_all_finished = true);
+    void WaitAndClearRequests(
+        brpc::StreamId stream_id,
+        bthread::Mutex &mux,
+        bthread::ConditionVariable &cv,
+        std::atomic<size_t> &on_fly_cnt,
+        std::atomic<WaitingStatus> &status,
+        bool &recovery_error,
+        WaitingStatus waiting_status = WaitingStatus::WaitForAll);
     static const int timeout_ms_ = 2000;
     // to resend ReplayLogRequest on stream timeout
     TxLog *log_agent_;

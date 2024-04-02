@@ -310,12 +310,12 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         std::lock_guard<std::mutex> lk(inbound_mux_);
         info = &inbound_connections_.find(stream_id)->second;
     }
-    std::mutex &mux = info->mux_;
-    std::condition_variable &cv = info->cv_;
-    uint64_t &total_msg_cnt = info->total_log_msg_cnt_;
-    uint64_t &finish_log_cnt = info->finished_cnt_;
+    bthread::Mutex &mux = info->mux_;
+    bthread::ConditionVariable &cv = info->cv_;
     bool &recovery_error = info->recovery_error_;
     uint16_t next_core = 0;
+    std::atomic<WaitingStatus> &status = info->status_;
+    std::atomic<size_t> &on_fly_cnt = info->on_fly_cnt_;
 
     for (size_t idx = 0; idx < size; ++idx)
     {
@@ -374,14 +374,15 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 msg.cluster_scale_op_msg().txn(),
                 mux,
                 cv,
-                finish_log_cnt,
+                status,
+                on_fly_cnt,
                 recovery_error,
                 msg_vec);
 
             local_shards_.EnqueueCcRequest(0, cc_req);
-            uint64_t msg_cnt = 1;
+            on_fly_cnt.fetch_add(1, std::memory_order_release);
             WaitAndClearRequests(
-                stream_id, msg_cnt, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -398,14 +399,15 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 msg.cluster_scale_op_msg().txn(),
                 mux,
                 cv,
-                finish_log_cnt,
+                status,
+                on_fly_cnt,
                 recovery_error,
                 msg_vec);
 
             local_shards_.EnqueueCcRequest(0, cc_req);
-            msg_cnt = 1;
+            on_fly_cnt.fetch_add(1, std::memory_order_release);
             WaitAndClearRequests(
-                stream_id, msg_cnt, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -428,7 +430,8 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                           schema_op_msg.txn(),
                           mux,
                           cv,
-                          finish_log_cnt,
+                          status,
+                          on_fly_cnt,
                           recovery_error,
                           msg_vec,
                           nullptr,
@@ -438,9 +441,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
             // wait for this schema operation to be recovered at all shards
             // before processing next
-            uint64_t msg_cnt = 1;
+            on_fly_cnt.fetch_add(1, std::memory_order_release);
             WaitAndClearRequests(
-                stream_id, msg_cnt, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -486,7 +489,8 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 txn,
                 mux,
                 cv,
-                finish_log_cnt,
+                status,
+                on_fly_cnt,
                 recovery_error,
                 msg_vec,
                 res_pair.first->second);
@@ -494,9 +498,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             local_shards_.EnqueueCcRequest(0, cc_req);
             // wait for this range split operation to be recovered at all shards
             // before processing next
-            uint64_t msg_cnt = 1;
+            on_fly_cnt.fetch_add(1, std::memory_order_release);
             WaitAndClearRequests(
-                stream_id, msg_cnt, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -506,6 +510,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         // parse and process log records
         const std::string &log_records = msg.binary_log_records();
         size_t offset = 0;
+        int binary_log_cnt = 0;
         while (offset < log_records.size())
         {
             // 8-byte for commit_ts
@@ -581,13 +586,14 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     0,
                     mux,
                     cv,
-                    finish_log_cnt,
+                    status,
+                    on_fly_cnt,
                     recovery_error,
                     msg_vec,
                     nullptr,
                     nullptr,
                     next_core);
-                total_msg_cnt++;
+                binary_log_cnt++;
 
                 // Enqueues the replay request to the first local shard. The
                 // shard will deserialize the log record and only insert the
@@ -600,23 +606,20 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 blob_offset += kv_len;
             }
         }
+        on_fly_cnt.fetch_add(binary_log_cnt, std::memory_order_relaxed);
 
         if (msg.has_finish())
         {
             // finish log replay of this log group
             // wait for all preceding ReplayLogCc requests finish
-            WaitAndClearRequests(stream_id,
-                                 total_msg_cnt,
-                                 mux,
-                                 cv,
-                                 finish_log_cnt,
-                                 recovery_error);
+            WaitAndClearRequests(
+                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
             // update recovering status and then close this stream,
             // log_shipping_agent has to create a new stream to send recoverTx
             // log records. when accepting that new stream, set no
             // idle_timeout_ms as that is a long-running connection.
             {
-                std::lock_guard<std::mutex> info_lk(info->mux_);
+                BAIDU_SCOPED_LOCK(info->mux_);
                 // ignore the old stream which is not in inbound_connections_.
                 // if error happens during replay, the current ng's leader term
                 // should not be updated.
@@ -654,11 +657,11 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
     bool wait_for_on_the_fly = false;
     bool recovery_failed = false;
     {
-        std::lock_guard<std::mutex> lk(mux);
+        BAIDU_SCOPED_LOCK(mux);
         // If there are too many on the fly reqs, block until
         // all of them are done. This will push log service back
         // from sending too many log msgs that we cannot handle.
-        if (total_msg_cnt - finish_log_cnt > 200000)
+        if (on_fly_cnt.load(std::memory_order_acquire) > 200000)
         {
             wait_for_on_the_fly = true;
         }
@@ -670,12 +673,12 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
     if (wait_for_on_the_fly || recovery_failed)
     {
         WaitAndClearRequests(stream_id,
-                             total_msg_cnt,
                              mux,
                              cv,
-                             finish_log_cnt,
+                             on_fly_cnt,
+                             status,
                              recovery_error,
-                             false);
+                             WaitingStatus::WaitForMany);
     }
     return 0;
 }
@@ -698,7 +701,7 @@ void ReplayService::on_idle_timeout(brpc::StreamId id)
         }
         info = &it->second;
     }
-    std::lock_guard<std::mutex> lk(info->mux_);
+    BAIDU_SCOPED_LOCK(info->mux_);
     if (info->recovering_)
     {
         // still recovering, resend replay request to log group
@@ -734,10 +737,10 @@ void ReplayService::on_closed(brpc::StreamId id)
         info = &inbound_connections_.find(id)->second;
     }
     WaitAndClearRequests(id,
-                         info->total_log_msg_cnt_,
                          info->mux_,
                          info->cv_,
-                         info->finished_cnt_,
+                         info->on_fly_cnt_,
+                         info->status_,
                          info->recovery_error_);
 
     std::unique_lock<std::mutex> lk(inbound_mux_);
@@ -752,35 +755,30 @@ void ReplayService::on_closed(brpc::StreamId id)
 }
 
 void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
-                                         uint64_t &total_cnt,
-                                         std::mutex &mux,
-                                         std::condition_variable &cv,
-                                         uint64_t &finish_log_cnt,
+                                         bthread::Mutex &mux,
+                                         bthread::ConditionVariable &cv,
+                                         std::atomic<size_t> &on_fly_cnt_,
+                                         std::atomic<WaitingStatus> &status,
                                          bool &recovery_error,
-                                         bool wait_for_all_finished)
+                                         WaitingStatus waiting_status)
 {
-    std::unique_lock<std::mutex> lk(mux);
-    if (total_cnt == 0)
+    size_t on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
+    if (on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll ||
+        on_fly_cnt > 200000 && waiting_status == WaitingStatus::WaitForMany)
     {
-        return;
+        status.store(waiting_status, std::memory_order_relaxed);
+        std::unique_lock<bthread::Mutex> lk(mux);
+        on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
+        while (on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll ||
+               on_fly_cnt > 200000 &&
+                   waiting_status == WaitingStatus::WaitForMany)
+        {
+            cv.wait(lk);
+            on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
+        }
+        status.store(WaitingStatus::Active, std::memory_order_relaxed);
     }
-    cv.wait(lk,
-            [&finish_log_cnt, &total_cnt, &wait_for_all_finished]
-            {
-                if (!wait_for_all_finished)
-                {
-                    return total_cnt - finish_log_cnt < 200000;
-                }
-                else
-                {
-                    return (finish_log_cnt == total_cnt);
-                }
-            });
-    if (finish_log_cnt == total_cnt)
-    {
-        finish_log_cnt = 0;
-        total_cnt = 0;
-    }
+    std::unique_lock<bthread::Mutex> lk(mux);
     if (recovery_error)
     {
         lk.unlock();

@@ -332,7 +332,6 @@ public:
                 meter_->Collect(metrics::NAME_MEMORY_USAGE, allocated);
             }
         }
-
         if (queue_size == 0)
         {
             return 0;
