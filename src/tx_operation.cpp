@@ -22,6 +22,7 @@
 #include "tx_service.h"
 #include "tx_trace.h"
 #include "tx_worker_pool.h"
+#include "type.h"
 #include "util.h"
 
 namespace txservice
@@ -2143,11 +2144,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (op_type_ == OperationType::DropTable)
+        else if (op_type_ == OperationType::DropTable ||
+                 op_type_ == OperationType::TruncateTable)
         {
-            // For DROP TABLE operations, the data store operation of
-            // deleting the k-v table happens after the commit log is
-            // flushed.
+            // For DROP TABLE and TRUNCATE TABLE operations, the data store
+            // operation of deleting the k-v table happens after the commit log
+            // is flushed.
             op_ = &acquire_all_lock_op_;
             txm->PushOperation(&acquire_all_lock_op_);
             txm->Process(acquire_all_lock_op_);
@@ -2248,14 +2250,16 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (op_type_ == OperationType::DropTable)
+        else if (op_type_ == OperationType::DropTable ||
+                 op_type_ == OperationType::TruncateTable)
         {
             // Clear write set before commit dirty schema.
             txm->rw_set_.ClearTable(table_key_.Name());
             txm->rw_set_.ClearReadSet(table_key_.Name());
 
-            // For DROP TABLE, the data store operation happens after all
-            // write locks are acquired and commit log is flushed.
+            // For DROP TABLE and TRUNCATE TABLE, the data store operation
+            // happens after all write locks are acquired and commit log is
+            // flushed.
             op_ = &post_all_lock_op_;
             txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
@@ -2505,7 +2509,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            if (op_type_ == OperationType::DropTable)
+            if (op_type_ == OperationType::DropTable ||
+                op_type_ == OperationType::TruncateTable)
             {
                 op_ = &upsert_kv_table_op_;
                 // Read table schema from local cc shard. This is because we
