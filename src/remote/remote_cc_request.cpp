@@ -1285,22 +1285,15 @@ txservice::remote::RemoteBroadcastStatisticsCc::RemoteBroadcastStatisticsCc()
     res_ = &cc_res_;
 
     cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
-    {
-        if (input_msg_ && recycle_input_msg_)
-        {
-            hd_->RecycleCcMsg(std::move(input_msg_));
-        }
-    };
+    { hd_->RecycleCcMsg(std::move(input_msg_)); };
 }
 
 void txservice::remote::RemoteBroadcastStatisticsCc::Reset(
-    std::unique_ptr<CcMessage> input_msg, bool recycle_input_msg)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_broadcast_statistics_req());
 
     cc_res_.Reset();
-
-    recycle_input_msg_ = recycle_input_msg;
 
     const BroadcastStatisticsRequest &req =
         input_msg->broadcast_statistics_req();

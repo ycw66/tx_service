@@ -62,8 +62,6 @@ class CcMap;
 
 struct LruPage;
 
-class SamplePool;
-
 template <typename RequestT, typename ResultType>
 struct TemplatedCcRequest : public CcRequestBase
 {
@@ -3559,11 +3557,6 @@ public:
         return remote_sample_pool_;
     }
 
-    void ResetCcm()
-    {
-        ccm_ = nullptr;
-    }
-
 protected:
     const TableName *sampling_table_name_{nullptr};
     uint64_t schema_version_{UINT64_MAX};
@@ -3576,23 +3569,26 @@ public:
     struct SamplePoolBase
     {
         virtual ~SamplePoolBase() = default;
+        virtual uint32_t Size() const = 0;
     };
 
     template <uint32_t CapacityN, typename KeyT, typename CopyKey>
     struct SamplePool : public SamplePoolBase
     {
     public:
+        // Template method is not allowd to be virtual.
         void Insert(const KeyT &key)
         {
             random_pairing_.Insert(key, ++counter_);
         }
 
+        // Template method is not allowd to be virtual.
         const std::vector<KeyT> &SampleKeys() const
         {
             return random_pairing_.SampleKeys();
         }
 
-        uint32_t Size() const
+        uint32_t Size() const override
         {
             return random_pairing_.Size();
         }
@@ -3616,28 +3612,98 @@ public:
         Clear();
     }
 
-    bool built_slice_sample_pool_{false};
-    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>::iterator
-        range_it_;
+    void ResetCcm()
+    {
+        ccm_ = nullptr;
+    }
+
+    bool PinStoreRanges(CcShard *shard)
+    {
+        bool all_pinned = true;
+
+        TableName range_table_name(table_name_->StringView(),
+                                   TableType::RangePartition);
+        std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+            *range_map = shard->GetTableRangesForATable(range_table_name,
+                                                        node_group_id_);
+
+        for (auto &[range_key, range_entry] : *range_map)
+        {
+            uint32_t partition_id = range_entry.GetRangeInfo()->PartitionId();
+            uint32_t bucket_owner =
+                shard->GetRangeOwner(partition_id, node_group_id_)
+                    ->BucketOwner();
+            if (bucket_owner == node_group_id_)
+            {
+                bool pinned = pinned_store_ranges_.count(&range_entry) > 0;
+                if (!pinned)
+                {
+                    // Pin store range so that it cannot be kicked out
+                    // during analyze.
+                    const StoreRange *store_range = range_entry.PinStoreRange();
+                    if (store_range)
+                    {
+                        pinned_store_ranges_.insert(&range_entry);
+                    }
+                    else
+                    {
+                        range_entry.FetchRangeSlices(range_table_name,
+                                                     this,
+                                                     node_group_id_,
+                                                     ng_term_,
+                                                     shard);
+                        all_pinned = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        return all_pinned;
+    }
+
+    void UnPinStoreRanges()
+    {
+        for (TableRangeEntry *range_entry : pinned_store_ranges_)
+        {
+            range_entry->UnPinStoreRange();
+        }
+    }
+
+    const std::unordered_set<TableRangeEntry *> PinnedStoreRanges() const
+    {
+        return pinned_store_ranges_;
+    }
 
 private:
     void Clear()
     {
-        built_slice_sample_pool_ = false;
         key_sample_pool_.reset(nullptr);
-        slice_sample_pool_.reset(nullptr);
-        next_pin_slice_idx_ = 0;
+        store_slice_sample_pool_.reset(nullptr);
+        built_slice_sample_pool_ = false;
+        pinned_store_ranges_.clear();
+        pin_slice_idx_ = 0;
+        pinned_slice_id_.Reset();
+        continue_key_.reset(nullptr);
         visit_keys_ = 0;
+        visit_slices_ = 0;
     }
 
 public:
     constexpr static uint32_t sample_pool_capacity_{1024};
     std::unique_ptr<SamplePoolBase> key_sample_pool_{nullptr};
-    std::unique_ptr<SamplePoolBase> slice_sample_pool_{nullptr};
+    std::unique_ptr<SamplePoolBase> store_slice_sample_pool_{nullptr};
 
-    size_t next_pin_slice_idx_{0};
+    bool built_slice_sample_pool_{false};
+    std::unordered_set<TableRangeEntry *> pinned_store_ranges_;
+
+    size_t pin_slice_idx_{0};
+    RangeSliceId pinned_slice_id_;
+
+    std::unique_ptr<TxKey> continue_key_{nullptr};
 
     uint32_t visit_keys_{0};
+    uint32_t visit_slices_{0};
 };
 
 struct ReloadCacheCc : public TemplatedCcRequest<ReloadCacheCc, Void>

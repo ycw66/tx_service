@@ -259,6 +259,29 @@ public:
                     // Bind statistics for the dirty schema.
                     catalog_entry->dirty_schema_->BindStatistics(
                         catalog_entry->schema_->StatisticsObject());
+                    if (req.OpType() == OperationType::AddIndex)
+                    {
+                        std::vector<TableName> new_index_names =
+                            catalog_entry->dirty_schema_->IndexNames();
+                        std::vector<TableName> old_index_names =
+                            catalog_entry->schema_->IndexNames();
+                        for (const TableName &new_index_name : new_index_names)
+                        {
+                            if (std::find(old_index_names.begin(),
+                                          old_index_names.end(),
+                                          new_index_name) ==
+                                old_index_names.end())
+                            {
+                                catalog_entry->schema_->StatisticsObject()
+                                    ->CreateIndex(
+                                        new_index_name,
+                                        catalog_entry->dirty_schema_
+                                            ->IndexKeySchema(new_index_name),
+                                        cc_ng_id_);
+                            }
+                        }
+                    }
+
 #ifdef RANGE_PARTITION_ENABLED
                     // Load ranges for the new added indexes. We cannot
                     // simply initialize it with empty range table since we
@@ -869,7 +892,7 @@ public:
                 if (catalog_entry->schema_ != nullptr)
                 {
                     {
-#ifndef ON_KEY_OBJECT
+#ifdef STATISTICS
                         // Initialize table statistics before create ccmap.
                         if (!shard_->LoadRangesAndStatisticsNx(
                                 catalog_entry->schema_.get(),
@@ -1083,6 +1106,12 @@ public:
                             // should clean them when commit dirty schema.
                             catalog_entry->dirty_schema_->AddDirtyIndex(
                                 new_index_name);
+                            catalog_entry->dirty_schema_->StatisticsObject()
+                                ->CreateIndex(
+                                    new_index_name,
+                                    catalog_entry->dirty_schema_
+                                        ->IndexKeySchema(new_index_name),
+                                    req.NodeGroupId());
                         }
                     }
                 }
@@ -1330,7 +1359,15 @@ public:
             return true;
         }
 
-        TableName base_table_name(req.SamplingTableName()->GetBaseTableNameSV(),
+        const TableName &table_name = *req.SamplingTableName();
+
+        DLOG(INFO) << "Receive table statistics " << table_name.StringView()
+                   << ". From ng #" << req.SamplePool()->ng_id() << ", to ng #"
+                   << req.NodeGroupId()
+                   << ". ng_records: " << req.SamplePool()->records()
+                   << ", ng_samples: " << req.SamplePool()->samples_size();
+
+        TableName base_table_name(table_name.GetBaseTableNameSV(),
                                   TableType::Primary);
         CatalogKey table_key(base_table_name);
         Iterator it = FindEmplace(table_key);
@@ -1371,7 +1408,7 @@ public:
             }
             else
             {
-                if (Statistics::NodeGroupDoStore(base_table_name) !=
+                if (Statistics::LeaderNodeGroup(base_table_name) !=
                     req.NodeGroupId())
                 {
                     hd_res->SetFinished();
@@ -1413,7 +1450,7 @@ public:
             if (table_schema)
             {
                 statistics_entry->statistics_->OnRemoteStatisticsMessage(
-                    *req.SamplingTableName(), table_schema, *req.SamplePool());
+                    table_name, table_schema, *req.SamplePool());
             }
         }
 

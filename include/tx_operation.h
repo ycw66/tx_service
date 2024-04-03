@@ -28,6 +28,7 @@ struct ScanOpenTxRequest;
 struct ScanBatchTxRequest;
 struct ScanBatchTuple;
 struct AnalyzeTableTxRequest;
+struct BroadcastStatisticsTxRequest;
 struct BatchReadTxRequest;
 struct DataMigrationStatus;
 struct ObjectCommandTxRequest;
@@ -987,11 +988,21 @@ private:
     constexpr static uint32_t range_sample_pool_capacity_{128};
 
 public:
-    AnalyzeTableAllOp(TransactionExecution *txm);
+    explicit AnalyzeTableAllOp(TransactionExecution *txm);
     void Reset(uint32_t hres_ref_cnt);
     void Forward(TransactionExecution *txm) override;
 
     AnalyzeTableTxRequest *analyze_tx_req_{nullptr};
+    CcHandlerResult<Void> hd_result_;
+};
+
+struct BroadcastStatisticsOp : TransactionOperation
+{
+    explicit BroadcastStatisticsOp(TransactionExecution *txm);
+    void Reset(uint32_t hres_ref_cnt);
+    void Forward(TransactionExecution *txm) override;
+
+    BroadcastStatisticsTxRequest *broadcast_tx_req_{nullptr};
     CcHandlerResult<Void> hd_result_;
 };
 

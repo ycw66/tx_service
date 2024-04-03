@@ -713,6 +713,28 @@ struct AnalyzeTableTxRequest
     const TableName *table_name_{nullptr};
 };
 
+struct BroadcastStatisticsTxRequest
+    : public TemplateTxRequest<BroadcastStatisticsTxRequest, Void>
+{
+    BroadcastStatisticsTxRequest(
+        const TableName *table_name = nullptr,
+        uint64_t schema_ts = 0,
+        const remote::NodeGroupSamplePool *sample_pool = nullptr,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          table_name_(table_name),
+          schema_ts_(schema_ts),
+          sample_pool_(sample_pool)
+    {
+    }
+
+    const TableName *table_name_{nullptr};
+    uint64_t schema_ts_{0};
+    const remote::NodeGroupSamplePool *sample_pool_{nullptr};
+};
+
 struct ObjectCommandTxRequest
     : public TemplateTxRequest<ObjectCommandTxRequest, RecordStatus>
 {

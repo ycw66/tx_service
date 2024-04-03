@@ -31,6 +31,11 @@ class Distribution
 {
 public:
     virtual ~Distribution() = default;
+    virtual uint64_t Records() const = 0;
+    virtual uint64_t Records(const KeySchema *key_schema,
+                             const TxKey &min_key,
+                             const TxKey &max_key) const = 0;
+    virtual std::vector<double> RecordsPerKey() const = 0;
 };
 
 class Statistics
@@ -43,7 +48,7 @@ public:
         return shard_code;
     }
 
-    static uint16_t CoreDoSample(const TableName &table_or_index_name)
+    static uint16_t LeaderCore(const TableName &table_or_index_name)
     {
         uint32_t shard_code =
             ShardCode(table_or_index_name.GetBaseTableNameSV());
@@ -52,7 +57,7 @@ public:
         return core_id;
     }
 
-    static NodeGroupId NodeGroupDoStore(const TableName &table_or_index_name)
+    static NodeGroupId LeaderNodeGroup(const TableName &table_or_index_name)
     {
         uint32_t shard_code =
             ShardCode(table_or_index_name.GetBaseTableNameSV());
@@ -62,8 +67,14 @@ public:
 public:
     virtual ~Statistics() = default;
 
-    virtual std::shared_ptr<Distribution> GetDistribution(
+    virtual const TableName &BaseTableName() const = 0;
+
+    virtual const Distribution *GetDistribution(
         const TableName &table_or_index_name) const = 0;
+
+    virtual void CreateIndex(const TableName &index_name,
+                             const KeySchema *key_schema,
+                             NodeGroupId cc_ng_id) = 0;
 
     virtual void DropIndex(const TableName &index_name) = 0;
 
@@ -72,15 +83,16 @@ public:
         const TableSchema *table_schema,
         const remote::NodeGroupSamplePool &remote_sample_pool) = 0;
 
-    virtual void PriorSplitRange(const TableName &table_or_index_name,
-                                 const TableSchema *table_schema,
-                                 NodeGroupId ng_id) const = 0;
+    virtual std::unique_ptr<remote::NodeGroupSamplePool>
+    MakeBroadcastSamplePool(NodeGroupId ng_id,
+                            const TableName &table_or_index_name,
+                            bool *updated_since_sync) const = 0;
 
-    virtual bool SyncTableStatistics(store::DataStoreHandler *store_hd,
-                                     const TableName &table_or_index_name,
-                                     const TableSchema *table_schema,
-                                     NodeGroupId ng_id,
-                                     uint64_t version) const = 0;
+    virtual std::unordered_map<TableName,
+                               std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+    MakeStoreStatistics(bool *updated_since_sync) const = 0;
+
+    virtual void SetUpdatedSinceSync() = 0;
 };
 
 struct StatisticsEntry

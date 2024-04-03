@@ -883,6 +883,13 @@ public:
 
     void DropTableStatistics(NodeGroupId ng_id);
 
+    void BroadcastIndexStatistics(
+        TransactionExecution *txm,
+        NodeGroupId ng_id,
+        const TableName &table_name,
+        const TableSchema *table_schema,
+        const remote::NodeGroupSamplePool &sample_pool);
+
     const BucketInfo *GetBucketInfo(const uint16_t bucket_id,
                                     const NodeGroupId ng_id) const;
 
@@ -1453,6 +1460,8 @@ private:
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
 
+    thread_local static CcRequestPool<BroadcastStatisticsCc>
+        broadcast_stat_cc_pool_;
     WorkerThreadContext statistics_worker_ctx_;
     void SyncTableStatisticsWorker();
     /**

@@ -1252,9 +1252,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             analyze_table_all_pool_.NextRequest();
         analyze_req->Reset(std::move(msg));
         TX_TRACE_ASSOCIATE(msg.get(), analyze_req);
-        uint32_t shard_code = txservice::Statistics::ShardCode(
-            analyze_req->GetTableName()->GetBaseTableNameSV());
-        local_shards_.EnqueueCcRequest(shard_code, analyze_req);
+        local_shards_.EnqueueCcRequest(0, analyze_req);
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_AnalyzeTableAllResponse:
@@ -1422,8 +1420,10 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             broadcast_stat_pool_.NextRequest();
         broadcast_stat_req->Reset(std::move(msg));
         TX_TRACE_ASSOCIATE(msg.get(), broadcast_stat_req);
-        uint16_t core_idx = txservice::Statistics::CoreDoSample(
-            *broadcast_stat_req->GetTableName());
+
+        const TableName &table_name = *broadcast_stat_req->SamplingTableName();
+        uint16_t core_idx = txservice::Statistics::LeaderCore(table_name);
+
         local_shards_.EnqueueToCcShard(core_idx, broadcast_stat_req);
         break;
     }

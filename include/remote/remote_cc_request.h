@@ -592,13 +592,9 @@ public:
         delete;
     RemoteBroadcastStatisticsCc(RemoteBroadcastStatisticsCc &&rhs) = delete;
 
-    void Reset(std::unique_ptr<CcMessage> input_msg,
-               bool recycle_input_msg = true);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
 
 private:
-    // If RemoteBroadcastStatisticsCc is sent to local node, it shouldn't be
-    // recycled.
-    bool recycle_input_msg_{true};
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};

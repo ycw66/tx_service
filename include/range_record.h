@@ -460,13 +460,13 @@ public:
                           int64_t ng_term,
                           CcShard *cc_shard);
 
-private:
-    StoreRange *RangeSlices()
+    const StoreRange *RangeSlices() const
     {
         return range_slices_.get();
     }
 
-    const StoreRange *RangeSlices() const
+private:
+    StoreRange *RangeSlices()
     {
         return range_slices_.get();
     }

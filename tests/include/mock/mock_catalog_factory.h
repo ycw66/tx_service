@@ -263,14 +263,13 @@ public:
     }
 
     std::unique_ptr<Statistics> CreateTableStatistics(
-        const TableName &base_table_name) override
+        const TableSchema *table_schema, NodeGroupId cc_ng_id) override
     {
         assert(false);
         return nullptr;
     }
 
     std::unique_ptr<Statistics> CreateTableStatistics(
-        const TableName &base_table_name,
         const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>

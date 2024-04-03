@@ -163,7 +163,7 @@ public:
     virtual size_t VerifyOrdering() = 0;
 
     virtual TableType Type() const = 0;
-    virtual const Schema *KeySchema() const = 0;
+    virtual const txservice::KeySchema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
 
     uint64_t SchemaTs() const

@@ -1572,11 +1572,9 @@ void txservice::LocalCcHandler::AnalyzeTableAll(const TableName &table_name,
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.NodeId())
     {
-        uint32_t shard_code =
-            Statistics::ShardCode(table_name.GetBaseTableNameSV());
         AnalyzeTableAllCc *req = analyze_table_all_pool.NextRequest();
         req->Reset(&table_name, ng_id, tx_number, &hres);
-        cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
+        cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
     }
     else
     {
@@ -1588,6 +1586,48 @@ void txservice::LocalCcHandler::AnalyzeTableAll(const TableName &table_name,
                                    tx_term,
                                    command_id,
                                    hres);
+    }
+}
+
+void txservice::LocalCcHandler::BroadcastStatistics(
+    const TableName &table_name,
+    uint64_t schema_ts,
+    const remote::NodeGroupSamplePool &sample_pool,
+    NodeGroupId ng_id,
+    TxNumber tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    CcHandlerResult<Void> &hres)
+{
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
+
+    DLOG(INFO) << "Broadcast table statistics " << table_name.StringView()
+               << ". From ng #" << sample_pool.ng_id() << ", to ng #" << ng_id
+               << ". ng_records: " << sample_pool.records()
+               << ", ng_samples: " << sample_pool.samples_size();
+
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id == cc_shards_.NodeId())
+    {
+        BroadcastStatisticsCc *req = broadcast_stat_pool.NextRequest();
+        req->Reset(
+            ng_id, &table_name, schema_ts, sample_pool, tx_number, &hres);
+        cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
+    }
+    else
+    {
+        hres.IncrementRemoteRef();
+        remote_hd_.BroadcastStatistics(cc_shards_.node_id_,
+                                       table_name,
+                                       schema_ts,
+                                       sample_pool,
+                                       ng_id,
+                                       tx_number,
+                                       tx_term,
+                                       command_id,
+                                       hres);
     }
 }
 

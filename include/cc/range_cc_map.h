@@ -762,7 +762,7 @@ public:
                 target_cce->payload_->range_owner_rec_;
 
             if (shard_->realtime_sampling_ &&
-                shard_->core_id_ == Statistics::CoreDoSample(this->table_name_))
+                shard_->core_id_ == Statistics::LeaderCore(this->table_name_))
             {
                 SplitSamplePool(old_info);
             }

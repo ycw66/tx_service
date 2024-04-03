@@ -16,6 +16,7 @@
 #include "error_messages.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
+#include "remote_type.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
@@ -27,6 +28,8 @@
 namespace txservice
 {
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
+thread_local CcRequestPool<BroadcastStatisticsCc>
+    LocalCcShards::broadcast_stat_cc_pool_;
 
 LocalCcShards::LocalCcShards(
     uint32_t node_id,
@@ -1590,8 +1593,8 @@ std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
     {
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
-        statistics_entry.statistics_ = catalog_factory_->CreateTableStatistics(
-            table_schema->GetBaseTableName());
+        statistics_entry.statistics_ =
+            catalog_factory_->CreateTableStatistics(table_schema, ng_id);
 
         table_schema->BindStatistics(statistics_entry.statistics_);
     }
@@ -1617,11 +1620,7 @@ std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
         statistics_entry.statistics_ = catalog_factory_->CreateTableStatistics(
-            table_schema->GetBaseTableName(),
-            table_schema,
-            std::move(sample_pool_map),
-            ccs,
-            ng_id);
+            table_schema, std::move(sample_pool_map), ccs, ng_id);
 
         table_schema->BindStatistics(statistics_entry.statistics_);
         if (dirty_table_schema)
@@ -1669,6 +1668,30 @@ void LocalCcShards::DropTableStatistics(NodeGroupId ng_id)
          ++ng_statistics_it)
     {
         ng_statistics_it->second.erase(ng_id);
+    }
+}
+
+void LocalCcShards::BroadcastIndexStatistics(
+    TransactionExecution *txm,
+    NodeGroupId ng_id,
+    const TableName &table_name,
+    const TableSchema *table_schema,
+    const remote::NodeGroupSamplePool &sample_pool)
+{
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+
+    if (ng_cnt > 1)
+    {
+        BroadcastStatisticsTxRequest broadcast_req(
+            &table_name, table_schema->Version(), &sample_pool);
+        txm->Execute(&broadcast_req);
+        broadcast_req.Wait();
+        if (broadcast_req.IsError())
+        {
+            LOG(ERROR) << "Broadcast table statistics for table: "
+                       << table_name.StringView()
+                       << ", error: " << broadcast_req.ErrorMsg();
+        }
     }
 }
 
@@ -3701,8 +3724,16 @@ void LocalCcShards::SplitFlushRange(
     LOG(INFO) << log_output;
     if (realtime_sampling_)
     {
-        table_schema->StatisticsObject()->PriorSplitRange(
-            table_name, table_schema, node_group);
+        // We should consider again whether should we broadcast statistics here.
+        bool updated_since_sync = false;
+        std::unique_ptr<remote::NodeGroupSamplePool> sample_pool =
+            table_schema->StatisticsObject()->MakeBroadcastSamplePool(
+                node_group, table_name, &updated_since_sync);
+        if (updated_since_sync)
+        {
+            BroadcastIndexStatistics(
+                split_txm, node_group, table_name, table_schema, *sample_pool);
+        }
     }
 
     SplitFlushTxRequest split_req(table_name,
@@ -4160,10 +4191,6 @@ void LocalCcShards::SyncTableStatisticsWorker()
                        WorkerStatus::Terminated;
             });
 
-        if (statistics_worker_ctx_.status_ == WorkerStatus::Terminated)
-        {
-            break;
-        }
         CODE_FAULT_INJECTOR("skip_sync_table_statistics", { continue; });
 
         worker_lk.unlock();
@@ -4191,8 +4218,6 @@ void LocalCcShards::SyncTableStatisticsWorker()
             ckpt_req.Wait();
 
             uint64_t sync_ts = ckpt_req.GetCkptTs();
-            auto sync_ts_pair = ng_sync_ts.try_emplace(node_group, 0);
-            uint64_t &last_sync_ts = sync_ts_pair.first->second;
             bool succ = true;
 
             // Get table names in this node group, stats sync worker should
@@ -4276,34 +4301,77 @@ void LocalCcShards::SyncTableStatisticsWorker()
                         continue;
                     }
 
-                    while (
-                        !table_schema->StatisticsObject()->SyncTableStatistics(
-                            store_hd_,
-                            table_name,
-                            table_schema,
-                            node_group,
-                            sync_ts))
+                    bool updated_since_sync = false;
+                    std::unique_ptr<remote::NodeGroupSamplePool> sample_pool =
+                        table_schema->StatisticsObject()
+                            ->MakeBroadcastSamplePool(
+                                node_group, table_name, &updated_since_sync);
+                    if (updated_since_sync)
                     {
-                        LOG(ERROR) << "Failed to update statistics of table "
-                                   << table_name.Trace() << ", retrying.";
-                        std::this_thread::sleep_for(1s);
-                        // Check leader term in infinite while loop.
-                        if (!Sharder::Instance().CheckLeaderTerm(node_group,
-                                                                 leader_term))
+                        BroadcastIndexStatistics(txm,
+                                                 node_group,
+                                                 table_name,
+                                                 table_schema,
+                                                 *sample_pool);
+                        table_schema->StatisticsObject()->SetUpdatedSinceSync();
+                    }
+
+                    if (Statistics::LeaderNodeGroup(table_name) == node_group)
+                    {
+                        // To prevent statistics in storage broken, only
+                        // one node is allowed to write.
+                        for (int i = 0; i < 10; i++)
                         {
-                            LOG(ERROR) << "Leader term changed during table "
-                                          "statistics update";
-                            succ = false;
-                            break;
+                            std::unordered_map<
+                                TableName,
+                                std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+                                sample_pool_map =
+                                    table_schema->StatisticsObject()
+                                        ->MakeStoreStatistics(
+                                            &updated_since_sync);
+                            if (updated_since_sync)
+                            {
+                                succ = store_hd_->UpsertTableStatistics(
+                                    base_table_name, sample_pool_map, sync_ts);
+                                if (succ)
+                                {
+                                    break;
+                                }
+                                else
+                                {
+                                    LOG(ERROR)
+                                        << "Failed to update statistics of "
+                                           "table "
+                                        << table_name.Trace() << ", retrying.";
+                                    std::this_thread::sleep_for(1s);
+                                    // Check leader term in infinite while
+                                    // loop.
+                                    if (!Sharder::Instance().CheckLeaderTerm(
+                                            node_group, leader_term))
+                                    {
+                                        LOG(ERROR)
+                                            << "Leader term changed during "
+                                               "table statistics update";
+                                        break;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                break;
+                            }
+                        }
+                        if (!succ)
+                        {
+                            // Set updated_since_sync_ to true, and next sync
+                            // loop will retry it.
+                            table_schema->StatisticsObject()
+                                ->SetUpdatedSinceSync();
                         }
                     }
 
                     txservice::CommitTx(txm);
                 }
-            }
-            if (succ)
-            {
-                last_sync_ts = sync_ts;
             }
 
             // finish table stats sync on this node group, unpin its data

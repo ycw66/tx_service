@@ -347,6 +347,15 @@ public:
                          uint16_t command_id,
                          CcHandlerResult<Void> &hres) override;
 
+    void BroadcastStatistics(const TableName &table_name,
+                             uint64_t schema_ts,
+                             const remote::NodeGroupSamplePool &sample_pool,
+                             NodeGroupId ng_id,
+                             TxNumber tx_number,
+                             int64_t tx_term,
+                             uint16_t command_id,
+                             CcHandlerResult<Void> &hres) override;
+
     void ObjectCommand(const TableName &table_name,
                        const TxKey &key,
                        uint32_t key_shard_code,
@@ -430,6 +439,7 @@ private:
     CcRequestPool<ScanNextBatchCc> scan_next_pool;
     CcRequestPool<ScanSliceCc> scan_slice_pool;
     CcRequestPool<AnalyzeTableAllCc> analyze_table_all_pool;
+    CcRequestPool<BroadcastStatisticsCc> broadcast_stat_pool;
     CcRequestPool<FaultInjectCC> fault_inject_pool;
     CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
     CcRequestPool<KickoutCcEntryCc> kickout_ccentry_pool_;

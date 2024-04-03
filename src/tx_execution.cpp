@@ -75,6 +75,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       write_log_(this),
       sleep_op_(this),
       analyze_table_all_op_(this),
+      broadcast_stat_op_(this),
       reload_cache_op_(this),
       fault_inject_op_(this),
       clean_entry_op_(this),
@@ -982,6 +983,34 @@ void TransactionExecution::ProcessTxRequest(AnalyzeTableTxRequest &analyze_req)
 
     PushOperation(&analyze_table_all_op_);
     Process(analyze_table_all_op_);
+}
+
+void TransactionExecution::ProcessTxRequest(
+    BroadcastStatisticsTxRequest &broadcast_req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &broadcast_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_))
+                .append("\"table_name\":")
+                .append(broadcast_req.table_name_->String());
+        });
+
+    void_resp_ = &broadcast_req.tx_result_;
+    broadcast_stat_op_.broadcast_tx_req_ = &broadcast_req;
+
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    assert(ng_cnt > 0);
+    uint32_t hres_ref_cnt = ng_cnt - 1;
+    broadcast_stat_op_.Reset(hres_ref_cnt);
+
+    PushOperation(&broadcast_stat_op_);
+    Process(broadcast_stat_op_);
 }
 
 void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
@@ -4917,6 +4946,72 @@ void TransactionExecution::PostProcess(AnalyzeTableAllOp &analyze_table_all_op)
     else
     {
         DLOG(INFO) << "txm notifies analyze tx request ";
+        void_resp_->Finish(void_);
+    }
+}
+
+void TransactionExecution::Process(BroadcastStatisticsOp &broadcast_stat_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &broadcast_stat_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    broadcast_stat_op.is_running_ = true;
+
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+
+    const BroadcastStatisticsTxRequest *req =
+        broadcast_stat_op.broadcast_tx_req_;
+    for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    {
+        if (ng_id != req->sample_pool_->ng_id())
+        {
+            cc_handler_->BroadcastStatistics(*req->table_name_,
+                                             req->schema_ts_,
+                                             *req->sample_pool_,
+                                             ng_id,
+                                             TxNumber(),
+                                             TxTerm(),
+                                             CommandId(),
+                                             broadcast_stat_op.hd_result_);
+        }
+    }
+
+    StartTiming();
+}
+
+void TransactionExecution::PostProcess(BroadcastStatisticsOp &broadcast_stat_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &broadcast_stat_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    if (broadcast_stat_op.hd_result_.IsError())
+    {
+        DLOG(INFO) << "BroadcastStatisticsOp FinishError for cc error: "
+                   << broadcast_stat_op.hd_result_.ErrorMsg();
+        void_resp_->FinishError(
+            ConvertCcError(broadcast_stat_op.hd_result_.ErrorCode()));
+    }
+    else
+    {
+        DLOG(INFO) << "txm notifies broadcast tx request ";
         void_resp_->Finish(void_);
     }
 }

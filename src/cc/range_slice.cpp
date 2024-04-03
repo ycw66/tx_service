@@ -1157,6 +1157,12 @@ StoreSlice *StoreRange::FindSlice(const TxKey &key)
     return slices_[slice_idx].get();
 }
 
+StoreSlice *StoreRange::FindSlice(size_t idx)
+{
+    std::shared_lock<std::shared_mutex> s_lk(mux_);
+    return slices_.at(idx).get();
+}
+
 size_t StoreRange::PostCkptSize()
 {
     std::shared_lock<std::shared_mutex> s_lk(mux_);

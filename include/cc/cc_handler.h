@@ -454,6 +454,16 @@ public:
                                  uint16_t command_id,
                                  CcHandlerResult<Void> &hres) = 0;
 
+    virtual void BroadcastStatistics(
+        const TableName &table_name,
+        uint64_t schema_ts,
+        const remote::NodeGroupSamplePool &sample_pool,
+        NodeGroupId ng_id,
+        TxNumber tx_number,
+        int64_t tx_term,
+        uint16_t command_id,
+        CcHandlerResult<Void> &hres) = 0;
+
     virtual uint32_t GetNodeId() const = 0;
 
     /**

@@ -39,6 +39,7 @@ struct CleanArchivesTxRequest;
 struct ScanBatchTuple;
 struct SplitFlushTxRequest;
 struct AnalyzeTableTxRequest;
+struct BroadcastStatisticsTxRequest;
 struct ClusterScaleTxRequest;
 struct SchemaRecoveryTxRequest;
 struct RangeSplitRecoveryTxRequest;
@@ -124,6 +125,7 @@ public:
     void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
     void ProcessTxRequest(SplitFlushTxRequest &split_flush_req);
     void ProcessTxRequest(AnalyzeTableTxRequest &analyze_req);
+    void ProcessTxRequest(BroadcastStatisticsTxRequest &analyze_req);
     void ProcessTxRequest(ClusterScaleTxRequest &scale_req);
     void ProcessTxRequest(SchemaRecoveryTxRequest &recover_req);
     void ProcessTxRequest(RangeSplitRecoveryTxRequest &recover_req);
@@ -301,6 +303,8 @@ private:
     void PostProcess(CleanCcEntryForTestOp &clean_entry_op);
     void Process(AnalyzeTableAllOp &analyze_table_op);
     void PostProcess(AnalyzeTableAllOp &analyze_table_op);
+    void Process(BroadcastStatisticsOp &broadcast_stat_op);
+    void PostProcess(BroadcastStatisticsOp &broadcast_stat_op);
     void Process(KickoutDataOp &kickout_data_all_op);
     void PostProcess(KickoutDataOp &kickout_data_all_op);
 
@@ -581,6 +585,9 @@ private:
     // analyze table
     AnalyzeTableAllOp analyze_table_all_op_;
 
+    // broadcast statistics
+    BroadcastStatisticsOp broadcast_stat_op_;
+
     // reload acl and cache
     ReloadCacheOperation reload_cache_op_;
 
@@ -628,6 +635,7 @@ private:
     friend struct FlushDataOp;
     friend struct DsSplitOp;
     friend struct AnalyzeTableAllOp;
+    friend struct BroadcastStatisticsOp;
     friend struct KickoutDataOp;
     friend struct ClusterScaleOp;
     friend struct NoOp;

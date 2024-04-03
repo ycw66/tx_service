@@ -4929,6 +4929,53 @@ void AnalyzeTableAllOp::Forward(TransactionExecution *txm)
     }
 }
 
+BroadcastStatisticsOp::BroadcastStatisticsOp(TransactionExecution *txm)
+    : hd_result_(txm)
+{
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void BroadcastStatisticsOp::Reset(uint32_t hres_ref_cnt)
+{
+    hd_result_.Reset();
+    hd_result_.SetRefCnt(hres_ref_cnt);
+}
+
+void BroadcastStatisticsOp::Forward(TransactionExecution *txm)
+{
+    if (!is_running_)
+    {
+        txm->Process(*this);
+        return;
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(600) &&
+             hd_result_.SetResultByTimeoutThread())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeOut",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
+
+        bool force_error = hd_result_.ForceError();
+        if (force_error)
+        {
+            txm->PostProcess(*this);
+        }
+    }
+}
+
 ObjectCommandOp::ObjectCommandOp(
     TransactionExecution *txm,
     CcHandlerResult<ReadKeyResult> *lock_range_result)

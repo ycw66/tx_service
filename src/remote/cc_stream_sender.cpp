@@ -252,6 +252,8 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                     resend_cv_.notify_one();
                 }
             }
+
+            return true;
         }
         else
         {
@@ -272,6 +274,8 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                     res->SetLocalOrRemoteError(
                         CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 }
+
+                return false;
             }
             else
             {
@@ -304,11 +308,15 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                 // or resend messages.
                 to_connect_flag_.store(true, std::memory_order_release);
                 to_connect_cv_.notify_one();
+
+                return true;
             }
         }
     }
-
-    return error_code == 0;
+    else
+    {
+        return true;
+    }
 }
 
 bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
@@ -411,6 +419,8 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                     resend_cv_.notify_one();
                 }
             }
+
+            return true;
         }
         else
         {
@@ -426,6 +436,8 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                     res->SetLocalOrRemoteError(
                         CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 }
+
+                return false;
             }
             else
             {
@@ -453,11 +465,15 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                 // wake up connector thread to reconnect streams
                 to_connect_flag_.store(true, std::memory_order_release);
                 to_connect_cv_.notify_one();
+
+                return true;
             }
         }
     }
-
-    return error_code == 0;
+    else
+    {
+        return true;
+    }
 }
 
 /**

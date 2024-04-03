@@ -528,11 +528,7 @@ public:
 
     StoreSlice *FindSlice(const TxKey &key);
 
-    StoreSlice *FindSlice(size_t idx)
-    {
-        std::shared_lock<std::shared_mutex> s_lk(mux_);
-        return slices_.at(idx).get();
-    }
+    StoreSlice *FindSlice(size_t idx);
 
     void InitSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slice_keys,
                     bool fully_cached = false);
@@ -788,6 +784,24 @@ public:
         slice_ptr_ = rhs.slice_ptr_;
 
         return *this;
+    }
+
+    friend bool operator==(const RangeSliceId &lhs, const RangeSliceId &rhs)
+    {
+        if (&lhs != &rhs)
+        {
+            return lhs.range_ptr_ == rhs.range_ptr_ &&
+                   lhs.slice_ptr_ == rhs.slice_ptr_;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    friend bool operator!=(const RangeSliceId &lhs, const RangeSliceId &rhs)
+    {
+        return !(lhs == rhs);
     }
 
     void Unpin()
