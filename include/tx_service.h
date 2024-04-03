@@ -146,32 +146,8 @@ public:
         }
         else
         {
-            // acquire shard ownership before switching heap since heap
-            // allocation with mimalloc must be thread exclusive.
-#ifdef EXT_TX_PROC_ENABLED
-            mi_heap_t *shard_heap =
-                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap();
-            bool need_switch = mi_heap_get_default() != shard_heap;
-            if (need_switch)
-            {
-                OccupyTxShard();
-                mi_override_thread(local_cc_shards_.GetCcShard(thd_id_)
-                                       ->GetShardHeapThreadId());
-                coordi_->ext_tx_proc_heap_ = mi_heap_set_default(
-                    local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
-            }
-
-#endif
             tx = std::make_unique<TransactionExecution>(
                 cc_hd_.get(), txlog_hd_, this);
-#ifdef EXT_TX_PROC_ENABLED
-            if (need_switch)
-            {
-                mi_heap_set_default(coordi_->ext_tx_proc_heap_);
-                mi_restore_default_thread_id();
-                ReleaseTxShardOwnership();
-            }
-#endif
         }
 
         TransactionExecution *tx_ptr = tx.get();
@@ -221,20 +197,8 @@ public:
         }
         else
         {
-            // acquire shard ownership before switching heap since heap
-            // allocation with mimalloc must be thread exclusive.
-            OccupyTxShard();
-            mi_override_thread(
-                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
-            coordi_->ext_tx_proc_heap_ = mi_heap_set_default(
-                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
             tx = std::make_unique<TransactionExecution>(
                 cc_hd_.get(), txlog_hd_, this, true);
-
-            mi_heap_set_default(coordi_->ext_tx_proc_heap_);
-            mi_restore_default_thread_id();
-            coordi_->ext_tx_proc_heap_ = nullptr;
-            ReleaseTxShardOwnership();
         }
 
         TransactionExecution *tx_ptr = tx.get();
@@ -753,7 +717,10 @@ public:
         mi_heap_set_default(coordi_->ext_tx_proc_heap_);
         mi_restore_default_thread_id();
         coordi_->ext_tx_proc_heap_ = nullptr;
-        ReleaseTxShardOwnership();
+        assert(coordi_->shard_status_.load(std::memory_order_relaxed) ==
+               TxShardStatus::Occupied);
+        coordi_->shard_status_.store(TxShardStatus::Free,
+                                     std::memory_order_release);
         return true;
     }
 
@@ -795,32 +762,6 @@ public:
             tx_it.first->second.cmd_id_ = cmd_id;
             tx_it.first->second.wait_clock_ts_ = clock_ts;
         }
-    }
-
-    void OccupyTxShard()
-    {
-        TxShardStatus expected = TxShardStatus::Free;
-        while (!coordi_->shard_status_.compare_exchange_weak(
-            expected, TxShardStatus::Occupied, std::memory_order_acquire))
-        {
-            // Issue X86 PAUSE or ARM YIELD instruction to
-            // reduce contention
-            // between hyper-threads
-            expected = TxShardStatus::Free;
-#if defined(__x86_64__)
-            __builtin_ia32_pause();
-#elif defined(__aarch64__)
-            __asm__ __volatile__("yield");
-#endif
-        }
-    }
-
-    void ReleaseTxShardOwnership()
-    {
-        assert(coordi_->shard_status_.load(std::memory_order_relaxed) ==
-               TxShardStatus::Occupied);
-        coordi_->shard_status_.store(TxShardStatus::Free,
-                                     std::memory_order_release);
     }
 #endif
 
