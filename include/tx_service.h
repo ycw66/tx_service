@@ -128,15 +128,7 @@ public:
         coordi_ = std::make_shared<TxProcCoordinator>();
     }
 
-    ~TxProcessor()
-    {
-        TxShardStatus expected = TxShardStatus::Free;
-        while (!coordi_->shard_status_.compare_exchange_weak(
-            expected, TxShardStatus::Deconstructed, std::memory_order_acq_rel))
-        {
-            expected = TxShardStatus::Free;
-        }
-    }
+    ~TxProcessor() = default;
 
     metrics::Meter *GetMeter()
     {
@@ -618,6 +610,13 @@ public:
 
     void Terminate()
     {
+        TxShardStatus expected = TxShardStatus::Free;
+        while (!coordi_->shard_status_.compare_exchange_weak(
+            expected, TxShardStatus::Deconstructed, std::memory_order_acq_rel))
+        {
+            expected = TxShardStatus::Free;
+        }
+
         // decrease use_count of share pointer to TableSchema
         cc_hd_ = nullptr;
 

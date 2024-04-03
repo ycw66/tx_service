@@ -1460,8 +1460,6 @@ private:
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
 
-    thread_local static CcRequestPool<BroadcastStatisticsCc>
-        broadcast_stat_cc_pool_;
     WorkerThreadContext statistics_worker_ctx_;
     void SyncTableStatisticsWorker();
     /**

@@ -127,11 +127,14 @@ public:
         assert(sample_pool.Capacity() == sample_pool_.Capacity());
         sample_pool_ = std::move(sample_pool);
 
-        auto lk_vec = statistics_->UniqueLockSamplePoolsExcept(
-            *table_or_index_name_, ng_id_);
-        statistics_->RebuildDistribution(*table_or_index_name_, key_schema);
-
-        ClearUpserts();
+        std::vector<std::unique_lock<std::mutex>> lk_others =
+            statistics_->TryLockSamplePoolsBesides(*table_or_index_name_,
+                                                   ng_id_);
+        if (AllLocked(lk_others))
+        {
+            statistics_->RebuildDistribution(*table_or_index_name_, key_schema);
+            ClearUpserts();
+        }
     }
 
     void OnInsert(const CcShard &ccs,
@@ -187,11 +190,15 @@ public:
                     records_.load(std::memory_order_acquire),
                     upserts_.load(std::memory_order_acquire)))
             {
-                auto lk_vec = statistics_->UniqueLockSamplePoolsExcept(
-                    *table_or_index_name_, ng_id_);
-                statistics_->RebuildDistribution(*table_or_index_name_,
-                                                 key_schema);
-                ClearUpserts();
+                std::vector<std::unique_lock<std::mutex>> lk_others =
+                    statistics_->TryLockSamplePoolsBesides(
+                        *table_or_index_name_, ng_id_);
+                if (AllLocked(lk_others))
+                {
+                    statistics_->RebuildDistribution(*table_or_index_name_,
+                                                     key_schema);
+                    ClearUpserts();
+                }
             }
         }
     }
@@ -255,11 +262,15 @@ public:
                         records_.load(std::memory_order_acquire),
                         upserts_.load(std::memory_order_acquire)))
                 {
-                    auto lk_vec = statistics_->UniqueLockSamplePoolsExcept(
-                        *table_or_index_name_, ng_id_);
-                    statistics_->RebuildDistribution(*table_or_index_name_,
-                                                     key_schema);
-                    ClearUpserts();
+                    std::vector<std::unique_lock<std::mutex>> lk_others =
+                        statistics_->TryLockSamplePoolsBesides(
+                            *table_or_index_name_, ng_id_);
+                    if (AllLocked(lk_others))
+                    {
+                        statistics_->RebuildDistribution(*table_or_index_name_,
+                                                         key_schema);
+                        ClearUpserts();
+                    }
                 }
             }
         }
@@ -287,9 +298,14 @@ public:
         return std::make_pair(std::move(lk), &sample_pool_.SampleKeys());
     }
 
-    std::unique_lock<std::mutex> UniqueLock()
+    std::unique_lock<std::mutex> Lock()
     {
         return std::unique_lock(sample_pool_mux_);
+    }
+
+    std::unique_lock<std::mutex> TryLock()
+    {
+        return std::unique_lock(sample_pool_mux_, std::try_to_lock);
     }
 
     const std::vector<KeyT> &SampleKeys() const
@@ -447,6 +463,15 @@ private:
     static bool NeedRebuildDistribution(int64_t records, int64_t upserts)
     {
         return upserts > records / 16;
+    }
+
+    static bool AllLocked(
+        const std::vector<std::unique_lock<std::mutex>> &lk_vec)
+    {
+        return std::all_of(lk_vec.begin(),
+                           lk_vec.end(),
+                           [](const std::unique_lock<std::mutex> &lk)
+                           { return lk.owns_lock(); });
     }
 
     // For small tables, do sampling/record on all cc_shards.
@@ -810,7 +835,7 @@ public:
             ng_id,
             TemplateCcMapSamplePool<KeyT>(&it->first, ng_id, param, this));
 
-        auto lk_vec = UniqueLockSamplePools(table_or_index_name);
+        auto lk_vec = LockSamplePools(table_or_index_name);
         RebuildDistribution(table_or_index_name, key_schema);
 
         SetUpdatedSinceSync();
@@ -969,7 +994,7 @@ public:
         SetUpdatedSinceSync();
     }
 
-    std::vector<std::unique_lock<std::mutex>> UniqueLockSamplePools(
+    std::vector<std::unique_lock<std::mutex>> LockSamplePools(
         const TableName &table_or_index_name)
     {
         NodeGroupSamplePoolMap &ng_sample_pool_map =
@@ -980,13 +1005,15 @@ public:
 
         for (auto &[ng_id, ccmap_sample_pool] : ng_sample_pool_map)
         {
-            lk_vec.emplace_back(ng_sample_pool_map.at(ng_id).UniqueLock());
+            lk_vec.emplace_back(ng_sample_pool_map.at(ng_id).Lock());
         }
 
         return lk_vec;
     }
 
-    std::vector<std::unique_lock<std::mutex>> UniqueLockSamplePoolsExcept(
+    // Assumes tx_processor already holds lock on exclude_ng_id. It will try
+    // to acquire lock on other ng. Call try_lock to avoid deadlock.
+    std::vector<std::unique_lock<std::mutex>> TryLockSamplePoolsBesides(
         const TableName &table_or_index_name, NodeGroupId exclude_ng_id)
     {
         NodeGroupSamplePoolMap &ng_sample_pool_map =
@@ -999,7 +1026,7 @@ public:
         {
             if (ng_id != exclude_ng_id)
             {
-                lk_vec.emplace_back(ng_sample_pool_map.at(ng_id).UniqueLock());
+                lk_vec.emplace_back(ng_sample_pool_map.at(ng_id).TryLock());
             }
         }
 

@@ -28,8 +28,6 @@
 namespace txservice
 {
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
-thread_local CcRequestPool<BroadcastStatisticsCc>
-    LocalCcShards::broadcast_stat_cc_pool_;
 
 LocalCcShards::LocalCcShards(
     uint32_t node_id,
