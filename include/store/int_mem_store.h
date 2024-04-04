@@ -191,10 +191,7 @@ public:
         const txservice::Schema *key_schema,
         const txservice::Schema *rec_schema,
         const txservice::KVCatalogInfo *kv_info,
-        bool scan_foward,
-        bool full_column_scan = true,
-        const std::unordered_set<std::string_view> *scan_columns_name =
-            nullptr) override
+        bool scan_foward) override
     {
         assert(false);
         return nullptr;

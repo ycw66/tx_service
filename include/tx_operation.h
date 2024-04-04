@@ -45,12 +45,6 @@ enum class TxLogType
     CLEAN
 };
 
-void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
-                                 TableWriteSet &table_write_set,
-                                 TableWriteSet::iterator &write_key_it,
-                                 const TableWriteSet::iterator &write_key_end,
-                                 ReadWriteSet &rw_set);
-
 struct TransactionOperation
 {
     TransactionOperation()

@@ -27,86 +27,6 @@
 
 namespace txservice
 {
-void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
-                                 TableWriteSet &table_write_set,
-                                 TableWriteSet::iterator &write_key_it,
-                                 const TableWriteSet::iterator &write_key_end,
-                                 ReadWriteSet &rw_set)
-{
-    // Advances the write key iterator such that it points to the first key
-    // belonging to the next range.
-    const TxKey *range_end_key = range_record.GetRangeInfo()->EndKey();
-    auto next_range_start = write_key_it;
-    if (range_end_key == nullptr ||
-        range_end_key->Type() == KeyType::PositiveInf)
-    {
-        next_range_start = write_key_end;
-    }
-    else
-    {
-        next_range_start = table_write_set.lower_bound(range_end_key);
-    }
-
-    NodeGroupId range_ng = range_record.GetRangeOwnerNg()->BucketOwner();
-    NodeGroupId new_bucket_ng =
-        range_record.GetRangeOwnerNg()->DirtyBucketOwner();
-
-    const std::vector<const BucketInfo *> *splitting_range_ngs =
-        range_record.GetNewRangeOwnerNgs();
-
-    // Updates the sharding codes of the write-set keys belonging to this
-    // range. The higher 22 bits represent the range ID.
-    NodeGroupId new_range_ng = UINT32_MAX;
-    NodeGroupId new_range_new_bucket_ng = UINT32_MAX;
-    size_t new_range_idx = 0;
-
-    auto *range_info = range_record.GetRangeInfo();
-    while (write_key_it != next_range_start)
-    {
-        WriteSetEntry &write_entry = write_key_it->second;
-        size_t hash = write_entry.key_->Hash();
-        write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
-        // If current range is migrating, forward to new range owner.
-        if (new_bucket_ng != UINT32_MAX)
-        {
-            write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
-                                                  (hash & 0x3FF));
-        }
-
-        // If range is splitting and the key will fall on a new range after
-        // split is finished, register forward_addr_ to indicate
-        // entry needs to be double written.
-        while (range_info->IsDirty() &&
-               new_range_idx < range_info->NewKey()->size() &&
-               !(*write_entry.key_ < *range_info->NewKey()->at(new_range_idx)))
-        {
-            new_range_ng =
-                splitting_range_ngs->at(new_range_idx)->BucketOwner();
-            new_range_new_bucket_ng =
-                splitting_range_ngs->at(new_range_idx++)->DirtyBucketOwner();
-        }
-        if (new_range_ng != UINT32_MAX)
-        {
-            if (new_range_ng != range_ng)
-            {
-                write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
-                                                      (hash & 0x3FF));
-            }
-            // If the new range is migrating, forward to the new owner of new
-            // range.
-            if (new_range_new_bucket_ng != UINT32_MAX &&
-                new_range_new_bucket_ng != range_ng)
-            {
-                write_entry.forward_addr_.try_emplace(
-                    (new_range_new_bucket_ng << 10) | (hash & 0x3FF));
-            }
-        }
-
-        rw_set.IncreaseFowardWriteCnt(write_entry.forward_addr_.size());
-        ++write_key_it;
-    }
-}
-
 class AbortReason
 {
 public:
@@ -668,11 +588,79 @@ void LockWriteRangesOp::Forward(TransactionExecution *txm)
 void LockWriteRangesOp::Advance(TransactionExecution *txm)
 {
 #ifdef RANGE_PARTITION_ENABLED
-    AdvanceWriteKeyForRangeInfo(txm->range_rec_,
-                                table_it_->second,
-                                write_key_it_,
-                                write_key_end_,
-                                txm->rw_set_);
+    // Advances the write key iterator such that it points to the first key
+    // belonging to the next range.
+    const TxKey *range_end_key = txm->range_rec_.GetRangeInfo()->EndKey();
+    auto next_range_start = write_key_it_;
+    if (range_end_key == nullptr ||
+        range_end_key->Type() == KeyType::PositiveInf)
+    {
+        next_range_start = write_key_end_;
+    }
+    else
+    {
+        TableWriteSet &table_write_set = table_it_->second;
+        next_range_start = table_write_set.lower_bound(range_end_key);
+    }
+
+    NodeGroupId range_ng = txm->range_rec_.GetRangeOwnerNg()->BucketOwner();
+    NodeGroupId new_bucket_ng =
+        txm->range_rec_.GetRangeOwnerNg()->DirtyBucketOwner();
+
+    const std::vector<const BucketInfo *> *splitting_range_ngs =
+        txm->range_rec_.GetNewRangeOwnerNgs();
+
+    // Updates the sharding codes of the write-set keys belonging to this
+    // range. The higher 22 bits represent the range ID.
+    NodeGroupId new_range_ng = UINT32_MAX;
+    NodeGroupId new_range_new_bucket_ng = UINT32_MAX;
+    size_t new_range_idx = 0;
+
+    auto *range_info = txm->range_rec_.GetRangeInfo();
+    while (write_key_it_ != next_range_start)
+    {
+        WriteSetEntry &write_entry = write_key_it_->second;
+        size_t hash = write_entry.key_->Hash();
+        write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
+        // If current range is migrating, forward to new range owner.
+        if (new_bucket_ng != UINT32_MAX)
+        {
+            write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
+                                                  (hash & 0x3FF));
+        }
+
+        // If range is splitting and the key will fall on a new range after
+        // split is finished, register forward_addr_ to indicate
+        // entry needs to be double written.
+        while (range_info->IsDirty() &&
+               new_range_idx < range_info->NewKey()->size() &&
+               !(*write_entry.key_ < *range_info->NewKey()->at(new_range_idx)))
+        {
+            new_range_ng =
+                splitting_range_ngs->at(new_range_idx)->BucketOwner();
+            new_range_new_bucket_ng =
+                splitting_range_ngs->at(new_range_idx++)->DirtyBucketOwner();
+        }
+        if (new_range_ng != UINT32_MAX)
+        {
+            if (new_range_ng != range_ng)
+            {
+                write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
+                                                      (hash & 0x3FF));
+            }
+            // If the new range is migrating, forward to the new owner of new
+            // range.
+            if (new_range_new_bucket_ng != UINT32_MAX &&
+                new_range_new_bucket_ng != range_ng)
+            {
+                write_entry.forward_addr_.try_emplace(
+                    (new_range_new_bucket_ng << 10) | (hash & 0x3FF));
+            }
+        }
+
+        txm->rw_set_.IncreaseFowardWriteCnt(write_entry.forward_addr_.size());
+        ++write_key_it_;
+    }
 
     if (write_key_it_ == write_key_end_)
     {

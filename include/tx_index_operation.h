@@ -82,44 +82,6 @@ struct UpsertTableIndexOp : public SchemaOp
      * binary representation of the catalog in the data store.
      */
     DsUpsertTableOp upsert_kv_table_op_;
-#ifndef RANGE_PARTITION_ENABLED
-    /**
-     * @brief Flush the old tuples whose commit timestamp less than the new
-     * table schema's version of the base table ccmap on all nodes into data
-     * store. Consist of scan, flush.
-     */
-    AsyncOp<Void> flush_all_old_tuples_pk_op_;
-    /**
-     * @brief Generate index data for old tuples, and upload them to sk ccmap.
-     * Consist of fetching from data store, constructing packed index data, and
-     * upload to the sk ccmap.
-     *
-     * NOTE: Store the expected node group term into result value, using it to
-     * check whether has failover during upload sk and flush sk operation.
-     */
-    AsyncOp<Void> fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
-    /**
-     * @brief Flush the index data of the old tuples into data store, and kick
-     * out them from the memory. Consist of scan, flush.
-     *
-     * NOTE: table_name is the index table name.
-     * NOTE: Currently, because of no data log during the operation of
-     * @@fetch_old_tuples_from_kv_gen_sk_data_upload_op_, should re-execute from
-     * the former stage if leader-transfer happened during this step.
-     */
-    AsyncOp<Void> flush_all_old_tuples_sk_op_;
-    /**
-     * @brief Kickout the old packed sk tuples from sk ccmap that new created.
-     */
-    KickoutDataAllOp kickout_data_all_op_;
-    /**
-     * @brief Flushes the log to the log service. This log confirms that the
-     * index data operation of the old tuples succeeds. In term of recovery,
-     * this log ensure that write intent is hold before this log, rather than
-     * write lock which will block checkpointer(acquire read lock).
-     */
-    WriteToLogOp prepare_log_for_sk_op_;
-#else
     /**
      * @brief Generate sk record from pk record parallelly. The parallel
      * granularity of the operation is range.
@@ -139,7 +101,6 @@ struct UpsertTableIndexOp : public SchemaOp
      * write lock which will block checkpointer(acquire read lock).
      */
     WriteToLogOp prepare_log_for_sk_op_;
-#endif
     /**
      * @brief Upgrades acquired write intents to write locks in all nodes.
      */
@@ -185,50 +146,8 @@ private:
                                 bool is_dirty,
                                 CcHandlerResult<Void> &hres,
                                 int64_t ng_term = INIT_TERM);
-
-    // Acquire and release range read lock.
-    bool AcquireRangeReadLocks(TransactionExecution *acquire_lock_txm,
-                               ReadWriteSet &rw_set);
-    void ReleaseRangeReadLocks(TransactionExecution *acquire_lock_txm,
-                               bool is_success);
-    // Acquire and reset node group leader term
+    // Reset node group leader term
     void ResetLeaderTerms();
-    CcErrorCode AcquireLeaderTermsIfNecessary(TransactionExecution *txm);
-    void AcquireNodeGroupLeaderTerm(NodeGroupId ng_id,
-                                    std::mutex &request_mux,
-                                    std::condition_variable &request_cv,
-                                    uint32_t &finished_req_cnt,
-                                    CcErrorCode &request_res);
-
-    // Upload sk record from local write set into sk ccmap
-    void UploadRecord(TxNumber tx_number,
-                      int64_t tx_term,
-                      uint16_t command_id,
-                      uint64_t commit_ts,
-                      const TableName &table_name,
-                      const TxKey *key,
-                      const TxRecord *record,
-                      OperationType operation_type,
-                      uint32_t key_shard_code,
-                      CcHandlerResult<PostProcessResult> &hres,
-                      int64_t expected_term);
-    void UploadSkData(TransactionExecution *txm, ReadWriteSet &rw_set);
-    bool UploadWithoutDataLog(TransactionExecution *upload_txm);
-    // Scan pk from data store
-    std::unique_ptr<store::DataStoreScanner> PrepareScanFromDataStore(
-        const TableName &table_name,
-        const TableSchema *table_schema,
-        NodeGroupId ng_id,
-        uint64_t commit_ts);
-    void ScanNextFromDataStore(store::DataStoreScanner *ds_scanner,
-                               bool &is_first_scan,
-                               const TxKey *&target_key,
-                               const TxRecord *&target_rec);
-    void FinishScanFromDataStore(
-        std::unique_ptr<store::DataStoreScanner> &ds_scanner);
-
-    void FetchTuplesAndUploadPackedKey(TransactionExecution *txm);
-
     bool NeedTriggerFlushSkOp()
     {
         return (scanned_pk_range_count_ % 60 == 0) ||
@@ -262,51 +181,6 @@ private:
                            size_t batch_range_cnt,
                            uint32_t &actual_task_cnt)> &dispatch_func);
 
-    void UpdateBatchRangeSize()
-    {
-        uint8_t new_batch_size = scan_batch_range_size_ * 0.8;
-        scan_batch_range_size_ = new_batch_size > 1 ? new_batch_size : 1;
-    }
-
-#if WITH_KV_STORAGE != KV_CASS
-    // Scan pk from ccmap
-    bool PrepareScanFromCcMap(const TableName &table_name,
-                              size_t &scan_alias,
-                              TransactionExecution *&scan_txm);
-    bool ScanNextFromCcMap(TransactionExecution *scan_txm,
-                           const TableName &table_name,
-                           const size_t &scan_alias,
-                           uint64_t commit_ts,
-                           std::vector<ScanBatchTuple> &scan_batch,
-                           size_t &scan_batch_idx,
-                           bool &is_last_scan_batch,
-                           const TxKey *&target_key,
-                           const TxRecord *&target_rec);
-    void FinishScanFromCcMap(TransactionExecution *scan_txm,
-                             const TableName &table_name,
-                             const size_t &scan_alias,
-                             std::vector<ScanBatchTuple> &scan_batch,
-                             bool is_success);
-
-    uint8_t PrefetchSize()
-    {
-        std::array<uint32_t, 5> boundaries = {1, 4, 16, 64, 256};
-
-        size_t idx = 0;
-        for (; idx < boundaries.size(); ++idx)
-        {
-            if (scan_batch_cnt_ < boundaries[idx])
-            {
-                break;
-            }
-        }
-
-        return idx < boundaries.size() ? boundaries[idx] - 1 : 255;
-    }
-
-    uint8_t scan_batch_cnt_;
-#endif
-
     // This variable have two roles:
     // 1) deserialize as AlterTableInfo object. 2) save into log.
     std::string alter_table_info_image_str_{""};
@@ -314,13 +188,10 @@ private:
 
     // Store the node group leader terms after acquired them.
     std::vector<int64_t> leader_terms_;
-    CcHandlerResult<PostProcessResult> post_write_result_;
 
     // Due to term or other error, called ForceToFinish to terminate this
     // operation
     bool is_force_finished_{false};
-
-    CcRequestPool<PostWriteCc> upload_pool_;
 
 #ifdef NDEBUG
     uint8_t scan_batch_range_size_{10};
