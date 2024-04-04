@@ -127,15 +127,11 @@ void SkGenerator::GenerateSkFromPk(const TxKey *start_key,
     acq_range_lock_txm->CommitTx(commit_req);
 
     {
-        std::unique_lock<std::mutex> task_lk(upload_batch_worker_ctx_.mux_);
-        // Wait until no pending task or upload error.
-        upload_batch_worker_ctx_.cv_.wait(
-            task_lk,
-            [this]()
-            {
-                return pending_upload_task_size_ == 0 ||
-                       upload_task_result_ != CcErrorCode::NO_ERROR;
-            });
+        std::unique_lock<std::mutex> upload_sender_lk(upload_sender_mux_);
+        // Wait until no ongoing task.
+        upload_sender_cv_.wait(upload_sender_lk,
+                               [this]()
+                               { return ongoing_upload_task_size_ == 0; });
     }
     defer_unpin.reset();
     LOG(INFO) << "GenerateSkFromPk: Finished generate sk from range#"
@@ -298,15 +294,11 @@ void SkGenerator::RemoteGenerateSkFromPk(
     acq_range_lock_txm->CommitTx(commit_req);
 
     {
-        std::unique_lock<std::mutex> task_lk(upload_batch_worker_ctx_.mux_);
-        // Wait until no pending task or upload error.
-        upload_batch_worker_ctx_.cv_.wait(
-            task_lk,
-            [this]()
-            {
-                return pending_upload_task_size_ == 0 ||
-                       upload_task_result_ != CcErrorCode::NO_ERROR;
-            });
+        std::unique_lock<std::mutex> upload_sender_lk(upload_sender_mux_);
+        // Wait until no ongoing task.
+        upload_sender_cv_.wait(upload_sender_lk,
+                               [this]()
+                               { return ongoing_upload_task_size_ == 0; });
     }
     defer_unpin.reset();
     LOG(INFO) << "RemoteGenerateSkFromPk: Finished generate sk from range#"
@@ -352,6 +344,7 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
 #endif
     );
 
+    CcErrorCode scan_res = CcErrorCode::NO_ERROR;
     bool scan_data_drained = false;
     bool scan_pk_finished = false;
     std::vector<TxKey::Uptr> last_finished_pos;
@@ -383,17 +376,18 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
 
         if (scan_req.IsError())
         {
-            auto scan_res = scan_req.ErrorCode();
+            scan_res = scan_req.ErrorCode();
             LOG(ERROR)
                 << "ScanPkAndGenerateSk: Scan pk records failed on range#"
                 << partition_id_
                 << " for base table: " << base_table_name_.StringView()
                 << " of ng#" << node_group_id_
                 << " with error: " << CcErrorMessage(scan_res);
-            if (scan_res == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+            if (scan_res == CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+                scan_res == CcErrorCode::NG_TERM_CHANGED)
             {
                 sk_encoder_vec.clear();
-                return scan_res;
+                break;
             }
             else if (scan_res == CcErrorCode::OUT_OF_MEMORY ||
                      scan_res == CcErrorCode::DATA_STORE_ERR)
@@ -432,7 +426,7 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
 
         scan_data_drained = true;
 
-        std::unique_lock<std::mutex> task_lk(upload_batch_worker_ctx_.mux_);
+        std::unique_lock<std::mutex> upload_sender_lk(upload_sender_mux_);
         if (ongoing_upload_task_size_ == SkGenerator::UploadBatchWorkerSize)
         {
             LOG(WARNING) << "ScanPkAndGenerateSk: Waitting the idle upload "
@@ -440,13 +434,16 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                          << " for table: " << base_table_name_.Trace()
                          << " of ng#" << node_group_id_;
             // Wait until get free task slot.
-            upload_batch_worker_ctx_.cv_.wait(
-                task_lk,
+            upload_sender_cv_.wait(
+                upload_sender_lk,
                 [this]() {
                     return ongoing_upload_task_size_ <
                            SkGenerator::UploadBatchWorkerSize;
                 });
         }
+        upload_sender_lk.unlock();
+
+        std::unique_lock<std::mutex> task_lk(upload_batch_worker_ctx_.mux_);
         uint8_t free_task_slot =
             upload_task_head_ == UINT8_MAX
                 ? 0
@@ -586,14 +583,30 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
             }
 
             task_lk.lock();
-            scan_pk_finished = scan_pk_finished ||
-                               upload_task_result_ != CcErrorCode::NO_ERROR;
             new_upload_task.task_status_ = UploadTaskStatus::Pending;
             upload_task_head_ = free_task_slot;
             ++pending_upload_task_size_;
             upload_batch_worker_ctx_.cv_.notify_one();
             task_lk.unlock();
         }
+
+        upload_sender_lk.lock();
+        scan_pk_finished =
+            scan_pk_finished || upload_task_result_ != CcErrorCode::NO_ERROR;
+        if (scan_pk_finished && !scan_data_drained)
+        {
+            LOG(ERROR) << "ScanPkAndGenerateSk: Terminate scan on range#"
+                       << partition_id_
+                       << " for table: " << base_table_name_.Trace() << "of ng#"
+                       << node_group_id_ << " caused by upload task failed."
+                       << static_cast<uint32_t>(upload_task_result_);
+            scan_req.UnpinSlices();
+            scan_res = upload_task_result_;
+            assert(upload_task_result_ == CcErrorCode::TX_NODE_NOT_LEADER ||
+                   upload_task_result_ ==
+                       CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        }
+        upload_sender_lk.unlock();
     } while (!scan_pk_finished);
 
     sk_encoder_vec.clear();
@@ -601,7 +614,7 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                << partition_id_ << " for table:" << base_table_name_.Trace()
                << " of ng#" << node_group_id_
                << " with pk tuples: " << scanned_pk_count;
-    return CcErrorCode::NO_ERROR;
+    return scan_res;
 }
 
 CcErrorCode SkGenerator::UploadWithoutDataLog(
@@ -1047,18 +1060,23 @@ void SkGenerator::UploadBatchWorker()
         {
             continue;
         }
-        if (upload_task_result_ != CcErrorCode::NO_ERROR)
-        {
-            break;
-        }
 
         auto &upload_task = upload_batch_queue_.at(upload_task_head_);
         if (upload_task.task_status_ == UploadTaskStatus::Pending)
         {
             upload_task.task_status_ = UploadTaskStatus::Ongoing;
             --pending_upload_task_size_;
-            ++ongoing_upload_task_size_;
             worker_lk.unlock();
+
+            {
+                std::unique_lock<std::mutex> upload_sender_lk(
+                    upload_sender_mux_);
+                if (upload_task_result_ != CcErrorCode::NO_ERROR)
+                {
+                    break;
+                }
+                ++ongoing_upload_task_size_;
+            }
         }
         else
         {
@@ -1088,7 +1106,8 @@ void SkGenerator::UploadBatchWorker()
         {
             res_code = UploadWithoutDataLog(upload_task, upload_req_pool);
             if (res_code == CcErrorCode::TX_NODE_NOT_LEADER ||
-                res_code == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                res_code == CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+                res_code == CcErrorCode::NG_TERM_CHANGED)
             {
                 LOG(ERROR) << "Upload this batch sk records failed of ng#"
                            << node_group_id_
@@ -1148,26 +1167,26 @@ void SkGenerator::UploadBatchWorker()
 
         worker_lk.lock();
         upload_task.task_status_ = UploadTaskStatus::Free;
-        --ongoing_upload_task_size_;
-        upload_task_result_ = (upload_task_result_ == CcErrorCode::NO_ERROR
-                                   ? res_code
-                                   : upload_task_result_);
-        upload_batch_worker_ctx_.cv_.notify_one();
+
+        {
+            std::unique_lock<std::mutex> upload_sender_lk(upload_sender_mux_);
+            --ongoing_upload_task_size_;
+            upload_task_result_ = (upload_task_result_ == CcErrorCode::NO_ERROR
+                                       ? res_code
+                                       : upload_task_result_);
+            upload_sender_cv_.notify_one();
+        }
         if (res_code != CcErrorCode::NO_ERROR)
         {
             assert(res_code == CcErrorCode::TX_NODE_NOT_LEADER ||
-                   res_code == CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                   res_code == CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+                   res_code == CcErrorCode::NG_TERM_CHANGED);
             break;
         }
     }
-    DLOG(INFO) << "Finish upload worker for range#" << partition_id_
-               << " with pending upload task size: "
-               << static_cast<uint32_t>(pending_upload_task_size_)
-               << " and upload task result: "
-               << static_cast<uint32_t>(upload_task_result_);
-    assert(pending_upload_task_size_ == 0 ||
-           upload_task_result_ != CcErrorCode::NO_ERROR);
     worker_lk.unlock();
+    DLOG(INFO) << "Finish upload worker for range#" << partition_id_
+               << " of ng#" << node_group_id_;
     for (size_t i = 0; i < upload_req_pool.size();)
     {
         if (upload_req_pool[i]->InUse())

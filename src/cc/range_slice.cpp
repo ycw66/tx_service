@@ -1079,10 +1079,10 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         // processors who will process the fill slice cc request. Hence,
         // loading slice into memory cannot complete at this point.
 
-        slice.last_load_ts_ = LocalCcShards::ClockTs();
         switch (kv_load_status)
         {
         case store::DataStoreHandler::LoadRangeSliceStatus::Success:
+            slice.last_load_ts_ = LocalCcShards::ClockTs();
             return LoadSliceStatus::Success;
         case store::DataStoreHandler::LoadRangeSliceStatus::Retry:
             // Put the ccrequests back to txprocessor queue except the first

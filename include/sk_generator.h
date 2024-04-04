@@ -126,8 +126,10 @@ private:
     WorkerThreadContext upload_batch_worker_ctx_{UploadBatchWorkerSize};
     std::array<UploadBatchTask, UploadBatchWorkerSize> upload_batch_queue_;
     uint8_t pending_upload_task_size_{0};
-    uint8_t ongoing_upload_task_size_{0};
     uint8_t upload_task_head_{UINT8_MAX};
+    std::mutex upload_sender_mux_;
+    std::condition_variable upload_sender_cv_;
+    uint8_t ongoing_upload_task_size_{0};
     CcErrorCode upload_task_result_{CcErrorCode::NO_ERROR};
     size_t scan_batch_size_{LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE};
     // Store the node group leader terms after acquired them.

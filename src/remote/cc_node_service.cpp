@@ -933,6 +933,7 @@ void CcNodeService::UploadBatch(
     bthread::ConditionVariable req_cv;
 
     UploadBatchCc req;
+    req.Use();
     req.Reset(table_name,
               ng_id,
               ng_term,

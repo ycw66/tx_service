@@ -2838,14 +2838,7 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
             if (export_base_table_rec_if_need_)
             {
-                for (size_t i = 0; i < slice_ids_.size(); ++i)
-                {
-                    if (slice_ids_[i].Slice() != nullptr)
-                    {
-                        slice_ids_[i].Unpin();
-                        slice_ids_[i].Reset();
-                    }
-                }
+                UnpinSlices();
             }
 #endif
             cv_.notify_one();
@@ -2863,14 +2856,7 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
             if (export_base_table_rec_if_need_)
             {
-                for (size_t i = 0; i < slice_ids_.size(); ++i)
-                {
-                    if (slice_ids_[i].Slice() != nullptr)
-                    {
-                        slice_ids_[i].Unpin();
-                        slice_ids_[i].Reset();
-                    }
-                }
+                UnpinSlices();
             }
 #endif
             cv_.notify_one();
@@ -2898,14 +2884,7 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
             if (err_ != CcErrorCode::NO_ERROR && export_base_table_rec_if_need_)
             {
-                for (size_t i = 0; i < slice_ids_.size(); ++i)
-                {
-                    if (slice_ids_[i].Slice() != nullptr)
-                    {
-                        slice_ids_[i].Unpin();
-                        slice_ids_[i].Reset();
-                    }
-                }
+                UnpinSlices();
             }
 #endif
             cv_.notify_one();
@@ -2935,6 +2914,20 @@ public:
     int64_t NodeGroupTerm() const
     {
         return node_group_term_;
+    }
+
+    void UnpinSlices()
+    {
+#ifdef RANGE_PARTITION_ENABLED
+        for (size_t i = 0; i < slice_ids_.size(); ++i)
+        {
+            if (slice_ids_[i].Slice() != nullptr)
+            {
+                slice_ids_[i].Unpin();
+                slice_ids_[i].Reset();
+            }
+        }
+#endif
     }
 
     std::vector<size_t> accumulated_scan_cnt_;
