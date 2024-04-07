@@ -822,8 +822,7 @@ void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
 void TransactionExecution::ProcessTxRequest(MultiObjectCommandTxRequest &req)
 {
     vct_rec_resp_ = &req.tx_result_;
-    multi_obj_cmd_.Reset(
-        req.table_name_, req.VctKey(), req.VctCommand(), false);
+    multi_obj_cmd_.Reset(&req);
 
     PushOperation(&multi_obj_cmd_);
     Process(multi_obj_cmd_);
@@ -5397,6 +5396,8 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
         uint64_t commit_ts = cmd_result.commit_ts_;
 
+        assert(obj_status != RecordStatus::Unknown);
+        bool version_changed = false;
         if (lock_acquired == LockType::WriteLock)
         {
             // The command modifies the object. Put it into the command set
@@ -5422,10 +5423,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                     << "set rset_has_expired_, txn: " << TxNumber()
                     << "; read_version: " << read_version
                     << "; cmd_result.commit_ts_: " << cmd_result.commit_ts_;
-                rec_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
-                rec_resp_ = nullptr;
-
-                return;
+                version_changed = true;
             }
         }
         else if (lock_acquired != LockType::NoLock &&
@@ -5433,35 +5431,24 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         {
             // Read lock is acquired under locking protocol. Add the cce to
             // read set for later PostRead.
-            bool add_res;
-            if (obj_status == RecordStatus::Unknown)
-            {
-                // Only used to release lock.
-                add_res = rw_set_.AddRead(cce_addr, 0, table_name);
-            }
-            else
-            {
-                add_res = rw_set_.AddRead(cce_addr, commit_ts, table_name);
-            }
+            bool add_res = rw_set_.AddRead(cce_addr, commit_ts, table_name);
             if (!add_res)
             {
                 // Add read set fail, there is at least two unmatched read. This
                 // can't be autocommit request.
                 assert(!obj_cmd_op.auto_commit_);
-                rec_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
-                rec_resp_ = nullptr;
-                return;
+                version_changed = true;
             }
         }
 
-        if (obj_status == RecordStatus::Unknown)
+        if (version_changed)
         {
-            // If obj_status == RecordStatus::Unknown, means the object is not
-            // in memory, it will finish this request and rerun it soon. It will
-            // be reload after refill the data read from cassandra.
-            cache_miss_read_cce_addr_ = cmd_result.cce_addr_;
-            rec_resp_->Finish(obj_status);
+            rec_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
             rec_resp_ = nullptr;
+            if (obj_cmd_op.auto_commit_)
+            {
+                Abort();
+            }
             return;
         }
 
@@ -5496,19 +5483,21 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
 
 void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 {
+    MultiObjectCommandTxRequest *req = obj_cmd_op.tx_req_;
+    const std::vector<const TxKey *> *vct_key = req->VctKey();
+    const std::vector<TxCommand *> *vct_cmd = req->VctCommand();
 #ifdef RANGE_PARTITION_ENABLED
-    while (obj_cmd_op.range_lock_cur_ < obj_cmd_op.vct_key_->size())
+    while (obj_cmd_op.range_lock_cur_ < vct_key->size())
     {
         obj_cmd_op.is_running_ = false;
         lock_range_result_.Value().Reset();
         lock_range_result_.Reset();
 
-        lock_range_op_.Reset(
-            TableName(obj_cmd_op.table_name_->StringView(),
-                      TableType::RangePartition),
-            obj_cmd_op.vct_key_->at(obj_cmd_op.range_lock_cur_),
-            &range_rec_,
-            &lock_range_result_);
+        lock_range_op_.Reset(TableName(req->table_name_->StringView(),
+                                       TableType::RangePartition),
+                             vct_key->at(obj_cmd_op.range_lock_cur_),
+                             &range_rec_,
+                             &lock_range_result_);
         PushOperation(&lock_range_op_);
         Process(lock_range_op_);
         return;
@@ -5518,13 +5507,13 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
     obj_cmd_op.is_running_ = true;
     uint64_t current_ts =
         dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
-    bool commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
+    // bool commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
 
-    for (size_t i = 0; i < obj_cmd_op.vct_key_->size(); i++)
+    for (size_t i = 0; i < vct_key->size(); i++)
     {
         auto &hd_res = obj_cmd_op.vct_hd_result_[i];
 
-        const TxKey &key = *obj_cmd_op.vct_key_->at(i);
+        const TxKey &key = *vct_key->at(i);
         uint32_t key_shard_code = 0;
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -5533,12 +5522,12 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 #else
         key_shard_code = Sharder::Instance().ShardCode(key.Hash());
 #endif
-
+        // NOTICE: For MultiObjectCommand, must not commit commands in ApplyCc
         hd_res.Reset();
-        cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
+        cc_handler_->ObjectCommand(*req->table_name_,
                                    key,
                                    key_shard_code,
-                                   *obj_cmd_op.vct_cmd_->at(i),
+                                   *vct_cmd->at(i),
                                    TxNumber(),
                                    tx_term_,
                                    command_id_.load(std::memory_order_relaxed),
@@ -5546,7 +5535,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
                                    hd_res,
                                    iso_level_,
                                    protocol_,
-                                   commit);
+                                   false);
     }
 
     StartTiming();
@@ -5579,54 +5568,51 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
         return;
     }
 #endif
+    MultiObjectCommandTxRequest *req = obj_cmd_op.tx_req_;
+    const std::vector<const TxKey *> *vct_key = req->VctKey();
+    const std::vector<TxCommand *> *vct_cmd = req->VctCommand();
 
     CcErrorCode err = obj_cmd_op.atm_err_code_.load(std::memory_order_relaxed);
     if (err != CcErrorCode::NO_ERROR)
     {
         vct_rec_resp_->FinishError(ConvertCcError(err));
         vct_rec_resp_ = nullptr;
-        if (obj_cmd_op.auto_commit_)
+        if (req->auto_commit_)
         {
             Abort();
         }
     }
     else
     {
-        // The command is directly executed and committed on the object if
-        // autocommit and skip wal are both set. In such case, there is no
-        // need to write log and do post write, and no need to add command
-        // into write set.
-        bool directly_commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
-        bool readonly = obj_cmd_op.vct_cmd_->at(0)->IsReadOnly();
+        bool readonly = vct_cmd->at(0)->IsReadOnly();
         std::vector<RecordStatus> vct_rec;
 
         {
             vct_rec.reserve(obj_cmd_op.vct_hd_result_.size());
+            bool version_changed = false;
 
             for (size_t i = 0; i < obj_cmd_op.vct_hd_result_.size(); i++)
             {
                 const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
-                RecordStatus obj_status = cmd_res.rec_status_;
-                vct_rec.push_back(obj_status);
-                LockType lock_acquired = cmd_res.lock_acquired_;
-                bool cmd_success = cmd_res.cmd_success_;
-                const TxKey *key = obj_cmd_op.vct_key_->at(i);
-                const TxCommand *cmd = obj_cmd_op.vct_cmd_->at(i);
+                vct_rec.push_back(cmd_res.rec_status_);
+
+                assert(cmd_res.rec_status_ != RecordStatus::Unknown);
 
                 // For autocommit read-modify-write commands, the
                 // ObjectCommandTxRequest sender will be notified after auto
                 // commit succeeds, i.e. after PostProcess or WritLog.
 
-                if (lock_acquired == LockType::WriteLock)
+                if (cmd_res.lock_acquired_ == LockType::WriteLock)
                 {
                     // The command modifies the object. Put it into the command
                     // set for writing log and post-processing. If the command
                     // fails, only to release the write lock.
-                    rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
-                                             cmd_res.cce_addr_,
-                                             cmd_res.commit_ts_,
-                                             key,
-                                             cmd_success ? cmd : nullptr);
+                    rw_set_.AddObjectCommand(
+                        *req->table_name_,
+                        cmd_res.cce_addr_,
+                        cmd_res.commit_ts_,
+                        vct_key->at(i),
+                        cmd_res.cmd_success_ ? vct_cmd->at(i) : nullptr);
 
                     uint64_t read_version =
                         rw_set_.DedupRead(cmd_res.cce_addr_);
@@ -5643,42 +5629,61 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                             << "; read_version: " << read_version
                             << "; cmd_result.commit_ts_: "
                             << cmd_res.commit_ts_;
-                        vct_rec_resp_->FinishError(
-                            TxErrorCode::OCC_BREAK_REPEATABLE_READ);
-                        vct_rec_resp_ = nullptr;
 
-                        return;
+                        version_changed = true;
                     }
                 }
-                else if (lock_acquired != LockType::NoLock &&
-                         !rw_set_.FindObjectCommand(*obj_cmd_op.table_name_,
+                else if (cmd_res.lock_acquired_ != LockType::NoLock &&
+                         !rw_set_.FindObjectCommand(*req->table_name_,
                                                     cmd_res.cce_addr_))
                 {
                     DLOG(INFO)
                         << "txm acquired readlock, ReadIntent or WriteIntent";
                     // Read lock is acquired under locking protocol. Add the cce
                     // to read set for later PostRead.
-                    rw_set_.AddRead(cmd_res.cce_addr_,
-                                    cmd_res.commit_ts_,
-                                    obj_cmd_op.table_name_);
+                    if (!rw_set_.AddRead(cmd_res.cce_addr_,
+                                         cmd_res.commit_ts_,
+                                         req->table_name_))
+                    {
+                        version_changed = true;
+                    }
                 }
+            }
 
-                assert(obj_status != RecordStatus::Unknown);
+            if (version_changed)
+            {
+                vct_rec_resp_->FinishError(
+                    TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                vct_rec_resp_ = nullptr;
+                if (req->auto_commit_)
+                {
+                    Abort();
+                }
+                return;
             }
         }
 
-        if (!obj_cmd_op.auto_commit_ || directly_commit || readonly)
+        bool cmd_success = req->Command()->IsPassed();
+        // NOTICE: sub commands never be committed in ApplyCc
+        if (!req->auto_commit_ || readonly)
         {
-            // Not autocommit, or autocommit and skip wal, or autocommit and
-            // this is a read only command. Notify the
-            // ObjectCommandTxRequest sender once the command finishes.
+            // Not autocommit, or autocommit and this is a read only command.
+            // Notify the ObjectCommandTxRequest sender once the command
+            // finishes.
             vct_rec_resp_->Finish(std::move(vct_rec));
             vct_rec_resp_ = nullptr;
         }
 
-        if (obj_cmd_op.auto_commit_)
+        if (req->auto_commit_)
         {
-            Commit();
+            if (cmd_success)
+            {
+                Commit();
+            }
+            else
+            {
+                Abort();
+            }
         }
     }
 }

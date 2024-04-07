@@ -5121,15 +5121,10 @@ MultiObjectCommandOp::MultiObjectCommandOp(
 {
 }
 
-void MultiObjectCommandOp::Reset(const TableName *table_name,
-                                 const std::vector<const TxKey *> *vct_key,
-                                 const std::vector<TxCommand *> *vct_cmd,
-                                 bool auto_commit)
+void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
 {
-    table_name_ = table_name;
-    vct_key_ = vct_key;
-    vct_cmd_ = vct_cmd;
-    size_t len = vct_key->size();
+    tx_req_ = req;
+    size_t len = req->VctKey()->size();
     size_t min_len = std::min(len, vct_hd_result_.size());
 
     for (size_t i = 0; i < min_len; i++)
@@ -5173,10 +5168,9 @@ void MultiObjectCommandOp::Reset(const TableName *table_name,
 
     atm_cnt_.store(len, std::memory_order_relaxed);
     atm_err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
-    auto_commit_ = auto_commit;
 
 #ifdef RANGE_PARTITION_ENABLED
-    vct_key_shard_code_.resize(vct_key->size());
+    vct_key_shard_code_.resize(len);
     range_lock_cur_ = 0;
     lock_range_result_->Value().Reset();
     lock_range_result_->Reset();
@@ -5189,6 +5183,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
     {
 #ifdef RANGE_PARTITION_ENABLED
         assert(lock_range_result_->IsFinished());
+        const std::vector<const TxKey *> *vct_key = tx_req_->VctKey();
         if (lock_range_result_->IsError())
         {
             txm->PostProcess(*this);
@@ -5203,7 +5198,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             lock_range_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             txm->PostProcess(*this);
         }
-        else if (range_lock_cur_ < vct_key_->size())
+        else if (range_lock_cur_ < vct_key->size())
         {
             // A range has been locked. Assigns the range's node group to all
             // keys belonging to this range.
@@ -5225,8 +5220,8 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 }
             };
 
-            for (; range_lock_cur_ < vct_key_->size() &&
-                   cmp(vct_key_->at(range_lock_cur_), range_end_key);
+            for (; range_lock_cur_ < vct_key->size() &&
+                   cmp(vct_key->at(range_lock_cur_), range_end_key);
                  ++range_lock_cur_)
             {
                 vct_key_shard_code_[range_lock_cur_] = key_shard;

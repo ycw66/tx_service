@@ -92,6 +92,7 @@ public:
         CcHandlerResult<ObjectCommandResult> *hd_res = req.Result();
         ObjectCommandResult &obj_result = hd_res->Value();
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
+        // TODO(lzx): replace "cmd_success" with TxCommand::IsPassed()
         bool &cmd_success = obj_result.cmd_success_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
         CcPage<KeyT, ValueT> *ccp = nullptr;

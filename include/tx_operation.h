@@ -1029,22 +1029,17 @@ struct MultiObjectCommandOp : TransactionOperation
     explicit MultiObjectCommandOp(
         TransactionExecution *txm,
         CcHandlerResult<ReadKeyResult> *lock_range_result = nullptr);
-    void Reset(const TableName *table_name,
-               const std::vector<const TxKey *> *vct_key,
-               const std::vector<TxCommand *> *vct_cmd,
-               bool auto_commit = false);
+    void Reset(MultiObjectCommandTxRequest *tx_req);
 
     void Forward(TransactionExecution *txm) override;
 
     TransactionExecution *txm_;
-    const TableName *table_name_{};
-    const std::vector<const TxKey *> *vct_key_{};
-    const std::vector<TxCommand *> *vct_cmd_{};
+    MultiObjectCommandTxRequest *tx_req_;
 
     std::vector<CcHandlerResult<ObjectCommandResult>> vct_hd_result_;
     std::atomic_int32_t atm_cnt_{0};
+    // Fast path to know whether error occurs instead of scan "vct_hd_result_"
     std::atomic<CcErrorCode> atm_err_code_{CcErrorCode::NO_ERROR};
-    bool auto_commit_{};
 
 #ifdef RANGE_PARTITION_ENABLED
     // The current position of TxKey* to get key_shard_code in

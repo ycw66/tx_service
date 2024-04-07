@@ -81,6 +81,7 @@ public:
     // continue or abort.
     virtual bool IsPassed() const
     {
+        // TODO(lzx): replace "ObjectCommandResult::cmd_success_" with this.
         return true;
     }
     // If this command will be existing until the transaction committed.
@@ -104,7 +105,7 @@ struct MultiObjectTxCommand
     virtual std::vector<TxCommand *> *CommandPointers() = 0;
 
     virtual bool IsFinished() = 0;
-
+    virtual bool IsLastStep() = 0;
     virtual size_t CmdSteps() = 0;
 
     virtual void IncrSteps() = 0;
