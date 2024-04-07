@@ -300,61 +300,6 @@ void CcNodeService::ClusterRemoveNode(
 }
 
 /**
- * @brief RPC service: get the leader term of the specific node group.
- */
-void CcNodeService::AcquireNodeGroupLeaderTerm(
-    ::google::protobuf::RpcController *controller,
-    const AcquireNodeGroupTermRequest *request,
-    AcquireNodeGroupTermResponse *response,
-    ::google::protobuf::Closure *done)
-{
-    // This object helps you to call done->Run() in RAII style. If you need
-    // to process the request asynchronously, pass done_guard.release().
-    brpc::ClosureGuard done_guard(done);
-
-    uint32_t ng_id = request->node_group_id();
-    int64_t leader_term = INIT_TERM;
-
-    bthread::Mutex b_thd_mu;
-    bthread::ConditionVariable b_thd_cv;
-    bool finished = false;
-    std::thread worker_thd = std::thread(
-        [ng_id, &leader_term, &b_thd_mu, &b_thd_cv, &finished]()
-        {
-            while ((leader_term = Sharder::Instance().LeaderTerm(ng_id)) < 0 &&
-                   Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
-            {
-                // The RPC server can receive the remote request, but this
-                // node has not finish log replay, so should wait until log
-                // replay finished.
-                LOG(INFO) << "CcNodeService AcquireLeaderTerm on ng#" << ng_id
-                          << " waiting log replay finished.";
-                std::this_thread::sleep_for(10s);
-            }
-            if (leader_term < 0)
-            {
-                LOG(ERROR) << "!!!ERROR!!! The non-leader node receives "
-                              "the request for ng#"
-                           << ng_id;
-            }
-
-            std::unique_lock b_thd_lk(b_thd_mu);
-            finished = true;
-            b_thd_cv.notify_one();
-        });
-
-    std::unique_lock lk(b_thd_mu);
-    while (!finished)
-    {
-        b_thd_cv.wait(lk);
-    }
-
-    response->set_node_group_term(leader_term);
-    response->set_node_group_id(ng_id);
-    worker_thd.join();
-}
-
-/**
  * @brief RPC service: flush all tuples whose commit timestamp less than the
  *  @@request.ckpt_ts into data store.
  */

@@ -110,15 +110,6 @@ message GetClusterNodesResponse{
     bool error = 3;
 }
 
-message AcquireNodeGroupTermRequest{
-    uint32 node_group_id = 1;
-}
-
-message AcquireNodeGroupTermResponse{
-    uint32 node_group_id = 1;
-    int64 node_group_term = 2;
-}
-
 message GenerateSkFromPkRequest
 {
     string table_name_str = 1;
@@ -188,7 +179,6 @@ service CcRpcService {
     rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterRemoveNodeResponse);
     rpc CheckClusterScaleStatus(ClusterScaleStatusRequest) returns (ClusterScaleStatusResponse);
     rpc GetClusterNodes(GetClusterNodesRequest) returns (GetClusterNodesResponse);
-    rpc AcquireNodeGroupLeaderTerm(AcquireNodeGroupTermRequest) returns (AcquireNodeGroupTermResponse);
     rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
     rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);
     rpc GenerateSkFromPk(GenerateSkFromPkRequest) returns (GenerateSkFromPkResponse);

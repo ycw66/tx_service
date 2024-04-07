@@ -72,12 +72,6 @@ public:
         ::txservice::remote::ClusterScaleStatusResponse *response,
         ::google::protobuf::Closure *done);
 
-    void AcquireNodeGroupLeaderTerm(
-        ::google::protobuf::RpcController *controller,
-        const AcquireNodeGroupTermRequest *request,
-        AcquireNodeGroupTermResponse *response,
-        ::google::protobuf::Closure *done) override;
-
     void FlushDataAll(::google::protobuf::RpcController *controller,
                       const FlushDataAllRequest *request,
                       FlushDataAllResponse *response,
