@@ -4520,7 +4520,8 @@ public:
     enum struct ApplyBlockType
     {
         NoBlocking = 0,
-        BlockOnLock,
+        BlockOnRead,  // this could be ReadLock or WriteIntent
+        BlockOnWriteLock,
         BlockOnFetch
     };
     ApplyBlockType block_type_{ApplyBlockType::NoBlocking};

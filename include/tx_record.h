@@ -56,12 +56,12 @@ enum struct RecordStatus : uint8_t
 #ifdef ON_KEY_OBJECT
     /// <summary>
     /// Used only to indicate the status of temporary object. The temporary
-    /// object hasn't been created.
+    /// object does not exist.(no dirty_payload, no pending_cmd)
     /// </summary>
     NonExistent,
     /// <summary>
     /// Used only to indicate the status of temporary object. The temporary
-    /// hasn't been created yet.
+    /// hasn't been created yet.(no dirty_payload, has pending_cmd)
     /// </summary>
     Uncreated,
 #endif
