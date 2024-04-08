@@ -238,17 +238,12 @@ public:
 
         if (metrics::enable_memory_usage)
         {
-            if (memory_usage_round_ == metrics::memory_usage_sample_round)
+            if (memory_usage_round_++ % metrics::collect_memory_usage_round ==
+                0)
             {
                 int64_t allocated, committed;
                 mi_thread_stats(&allocated, &committed);
-                meter_->Collect(metrics::NAME_MEMORY_USAGE,
-                                allocated * core_cnt_);
-                memory_usage_round_ = 1;
-            }
-            else
-            {
-                ++memory_usage_round_;
+                meter_->Collect(metrics::NAME_MEMORY_USAGE, allocated);
             }
         }
 

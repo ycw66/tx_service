@@ -7135,7 +7135,6 @@ void BatchReadOperation::Reset()
             new_hd_result.post_lambda_ = head_hd_result.post_lambda_;
         }
     }
-
     op_start_ = metrics::TimePoint::max();
 }
 

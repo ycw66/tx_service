@@ -601,6 +601,7 @@ private:
     BatchReadOperation batch_read_op_;
 
     metrics::TimePoint tx_duration_start_;
+    bool is_collecting_duration_round_{false};
 
     friend struct TransactionOperation;
     friend struct CompositeTransactionOperation;

@@ -115,7 +115,8 @@ CcShard::CcShard(uint16_t core_id,
     if (metrics::enable_metrics)
     {
         meter_->Register(metrics::NAME_MEMORY_LIMIT, metrics::Type::Gauge);
-        meter_->Collect(metrics::NAME_MEMORY_LIMIT, memory_limit_);
+        meter_->Collect(metrics::NAME_MEMORY_LIMIT,
+                        MB(node_memory_limit_mb) / core_cnt_);
     }
 
     if (metrics::enable_cache_hit_rate)

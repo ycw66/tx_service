@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <memory>
 
 #include "meter.h"
@@ -6,7 +7,7 @@
 
 namespace metrics
 {
-inline std::unique_ptr<metrics::Meter> kv_meter = nullptr;
+inline std::unique_ptr<metrics::Meter> kv_meter{nullptr};
 inline const metrics::Name NAME_KV_FLUSH_ROWS_TOTAL{"kv_flush_rows_total"};
 inline const metrics::Name NAME_KV_LOAD_SLICE_TOTAL{"kv_load_slice_total"};
 inline const metrics::Name NAME_KV_LOAD_SLICE_DURATION{
@@ -33,13 +34,14 @@ inline const metrics::Name NAME_REMOTE_REQUEST_DURATION{
 inline const metrics::Name NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT{
     "remote_request_in_flight_count"};
 
-// tx_service
-inline bool enable_tx_service_metrics = false;
-inline bool enable_cache_hit_rate = false;
-inline bool enable_busy_round_metrics = false;
-inline bool enable_memory_usage = false;
-inline bool enable_kv_metrics = false;
+inline bool enable_memory_usage{false};
+inline bool enable_cache_hit_rate{false};
+inline bool enable_tx_metrics{false};
+inline bool enable_remote_request_metrics{false};
+inline bool enable_busy_round_metrics{false};
+inline bool enable_kv_metrics{false};
 
-inline size_t busy_round_threshold = 0;
-inline size_t memory_usage_sample_round = 0;
+inline size_t collect_memory_usage_round{0};
+inline size_t collect_tx_duration_round{0};
+inline size_t busy_round_threshold{0};
 }  // namespace metrics

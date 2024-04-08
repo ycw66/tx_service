@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <list>
 #include <map>
 #include <memory>
@@ -98,7 +99,7 @@ public:
                             metrics::Type::Gauge);
         }
 
-        if (metrics::enable_tx_service_metrics)
+        if (metrics::enable_tx_metrics)
         {
             auto meter = GetMeter();
             meter->Register(metrics::NAME_TX_DURATION,
@@ -415,7 +416,7 @@ public:
         shard_status.store(TxShardStatus::Free, std::memory_order_release);
 #endif
 
-        if (metrics::enable_metrics)
+        if (metrics::enable_busy_round_metrics)
         {
             empty_round_count_ += req_cnt == 0 ? 1 : 0;
             if (++total_round_count_ == empty_round_threshold_)
@@ -794,6 +795,14 @@ private:
         sleep_cv.notify_one();
     }
 
+    /**
+     * @brief This method is only utilized for sampling the tx_duration metric.
+     */
+    inline size_t CheckAndUpdateTxCurrentRound()
+    {
+        return (tx_current_round_++ % metrics::collect_tx_duration_round) == 0;
+    };
+
     size_t thd_id_;
     std::atomic<bool> terminated_;
     std::atomic<TxProcessorStatus> tx_proc_status_{TxProcessorStatus::Busy};
@@ -855,9 +864,14 @@ private:
     size_t total_round_count_{0};
     size_t empty_round_threshold_{1000};
 
+    // tx_current_round_ is only utilized for sampling the tx_duration and
+    // remote request metric.
+    size_t tx_current_round_{1};
+
 public:
     friend class TxService;
     friend struct txservice::SplitFlushRangeOp;
+    friend class TransactionExecution;
 };
 
 class TxService

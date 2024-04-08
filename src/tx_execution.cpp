@@ -1325,7 +1325,14 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
                 .append(std::to_string(this->tx_term_));
         });
 
-    if (metrics::enable_tx_service_metrics)
+    is_collecting_duration_round_ = false;
+    if (metrics::enable_tx_metrics)
+    {
+        is_collecting_duration_round_ =
+            tx_processor_->CheckAndUpdateTxCurrentRound();
+    }
+
+    if (metrics::enable_tx_metrics && is_collecting_duration_round_)
     {
         tx_duration_start_ = metrics::Clock::now();
     }
@@ -1613,13 +1620,16 @@ void TransactionExecution::Process(ReadOperation &read)
 
             if (!read.hd_result_.Value().is_local_)
             {
-                if (metrics::enable_tx_service_metrics)
+                if (metrics::enable_remote_request_metrics)
                 {
                     auto meter = tx_processor_->GetMeter();
                     meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                                    metrics::Value::IncDecValue::Increment,
                                    "read");
-                    read.op_start_ = metrics::Clock::now();
+                    if (is_collecting_duration_round_)
+                    {
+                        read.op_start_ = metrics::Clock::now();
+                    }
                 }
 
                 StartTiming();
@@ -1669,13 +1679,16 @@ void TransactionExecution::Process(ReadOperation &read)
 void TransactionExecution::PostProcess(ReadOperation &read)
 {
     // collect metrics: remote read duration
-    if (metrics::enable_tx_service_metrics &&
+    if (metrics::enable_remote_request_metrics &&
         !read.hd_result_.Value().is_local_)
     {
         metrics::Meter *meter;
         meter = tx_processor_->GetMeter();
-        meter->CollectDuration(
-            metrics::NAME_REMOTE_REQUEST_DURATION, read.op_start_, "read");
+        if (is_collecting_duration_round_)
+        {
+            meter->CollectDuration(
+                metrics::NAME_REMOTE_REQUEST_DURATION, read.op_start_, "read");
+        }
         meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
                        "read");
@@ -2158,13 +2171,16 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 protocol_);
 
             is_local = scan_next.slice_hd_result_.Value().is_local_;
-            if (metrics::enable_tx_service_metrics && !is_local)
+            if (metrics::enable_remote_request_metrics && !is_local)
             {
                 auto meter = tx_processor_->GetMeter();
                 meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                                metrics::Value::IncDecValue::Increment,
                                "scan_next");
-                scan_next.op_start_ = metrics::Clock::now();
+                if (is_collecting_duration_round_)
+                {
+                    scan_next.op_start_ = metrics::Clock::now();
+                }
             }
         }
         else if ((scanner.Direction() == ScanDirection::Forward &&
@@ -2213,13 +2229,16 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     protocol_);
 
                 is_local = scan_next.slice_hd_result_.Value().is_local_;
-                if (metrics::enable_tx_service_metrics && !is_local)
+                if (metrics::enable_remote_request_metrics && !is_local)
                 {
                     auto meter = tx_processor_->GetMeter();
                     meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                                    metrics::Value::IncDecValue::Increment,
                                    "scan_next");
-                    scan_next.op_start_ = metrics::Clock::now();
+                    if (is_collecting_duration_round_)
+                    {
+                        scan_next.op_start_ = metrics::Clock::now();
+                    }
                 }
             }
             else
@@ -2284,16 +2303,18 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
 void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 {
-// collect metrics: remote scan next duration
 #ifdef RANGE_PARTITION_ENABLED
-    if (metrics::enable_tx_service_metrics &&
+    if (metrics::enable_remote_request_metrics &&
         !scan_next.slice_hd_result_.Value().is_local_)
     {
         metrics::Meter *meter;
         meter = tx_processor_->GetMeter();
-        meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
-                               scan_next.op_start_,
-                               "scan_next");
+        if (is_collecting_duration_round_)
+        {
+            meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
+                                   scan_next.op_start_,
+                                   "scan_next");
+        }
         meter = tx_processor_->GetMeter();
         meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
@@ -3261,7 +3282,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
         }
     }
 
-    if (metrics::enable_tx_service_metrics &&
+    if (metrics::enable_remote_request_metrics &&
         acquire_write.hd_result_.Value().at(0).remote_ack_cnt_->load(
             std::memory_order_relaxed) > 0)
     {
@@ -3269,7 +3290,10 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
         meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Increment,
                        "acquire_write");
-        acquire_write.op_start_ = metrics::Clock::now();
+        if (is_collecting_duration_round_)
+        {
+            acquire_write.op_start_ = metrics::Clock::now();
+        }
     }
 
     StartTiming();
@@ -3277,15 +3301,17 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
 
 void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
 {
-    // collect metrics: remote acquire write duration
-    if (metrics::enable_tx_service_metrics &&
+    if (metrics::enable_remote_request_metrics &&
         acquire_write.op_start_ < metrics::TimePoint::max())
     {
         metrics::Meter *meter;
         meter = tx_processor_->GetMeter();
-        meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
-                               acquire_write.op_start_,
-                               "acquire_write");
+        if (is_collecting_duration_round_)
+        {
+            meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
+                                   acquire_write.op_start_,
+                                   "acquire_write");
+        }
         meter = tx_processor_->GetMeter();
         meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
@@ -3489,14 +3515,17 @@ void TransactionExecution::Process(ValidateOperation &validate)
         }
     }
 
-    if (metrics::enable_tx_service_metrics &&
+    if (metrics::enable_remote_request_metrics &&
         !validate.hd_result_.Value().is_local_)
     {
         auto meter = tx_processor_->GetMeter();
         meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Increment,
                        "validate");
-        validate.op_start_ = metrics::Clock::now();
+        if (is_collecting_duration_round_)
+        {
+            validate.op_start_ = metrics::Clock::now();
+        }
     }
 
     if (empty_rset)
@@ -3513,14 +3542,17 @@ void TransactionExecution::Process(ValidateOperation &validate)
 void TransactionExecution::PostProcess(ValidateOperation &validate)
 {
     // collect metrics: remote validate duration
-    if (metrics::enable_tx_service_metrics &&
+    if (metrics::enable_remote_request_metrics &&
         !validate.hd_result_.Value().is_local_)
     {
         metrics::Meter *meter;
         meter = tx_processor_->GetMeter();
-        meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
-                               validate.op_start_,
-                               "validate");
+        if (is_collecting_duration_round_)
+        {
+            meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
+                                   validate.op_start_,
+                                   "validate");
+        }
         meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
                        "validate");
@@ -3950,13 +3982,16 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
         return;
     }
 
-    if (metrics::enable_tx_service_metrics)
+    if (metrics::enable_remote_request_metrics)
     {
         auto meter = tx_processor_->GetMeter();
         meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Increment,
                        "write_log");
-        write_log.op_start_ = metrics::Clock::now();
+        if (is_collecting_duration_round_)
+        {
+            write_log.op_start_ = metrics::Clock::now();
+        }
     }
 
     assert(txlog_ != nullptr);
@@ -3983,14 +4018,16 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
 void TransactionExecution::PostProcess(WriteToLogOp &write_log)
 {
     // collect metrics: write log duration
-    if (metrics::enable_tx_service_metrics)
+    if (metrics::enable_remote_request_metrics)
     {
         metrics::Meter *meter;
         meter = tx_processor_->GetMeter();
-        meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
-                               write_log.op_start_,
-                               "write_log");
-        meter = tx_processor_->GetMeter();
+        if (is_collecting_duration_round_)
+        {
+            meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
+                                   write_log.op_start_,
+                                   "write_log");
+        }
         meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Decrement,
                        "write_log");
@@ -4371,14 +4408,17 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         }
     }
 
-    if (metrics::enable_tx_service_metrics &&
+    if (metrics::enable_remote_request_metrics &&
         !post_process.hd_result_.Value().is_local_)
     {
         auto meter = tx_processor_->GetMeter();
         meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                        metrics::Value::IncDecValue::Increment,
                        "post_process");
-        post_process.op_start_ = metrics::Clock::now();
+        if (is_collecting_duration_round_)
+        {
+            post_process.op_start_ = metrics::Clock::now();
+        }
     }
 
     StartTiming();
@@ -4386,21 +4426,27 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
 void TransactionExecution::PostProcess(PostProcessOp &post_process)
 {
-    // collect metrics: remote post process duration
-    // collect metrics: tx duration, and tx processed total
-    if (metrics::enable_tx_service_metrics)
+    if (metrics::enable_tx_metrics)
     {
         auto meter = tx_processor_->GetMeter();
-        if (!post_process.hd_result_.Value().is_local_)
+        if (metrics::enable_remote_request_metrics &&
+            !post_process.hd_result_.Value().is_local_)
         {
-            meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
-                                   post_process.op_start_,
-                                   "post_process");
+            if (is_collecting_duration_round_)
+            {
+                meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
+                                       post_process.op_start_,
+                                       "post_process");
+            }
             meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
                            metrics::Value::IncDecValue::Decrement,
                            "post_process");
         }
-        meter->CollectDuration(metrics::NAME_TX_DURATION, tx_duration_start_);
+        if (is_collecting_duration_round_)
+        {
+            meter->CollectDuration(metrics::NAME_TX_DURATION,
+                                   tx_duration_start_);
+        }
         meter->Collect(metrics::NAME_TX_PROCESSED_TOTAL, 1);
     }
 
