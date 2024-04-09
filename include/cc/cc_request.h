@@ -2832,6 +2832,7 @@ public:
             }
             accumulated_scan_cnt_.at(i) = 0;
         }
+        err_ = CcErrorCode::NO_ERROR;
     }
 
     void SetError(CcErrorCode err)

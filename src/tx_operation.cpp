@@ -3765,7 +3765,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     {
                                         LOG(INFO)
                                             << "DataSync scan failed on table "
-                                            << table_name.StringView();
+                                            << table_name.StringView()
+                                            << " with error: "
+                                            << static_cast<uint32_t>(
+                                                   scan_cc.ErrorCode());
                                         hd_res.SetError(scan_cc.ErrorCode());
                                         return;
                                     }

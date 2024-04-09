@@ -419,6 +419,7 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
 #endif
                 scan_req.Reset();
                 scan_pk_finished = false;
+                scan_res = CcErrorCode::NO_ERROR;
                 continue;
             }
             else
