@@ -3745,7 +3745,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     Sharder::Instance().GetLocalCcShardsCount(),
                                     LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
                                     txn,
-                                    false,
                                     req_start_key,
                                     req_end_key,
                                     export_base_table_rec_if_need);

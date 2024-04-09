@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <unordered_set>
 
@@ -164,6 +165,11 @@ public:
     size_t Size() const override
     {
         return sizeof(bucket_id_);
+    }
+
+    uint16_t BucketId() const
+    {
+        return bucket_id_;
     }
 
     friend bool operator==(const RangeBucketKey &lhs,

@@ -1,5 +1,7 @@
 #include "sk_generator.h"
 
+#include <optional>
+
 #include "tx_request.h"
 #include "tx_service.h"
 
@@ -334,13 +336,16 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                             core_cnt,
                             scan_batch_size_,
                             tx_number,
-                            false,
                             start_key,
                             end_key
 #ifdef RANGE_PARTITION_ENABLED
                             ,
                             true,
                             true
+#else
+                            ,
+                            false,
+                            [](size_t hash_code) { return true; }
 #endif
     );
 
@@ -351,7 +356,7 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
     last_finished_pos.reserve(core_cnt);
     for (size_t i = 0; i < core_cnt; ++i)
     {
-        last_finished_pos.emplace_back(std::move(start_key->Clone()));
+        last_finished_pos.emplace_back(start_key->Clone());
     }
 
     std::vector<SkEncoder::uptr> sk_encoder_vec;

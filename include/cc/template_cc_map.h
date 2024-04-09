@@ -5323,6 +5323,11 @@ public:
             }
 #endif
 
+            if (!req.filter_lambda_(key->Hash()))
+            {
+                continue;
+            }
+
             if (cce->NeedCkpt())
             {
                 cce->ExportForCkpt(*key,

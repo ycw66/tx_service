@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
@@ -2175,7 +2176,9 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                                                        status,
                                                        is_dirty,
                                                        can_be_skipped,
-                                                       hres);
+                                                       hres,
+                                                       [](size_t hash_code)
+                                                       { return true; });
 
             // Push task to worker task queue.
             std::lock_guard<std::mutex> task_worker_lk(
@@ -2205,7 +2208,9 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                                                        status,
                                                        is_dirty,
                                                        can_be_skipped,
-                                                       hres));
+                                                       hres,
+                                                       [](size_t)
+                                                       { return true; }));
                     task_cnt++;
                 }
                 else
@@ -2233,7 +2238,9 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                                                    status,
                                                    is_dirty,
                                                    can_be_skipped,
-                                                   hres));
+                                                   hres,
+                                                   [](size_t)
+                                                   { return true; }));
                 task_cnt++;
             }
 
@@ -2753,7 +2760,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                            cc_shards_.size(),
                            DATA_SYNC_SCAN_BATCH_SIZE,
                            data_sync_txm->TxNumber(),
-                           false,
                            range_entry->GetRangeInfo()->StartKey(),
                            range_entry->GetRangeInfo()->EndKey());
 
@@ -3307,7 +3313,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                            1,
                            DATA_SYNC_SCAN_BATCH_SIZE,
                            data_sync_txm->TxNumber(),
-                           true);
+                           nullptr,
+                           nullptr,
+                           true,
+                           data_sync_task->filter_lambda_);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement

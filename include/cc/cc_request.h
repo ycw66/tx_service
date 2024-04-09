@@ -2671,13 +2671,16 @@ public:
                    uint16_t core_cnt,
                    size_t scan_batch_size,
                    uint64_t txn,
-                   bool only_one_core,
-                   const TxKey *target_start_key = nullptr,
-                   const TxKey *target_end_key = nullptr
+                   const TxKey *target_start_key,
+                   const TxKey *target_end_key
 #ifdef RANGE_PARTITION_ENABLED
                    ,
                    bool export_base_table_rec_if_need = false,
                    bool skip_archived_key = false
+#else
+                   ,
+                   bool only_one_core,
+                   std::function<bool(size_t hash_code)> filter
 #endif
                    )
         : table_name_(&table_name),
@@ -2693,12 +2696,15 @@ public:
           err_(CcErrorCode::NO_ERROR),
           unfinished_cnt_(core_cnt_),
           mux_(),
-          cv_(),
-          only_scan_one_core_(only_one_core)
+          cv_()
 #ifdef RANGE_PARTITION_ENABLED
           ,
           export_base_table_rec_if_need_(export_base_table_rec_if_need),
           skip_archived_key_(skip_archived_key)
+#else
+          ,
+          only_scan_one_core_(only_one_core),
+          filter_lambda_(filter)
 #endif
     {
         tx_number_ = txn;
@@ -2974,8 +2980,6 @@ private:
     std::mutex mux_;
     std::condition_variable cv_;
 
-    bool only_scan_one_core_{false};
-
 #ifdef RANGE_PARTITION_ENABLED
     // True means If no larger version exists, we need to export the data which
     // commit_ts same as ckpt_ts. Note: This flag only used for RangePartition.
@@ -2984,6 +2988,10 @@ private:
 
     // This is used for scan during add index txm.
     bool skip_archived_key_{false};
+
+#else
+    bool only_scan_one_core_{false};
+    std::function<bool(size_t hash_code)> filter_lambda_;
 #endif
 
     template <typename KeyT, typename ValueT>

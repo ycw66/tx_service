@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <thread>
@@ -75,13 +77,23 @@ public:
                  std::shared_ptr<DataSyncStatus> status,
                  bool is_dirty,
                  bool need_adjust_ts,
-                 CcHandlerResult<Void> *hres = nullptr)
+                 CcHandlerResult<Void> *hres
+#ifndef RANGE_PARTITION_ENABLED
+                 ,
+                 std::function<bool(size_t)> filter_lambda
+#endif
+                 )
         : table_name_(table_name),
           range_id_(range_id),
           range_version_(range_version),
           node_group_id_(ng_id),
           node_group_term_(ng_term),
-          data_sync_ts_(data_sync_ts),
+          data_sync_ts_(data_sync_ts)
+#ifndef RANGE_PARTITION_ENABLED
+          ,
+          filter_lambda_(filter_lambda)
+#endif
+          ,
           status_(status),
           is_dirty_(is_dirty),
           sync_ts_adjustable_(need_adjust_ts),
@@ -211,6 +223,7 @@ public:
     // Flush data task cnt + 1 (Data sync task)
     int64_t flight_task_cnt_{0};
     CkptErrorCode ckpt_err_{CkptErrorCode::NO_ERROR};
+    std::function<bool(size_t)> filter_lambda_;
 #endif
 
     std::shared_ptr<DataSyncStatus> status_{nullptr};
