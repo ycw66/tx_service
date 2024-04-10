@@ -35,7 +35,8 @@ enum class DataStoreDataType
 {
     Blob,
     Numeric,
-    String
+    String,
+    Bool
 };
 
 struct DataStoreSearchCond
