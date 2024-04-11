@@ -120,26 +120,28 @@ public:
 
         if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
         {
-            if (status_->need_truncate_log_ &&
-                status_->err_code_ == CcErrorCode::NO_ERROR)
+            if (status_->need_truncate_log_)
             {
-                // Truncate redo log
-                LOG(INFO) << "Checkpoint of node group #" << node_group_id_
-                          << " succeeded with timestamp: "
-                          << status_->truncate_log_ts_;
-                Sharder::Instance().UpdateNodeGroupCkptTs(
-                    node_group_id_, status_->truncate_log_ts_);
-                Sharder::Instance().GetLogAgent()->UpdateCheckpointTs(
-                    node_group_id_,
-                    node_group_term_,
-                    status_->truncate_log_ts_);
-            }
-            else
-            {
-                LOG(INFO) << "Checkpoint of node group #" << node_group_id_
-                          << " finished with timestamp: " << data_sync_ts_
-                          << " with result code: "
-                          << static_cast<uint32_t>(status_->err_code_);
+                if (status_->err_code_ == CcErrorCode::NO_ERROR)
+                {
+                    // Truncate redo log
+                    LOG(INFO) << "Checkpoint of node group #" << node_group_id_
+                              << " succeeded with timestamp: "
+                              << status_->truncate_log_ts_;
+                    Sharder::Instance().UpdateNodeGroupCkptTs(
+                        node_group_id_, status_->truncate_log_ts_);
+                    Sharder::Instance().GetLogAgent()->UpdateCheckpointTs(
+                        node_group_id_,
+                        node_group_term_,
+                        status_->truncate_log_ts_);
+                }
+                else
+                {
+                    LOG(INFO) << "Checkpoint of node group #" << node_group_id_
+                              << " finished with timestamp: " << data_sync_ts_
+                              << " with result code: "
+                              << static_cast<uint32_t>(status_->err_code_);
+                }
             }
 
             if (task_res_)
@@ -943,8 +945,12 @@ public:
                                             uint16_t bucket_id);
 
     void EnqueueDataSyncTaskForBucket(
+#ifdef RANGE_PARTITION_ENABLED
         const std::unordered_map<TableName, std::unordered_set<int32_t>>
             &ranges_in_bucket_snapshot,
+#else
+        uint16_t bucket_id,
+#endif
         uint32_t ng_id,
         int64_t ng_term,
         uint64_t data_sync_ts,
@@ -1046,6 +1052,7 @@ private:
     BucketInfo *GetRangeOwnerInternal(int32_t range_id,
                                       const NodeGroupId ng_id) const;
 
+#ifdef RANGE_PARTITION_ENABLED
     bool EnqueueRangeDataSyncTask(const TableName &table_name,
                                   uint32_t ng_id,
                                   int64_t ng_term,
@@ -1055,6 +1062,20 @@ private:
                                   bool can_be_skipped,
                                   std::shared_ptr<DataSyncStatus> status,
                                   CcHandlerResult<Void> *hres);
+#else
+    bool EnqueueDataSyncTaskToCore(
+        const TableName &table_name,
+        uint32_t ng_id,
+        int64_t ng_term,
+        uint64_t data_sync_ts,
+        uint16_t core_idx,
+        bool is_dirty = false,
+        bool can_be_skipped = false,
+        std::shared_ptr<DataSyncStatus> status = nullptr,
+        CcHandlerResult<Void> *hres = nullptr,
+        std::function<bool(size_t)> filter_lambda = [](size_t)
+        { return true; });
+#endif
 
     void PopPendingTask(NodeGroupId ng_id,
                         const TableName &table_name,

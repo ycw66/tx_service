@@ -5284,11 +5284,12 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
                              tx_number_.load(std::memory_order_relaxed),
                              tx_term_,
                              command_id_.load(std::memory_order_relaxed),
-                             kickout_data_op.commit_ts_,
                              kickout_data_op.hd_result_,
-                             CleanType::CleanForSplitRange,
+                             kickout_data_op.clean_type_,
+                             kickout_data_op.bucket_id_,
                              kickout_data_op.start_key_,
-                             kickout_data_op.end_key_);
+                             kickout_data_op.end_key_,
+                             kickout_data_op.clean_ts_);
 }
 
 void TransactionExecution::PostProcess(KickoutDataOp &kickout_data_all_op)
@@ -5761,9 +5762,12 @@ void TransactionExecution::Process(KickoutDataAllOp &kickout_data_all_op)
                 tx_number_.load(std::memory_order_relaxed),
                 tx_term_,
                 command_id_.load(std::memory_order_relaxed),
-                kickout_data_all_op.commit_ts_,
                 kickout_data_all_op.hd_result_,
-                CleanType::CleanForAlterTable);
+                CleanType::CleanForAlterTable,
+                0,
+                nullptr,
+                nullptr,
+                kickout_data_all_op.commit_ts_);
         }
     }
 

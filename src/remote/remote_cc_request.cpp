@@ -4,6 +4,7 @@
 
 #include "cc/cc_handler_result.h"
 #include "cc/ccm_scanner.h"
+#include "cc_request.pb.h"
 #include "error_messages.h"  //CcErrorCode
 #include "remote/remote_cc_handler.h"
 #include "remote/remote_type.h"  //ToRemoteType
@@ -1686,12 +1687,16 @@ void txservice::remote::RemoteKickoutCcEntry::Reset(
                             ToLocalType::ConvertCcTableType(req.table_type()));
 
     size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+    assert(req.clean_type() == remote::CleanType::CleanForAlterTable);
     KickoutCcEntryCc::Reset(table_name_,
                             req.node_group_id(),
-                            req.ckpt_ts(),
                             core_cnt,
                             &cc_res_,
-                            (txservice::CleanType) req.clean_type());
+                            (txservice::CleanType) req.clean_type(),
+                            nullptr,
+                            nullptr,
+                            0,
+                            req.clean_ts());
 
     input_msg_ = std::move(input_msg);
 

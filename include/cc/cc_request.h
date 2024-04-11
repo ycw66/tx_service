@@ -7,7 +7,6 @@
 
 #include <algorithm>  // std::min
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -4077,14 +4076,16 @@ public:
 
     KickoutCcEntryCc(const TableName &table_name,
                      const uint32_t ng_id,
-                     const uint64_t ckpt_ts,
                      uint16_t core_cnt,
                      CcHandlerResult<Void> *res,
                      CleanType clean_type,
                      const TxKey *start_key = nullptr,
-                     const TxKey *end_key = nullptr)
-        : ckpt_ts_(ckpt_ts),
-          clean_type_(clean_type),
+                     const TxKey *end_key = nullptr,
+                     uint16_t bucket_id = 0,
+                     uint64_t clean_ts = 0)
+        : clean_type_(clean_type),
+          bucket_id_(bucket_id),
+          clean_ts_(clean_ts),
           start_key_(start_key),
           end_key_(end_key),
           unfinished_cnt_(core_cnt)
@@ -4103,23 +4104,24 @@ public:
 
     void Reset(const TableName &table_name,
                const uint32_t ng_id,
-               const uint64_t ckpt_ts,
                uint16_t core_cnt,
                CcHandlerResult<Void> *res,
                CleanType clean_type,
                const TxKey *start_key = nullptr,
-               const TxKey *end_key = nullptr)
+               const TxKey *end_key = nullptr,
+               uint16_t bucket_id = 0,
+               uint64_t clean_ts = 0)
     {
         // Reset struct members with passed in args
         table_name_ = &table_name;
         node_group_id_ = ng_id;
-        ckpt_ts_ = ckpt_ts;
         res_ = res;
+        unfinished_cnt_ = core_cnt;
+        bucket_id_ = bucket_id;
+        clean_ts_ = clean_ts;
+        resume_key_.clear();
         start_key_ = start_key;
         end_key_ = end_key;
-        unfinished_cnt_ = core_cnt;
-        clean_type_ = clean_type;
-        resume_key_.clear();
         for (uint16_t i = 0; i < core_cnt; ++i)
         {
             resume_key_.emplace_back(nullptr);
@@ -4140,11 +4142,6 @@ public:
             // directly.
             return SetFinish(ccs.core_id_);
         }
-    }
-
-    uint64_t CkptTs() const
-    {
-        return ckpt_ts_;
     }
 
     TxKey *ResumeKey(uint16_t core_id) const
@@ -4180,14 +4177,65 @@ public:
         return false;
     }
 
-    txservice::CleanType CleanType() const
+    bool IsCleanTarget(const TxKey *key, const LruEntry *entry)
     {
-        return clean_type_;
+        switch (clean_type_)
+        {
+        case CleanType::CleanRangeData:
+        {
+            if (start_key_ == nullptr || *start_key_ < *key ||
+                *start_key_ == *key)
+            {
+                if (end_key_)
+                {
+                    return *key < *end_key_;
+                }
+                else
+                {
+                    // end key is pos inf
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        case CleanType::CleanBucketData:
+        {
+            return bucket_id_ == (key->Hash() & 0x3FFF);
+        }
+        case CleanType::CleanForAlterTable:
+        {
+            return entry->CommitTs() <= clean_ts_ && entry->CommitTs() > 1;
+        }
+        default:
+            assert(false);
+            return false;
+        }
+    }
+
+    bool CanBeCleaned(const TxKey *key, const LruEntry *entry)
+    {
+        switch (clean_type_)
+        {
+        case CleanType::CleanRangeData:
+        case CleanType::CleanBucketData:
+            // All data in the target range/bucket can be cleaned.
+            return true;
+        case CleanType::CleanForAlterTable:
+            return entry->IsFree();
+        default:
+            assert(false);
+            return false;
+        }
     }
 
 private:
-    uint64_t ckpt_ts_{0};
-    txservice::CleanType clean_type_{CleanType::CleanForSplitRange};
+    CleanType clean_type_;
+    // Target bucket to be cleaned if clean type is CleanBucketData.
+    uint16_t bucket_id_{0};
+    // kickout all cce with commit ts <= clean_ts_ if clean type is
+    // CleanForAlterTable.
+    uint64_t clean_ts_{0};
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
     std::vector<TxKey::Uptr> resume_key_;

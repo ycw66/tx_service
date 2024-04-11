@@ -3007,7 +3007,6 @@ void KickoutDataOp::Reset()
     table_name_ = nullptr;
     start_key_ = nullptr;
     end_key_ = nullptr;
-    commit_ts_ = 0;
     node_group_ = 0;
     hd_result_.Reset();
 }
@@ -4395,7 +4394,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         // We don't care about the commit ts of the target cc entry, all entries
         // fall into the migrated new ranges should be kicked out no matter
         // what.
-        kickout_old_range_data_op_.commit_ts_ = UINT64_MAX;
         auto local_shards = Sharder::Instance().GetLocalCcShards();
         for (kickout_data_it_ = new_range_info_.cbegin();
              kickout_data_it_ != new_range_info_.cend();
@@ -4421,6 +4419,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     kickout_old_range_data_op_.end_key_ =
                         std::next(kickout_data_it_)->first.get();
                 }
+                kickout_old_range_data_op_.clean_type_ =
+                    CleanType::CleanRangeData;
 
                 LOG(INFO)
                     << "Split Flush transaction kickout old data in range "
@@ -6285,7 +6285,11 @@ void DataMigrationOp::Reset(TransactionExecution *txm,
     post_all_bucket_lock_op_.key_ = &bucket_key_;
     post_all_bucket_lock_op_.rec_ = &bucket_record_;
 
+#ifdef RANGE_PARTITION_ENABLED
     assert(ranges_in_bucket_snapshot_.empty());
+#else
+    assert(table_snapshot_.empty());
+#endif
 }
 
 void DataMigrationOp::Forward(TransactionExecution *txm)
@@ -6556,6 +6560,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             return;
         }
 
+#ifdef RANGE_PARTITION_ENABLED
         auto local_shards = Sharder::Instance().GetLocalCcShards();
         ranges_in_bucket_snapshot_ = local_shards->GetRangesInBucket(
             status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
@@ -6576,13 +6581,16 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
         }
         else
+#endif
         {
             LOG(INFO) << "Data migration: install dirty bucket, bucket id: "
                       << status_->bucket_ids_[migrate_bucket_idx_]
                       << ", txn: " << txm->TxNumber();
 
-            const BucketInfo *bucket_info = local_shards->GetBucketInfo(
-                status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
+            const BucketInfo *bucket_info =
+                Sharder::Instance().GetLocalCcShards()->GetBucketInfo(
+                    status_->bucket_ids_[migrate_bucket_idx_],
+                    txm->TxCcNodeId());
             bucket_info_ = *bucket_info;
             assert(txm->CommitTs() > bucket_info_.Version());
             bucket_info_.SetDirty(status_->new_owner_ngs_[migrate_bucket_idx_],
@@ -6616,6 +6624,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                   << status_->bucket_ids_[migrate_bucket_idx_]
                   << ", txn: " << txm->TxNumber();
 
+#ifdef RANGE_PARTITION_ENABLED
         // Test drop table t1 concurrently. See monograph_test repo. table
         // name need to keep consistent
         CODE_FAULT_INJECTOR("wait_table_t1_be_droped_continue", {
@@ -6637,6 +6646,18 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                                                 txm->CommitTs(),
                                                 &data_sync_op_.hd_result_);
         };
+#else
+        data_sync_op_.op_func_ = [this, txm]
+        {
+            LocalCcShards *shard = Sharder::Instance().GetLocalCcShards();
+            shard->EnqueueDataSyncTaskForBucket(
+                status_->bucket_ids_[migrate_bucket_idx_],
+                txm->TxCcNodeId(),
+                txm->TxTerm(),
+                txm->CommitTs(),
+                &data_sync_op_.hd_result_);
+        };
+#endif
 
         ACTION_FAULT_INJECTOR("data_migrate_after_install_dirty");
         ForwardToSubOperation(txm, &data_sync_op_);
@@ -6746,6 +6767,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         bucket_info_.Set(status_->new_owner_ngs_[migrate_bucket_idx_],
                          txm->CommitTs());
         bucket_record_.SetBucketInfo(&bucket_info_);
+
+#ifdef RANGE_PARTITION_ENABLED
         ranges_in_bucket_snapshot_ =
             Sharder::Instance().GetLocalCcShards()->GetRangesInBucket(
                 status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
@@ -6754,7 +6777,6 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         {
             // Set commit ts as UINT64_MAX so that all cc entries in this range
             // are deleted.
-            kickout_data_op_.commit_ts_ = UINT64_MAX;
             kickout_data_op_.node_group_ = txm->TxCcNodeId();
             kickout_tbl_it_ = ranges_in_bucket_snapshot_.cbegin();
             kickout_range_it_ = kickout_tbl_it_->second.cbegin();
@@ -6786,6 +6808,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             assert(range != nullptr);
             kickout_data_op_.start_key_ = range->GetRangeInfo()->StartKey();
             kickout_data_op_.end_key_ = range->GetRangeInfo()->EndKey();
+            // All data in this range is clean target.
+            kickout_data_op_.clean_type_ = CleanType::CleanRangeData;
             LOG(INFO) << "Data migration: kickout bucket data"
                       << ", bucket id: "
                       << status_->bucket_ids_[migrate_bucket_idx_]
@@ -6801,6 +6825,39 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             post_all_bucket_lock_op_.write_type_ = PostWriteType::PostCommit;
             ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
         }
+
+#else
+        //  For hash partition, send kickout cc to each cc map to kickout data
+        //  in this bucket.
+        table_snapshot_ =
+            Sharder::Instance().GetLocalCcShards()->GetCatalogTableNameSnapshot(
+                txm->TxCcNodeId(), txm->CommitTs());
+        kickout_tbl_it_ = table_snapshot_.cbegin();
+
+        if (kickout_tbl_it_ == table_snapshot_.cend())
+        {
+            LOG(INFO) << "Data migration: post write all"
+                      << ", bucket id: "
+                      << status_->bucket_ids_[migrate_bucket_idx_]
+                      << ", txn: " << txm->TxNumber();
+            post_all_bucket_lock_op_.write_type_ = PostWriteType::PostCommit;
+            ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+            return;
+        }
+
+        kickout_data_op_.node_group_ = txm->TxCcNodeId();
+        kickout_data_op_.table_name_ = &kickout_tbl_it_->first;
+        kickout_data_op_.start_key_ = nullptr;
+        kickout_data_op_.end_key_ = nullptr;
+        // Check if the key is hashed to this bucket
+        kickout_data_op_.clean_type_ = CleanType::CleanBucketData;
+        LOG(INFO) << "Data migration: kickout bucket data"
+                  << ", bucket id: "
+                  << status_->bucket_ids_[migrate_bucket_idx_]
+                  << ", txn: " << txm->TxNumber();
+        ForwardToSubOperation(txm, &kickout_data_op_);
+
+#endif
     }
     else if (op_ == &kickout_data_op_)
     {
@@ -6816,13 +6873,13 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                        << ", bucket id : "
                        << status_->bucket_ids_[migrate_bucket_idx_]
                        << ", table name " << kickout_tbl_it_->first.StringView()
-                       << ", range id : " << *kickout_range_it_
                        << ", tx_number:" << txm->TxNumber()
                        << ", keep retrying";
             RetrySubOperation(txm, &kickout_data_op_);
             return;
         }
 
+#ifdef RANGE_PARTITION_ENABLED
         if (++kickout_range_it_ == kickout_tbl_it_->second.cend())
         {
             if (++kickout_tbl_it_ == ranges_in_bucket_snapshot_.cend())
@@ -6863,6 +6920,19 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         assert(range != nullptr);
         kickout_data_op_.start_key_ = range->GetRangeInfo()->StartKey();
         kickout_data_op_.end_key_ = range->GetRangeInfo()->EndKey();
+#else
+        if (++kickout_tbl_it_ == table_snapshot_.cend())
+        {
+            LOG(INFO) << "Data migration: post write all"
+                      << ", bucket id: "
+                      << status_->bucket_ids_[migrate_bucket_idx_]
+                      << ", txn: " << txm->TxNumber();
+            post_all_bucket_lock_op_.write_type_ = PostWriteType::PostCommit;
+            ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+            return;
+        }
+        kickout_data_op_.table_name_ = &kickout_tbl_it_->first;
+#endif
 
         ForwardToSubOperation(txm, &kickout_data_op_);
     }
@@ -7071,7 +7141,11 @@ void DataMigrationOp::Clear()
 
     status_ = nullptr;
 
+#ifdef RANGE_PARTITION_ENABLED
     ranges_in_bucket_snapshot_.clear();
+#else
+    table_snapshot_.clear();
+#endif
 }
 
 BatchReadOperation::BatchReadOperation(

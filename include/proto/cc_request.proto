@@ -350,9 +350,9 @@ enum SlicePosition {
 }
 
 enum CleanType {
-    CleanForFree = 0;
-    CleanForSplitRange = 1;
-    CleanForAlterTabel = 2;
+    CleanRangeData = 0;
+    CleanBucketData = 1;
+    CleanForAlterTable = 2;
 }
 
 message AcquireRequest {
@@ -791,7 +791,7 @@ message KickoutDataRequest {
     uint32 node_group_id = 2;
     string table_name_str = 3;
     CcTableType table_type = 4;
-    uint64 ckpt_ts = 5;
+    uint64 clean_ts = 5;
     CleanType clean_type = 6;
 }
 

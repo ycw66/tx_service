@@ -60,21 +60,19 @@ enum struct ScanType : uint8_t
 enum struct CleanType
 {
     /**
-     * This used to free the memory when the ccshard is full. In this case, the
-     * `CleanPageAndReBalance()` is invoked during `CcShard::Clean()`, and the
-     * CcPage come from the LRU list. Then will clean cc entries that is free,
-     * that is to say, the ccentry has been checkpointed and have no lock on
-     * this ccentry.
-     */
-    CleanForFree = 0,
-    /**
      * This used to kickout the ccentries that donot belong to this node anymore
      * during split range operation. In this case, the `CleanPageAndReBalance()`
      * is invoked during execute `KickoutCcEntryCc` request, and the CcPage come
      * from the request's `start_key`. Then will clean cc entries that are in
      * the specific range.
      */
-    CleanForSplitRange,
+    CleanRangeData = 0,
+    /**
+     * This is used to kickout the ccentries that no longer belong to this node
+     * group anymore during bucket migration. All data in the specified bucket
+     * should be cleaned regardless of its persistance status and lock status.
+     */
+    CleanBucketData,
     /**
      * This used to kickout the ccentries during alter table operation. In this
      * case, the `CleanPageAndReBalance()` is invoked during execute
@@ -144,7 +142,6 @@ public:
 
     virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *page,
-        CleanType clean_type = CleanType::CleanForFree,
         KickoutCcEntryCc *kickout_cc = nullptr,
         bool *is_success = nullptr) = 0;
     virtual void Clean() = 0;

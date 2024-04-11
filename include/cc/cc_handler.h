@@ -1,8 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <unordered_set>
-#include <utility>
 #include <vector>
 
 #include "catalog_factory.h"
@@ -11,7 +9,6 @@
 #include "ccm_scanner.h"
 #include "read_write_entry.h"
 #include "scan.h"
-#include "tx_container.h"
 #include "tx_key.h"
 #include "tx_operation.h"
 #include "tx_operation_result.h"
@@ -513,26 +510,31 @@ public:
                                  ResultTemplateType type) = 0;
 
     /**
-     * @brief Kickout the ccentrise whose commit_ts less than @@ckpt_ts
-     * and between start_key and end_key from ccmap.
+     * @brief Kickout the ccentrise that are between start_key and
+     * end_key from ccmap.
      *
      * @param ng_id The node group id that to execute the operation.
      * @param tx_number Tx number
      * @param tx_term Term of the tx node
      * @param command_id
-     * @param commit_ts
      * @param hres Result handler of the request
+     * @param clean_type The clean type of the data
+     * @param bucket_id only used if clean type is CleanBucketData
+     * @param start_key The start key of the data
+     * @param end_key The end key of the data
+     * @param clean_ts only used if clean type is CleanForAlterTable
      */
     virtual void KickoutData(const TableName &table_name,
                              uint32_t ng_id,
                              TxNumber tx_number,
                              int64_t tx_term,
                              uint64_t command_id,
-                             uint64_t commit_ts,
                              CcHandlerResult<Void> &hres,
                              CleanType clean_type,
+                             uint16_t bucket_id = 0,
                              const TxKey *start_key = nullptr,
-                             const TxKey *end_key = nullptr) = 0;
+                             const TxKey *end_key = nullptr,
+                             uint64_t clean_ts = 0) = 0;
 
     virtual void VerifyOrphanLock(TxNumber txn) = 0;
 };

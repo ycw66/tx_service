@@ -176,6 +176,8 @@ public:
         return (node_group_id << 10) | residual;
     }
 
+    uint16_t ShardBucketIdToCoreIdx(uint16_t bucket_id);
+
     uint32_t ShardToCcNodeGroup(uint32_t sharding_code)
     {
 #ifdef ON_KEY_OBJECT

@@ -1958,6 +1958,7 @@ LocalCcShards::GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed)
     return migrate_plan;
 }
 
+#ifdef RANGE_PARTITION_ENABLED
 bool LocalCcShards::EnqueueRangeDataSyncTask(
     const TableName &table_name,
     uint32_t ng_id,
@@ -1969,7 +1970,6 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
     std::shared_ptr<DataSyncStatus> status,
     CcHandlerResult<Void> *hres)
 {
-#ifdef RANGE_PARTITION_ENABLED
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition);
     const RangeInfo *range_info = range_entry->GetRangeInfo();
@@ -2103,12 +2103,117 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
 
         return false;
     }
-#else
-
-    assert(false && "Unsupport for hash partition");
-
-#endif
 }
+#else
+bool LocalCcShards::EnqueueDataSyncTaskToCore(
+    const TableName &table_name,
+    uint32_t ng_id,
+    int64_t ng_term,
+    uint64_t data_sync_ts,
+    uint16_t core_idx,
+    bool is_dirty,
+    bool can_be_skipped,
+    std::shared_ptr<DataSyncStatus> status,
+    CcHandlerResult<Void> *hres,
+    std::function<bool(size_t)> filter_lambda)
+{
+    auto task_limiter_key = TaskLimiterKey(
+        ng_id, table_name.StringView(), table_name.Type(), core_idx);
+    std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
+    auto iter = task_limiters_.find(task_limiter_key);
+    bool enqueued_task = false;
+    if (iter == task_limiters_.end())
+    {
+        // Create task limiter
+        auto limiter = task_limiters_.emplace(
+            task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
+        // Update `latest_pending_task_ts` to higher ts if this task can be
+        // skipped(also means it's `data_sync_ts_` can be adjusted).
+        if (can_be_skipped)
+        {
+            limiter.first->second->latest_pending_task_ts_ = data_sync_ts;
+        }
+        // Relase `task_limiter_mux_`
+        task_limiter_lk.unlock();
+
+        auto task = std::make_shared<DataSyncTask>(table_name,
+                                                   0,
+                                                   0,
+                                                   ng_id,
+                                                   ng_term,
+                                                   data_sync_ts,
+                                                   status,
+                                                   is_dirty,
+                                                   can_be_skipped,
+                                                   hres,
+                                                   filter_lambda);
+
+        // Push task to worker task queue.
+        {
+            std::lock_guard<std::mutex> task_worker_lk(
+                data_sync_worker_ctx_.mux_);
+            data_sync_task_queue_[core_idx].emplace_back(task);
+            data_sync_worker_ctx_.cv_.notify_all();
+        }
+        enqueued_task = true;
+    }
+    else
+    {
+        if (can_be_skipped)
+        {
+            assert(hres == nullptr);
+            // '0' means have no pending task on queue. so we push this task
+            // to PendingTaskQueue
+            if (iter->second->latest_pending_task_ts_ == 0)
+            {
+                iter->second->latest_pending_task_ts_ = data_sync_ts;
+                iter->second->pending_tasks_.push(
+                    std::make_shared<DataSyncTask>(table_name,
+                                                   0,
+                                                   0,
+                                                   ng_id,
+                                                   ng_term,
+                                                   data_sync_ts,
+                                                   status,
+                                                   is_dirty,
+                                                   can_be_skipped,
+                                                   hres,
+                                                   filter_lambda));
+                enqueued_task = true;
+            }
+            else
+            {
+                // Already has one pending task on the PendingTaskQueue. We
+                // just update `latest_pending_task_ts_` to higher ts.
+                iter->second->latest_pending_task_ts_ = std::max(
+                    iter->second->latest_pending_task_ts_, data_sync_ts);
+                status->SetNoTruncateLog();
+            }
+        }
+        else
+        {
+            // This task can't be skipped(DataMigration, CraeteIndex,
+            // LastCheckpoint). Because these operations need to explicitly
+            // flush data into storage, rather than relying on other
+            // checkpoint tasks.
+            iter->second->pending_tasks_.push(
+                std::make_shared<DataSyncTask>(table_name,
+                                               0,
+                                               0,
+                                               ng_id,
+                                               ng_term,
+                                               data_sync_ts,
+                                               status,
+                                               is_dirty,
+                                               can_be_skipped,
+                                               hres,
+                                               filter_lambda));
+            enqueued_task = true;
+        }
+    }
+    return enqueued_task;
+}
+#endif
 
 void LocalCcShards::EnqueueDataSyncTaskForTable(
     const TableName &table_name,
@@ -2145,106 +2250,19 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
     auto core_count = cc_shards_.size();
     size_t task_cnt = 0;
 
-    bool need_notify_worker = false;
-
     for (size_t core_idx = 0; core_idx < core_count; ++core_idx)
     {
-        auto task_limiter_key = TaskLimiterKey(
-            ng_id, table_name.StringView(), table_name.Type(), core_idx);
-        std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
-        auto iter = task_limiters_.find(task_limiter_key);
-        if (iter == task_limiters_.end())
+        if (EnqueueDataSyncTaskToCore(table_name,
+                                      ng_id,
+                                      ng_term,
+                                      data_sync_ts,
+                                      core_idx,
+                                      is_dirty,
+                                      can_be_skipped,
+                                      status,
+                                      hres))
         {
-            // Create task limiter
-            auto limiter = task_limiters_.emplace(
-                task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
-            // Update `latest_pending_task_ts` to higher ts if this task can be
-            // skipped(also means it's `data_sync_ts_` can be adjusted).
-            if (can_be_skipped)
-            {
-                limiter.first->second->latest_pending_task_ts_ = data_sync_ts;
-            }
-            // Relase `task_limiter_mux_`
-            task_limiter_lk.unlock();
-
-            auto task = std::make_shared<DataSyncTask>(table_name,
-                                                       0,
-                                                       0,
-                                                       ng_id,
-                                                       ng_term,
-                                                       data_sync_ts,
-                                                       status,
-                                                       is_dirty,
-                                                       can_be_skipped,
-                                                       hres,
-                                                       [](size_t hash_code)
-                                                       { return true; });
-
-            // Push task to worker task queue.
-            std::lock_guard<std::mutex> task_worker_lk(
-                data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_[core_idx].emplace_back(task);
-
             task_cnt++;
-            need_notify_worker = true;
-        }
-        else
-        {
-            if (can_be_skipped)
-            {
-                assert(hres == nullptr);
-                // '0' means have no pending task on queue. so we push this task
-                // to PendingTaskQueue
-                if (iter->second->latest_pending_task_ts_ == 0)
-                {
-                    iter->second->latest_pending_task_ts_ = data_sync_ts;
-                    iter->second->pending_tasks_.push(
-                        std::make_shared<DataSyncTask>(table_name,
-                                                       0,
-                                                       0,
-                                                       ng_id,
-                                                       ng_term,
-                                                       data_sync_ts,
-                                                       status,
-                                                       is_dirty,
-                                                       can_be_skipped,
-                                                       hres,
-                                                       [](size_t)
-                                                       { return true; }));
-                    task_cnt++;
-                }
-                else
-                {
-                    // Already has one pending task on the PendingTaskQueue. We
-                    // just update `latest_pending_task_ts_` to higher ts.
-                    iter->second->latest_pending_task_ts_ = std::max(
-                        iter->second->latest_pending_task_ts_, data_sync_ts);
-                    status->SetNoTruncateLog();
-                }
-            }
-            else
-            {
-                // This task can't be skipped(DataMigration, CraeteIndex,
-                // LastCheckpoint). Because these operations need to explicitly
-                // flush data into storage, rather than relying on other
-                // checkpoint tasks.
-                iter->second->pending_tasks_.push(
-                    std::make_shared<DataSyncTask>(table_name,
-                                                   0,
-                                                   0,
-                                                   ng_id,
-                                                   ng_term,
-                                                   data_sync_ts,
-                                                   status,
-                                                   is_dirty,
-                                                   can_be_skipped,
-                                                   hres,
-                                                   [](size_t)
-                                                   { return true; }));
-                task_cnt++;
-            }
-
-            task_limiter_lk.unlock();
         }
     }
 
@@ -2253,7 +2271,6 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         status->unfinished_tasks_ += task_cnt;
         if (hres)
         {
-            assert(can_be_skipped == false);
             status->all_task_started_ = true;
             if (status->unfinished_tasks_ == 0)
             {
@@ -2261,12 +2278,6 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                 return;
             }
         }
-    }
-
-    if (need_notify_worker)
-    {
-        std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
-        data_sync_worker_ctx_.cv_.notify_all();
     }
 
 #else
@@ -2329,8 +2340,12 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
 }
 
 void LocalCcShards::EnqueueDataSyncTaskForBucket(
+#ifdef RANGE_PARTITION_ENABLED
     const std::unordered_map<TableName, std::unordered_set<int32_t>>
         &ranges_in_bucket_snapshot,
+#else
+    uint16_t bucket_id,
+#endif
     uint32_t ng_id,
     int64_t ng_term,
     uint64_t data_sync_ts,
@@ -2390,8 +2405,45 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     data_sync_worker_ctx_.cv_.notify_all();
 
 #else
+    std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+    std::shared_ptr<DataSyncStatus> status =
+        std::make_shared<DataSyncStatus>(false);
+    size_t task_cnt = 0;
+    for (auto &catalog_ng : table_catalogs_)
+    {
+        auto catalog_it = catalog_ng.second.find(ng_id);
+        if (catalog_it == catalog_ng.second.end())
+        {
+            // Skip the table if it is not initialized in this ng.
+            continue;
+        }
+        if (EnqueueDataSyncTaskToCore(
+                catalog_ng.first,
+                ng_id,
+                ng_term,
+                data_sync_ts,
+                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id),
+                false,
+                false,
+                status,
+                hres,
+                [bucket_id](size_t key_hash)
+                { return (key_hash & 0x3FFF) == bucket_id; }))
+        {
+            task_cnt++;
+        }
+    }
 
-    assert(false && "Unsupport for hash partition");
+    {
+        std::lock_guard<std::mutex> status_lk(status->mux_);
+        status->all_task_started_ = true;
+        status->unfinished_tasks_ += task_cnt;
+        if (status->unfinished_tasks_ == 0)
+        {
+            hres->SetFinished();
+            return;
+        }
+    }
 #endif
 }
 

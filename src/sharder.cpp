@@ -378,6 +378,11 @@ int Sharder::Init(
     return 0;
 }
 
+uint16_t Sharder::ShardBucketIdToCoreIdx(uint16_t bucket_id)
+{
+    return (bucket_id & 0x3FF) % local_shards_->Count();
+}
+
 std::shared_ptr<brpc::Channel> Sharder::GetCcNodeServiceChannel(
     uint32_t node_id)
 {
@@ -969,12 +974,14 @@ void Sharder::UpdateClusterConfig(
                 LOG(ERROR) << "RPC to host manager to update node group "
                               "configs failed "
                            << cntl.ErrorText();
+                cc_shard->Enqueue(cc_req);
                 return;
             }
             if (resp.error())
             {
                 LOG(ERROR)
                     << "Failed to update node group configs on host manager";
+                cc_shard->Enqueue(cc_req);
                 return;
             }
 

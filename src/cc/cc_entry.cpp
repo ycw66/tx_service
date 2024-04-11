@@ -78,7 +78,7 @@ void LruEntry::SetCommitTsPayloadStatus(uint64_t ts, RecordStatus status)
     }
 }
 
-bool LruEntry::IsFree()
+bool LruEntry::IsFree() const
 {
     // As long as all locks are released, the lock associated with this cc entry
     // should be recycled.

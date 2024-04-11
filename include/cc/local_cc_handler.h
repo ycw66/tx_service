@@ -396,26 +396,25 @@ public:
                          ResultTemplateType type) override;
 
     /// <summary>
-    /// Kickout the ccentrise whose commit_ts less than @@ckpt_ts and betwen
-    /// start_key and end_key from ccmap.
+    /// Kickout the ccentrise that are betwen start_key and end_key from ccmap.
     /// </summary>
     /// <param name="table_name"></param>
     /// <param name="ng_id">Id of the node group that to exec. the req.</param>
     /// <param name="tx_number">Tx number</param>
     /// <param name="tx_term">Term of the tx node</param>
     /// <param name="command_id"></param>
-    /// <param name="commit_ts"></param>
     /// <param name="hres">hres</param>
     void KickoutData(const TableName &table_name,
                      uint32_t ng_id,
                      TxNumber tx_number,
                      int64_t tx_term,
                      uint64_t command_id,
-                     uint64_t commit_ts,
                      CcHandlerResult<Void> &hres,
                      CleanType clean_type,
+                     uint16_t bucket_id = 0,
                      const TxKey *start_key = nullptr,
-                     const TxKey *end_key = nullptr) override;
+                     const TxKey *end_key = nullptr,
+                     uint64_t clean_ts = 0) override;
 
     void VerifyOrphanLock(TxNumber txn) override;
 

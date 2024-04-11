@@ -1751,11 +1751,12 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                                             TxNumber tx_number,
                                             int64_t tx_term,
                                             uint64_t command_id,
-                                            uint64_t commit_ts,
                                             CcHandlerResult<Void> &hres,
                                             CleanType clean_type,
+                                            uint16_t bucket_id,
                                             const TxKey *start_key,
-                                            const TxKey *end_key)
+                                            const TxKey *end_key,
+                                            uint64_t clean_ts)
 {
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
@@ -1764,36 +1765,54 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
     if (dest_node_id == cc_shards_.node_id_)
     {
         KickoutCcEntryCc *req = kickout_ccentry_pool_.NextRequest();
+        // For hash partition, all data in a single bucket should be hashed to
+        // the same core.
+        uint16_t core_cnt = clean_type == CleanType::CleanBucketData
+                                ? 1
+                                : Sharder::Instance().GetLocalCcShardsCount();
         req->Reset(table_name,
                    ng_id,
-                   commit_ts,
-                   Sharder::Instance().GetLocalCcShardsCount(),
+                   core_cnt,
                    &hres,
                    clean_type,
                    start_key,
-                   end_key);
+                   end_key,
+                   bucket_id,
+                   clean_ts);
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
-        // Dispatch the request to all cores and run in parallel
-        for (uint16_t idx = 0;
-             idx < Sharder::Instance().GetLocalCcShardsCount();
-             idx++)
+        if (clean_type == CleanType::CleanBucketData)
         {
-            cc_shards_.EnqueueToCcShard(idx, req);
+            // For clean bucket data just send req to the core which the
+            // bucket belongs to.
+            cc_shards_.EnqueueToCcShard(
+                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id), req);
+        }
+        else
+        {
+            // Dispatch the request to all cores and run in parallel
+            for (uint16_t idx = 0;
+                 idx < Sharder::Instance().GetLocalCcShardsCount();
+                 idx++)
+            {
+                cc_shards_.EnqueueToCcShard(idx, req);
+            }
         }
     }
     else
     {
+        // Only alter table will try to clean data on remote node.
+        assert(clean_type == CleanType::CleanForAlterTable);
         remote_hd_.KickoutData(cc_shards_.node_id_,
                                tx_number,
                                tx_term,
                                command_id,
                                table_name,
                                ng_id,
-                               commit_ts,
                                clean_type,
-                               hres);
+                               hres,
+                               clean_ts);
     }
 }
 

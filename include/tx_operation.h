@@ -9,6 +9,7 @@
 
 #include "catalog_key_record.h"
 #include "cc_entry.h"
+#include "cc_map.h"
 #include "cluster_config_record.h"
 #include "log_closure.h"
 #include "range_record.h"
@@ -785,9 +786,15 @@ struct KickoutDataOp : public TransactionOperation
 
     const TableName *table_name_{nullptr};
     NodeGroupId node_group_;
-    uint64_t commit_ts_{0};
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
+    CleanType clean_type_{CleanType::CleanRangeData};
+    // Clean ts for the kickout cc. Only valid if clean type is
+    // CleanForAlterTable.
+    uint64_t clean_ts_{0};
+    // Target bucket for kickout cc. Only valid if clean type is
+    // CleanBucketData.
+    uint16_t bucket_id_{0};
     CcHandlerResult<Void> hd_result_;
 };
 
@@ -1388,6 +1395,7 @@ private:
     void ForceToFinish(TransactionExecution *txm);
     void Clear();
 
+#ifdef RANGE_PARTITION_ENABLED
     // the snapshot of the ranges that we need to migrate for current bucket.
     // Note that the table name here is of type range partition.
     std::unordered_map<TableName, std::unordered_set<int32_t>>
@@ -1396,6 +1404,10 @@ private:
         kickout_tbl_it_;
     std::unordered_set<int32_t>::const_iterator kickout_range_it_;
     TableName kickout_table_{std::string(""), TableType::Primary};
+#else
+    std::unordered_map<TableName, bool> table_snapshot_;
+    std::unordered_map<TableName, bool>::const_iterator kickout_tbl_it_;
+#endif
 
     std::shared_ptr<DataMigrationStatus> status_;
 };

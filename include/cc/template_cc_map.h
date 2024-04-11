@@ -5323,12 +5323,7 @@ public:
             }
 #endif
 
-            if (!req.filter_lambda_(key->Hash()))
-            {
-                continue;
-            }
-
-            if (cce->NeedCkpt())
+            if (req.filter_lambda_(key->Hash()) && cce->NeedCkpt())
             {
                 cce->ExportForCkpt(*key,
                                    req.DataSyncVec(vec_idx),
@@ -6217,7 +6212,6 @@ public:
         // Iterate the cc map using the original page list.
         const KeyT *start_key = static_cast<const KeyT *>(req.StartKey());
         const KeyT *end_key = static_cast<const KeyT *>(req.EndKey());
-        CleanType clean_type = req.CleanType();
         LruPage *lru_page;
         if (req.ResumeKey(shard_->core_id_) != nullptr)
         {
@@ -6261,7 +6255,7 @@ public:
                ccp != &pos_inf_page_)
         {
             auto [freed_cnt, next_page] =
-                CleanPageAndReBalance(ccp, clean_type, &req, &is_success);
+                CleanPageAndReBalance(ccp, &req, &is_success);
             ++scan_page_cnt;
             // Move to next page
             ccp = static_cast<CcPage<KeyT, ValueT> *>(next_page);
@@ -6620,7 +6614,6 @@ public:
      */
     std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *lru_page,
-        CleanType clean_type = CleanType::CleanForFree,
         KickoutCcEntryCc *kickout_cc = nullptr,
         bool *is_success = nullptr) override
     {
@@ -6643,7 +6636,7 @@ public:
         CcPage<KeyT, ValueT> *page =
             static_cast<CcPage<KeyT, ValueT> *>(lru_page);
         const KeyT old_page_key(page->FirstKey());
-        bool success = CleanPage(page, free_cnt, clean_type, kickout_cc);
+        bool success = CleanPage(page, free_cnt, kickout_cc);
 
         // Output the operation result if the caller care it.
         if (is_success != nullptr)
@@ -8450,19 +8443,11 @@ protected:
      */
     bool CleanPage(CcPage<KeyT, ValueT> *page,
                    size_t &free_cnt,
-                   CleanType clean_type,
                    KickoutCcEntryCc *kickout_cc = nullptr)
     {
         std::vector<KeyT> &keys = page->keys_;
         std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &entries =
             page->entries_;
-        const KeyT *start_key = nullptr;
-        const KeyT *end_key = nullptr;
-        if (kickout_cc)
-        {
-            start_key = static_cast<const KeyT *>(kickout_cc->StartKey());
-            end_key = static_cast<const KeyT *>(kickout_cc->EndKey());
-        }
         auto key_insert_it = keys.begin();
         auto entry_insert_it = entries.begin();
 
@@ -8476,34 +8461,23 @@ protected:
         for (; key_it != keys.end(); key_it++, entry_it++)
         {
             CcEntry<KeyT, ValueT> *cce = entry_it->get();
-
-            bool can_be_clean = false;
-            switch (clean_type)
+            bool can_be_cleaned = false;
+            bool is_clean_target = false;
+            if (kickout_cc)
             {
-            case CleanType::CleanForFree:
-                can_be_clean = cce->IsFree();
-                break;
-            case CleanType::CleanForSplitRange:
-            {
-                assert(kickout_cc);
-                can_be_clean = KeyInRange(&(*key_it), start_key, end_key);
-                break;
+                is_clean_target = kickout_cc->IsCleanTarget(&(*key_it), cce);
+                can_be_cleaned = is_clean_target &&
+                                 kickout_cc->CanBeCleaned(&(*key_it), cce);
             }
-            case CleanType::CleanForAlterTable:
+            else
             {
-                assert(kickout_cc);
-                can_be_clean = cce->CommitTs() <= kickout_cc->CkptTs() &&
-                               cce->CommitTs() > 1 && cce->IsFree();
-                break;
-            }
-            default:
-            {
-                LOG(ERROR) << "Unknown clean type: " << (uint32_t) clean_type;
-                assert(false);
-            }
+                can_be_cleaned = cce->IsFree();
+                // If we're just doing regular page clean, no cce is specific
+                // clean target and clean_succecss is always true.
+                is_clean_target = false;
             }
 
-            if (can_be_clean)
+            if (can_be_cleaned)
             {
 #ifdef RANGE_PARTITION_ENABLED
                 bool kick_ret = shard_->local_shards_.KickoutKeyInSlice(
@@ -8519,39 +8493,29 @@ protected:
                     // record the commit_ts if the entry cannot be
                     // cleaned.
                     last_commit_ts = std::max(last_commit_ts, cce->CommitTs());
-                    // The ccentry that expect to clean cannot be kick
-                    // out. In this branch, only when clean_type is
-                    // CleanForSplitRange or CleanForAlterTable care
-                    // this clean status
-                    if (clean_type == CleanType::CleanForSplitRange ||
-                        clean_type == CleanType::CleanForAlterTable)
+                    if (is_clean_target)
                     {
+                        // The ccentry that expect to clean cannot be kick
+                        // out.
                         clean_success = false;
                     }
                 }
                 else
+#endif
                 {
                     // free entries will be erased
                     free_cnt++;
+                    // Check if the cce has any locks on it. If so recycle the
+                    // lock entry before deleting cce.
+                    // TODO{liunyl}: invalidate cleared lock terms.
+                    (*entry_it)->ClearLocks(*shard_, cc_ng_id_);
                 }
-#else
-                // free entries will be erased
-                free_cnt++;
-#endif
             }
             else
             {
                 // The ccentry that expect to clean cannot be kick out.
-                // In this branch, only when clean_type is
-                // CleanForAlterTable care this clean status. For
-                // CleanForSplitRange, if can_be_clean is false, it mean
-                // that this ccentry is not the target one, so it do not
-                // care this clean status.
-                if (clean_type == CleanType::CleanForAlterTable &&
-                    cce->CommitTs() <= kickout_cc->CkptTs() &&
-                    cce->CommitTs() > 1)
+                if (is_clean_target)
                 {
-                    assert(!cce->IsFree());
                     clean_success = false;
                 }
                 // keep the entries that are not free

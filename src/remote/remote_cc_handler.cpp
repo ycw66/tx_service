@@ -856,9 +856,9 @@ void txservice::remote::RemoteCcHandler::KickoutData(
     uint64_t command_id,
     const TableName &table_name,
     uint32_t ng_id,
-    uint64_t commit_ts,
     txservice::CleanType clean_type,
-    CcHandlerResult<Void> &hres)
+    CcHandlerResult<Void> &hres,
+    uint64_t clean_ts)
 {
     CcMessage send_msg;
 
@@ -877,7 +877,8 @@ void txservice::remote::RemoteCcHandler::KickoutData(
     kickout_data_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
     kickout_data_req->set_node_group_id(ng_id);
-    kickout_data_req->set_ckpt_ts(commit_ts);
+    kickout_data_req->set_clean_ts(clean_ts);
+    assert(clean_type == txservice::CleanType::CleanForAlterTable);
     kickout_data_req->set_clean_type((txservice::remote::CleanType) clean_type);
 
     // Send message

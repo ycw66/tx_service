@@ -293,7 +293,7 @@ public:
      *
      * @return true: entry can be kicked out.
      */
-    bool IsFree();
+    bool IsFree() const;
 
     uint64_t CommitTs() const;
 
