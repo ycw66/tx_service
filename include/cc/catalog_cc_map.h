@@ -670,7 +670,8 @@ public:
 #endif
 
                 if (req.OpType() == OperationType::AddIndex ||
-                    req.OpType() == OperationType::DropIndex)
+                    req.OpType() == OperationType::DropIndex ||
+                    req.OpType() == OperationType::Update)
                 {
                     std::vector<TableName> new_index_names =
                         new_schema->IndexNames();
