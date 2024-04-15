@@ -383,8 +383,10 @@ public:
             cmd->IsReadOnly())
         {
             // Read only commands in read committed isolation level just checks
-            // the payload.
-            object_not_exist = cce->PayloadStatus() == RecordStatus::Deleted;
+            // the payload. `Deleted` status means current payload is deleted,
+            // `Unknown` status means the current payload is being created.
+            object_not_exist = cce->PayloadStatus() == RecordStatus::Deleted ||
+                               cce->PayloadStatus() == RecordStatus::Unknown;
         }
         else
         {
