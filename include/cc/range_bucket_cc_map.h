@@ -2,8 +2,10 @@
 
 #include "cc_request.h"
 #include "range_bucket_key_record.h"
+#include "sharder.h"
 #include "template_cc_map.h"
 #include "tx_service.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -345,7 +347,8 @@ public:
 
         // Only used on first core to restore migrate tx.
         // map from tx number to cur bucket each migrate tx is working on.
-        std::unordered_map<TxNumber, const ::txlog::BucketMigrateMessage *>
+        std::unordered_map<TxNumber,
+                           std::vector<const ::txlog::BucketMigrateMessage *>>
             migrate_tx_state;
         // list of buckets that haven't started migrating.
         std::vector<const ::txlog::BucketMigrateMessage *> pending_buckets;
@@ -361,8 +364,7 @@ public:
                     // Update bucket owner on the first core
                     switch (bucket_process.stage())
                     {
-                    case ::txlog::BucketMigrateMessage_Stage::
-                        BucketMigrateMessage_Stage_NotStarted:
+                    case ::txlog::BucketMigrateStage::NotStarted:
                     {
                         info->bucket_owner_ = bucket_process.old_owner();
                         if (ng_id == req.NodeGroupId())
@@ -371,8 +373,7 @@ public:
                         }
                         break;
                     }
-                    case ::txlog::BucketMigrateMessage_Stage::
-                        BucketMigrateMessage_Stage_BeforeLocking:
+                    case ::txlog::BucketMigrateStage::BeforeLocking:
                     {
                         info->bucket_owner_ = bucket_process.old_owner();
                         if (ng_id == req.NodeGroupId())
@@ -382,14 +383,13 @@ public:
                             // need to assign this bucket to the specified
                             // migration worker tx, since the acquired write
                             // lock on only be released by the same tx number.
-                            migrate_tx_state.try_emplace(
-                                bucket_process.migration_txn(),
-                                &bucket_process);
+                            auto tx_it = migrate_tx_state.try_emplace(
+                                bucket_process.migration_txn());
+                            tx_it.first->second.push_back(&bucket_process);
                         }
                         break;
                     }
-                    case ::txlog::BucketMigrateMessage_Stage::
-                        BucketMigrateMessage_Stage_PrepareMigrate:
+                    case ::txlog::BucketMigrateStage::PrepareMigrate:
                     {
                         info->bucket_owner_ = bucket_process.old_owner();
                         assert(bucket_process.migrate_ts() > info->Version());
@@ -397,27 +397,25 @@ public:
                                        bucket_process.migrate_ts());
                         if (ng_id == req.NodeGroupId())
                         {
-                            migrate_tx_state.try_emplace(
-                                bucket_process.migration_txn(),
-                                &bucket_process);
+                            auto tx_it = migrate_tx_state.try_emplace(
+                                bucket_process.migration_txn());
+                            tx_it.first->second.push_back(&bucket_process);
                         }
                         break;
                     }
-                    case ::txlog::BucketMigrateMessage_Stage::
-                        BucketMigrateMessage_Stage_CommitMigrate:
+                    case ::txlog::BucketMigrateStage::CommitMigrate:
                     {
                         info->Set(bucket_process.new_owner(),
                                   bucket_process.migrate_ts());
                         if (ng_id == req.NodeGroupId())
                         {
-                            migrate_tx_state.try_emplace(
-                                bucket_process.migration_txn(),
-                                &bucket_process);
+                            auto tx_it = migrate_tx_state.try_emplace(
+                                bucket_process.migration_txn());
+                            tx_it.first->second.push_back(&bucket_process);
                         }
                         break;
                     }
-                    case ::txlog::BucketMigrateMessage_Stage::
-                        BucketMigrateMessage_Stage_CleanMigrate:
+                    case ::txlog::BucketMigrateStage::CleanMigrate:
                     {
                         info->Set(bucket_process.new_owner(),
                                   bucket_process.migrate_ts());
@@ -437,11 +435,9 @@ public:
                     // Coordinator of migrate tx. We need to restore the lock
                     // state just after the log is written.
                     if (bucket_process.stage() ==
-                            ::txlog::BucketMigrateMessage_Stage::
-                                BucketMigrateMessage_Stage_PrepareMigrate ||
+                            ::txlog::BucketMigrateStage::PrepareMigrate ||
                         bucket_process.stage() ==
-                            ::txlog::BucketMigrateMessage_Stage::
-                                BucketMigrateMessage_Stage_CommitMigrate)
+                            ::txlog::BucketMigrateStage::CommitMigrate)
                     {
                         lock_type = LockType::WriteLock;
                     }
@@ -451,11 +447,9 @@ public:
                     // Participant of migrate tx. We need to restore the lock
                     // state just before writing the next log.
                     if ((bucket_process.stage() ==
-                         ::txlog::BucketMigrateMessage_Stage::
-                             BucketMigrateMessage_Stage_BeforeLocking) ||
+                         ::txlog::BucketMigrateStage::BeforeLocking) ||
                         bucket_process.stage() ==
-                            ::txlog::BucketMigrateMessage_Stage::
-                                BucketMigrateMessage_Stage_PrepareMigrate)
+                            ::txlog::BucketMigrateStage::PrepareMigrate)
                     {
                         lock_type = LockType::WriteLock;
                     }
@@ -511,8 +505,8 @@ public:
             {
                 std::unordered_map<TxNumber, size_t>
                     migrate_tx_current_bucket_idx;
-                std::vector<uint16_t> bucket_ids;
-                std::vector<NodeGroupId> new_owner_ngs;
+                std::vector<std::vector<uint16_t>> bucket_ids_per_task;
+                std::vector<std::vector<NodeGroupId>> new_owner_ngs_per_task;
                 std::vector<TxNumber> migrate_txns;
                 // Put in progress buckets into todo bucket list first and
                 // record the idx of which bucket each migrate tx is working on.
@@ -527,29 +521,86 @@ public:
                         migrate_tx_state.end())
                     {
                         migrate_tx_current_bucket_idx.try_emplace(
-                            migrate_txn, bucket_ids.size());
-                        bucket_ids.push_back(
-                            migrate_tx_state[migrate_txn]->bucket_id());
-                        new_owner_ngs.push_back(
-                            migrate_tx_state[migrate_txn]->new_owner());
+                            migrate_txn, bucket_ids_per_task.size());
+                        bucket_ids_per_task.emplace_back();
+                        new_owner_ngs_per_task.emplace_back();
+                        for (auto bucket_process :
+                             migrate_tx_state[migrate_txn])
+                        {
+                            bucket_ids_per_task.back().push_back(
+                                bucket_process->bucket_id());
+                            new_owner_ngs_per_task.back().push_back(
+                                bucket_process->new_owner());
+                        }
                     }
                 }
                 // Idle migrate tx should fetch bucket from next_bucket_idx.
-                size_t next_bucket_idx = bucket_ids.size();
+                size_t next_bucket_idx = bucket_ids_per_task.size();
 
+#ifdef RANGE_PARTITION_ENABLED
                 // Now put buckets that have not been picked up by any migrate
                 // tx into the todo list.
-                for (auto pending_bucket : pending_buckets)
+                // Each worker processes 10 buckets at a time, so each task
+                // should contain up to 10 buckets.
+                bucket_ids_per_task.emplace_back();
+                new_owner_ngs_per_task.emplace_back();
+                std::vector<uint16_t> *cur_task_bucekt_ids =
+                    &bucket_ids_per_task.back();
+                std::vector<NodeGroupId> *cur_task_new_owner_ngs =
+                    &new_owner_ngs_per_task.back();
+                for (size_t i = 0; i < pending_buckets.size(); i++)
                 {
-                    bucket_ids.push_back(pending_bucket->bucket_id());
-                    new_owner_ngs.push_back(pending_bucket->new_owner());
+                    cur_task_bucekt_ids->push_back(
+                        pending_buckets[i]->bucket_id());
+                    cur_task_new_owner_ngs->push_back(
+                        pending_buckets[i]->new_owner());
+                    if (cur_task_bucekt_ids->size() == 10 &&
+                        i != pending_buckets.size() - 1)
+                    {
+                        bucket_ids_per_task.push_back(std::vector<uint16_t>());
+                        new_owner_ngs_per_task.push_back(
+                            std::vector<NodeGroupId>());
+                        cur_task_bucekt_ids = &bucket_ids_per_task.back();
+                        cur_task_new_owner_ngs = &new_owner_ngs_per_task.back();
+                    }
                 }
+#else
+                // Put all buckets on the same core to the same task.
+                std::unordered_map<
+                    uint16_t,
+                    std::vector<const ::txlog::BucketMigrateMessage *>>
+                    bucket_ids_per_core;
+                for (size_t i = 0; i < pending_buckets.size(); i++)
+                {
+                    uint16_t core_id =
+                        Sharder::Instance().ShardBucketIdToCoreIdx(
+                            pending_buckets[i]->bucket_id());
+                    auto core_tasks_it =
+                        bucket_ids_per_core.try_emplace(core_id);
+                    core_tasks_it.first->second.push_back(pending_buckets[i]);
+                }
+
+                // Put these pending tasks to the task list
+                for (auto &[core_id, buckets] : bucket_ids_per_core)
+                {
+                    bucket_ids_per_task.emplace_back();
+                    new_owner_ngs_per_task.emplace_back();
+                    for (auto bucket_msg : buckets)
+                    {
+                        bucket_ids_per_task.back().push_back(
+                            bucket_msg->bucket_id());
+                        new_owner_ngs_per_task.back().push_back(
+                            bucket_msg->new_owner());
+                    }
+                }
+
+#endif
 
                 std::shared_ptr<DataMigrationStatus> status =
                     std::make_shared<DataMigrationStatus>(
                         cluster_scale_txn,
-                        std::move(bucket_ids),
-                        std::move(new_owner_ngs),
+                        std::move(bucket_ids_per_task),
+                        std::move(new_owner_ngs_per_task),
                         std::move(migrate_txns));
                 status->next_bucket_idx_ = next_bucket_idx;
 
@@ -575,7 +626,9 @@ public:
                     {
                         // pass down the log message of the current bucket this
                         // migrate tx is working on.
-                        migrate_msg = migrate_tx_state[migrate_txn];
+                        migrate_msg = migrate_tx_state[migrate_txn][0];
+                        // all buckets in this migrate tx should have the same
+                        // commit ts.
                         commit_ts = migrate_msg->migrate_ts();
                         cur_bucket_idx =
                             migrate_tx_current_bucket_idx[migrate_txn];

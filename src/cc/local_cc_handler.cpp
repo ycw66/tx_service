@@ -1,19 +1,16 @@
 #include "local_cc_handler.h"
 
-#include <chrono>
 #include <string>
 
 #include "cc_protocol.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
-#include "remote/remote_type.h"
 #include "sharder.h"
 #include "statistics.h"
 #include "tx_execution.h"
 #include "tx_record.h"
 #include "tx_trace.h"
-#include "tx_worker_pool.h"
 #include "type.h"
 
 #ifdef ON_KEY_OBJECT
@@ -1766,7 +1763,7 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                                             uint64_t command_id,
                                             CcHandlerResult<Void> &hres,
                                             CleanType clean_type,
-                                            uint16_t bucket_id,
+                                            std::vector<uint16_t> *bucket_id,
                                             const TxKey *start_key,
                                             const TxKey *end_key,
                                             uint64_t clean_ts)
@@ -1798,9 +1795,12 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
         if (clean_type == CleanType::CleanBucketData)
         {
             // For clean bucket data just send req to the core which the
-            // bucket belongs to.
+            // buckets belongs to. All buckets passed in should be on the same
+            // core.
+            assert(bucket_id && !bucket_id->empty());
             cc_shards_.EnqueueToCcShard(
-                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id), req);
+                Sharder::Instance().ShardBucketIdToCoreIdx((*bucket_id)[0]),
+                req);
         }
         else
         {

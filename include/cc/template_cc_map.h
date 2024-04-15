@@ -6213,13 +6213,19 @@ public:
         const KeyT *start_key = static_cast<const KeyT *>(req.StartKey());
         const KeyT *end_key = static_cast<const KeyT *>(req.EndKey());
         LruPage *lru_page;
-        if (req.ResumeKey(shard_->core_id_) != nullptr)
+        uint16_t pause_idx = shard_->core_id_;
+        if (req.GetCleanType() == CleanType::CleanBucketData)
+        {
+            // For clean bucket data, cc req is only sent to 1 core.
+            pause_idx = 0;
+        }
+        if (req.ResumeKey(pause_idx) != nullptr)
         {
             // resume key is the first key we need to start with, find
             // the floor key of it in case resume key has already been
             // kicked out.
             const KeyT *resume_key =
-                static_cast<const KeyT *>(req.ResumeKey(shard_->core_id_));
+                static_cast<const KeyT *>(req.ResumeKey(pause_idx));
             Iterator it = Floor(*resume_key);
             lru_page = it.GetPage();
         }
@@ -6271,12 +6277,12 @@ public:
         if (ccp == &pos_inf_page_ ||
             (end_key != nullptr && !(ccp->FirstKey() < *end_key)))
         {
-            return req.SetFinish(shard_->core_id_);
+            return req.SetFinish();
         }
         else
         {
             // Set the resume key for next round
-            req.SetResumeKey(&ccp->FirstKey(), shard_->core_id_);
+            req.SetResumeKey(&ccp->FirstKey(), pause_idx);
             shard_->Enqueue(&req);
             return false;
         }

@@ -120,29 +120,29 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
 
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_intent_op_.key_ = &table_key_;
+    acquire_all_intent_op_.keys_.push_back(&table_key_);
     acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
     acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
 
     upgrade_all_intent_to_lock_op_.table_name_ = &catalog_ccm_name;
-    upgrade_all_intent_to_lock_op_.key_ = &table_key_;
+    upgrade_all_intent_to_lock_op_.keys_.push_back(&table_key_);
     upgrade_all_intent_to_lock_op_.cc_op_ = CcOperation::Write;
     upgrade_all_intent_to_lock_op_.protocol_ = CcProtocol::Locking;
 
     downgrade_all_lock_to_intent_op_.table_name_ = &catalog_ccm_name;
-    downgrade_all_lock_to_intent_op_.key_ = &table_key_;
-    downgrade_all_lock_to_intent_op_.rec_ = &catalog_rec_;
+    downgrade_all_lock_to_intent_op_.keys_.push_back(&table_key_);
+    downgrade_all_lock_to_intent_op_.recs_.push_back(&catalog_rec_);
     downgrade_all_lock_to_intent_op_.op_type_ = op_type_;
     downgrade_all_lock_to_intent_op_.write_type_ = PostWriteType::PrepareCommit;
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_lock_op_.key_ = &table_key_;
+    acquire_all_lock_op_.keys_.push_back(&table_key_);
     acquire_all_lock_op_.cc_op_ = CcOperation::Write;
     acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
 
     post_all_lock_op_.table_name_ = &catalog_ccm_name;
-    post_all_lock_op_.key_ = &table_key_;
-    post_all_lock_op_.rec_ = &catalog_rec_;
+    post_all_lock_op_.keys_.push_back(&table_key_);
+    post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
 
@@ -1163,34 +1163,32 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     alter_table_info_.Reset();
     alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
 
-    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
-    acquire_all_intent_op_.Reset(node_group_cnt);
-    upgrade_all_intent_to_lock_op_.Reset(node_group_cnt);
     prepare_log_op_.Reset();
-    downgrade_all_lock_to_intent_op_.Reset(node_group_cnt);
     unlock_cluster_config_op_.Reset();
     upsert_kv_table_op_.Reset();
     generate_sk_parallel_op_.Reset();
     flush_all_old_tuples_sk_op_.Reset();
     prepare_log_for_sk_op_.Reset();
-    acquire_all_lock_op_.Reset(node_group_cnt);
     commit_log_op_.Reset();
-    post_all_lock_op_.Reset(node_group_cnt);
     clean_log_op_.Reset();
 
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_intent_op_.key_ = &table_key_;
+    acquire_all_intent_op_.keys_.clear();
+    acquire_all_intent_op_.keys_.push_back(&table_key_);
     acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
     acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
 
     upgrade_all_intent_to_lock_op_.table_name_ = &catalog_ccm_name;
-    upgrade_all_intent_to_lock_op_.key_ = &table_key_;
+    upgrade_all_intent_to_lock_op_.keys_.clear();
+    upgrade_all_intent_to_lock_op_.keys_.push_back(&table_key_);
     upgrade_all_intent_to_lock_op_.cc_op_ = CcOperation::Write;
     upgrade_all_intent_to_lock_op_.protocol_ = CcProtocol::Locking;
 
     downgrade_all_lock_to_intent_op_.table_name_ = &catalog_ccm_name;
-    downgrade_all_lock_to_intent_op_.key_ = &table_key_;
-    downgrade_all_lock_to_intent_op_.rec_ = &catalog_rec_;
+    downgrade_all_lock_to_intent_op_.keys_.clear();
+    downgrade_all_lock_to_intent_op_.keys_.push_back(&table_key_);
+    downgrade_all_lock_to_intent_op_.recs_.clear();
+    downgrade_all_lock_to_intent_op_.recs_.push_back(&catalog_rec_);
     downgrade_all_lock_to_intent_op_.op_type_ = op_type_;
     downgrade_all_lock_to_intent_op_.write_type_ = PostWriteType::PrepareCommit;
 
@@ -1198,13 +1196,16 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     upsert_kv_table_op_.op_type_ = op_type_;
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_lock_op_.key_ = &table_key_;
+    acquire_all_lock_op_.keys_.clear();
+    acquire_all_lock_op_.keys_.push_back(&table_key_);
     acquire_all_lock_op_.cc_op_ = CcOperation::Write;
     acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
 
     post_all_lock_op_.table_name_ = &catalog_ccm_name;
-    post_all_lock_op_.key_ = &table_key_;
-    post_all_lock_op_.rec_ = &catalog_rec_;
+    post_all_lock_op_.keys_.clear();
+    post_all_lock_op_.keys_.push_back(&table_key_);
+    post_all_lock_op_.recs_.clear();
+    post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
 

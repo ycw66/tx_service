@@ -246,8 +246,8 @@ struct DataMigrationStatus
 {
 public:
     DataMigrationStatus(TxNumber cluster_scale_txn,
-                        std::vector<uint16_t> &&bucket_ids,
-                        std::vector<NodeGroupId> &&new_owner_ngs,
+                        std::vector<std::vector<uint16_t>> &&bucket_ids,
+                        std::vector<std::vector<NodeGroupId>> &&new_owner_ngs,
                         std::vector<TxNumber> &&migration_txns)
         : cluster_scale_txn_(cluster_scale_txn),
           bucket_ids_(std::move(bucket_ids)),
@@ -259,8 +259,9 @@ public:
     }
 
     TxNumber cluster_scale_txn_;
-    std::vector<uint16_t> bucket_ids_;
-    std::vector<NodeGroupId> new_owner_ngs_;
+    // Each worker should migrate a batch of buckets to speed up the migration.
+    std::vector<std::vector<uint16_t>> bucket_ids_;
+    std::vector<std::vector<NodeGroupId>> new_owner_ngs_;
     std::vector<TxNumber> migration_txns_;
     std::atomic_size_t next_bucket_idx_;
     std::atomic_size_t unfinished_worker_;
@@ -952,7 +953,7 @@ public:
         const std::unordered_map<TableName, std::unordered_set<int32_t>>
             &ranges_in_bucket_snapshot,
 #else
-        uint16_t bucket_id,
+        const std::vector<uint16_t> &bucket_id,
 #endif
         uint32_t ng_id,
         int64_t ng_term,

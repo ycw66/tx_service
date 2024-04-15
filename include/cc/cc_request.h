@@ -4081,10 +4081,10 @@ public:
                      CleanType clean_type,
                      const TxKey *start_key = nullptr,
                      const TxKey *end_key = nullptr,
-                     uint16_t bucket_id = 0,
+                     std::vector<uint16_t> *bucket_ids = nullptr,
                      uint64_t clean_ts = 0)
         : clean_type_(clean_type),
-          bucket_id_(bucket_id),
+          bucket_ids_(bucket_ids),
           clean_ts_(clean_ts),
           start_key_(start_key),
           end_key_(end_key),
@@ -4109,7 +4109,7 @@ public:
                CleanType clean_type,
                const TxKey *start_key = nullptr,
                const TxKey *end_key = nullptr,
-               uint16_t bucket_id = 0,
+               std::vector<uint16_t> *bucket_ids = nullptr,
                uint64_t clean_ts = 0)
     {
         // Reset struct members with passed in args
@@ -4117,7 +4117,8 @@ public:
         node_group_id_ = ng_id;
         res_ = res;
         unfinished_cnt_ = core_cnt;
-        bucket_id_ = bucket_id;
+        bucket_ids_ = bucket_ids;
+        clean_type_ = clean_type;
         clean_ts_ = clean_ts;
         resume_key_.clear();
         start_key_ = start_key;
@@ -4140,7 +4141,7 @@ public:
         {
             // If no ccmap for this table, nothing to kickout, notify finish
             // directly.
-            return SetFinish(ccs.core_id_);
+            return SetFinish();
         }
     }
 
@@ -4164,7 +4165,7 @@ public:
         return end_key_;
     }
 
-    bool SetFinish(size_t core_id)
+    bool SetFinish()
     {
         if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
         {
@@ -4201,7 +4202,16 @@ public:
         }
         case CleanType::CleanBucketData:
         {
-            return bucket_id_ == (key->Hash() & 0x3FFF);
+            assert(bucket_ids_ && !bucket_ids_->empty());
+            uint16_t bucket_id = key->Hash() & 0x3FFF;
+            for (uint16_t id : *bucket_ids_)
+            {
+                if (bucket_id == id)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
         case CleanType::CleanForAlterTable:
         {
@@ -4229,10 +4239,15 @@ public:
         }
     }
 
+    CleanType GetCleanType() const
+    {
+        return clean_type_;
+    }
+
 private:
     CleanType clean_type_;
-    // Target bucket to be cleaned if clean type is CleanBucketData.
-    uint16_t bucket_id_{0};
+    // Target buckets to be cleaned if clean type is CleanBucketData.
+    std::vector<uint16_t> *bucket_ids_{nullptr};
     // kickout all cce with commit ts <= clean_ts_ if clean type is
     // CleanForAlterTable.
     uint64_t clean_ts_{0};

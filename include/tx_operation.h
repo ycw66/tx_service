@@ -12,6 +12,7 @@
 #include "cc_map.h"
 #include "cluster_config_record.h"
 #include "log_closure.h"
+#include "raft_log.pb.h"
 #include "range_record.h"
 #include "read_write_set.h"
 #include "tx_command.h"
@@ -521,7 +522,7 @@ struct AcquireAllOp : public TransactionOperation
     std::atomic<int32_t> remote_ack_cnt_{0};
 
     const TableName *table_name_{nullptr};
-    const TxKey *key_{nullptr};
+    std::vector<const TxKey *> keys_;
 
     CcOperation cc_op_{CcOperation::ReadForWrite};
     CcProtocol protocol_{CcProtocol::OCC};
@@ -538,8 +539,8 @@ struct PostWriteAllOp : public TransactionOperation
     CcHandlerResult<PostProcessResult> hd_result_;
 
     const TableName *table_name_{nullptr};
-    const TxKey *key_{nullptr};
-    TxRecord *rec_{nullptr};
+    std::vector<const TxKey *> keys_;
+    std::vector<TxRecord *> recs_;
     OperationType op_type_{OperationType::Upsert};
     PostWriteType write_type_{PostWriteType::PrepareCommit};
 };
@@ -792,9 +793,9 @@ struct KickoutDataOp : public TransactionOperation
     // Clean ts for the kickout cc. Only valid if clean type is
     // CleanForAlterTable.
     uint64_t clean_ts_{0};
-    // Target bucket for kickout cc. Only valid if clean type is
+    // Target buckets for kickout cc. Only valid if clean type is
     // CleanBucketData.
-    uint16_t bucket_id_{0};
+    std::vector<uint16_t> *bucket_ids_{nullptr};
     CcHandlerResult<Void> hd_result_;
 };
 
@@ -1302,6 +1303,15 @@ private:
 
 struct DataMigrationOp : public CompositeTransactionOperation
 {
+    /**
+     * @brief Data migration op will migrate buckets to their new leader in
+     * batches. We will have multilpe migrate worker txs to do the migrate, and
+     * each worker will try to fetch some new buckets to work on from the
+     * pending work list when it is done' with the previous batch. For hash
+     * partition, a worker will migrate all buckets on a core in a single run.
+     * This is to speed up the flush and kickout op and avoid repeatedly
+     * scanning the same core with each bucket.
+     */
 public:
     DataMigrationOp() = delete;
 
@@ -1312,6 +1322,8 @@ public:
                std::shared_ptr<DataMigrationStatus> status);
 
     void Forward(TransactionExecution *txm) override;
+
+    void PrepareNextRoundBuckets();
 
     /**
      * @brief Write the first prepare log. This log request will check if the
@@ -1378,15 +1390,15 @@ public:
     WriteToLogOp write_last_clean_log_op_;
 
     size_t migrate_bucket_idx_{0};
-    RangeBucketKey bucket_key_;
-    RangeBucketRecord bucket_record_;
-    BucketInfo bucket_info_;
+    std::vector<RangeBucketKey> bucket_keys_;
+    std::vector<RangeBucketRecord> bucket_records_;
+    std::vector<BucketInfo> bucket_info_;
 
 private:
     void FillLogRequest(TransactionExecution *txm,
                         WriteToLogOp *log_op,
                         TxLogType log_type,
-                        txlog::BucketMigrateMessage_Stage migrate_stage);
+                        txlog::BucketMigrateStage migrate_stage);
 
     void FillFirstLogRequest(TransactionExecution *txm,
                              std::vector<uint64_t> &migration_txns);
@@ -1437,4 +1449,5 @@ public:
     std::vector<ScanBatchTuple>::iterator lock_it_;
 #endif
 };
+
 }  // namespace txservice

@@ -34,12 +34,6 @@ if (FORK_HM_PROCESS)
     add_definitions(-DFORK_HM_PROCESS)
 endif()
 
-option(TXRESULT_USE_BTHREAD_MUTEX "TxRequest use bthread::Mutex instead of std::mutex" OFF)
-message(STATUS "TXRESULT_USE_BTHREAD_MUTEX : ${RANGE_PARTITION_ENABLED}")
-if (TXRESULT_USE_BTHREAD_MUTEX)
-    add_definitions(-DTXRESULT_USE_BTHREAD_MUTEX)
-endif()
-
 option(ON_KEY_OBJECT "Enable ON_KEY_OBJECT" OFF)
 message(STATUS "ON_KEY_OBJECT : ${RANGE_PARTITION_ENABLED}")
 if (ON_KEY_OBJECT)

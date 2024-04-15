@@ -1,15 +1,9 @@
 #pragma once
 
-#include <atomic>
-#include <condition_variable>
-#include <iostream>
-#include <mutex>
-#include <thread>
-
-#ifdef TXRESULT_USE_BTHREAD_MUTEX
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
-#endif
+
+#include <mutex>
 
 #include "error_messages.h"
 
@@ -58,11 +52,7 @@ public:
 
     TxResultStatus Status()
     {
-#ifdef TXRESULT_USE_BTHREAD_MUTEX
         std::lock_guard<bthread::Mutex> lk(mutex_);
-#else
-        std::lock_guard<std::mutex> lk(mutex_);
-#endif
         return status_;
     }
 
@@ -88,11 +78,8 @@ public:
 
     void Finish(const T &val)
     {
-#ifdef TXRESULT_USE_BTHREAD_MUTEX
         std::unique_lock<bthread::Mutex> lk(mutex_);
-#else
-        std::unique_lock<std::mutex> lk(mutex_);
-#endif
+
         value_ = val;
         status_ = TxResultStatus::Finished;
 
@@ -121,11 +108,8 @@ public:
 
     void Finish(T &&val)
     {
-#ifdef TXRESULT_USE_BTHREAD_MUTEX
         std::unique_lock<bthread::Mutex> lk(mutex_);
-#else
-        std::unique_lock<std::mutex> lk(mutex_);
-#endif
+
         value_ = std::move(val);
         status_ = TxResultStatus::Finished;
 
@@ -148,11 +132,8 @@ public:
 
     void FinishError(TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR)
     {
-#ifdef TXRESULT_USE_BTHREAD_MUTEX
         std::unique_lock<bthread::Mutex> lk(mutex_);
-#else
-        std::unique_lock<std::mutex> lk(mutex_);
-#endif
+
         status_ = TxResultStatus::Error;
         error_code_ = err_code;
 
@@ -184,11 +165,8 @@ public:
     void Reset(const std::function<void()> *yield_fptr = nullptr,
                const std::function<void()> *resume_fptr = nullptr)
     {
-#ifdef TXRESULT_USE_BTHREAD_MUTEX
         std::lock_guard<bthread::Mutex> lk(mutex_);
-#else
-        std::lock_guard<std::mutex> lk(mutex_);
-#endif
+
         status_ = TxResultStatus::Unknown;
         error_code_ = TxErrorCode::NO_ERROR;
         waiting_ = false;
@@ -200,11 +178,8 @@ public:
     {
         if (yield_func_ != nullptr)
         {
-#ifdef TXRESULT_USE_BTHREAD_MUTEX
             std::unique_lock<bthread::Mutex> lk(mutex_);
-#else
-            std::unique_lock<std::mutex> lk(mutex_);
-#endif
+
             if (status_ == TxResultStatus::Unknown)
             {
                 waiting_ = true;
@@ -220,18 +195,12 @@ public:
         }
         else
         {
-#ifdef TXRESULT_USE_BTHREAD_MUTEX
             std::unique_lock<bthread::Mutex> lk(mutex_);
             waiting_ = true;
             while (status_ == TxResultStatus::Unknown)
             {
                 cv_.wait(lk);
             }
-#else
-            std::unique_lock<std::mutex> lk(mutex_);
-            waiting_ = true;
-            cv_.wait(lk, [this] { return status_ != TxResultStatus::Unknown; });
-#endif
         }
 
         return 0;
@@ -241,13 +210,8 @@ private:
     T value_;
     TxResultStatus status_;
     TxErrorCode error_code_;
-#ifdef TXRESULT_USE_BTHREAD_MUTEX
     bthread::Mutex mutex_;
     bthread::ConditionVariable cv_;
-#else
-    std::mutex mutex_;
-    std::condition_variable cv_;
-#endif
 
     bool waiting_{false};
     const std::function<void()> *yield_func_;

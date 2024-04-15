@@ -19,7 +19,7 @@ public:
     {
     }
 
-    BucketInfo(const BucketInfo &other) = delete;
+    BucketInfo(const BucketInfo &other) = default;
 
     BucketInfo &operator=(const BucketInfo &rhs)
     {
@@ -167,11 +167,6 @@ public:
         return sizeof(bucket_id_);
     }
 
-    uint16_t BucketId() const
-    {
-        return bucket_id_;
-    }
-
     friend bool operator==(const RangeBucketKey &lhs,
                            const RangeBucketKey &rhs);
     friend bool operator!=(const RangeBucketKey &lhs,
@@ -180,10 +175,7 @@ public:
     friend bool operator<=(const RangeBucketKey &lhs,
                            const RangeBucketKey &rhs);
 
-private:
     uint16_t bucket_id_{UINT16_MAX};
-
-    friend class RangeBucketCcMap;
 };
 
 struct RangeBucketRecord : public TxRecord

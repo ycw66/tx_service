@@ -10,9 +10,11 @@
 #include "cc_protocol.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
+#include "raft_log.pb.h"
 #include "scan.h"
 #include "sharder.h"
 #include "statistics.h"
+#include "tx_key.h"
 #include "tx_operation.h"
 #include "tx_operation_result.h"
 #include "tx_request.h"
@@ -4532,23 +4534,28 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
     uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
     acq_all_op.Reset(node_group_cnt);
     acq_all_op.is_running_ = true;
+    size_t hd_idx = 0;
 
     for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
     {
-        CcHandlerResult<AcquireAllResult> &hres = acq_all_op.hd_results_[nid];
-        hres.Reset();
-        hres.Value().remote_ack_cnt_ = &acq_all_op.remote_ack_cnt_;
-        cc_handler_->AcquireWriteAll(
-            *acq_all_op.table_name_,
-            *acq_all_op.key_,
-            nid,
-            tx_number_.load(std::memory_order_relaxed),
-            tx_term_,
-            command_id_.load(std::memory_order_relaxed),
-            false,
-            hres,
-            acq_all_op.protocol_,
-            acq_all_op.cc_op_);
+        for (uint32_t key_idx = 0; key_idx < acq_all_op.keys_.size(); key_idx++)
+        {
+            CcHandlerResult<AcquireAllResult> &hres =
+                acq_all_op.hd_results_[hd_idx++];
+            hres.Reset();
+            hres.Value().remote_ack_cnt_ = &acq_all_op.remote_ack_cnt_;
+            cc_handler_->AcquireWriteAll(
+                *acq_all_op.table_name_,
+                *acq_all_op.keys_[key_idx],
+                nid,
+                tx_number_.load(std::memory_order_relaxed),
+                tx_term_,
+                command_id_.load(std::memory_order_relaxed),
+                false,
+                hres,
+                acq_all_op.protocol_,
+                acq_all_op.cc_op_);
+        }
     }
     StartTiming();
 }
@@ -4589,13 +4596,33 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
         if (TxCcNodeId() == ngid)
         {
             // Send out local request at last to prevent it from
-            // modifying rec_ while the handler is still using it.
+            // modifying recs_ while the handler is still using it.
             continue;
         }
+        for (uint32_t keyid = 0; keyid < post_write_all_op.keys_.size();
+             ++keyid)
+        {
+            cc_handler_->PostWriteAll(
+                *post_write_all_op.table_name_,
+                *post_write_all_op.keys_[keyid],
+                *post_write_all_op.recs_[keyid],
+                ngid,
+                tx_number_.load(std::memory_order_relaxed),
+                tx_term_,
+                command_id_.load(std::memory_order_relaxed),
+                commit_ts_,
+                post_write_all_op.hd_result_,
+                post_write_all_op.op_type_,
+                post_write_all_op.write_type_);
+        }
+    }
+
+    for (uint32_t keyid = 0; keyid < post_write_all_op.keys_.size(); ++keyid)
+    {
         cc_handler_->PostWriteAll(*post_write_all_op.table_name_,
-                                  *post_write_all_op.key_,
-                                  *post_write_all_op.rec_,
-                                  ngid,
+                                  *post_write_all_op.keys_[keyid],
+                                  *post_write_all_op.recs_[keyid],
+                                  TxCcNodeId(),
                                   tx_number_.load(std::memory_order_relaxed),
                                   tx_term_,
                                   command_id_.load(std::memory_order_relaxed),
@@ -4604,18 +4631,6 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
                                   post_write_all_op.op_type_,
                                   post_write_all_op.write_type_);
     }
-
-    cc_handler_->PostWriteAll(*post_write_all_op.table_name_,
-                              *post_write_all_op.key_,
-                              *post_write_all_op.rec_,
-                              TxCcNodeId(),
-                              tx_number_.load(std::memory_order_relaxed),
-                              tx_term_,
-                              command_id_.load(std::memory_order_relaxed),
-                              commit_ts_,
-                              post_write_all_op.hd_result_,
-                              post_write_all_op.op_type_,
-                              post_write_all_op.write_type_);
     StartTiming();
 }
 
@@ -5298,7 +5313,7 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
                              command_id_.load(std::memory_order_relaxed),
                              kickout_data_op.hd_result_,
                              kickout_data_op.clean_type_,
-                             kickout_data_op.bucket_id_,
+                             kickout_data_op.bucket_ids_,
                              kickout_data_op.start_key_,
                              kickout_data_op.end_key_,
                              kickout_data_op.clean_ts_);
@@ -6167,28 +6182,24 @@ void TransactionExecution::RecoverDataMigration(
     if (migrate_msg)
     {
         migration_op_->migrate_bucket_idx_ = cur_idx;
-        migration_op_->bucket_key_ =
-            RangeBucketKey(status->bucket_ids_[cur_idx]);
+        migration_op_->PrepareNextRoundBuckets();
 
         switch (migrate_msg->stage())
         {
-        case ::txlog::BucketMigrateMessage_Stage::
-            BucketMigrateMessage_Stage_BeforeLocking:
+        case ::txlog::BucketMigrateStage::BeforeLocking:
         {
             migration_op_->op_ = &migration_op_->write_before_locking_log_op_;
             migration_op_->write_before_locking_log_op_.hd_result_
                 .SetFinished();
             break;
         }
-        case ::txlog::BucketMigrateMessage_Stage::
-            BucketMigrateMessage_Stage_PrepareMigrate:
+        case ::txlog::BucketMigrateStage::PrepareMigrate:
         {
             migration_op_->op_ = &migration_op_->prepare_log_op_;
             migration_op_->prepare_log_op_.hd_result_.SetFinished();
             break;
         }
-        case ::txlog::BucketMigrateMessage_Stage::
-            BucketMigrateMessage_Stage_CommitMigrate:
+        case ::txlog::BucketMigrateStage::CommitMigrate:
         {
             migration_op_->op_ = &migration_op_->commit_log_op_;
             migration_op_->commit_log_op_.hd_result_.SetFinished();
@@ -6281,6 +6292,9 @@ void TransactionExecution::RecoverClusterScale(
             else if (dm_started)
             {
                 op->op_ = &op->install_cluster_config_op_;
+                op->install_cluster_config_op_.keys_.clear();
+                op->install_cluster_config_op_.keys_.push_back(
+                    NegativeInfinity<VoidKey>::Instance());
                 op->install_cluster_config_op_.Reset(1);
                 op->install_cluster_config_op_.hd_result_.SetFinished();
                 op->SetStatus(

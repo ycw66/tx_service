@@ -416,7 +416,7 @@ public:
                      uint64_t command_id,
                      CcHandlerResult<Void> &hres,
                      CleanType clean_type,
-                     uint16_t bucket_id = 0,
+                     std::vector<uint16_t> *bucket_id = nullptr,
                      const TxKey *start_key = nullptr,
                      const TxKey *end_key = nullptr,
                      uint64_t clean_ts = 0) override;

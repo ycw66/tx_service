@@ -413,132 +413,176 @@ void CcNodeService::InitDataMigration(
     ::txservice::remote::InitMigrationResponse *response,
     ::google::protobuf::Closure *done)
 {
-    auto thd = std::thread(
-        [request, response, done]()
+    brpc::ClosureGuard done_guard(done);
+
+    // We don't know if this RPC request is stale or new.
+    // We just create a new transaction to do data migration.
+    // the write_first_prepare_log request of migration transaction will
+    // be rejected if this RPC request is stale or if the
+    // ClusterScaleTx is finished transaction.
+
+    TxLog *tx_log = Sharder::Instance().GetLogAgent();
+    auto cluster_scale_tx_log_ng_id =
+        tx_log->GetLogGroupId(request->tx_number());
+
+    TxService *tx_service =
+        Sharder::Instance().GetLocalCcShards()->GetTxservice();
+    std::vector<TransactionExecution *> txms;
+    std::vector<TxNumber> txns;
+
+    // Fill in the migration plan that will be passed to workers
+    std::vector<uint16_t> bucket_ids;
+    std::vector<NodeGroupId> new_owner_ngs;
+    size_t migrate_infos_size =
+        static_cast<size_t>(request->migrate_infos_size());
+    bucket_ids.reserve(migrate_infos_size);
+    new_owner_ngs.reserve(migrate_infos_size);
+
+    for (size_t idx = 0; idx < migrate_infos_size; ++idx)
+    {
+        const auto &migrate_info = request->migrate_infos(idx);
+        bucket_ids.push_back(migrate_info.bucket_id());
+        new_owner_ngs.push_back(migrate_info.new_owner());
+    }
+#ifdef RANGE_PARTITION_ENABLED
+    // Each worker processes 10 buckets at a time.
+    int worker_tx_cnt =
+        bucket_ids.size() > 100 ? 10 : (bucket_ids.size() / 10) + 1;
+    // Each worker processes 10 buckets at a time.
+    std::vector<std::vector<uint16_t>> bucket_ids_per_task(1);
+    std::vector<std::vector<NodeGroupId>> new_owner_ngs_per_task(1);
+    std::vector<uint16_t> *cur_task_bucekt_ids = &bucket_ids_per_task.back();
+    std::vector<NodeGroupId> *cur_task_new_owner_ngs =
+        &new_owner_ngs_per_task.back();
+    for (size_t i = 0; i < bucket_ids.size(); i++)
+    {
+        cur_task_bucekt_ids->push_back(bucket_ids[i]);
+        cur_task_new_owner_ngs->push_back(new_owner_ngs[i]);
+        if (cur_task_bucekt_ids->size() == 10 && i != bucket_ids.size() - 1)
         {
-            brpc::ClosureGuard done_guard(done);
+            bucket_ids_per_task.push_back(std::vector<uint16_t>());
+            new_owner_ngs_per_task.push_back(std::vector<NodeGroupId>());
+            cur_task_bucekt_ids = &bucket_ids_per_task.back();
+            cur_task_new_owner_ngs = &new_owner_ngs_per_task.back();
+        }
+    }
 
-            // We don't know if this RPC request is stale or new.
-            // We just create a new transaction to do data migration.
-            // the write_first_prepare_log request of migration transaction will
-            // be rejected if this RPC request is stale or if the
-            // ClusterScaleTx is finished transaction.
+#else
+    // Each worker processes all buckets that is on a specific core.
+    int worker_tx_cnt = Sharder::Instance().GetLocalCcShards()->Count();
+    // Put all buckets on the same core to the same task.
+    std::vector<std::vector<uint16_t>> bucket_ids_per_task(worker_tx_cnt);
+    std::vector<std::vector<NodeGroupId>> new_owner_ngs_per_task(worker_tx_cnt);
+    for (size_t i = 0; i < bucket_ids.size(); i++)
+    {
+        uint16_t core_id =
+            Sharder::Instance().ShardBucketIdToCoreIdx(bucket_ids[i]);
+        bucket_ids_per_task[core_id].push_back(bucket_ids[i]);
+        new_owner_ngs_per_task[core_id].push_back(new_owner_ngs[i]);
+    }
 
-            TxLog *tx_log = Sharder::Instance().GetLogAgent();
-            auto cluster_scale_tx_log_ng_id =
-                tx_log->GetLogGroupId(request->tx_number());
+    // Remove empty tasks.
+    for (auto task_it = bucket_ids_per_task.begin();
+         task_it != bucket_ids_per_task.end();)
+    {
+        if (task_it->empty())
+        {
+            worker_tx_cnt--;
+            task_it = bucket_ids_per_task.erase(task_it);
+        }
+        else
+        {
+            task_it++;
+        }
+    }
+#endif
+    for (int i = 0; i < worker_tx_cnt; i++)
+    {
+        TransactionExecution *txm = tx_service->NewTx();
 
-            TxService *tx_service =
-                Sharder::Instance().GetLocalCcShards()->GetTxservice();
-            std::vector<TransactionExecution *> txms;
-            std::vector<TxNumber> txns;
-            int worker_tx_cnt = request->migrate_infos_size() > 10
-                                    ? 10
-                                    : request->migrate_infos_size();
-            for (int i = 0; i < worker_tx_cnt; i++)
+        InitTxRequest init_req;
+        // Set isolation level to RepeatableRead to ensure the readlock
+        // will be set during the execution of the following
+        // ReadTxRequest.
+        init_req.iso_level_ = IsolationLevel::RepeatableRead;
+        init_req.protocol_ = CcProtocol::Locking;
+        // Set tx node group id
+        init_req.tx_ng_id_ = request->orig_owner();
+        // Set log node group id to ensure the log will be write to
+        // special location.
+        init_req.log_group_id_ = cluster_scale_tx_log_ng_id;
+
+        init_req.Reset();
+        txm->Execute(&init_req);
+        init_req.Wait();
+
+        if (init_req.IsError())
+        {
+            response->set_success(false);
+            for (auto cur_txm : txms)
             {
-                TransactionExecution *txm = tx_service->NewTx();
-
-                InitTxRequest init_req;
-                // Set isolation level to RepeatableRead to ensure the readlock
-                // will be set during the execution of the following
-                // ReadTxRequest.
-                init_req.iso_level_ = IsolationLevel::RepeatableRead;
-                init_req.protocol_ = CcProtocol::Locking;
-                // Set tx node group id
-                init_req.tx_ng_id_ = request->orig_owner();
-                // Set log node group id to ensure the log will be write to
-                // special location.
-                init_req.log_group_id_ = cluster_scale_tx_log_ng_id;
-
-                init_req.Reset();
-                txm->Execute(&init_req);
-                init_req.Wait();
-
-                if (init_req.IsError())
-                {
-                    response->set_success(false);
-                    for (auto cur_txm : txms)
-                    {
-                        AbortTxRequest abort_req;
-                        cur_txm->Execute(&abort_req);
-                        abort_req.Wait();
-                    }
-                    return;
-                }
-
-                txms.push_back(txm);
-                txns.push_back(txm->TxNumber());
+                AbortTxRequest abort_req;
+                cur_txm->Execute(&abort_req);
+                abort_req.Wait();
             }
+            return;
+        }
 
-            // Fill in the migration plan that will be passed to workers
-            std::vector<uint16_t> bucket_ids;
-            std::vector<NodeGroupId> new_owner_ids;
-            size_t migrate_infos_size =
-                static_cast<size_t>(request->migrate_infos_size());
-            bucket_ids.reserve(migrate_infos_size);
-            new_owner_ids.reserve(migrate_infos_size);
+        txms.push_back(txm);
+        txns.push_back(txm->TxNumber());
+    }
 
-            for (size_t idx = 0; idx < migrate_infos_size; ++idx)
-            {
-                const auto &migrate_info = request->migrate_infos(idx);
-                bucket_ids.push_back(migrate_info.bucket_id());
-                new_owner_ids.push_back(migrate_info.new_owner());
-            }
-            std::shared_ptr<DataMigrationStatus> status =
-                std::make_shared<DataMigrationStatus>(request->tx_number(),
-                                                      std::move(bucket_ids),
-                                                      std::move(new_owner_ids),
-                                                      std::move(txns));
-            // All worker txs has been started, now write the first prepare log,
-            // the first tx will write a prepare log that marks the node group
-            // migration process has been started. The log contains all of the
-            // worker txns, so once this log is written, the migration of this
-            // node gorup is always going to succeed.
+    std::shared_ptr<DataMigrationStatus> status =
+        std::make_shared<DataMigrationStatus>(request->tx_number(),
+                                              std::move(bucket_ids_per_task),
+                                              std::move(new_owner_ngs_per_task),
+                                              std::move(txns));
+    // All worker txs has been started, now write the first prepare log,
+    // the first tx will write a prepare log that marks the node group
+    // migration process has been started. The log contains all of the
+    // worker txns, so once this log is written, the migration of this
+    // node gorup is always going to succeed.
+    DataMigrationTxRequest migrate_req(status);
+    txms[0]->Execute(&migrate_req);
+    migrate_req.Wait();
+
+    if (migrate_req.IsError())
+    {
+        if (migrate_req.ErrorCode() ==
+            TxErrorCode::DUPLICATE_MIGRATION_TX_ERROR)
+        {
+            // Migration on this node group is already in progress.
+            // We can mark the migration init as success.
+            response->set_success(true);
+        }
+        else
+        {
+            response->set_success(false);
+        }
+        // Abort rest of the workers.
+        for (size_t i = 1; i < txms.size(); i++)
+        {
+            AbortTxRequest abort_req;
+            txms[i]->Execute(&abort_req);
+            abort_req.Wait();
+        }
+    }
+    else
+    {
+        assert(!migrate_req.IsError());
+
+        response->set_success(true);
+        for (size_t i = 1; i < txms.size(); i++)
+        {
+            // If the log is successfully written, start the rest of the
+            // workers.
             DataMigrationTxRequest migrate_req(status);
-            txms[0]->Execute(&migrate_req);
+            txms[i]->Execute(&migrate_req);
+            // Wait for shared ptr is passed into txm before destructing
+            // tx req.
             migrate_req.Wait();
-
-            if (migrate_req.IsError())
-            {
-                if (migrate_req.ErrorCode() ==
-                    TxErrorCode::DUPLICATE_MIGRATION_TX_ERROR)
-                {
-                    // Migration on this node group is already in progress.
-                    // We can mark the migration init as success.
-                    response->set_success(true);
-                }
-                else
-                {
-                    response->set_success(false);
-                }
-                // Abort rest of the workers.
-                for (size_t i = 1; i < txms.size(); i++)
-                {
-                    AbortTxRequest abort_req;
-                    txms[i]->Execute(&abort_req);
-                    abort_req.Wait();
-                }
-            }
-            else
-            {
-                assert(!migrate_req.IsError());
-
-                response->set_success(true);
-                for (size_t i = 1; i < txms.size(); i++)
-                {
-                    // If the log is successfully written, start the rest of the
-                    // workers.
-                    DataMigrationTxRequest migrate_req(status);
-                    txms[i]->Execute(&migrate_req);
-                    // Wait for shared ptr is passed into txm before destructing
-                    // tx req.
-                    migrate_req.Wait();
-                }
-            }
-        });
-
-    thd.detach();
+        }
+    }
 }
 
 void CcNodeService::CheckClusterScaleStatus(

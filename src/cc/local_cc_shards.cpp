@@ -2367,7 +2367,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     const std::unordered_map<TableName, std::unordered_set<int32_t>>
         &ranges_in_bucket_snapshot,
 #else
-    uint16_t bucket_id,
+    const std::vector<uint16_t> &bucket_ids,
 #endif
     uint32_t ng_id,
     int64_t ng_term,
@@ -2432,6 +2432,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     std::shared_ptr<DataSyncStatus> status =
         std::make_shared<DataSyncStatus>(false);
     size_t task_cnt = 0;
+    assert(!bucket_ids.empty());
     for (auto &catalog_ng : table_catalogs_)
     {
         auto catalog_it = catalog_ng.second.find(ng_id);
@@ -2445,13 +2446,25 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
                 ng_id,
                 ng_term,
                 data_sync_ts,
-                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id),
+                Sharder::Instance().ShardBucketIdToCoreIdx(
+                    bucket_ids[0]),  // all buckets passed in should land on the
+                                     // same core
                 false,
                 false,
                 status,
                 hres,
-                [bucket_id](size_t key_hash)
-                { return (key_hash & 0x3FFF) == bucket_id; }))
+                [&bucket_ids](size_t key_hash)
+                {
+                    uint16_t bucket_id = key_hash & 0x3FFF;
+                    for (uint16_t target_id : bucket_ids)
+                    {
+                        if (bucket_id == target_id)
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                }))
         {
             task_cnt++;
         }
