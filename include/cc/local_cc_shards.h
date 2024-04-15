@@ -14,6 +14,7 @@
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -371,7 +372,9 @@ public:
         bool enable_mvcc = true,
         metrics::MetricsRegistry *metrics_registry = nullptr,
         metrics::CommonLabels common_labels = {},
-        std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr);
+        std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr,
+        std::function<void(std::string_view, std::string_view)> publish_func =
+            nullptr);
 
     ~LocalCcShards();
 
@@ -958,6 +961,20 @@ public:
 
     void InitPrebuiltTables(NodeGroupId ng_id);
 
+    void PublishMessage(const std::string &chan, const std::string &message);
+
+    using PublishArg = std::tuple<LocalCcShards *, std::string, std::string>;
+
+    static void *Publish(void *raw_args)
+    {
+        std::unique_ptr<PublishArg> args_guard(
+            static_cast<PublishArg *>(raw_args));
+
+        auto [self, ch, msg] = *static_cast<PublishArg *>(raw_args);
+        self->publish_func_(ch, msg);
+        return nullptr;
+    }
+
     /**
      * @brief Generate bucket migration plan based on the new node group config.
      */
@@ -1507,6 +1524,9 @@ private:
 
     WorkerThreadContext defragment_worker_ctx_;
     void DefragmentWorker();
+
+    // For cluster Publish message
+    std::function<void(std::string_view, std::string_view)> publish_func_;
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

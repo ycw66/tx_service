@@ -32,6 +32,7 @@ struct AbortTxRequest;
 struct UpsertTableTxRequest;
 struct ObjectCommandTxRequest;
 struct MultiObjectCommandTxRequest;
+struct PublishTxRequest;
 struct ReloadCacheTxRequest;
 struct FaultInjectTxRequest;
 struct CleanCcEntryForTestTxRequest;
@@ -119,6 +120,7 @@ public:
     void ProcessTxRequest(UpsertTableTxRequest &req);
     void ProcessTxRequest(ObjectCommandTxRequest &req);
     void ProcessTxRequest(MultiObjectCommandTxRequest &req);
+    void ProcessTxRequest(PublishTxRequest &req);
     void ProcessTxRequest(ReloadCacheTxRequest &req);
     void ProcessTxRequest(FaultInjectTxRequest &fi_req);
     void ProcessTxRequest(CleanCcEntryForTestTxRequest &clean_req);

@@ -997,6 +997,21 @@ inline bool ObjectCommandTxRequest::operator<(
     return *key_ptr < *r_min_key;
 }
 
+struct PublishTxRequest : public TemplateTxRequest<PublishTxRequest, Void>
+{
+    PublishTxRequest(std::string_view chan,
+                     std::string_view message,
+                     TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(nullptr, nullptr, txm),
+          chan_(chan),
+          message_(message)
+    {
+    }
+
+    std::string_view chan_;
+    std::string_view message_;
+};
+
 struct ClusterScaleTxRequest
     : public TemplateTxRequest<ClusterScaleTxRequest, Void>
 {

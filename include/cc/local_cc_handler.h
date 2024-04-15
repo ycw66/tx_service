@@ -369,6 +369,11 @@ public:
                        CcProtocol proto,
                        bool commit) override;
 
+    void PublishMessage(uint64_t ng_id,
+                        int64_t tx_term,
+                        std::string_view chan,
+                        std::string_view message) override;
+
     void CleanCcEntryForTest(const TableName &table_name,
                              const TxKey &key,
                              bool only_archives,

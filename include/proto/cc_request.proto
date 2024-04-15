@@ -825,6 +825,11 @@ message ApplyResponse {
     bool is_ack = 9;
 }
 
+message PublishRequest {
+    string chan = 1;
+    string message = 2;
+}
+
 message CcMessage {
     enum MessageType {
         AcquireRequest = 0;
@@ -866,6 +871,7 @@ message CcMessage {
         ReloadCacheResponse = 49;
         ApplyRequest = 50;
         ApplyResponse = 51;
+        PublishRequest = 52;
     }
 
     MessageType type = 1;
@@ -914,5 +920,6 @@ message CcMessage {
         ReloadCacheResponse reload_cache_resp = 57;
         ApplyRequest apply_cc_req = 58;
         ApplyResponse apply_cc_resp = 59;
+        PublishRequest publish_req = 60;
     }
 }

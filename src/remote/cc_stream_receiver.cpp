@@ -1664,6 +1664,16 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         msg_pool_.enqueue(std::move(msg));
         break;
     }
+    case CcMessage::MessageType::CcMessage_MessageType_PublishRequest:
+    {
+        // Get args from msg
+        remote::PublishRequest *publish_req = msg->mutable_publish_req();
+        const std::string &chan = publish_req->chan();
+        const std::string &message = publish_req->message();
+
+        local_shards_.PublishMessage(chan, message);
+        break;
+    }
     default:
         break;
     }

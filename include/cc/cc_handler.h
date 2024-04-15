@@ -493,6 +493,11 @@ public:
                                CcProtocol proto,
                                bool commit) = 0;
 
+    virtual void PublishMessage(uint64_t ng_id,
+                                int64_t tx_term,
+                                std::string_view chan,
+                                std::string_view message) = 0;
+
     virtual void CleanCcEntryForTest(const TableName &table_name,
                                      const TxKey &key,
                                      bool only_archives,

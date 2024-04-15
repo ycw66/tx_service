@@ -893,7 +893,9 @@ public:
         bool skip_kv = false,  // only used in mono_redis
         metrics::MetricsRegistry *metrics_registry = nullptr,
         metrics::CommonLabels common_labels = {},
-        std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr)
+        std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr,
+        std::function<void(std::string_view, std::string_view)> publish_func =
+            nullptr)
         : local_cc_shards_(node_id,
                            conf.at("core_num"),
                            conf.at("node_memory_limit_mb"),
@@ -909,7 +911,8 @@ public:
                            enable_mvcc,
                            metrics_registry,
                            common_labels,
-                           prebuilt_tables),
+                           prebuilt_tables,
+                           publish_func),
           ckpt_(local_cc_shards_,
                 store_hd,
                 conf.at("checkpointer_interval"),

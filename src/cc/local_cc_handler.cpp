@@ -1701,6 +1701,19 @@ void txservice::LocalCcHandler::ObjectCommand(
     }
 }
 
+void txservice::LocalCcHandler::PublishMessage(uint64_t ng_id,
+                                               int64_t tx_term,
+                                               std::string_view chan,
+                                               std::string_view message)
+{
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id != cc_shards_.node_id_)
+    {
+        DLOG(INFO) << "publish message to remote node: " << ng_id;
+        remote_hd_.PublishMessage(ng_id, tx_term, chan, message);
+    }
+}
+
 void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
                                                     const TxKey &key,
                                                     bool only_archives,

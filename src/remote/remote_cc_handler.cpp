@@ -929,3 +929,21 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
 
     stream_sender_.SendMessageToNg(dest_ng_id, send_msg, &hres);
 }
+
+void txservice::remote::RemoteCcHandler::PublishMessage(
+    uint64_t ng_id,
+    int64_t tx_term,
+    std::string_view chan,
+    std::string_view message)
+{
+    CcMessage send_msg;
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_PublishRequest);
+    send_msg.set_tx_term(tx_term);
+
+    PublishRequest *publish_req = send_msg.mutable_publish_req();
+    publish_req->set_chan(std::string(chan));
+    publish_req->set_message(std::string(message));
+
+    stream_sender_.SendMessageToNg(ng_id, send_msg);
+}

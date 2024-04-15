@@ -828,6 +828,18 @@ void TransactionExecution::ProcessTxRequest(MultiObjectCommandTxRequest &req)
     Process(multi_obj_cmd_);
 }
 
+void TransactionExecution::ProcessTxRequest(PublishTxRequest &req)
+{
+    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
+
+    for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
+    {
+        cc_handler_->PublishMessage(nid, tx_term_, req.chan_, req.message_);
+    }
+
+    req.tx_result_.Finish({});
+}
+
 void TransactionExecution::ProcessTxRequest(ReloadCacheTxRequest &req)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(

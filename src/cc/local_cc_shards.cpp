@@ -46,7 +46,8 @@ LocalCcShards::LocalCcShards(
     bool enable_mvcc,
     metrics::MetricsRegistry *metrics_registry,
     metrics::CommonLabels common_labels,
-    std::unordered_map<TableName, std::string> *prebuilt_tables)
+    std::unordered_map<TableName, std::string> *prebuilt_tables,
+    std::function<void(std::string_view, std::string_view)> publish_func)
     : range_slice_memory_limit_(((uint64_t) MB(memory_limit_mb)) / 20),
       store_hd_(store_hd),
       node_id_(node_id),
@@ -71,7 +72,8 @@ LocalCcShards::LocalCcShards(
       flush_data_worker_ctx_(std::min((int) core_cnt, 10)),
 #endif
       statistics_worker_ctx_(1),
-      defragment_worker_ctx_(1)
+      defragment_worker_ctx_(1),
+      publish_func_(publish_func)
 {
     using namespace std::chrono_literals;
     uint64_t ts_base = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -830,6 +832,27 @@ void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id)
             ng_it.first->second.InitSchema(
                 catalog_factory_->CreateTableSchema(table, image, 2), 2);
         }
+    }
+}
+
+void LocalCcShards::PublishMessage(const std::string &chan,
+                                   const std::string &message)
+{
+    assert(publish_func_ != nullptr);
+
+    // start a new bthread to handle message publish as it might block the
+    // thread
+    bthread_t tid = 0;
+    bthread_attr_t attr = BTHREAD_ATTR_NORMAL;
+
+    // args will be deleted in `publish`
+    auto *args_ptr = new PublishArg(this, chan, message);
+
+    if (bthread_start_background(&tid, &attr, Publish, args_ptr) != 0)
+    {
+        LOG(FATAL) << "Fail to start Publish bthread";
+        delete args_ptr;
+        publish_func_(chan, message);
     }
 }
 

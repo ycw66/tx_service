@@ -286,6 +286,11 @@ public:
                        CcProtocol proto,
                        bool commit);
 
+    void PublishMessage(uint64_t ng_id,
+                        int64_t tx_term,
+                        std::string_view chan,
+                        std::string_view message);
+
 private:
     CcStreamSender &stream_sender_;
 };
