@@ -661,27 +661,26 @@ public:
 
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireAllCc", {
             LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireAllCc";
-            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
+            return hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         });
 
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
         if (ng_term < 0)
         {
-            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
+            return hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
         uint16_t tx_core_id = ((req.Txn() >> 32L) & 0x3FF) % shard_->core_cnt_;
 
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
-        if (req.CcePtr() != nullptr)
+        if (req.CcePtr(shard_->core_id_) != nullptr)
         {
             // The request was blocked before and is now unblocked.
             resume = true;
-            cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(
+                req.CcePtr(shard_->core_id_));
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce_ptr,
                                             cce_ptr->PayloadStatus(),
@@ -707,6 +706,7 @@ public:
             }
             else
             {
+                assert(shard_->core_id_ == 0);
                 switch (*req.KeyStrType())
                 {
                 case KeyType::NegativeInf:
@@ -731,6 +731,18 @@ public:
                 }
             }
 
+            if (hd_res->RefCnt() == 0)
+            {
+                // This is the first time req is processed on any core,
+                // send the req to rest of the cores.
+                hd_res->SetRefCnt(shard_->core_cnt_);
+                for (uint32_t core_id = 1; core_id < shard_->core_cnt_;
+                     core_id++)
+                {
+                    MoveRequest(&req, core_id);
+                }
+            }
+
             if (req.IsInsert())
             {
                 // For insert requests, finds a cc entry whose gap will
@@ -748,8 +760,8 @@ public:
                     if (cce_ptr->PayloadStatus() != RecordStatus::Deleted)
                     {
                         // Inserts a duplicate key.
-                        hd_res->SetError(CcErrorCode::DUPLICATE_INSERT_ERR);
-                        return true;
+                        return hd_res->SetError(
+                            CcErrorCode::DUPLICATE_INSERT_ERR);
                     }
                     else
                     {
@@ -762,7 +774,7 @@ public:
                                 shard_->LocalCoreId());
                         }
 
-                        req.SetCcePtr(cce_ptr);
+                        req.SetCcePtr(cce_ptr, shard_->core_id_);
                     }
                 }
                 else
@@ -782,15 +794,14 @@ public:
                     // has reached the maximal capacity. Blocks the request by
                     // putting it back to the cc request queue.
 #ifdef RANGE_PARTITION_ENABLED
-                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
+                    return hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
 #else
                     shard_->Enqueue(shard_->LocalCoreId(), &req);
                     return false;
 #endif
                 }
 
-                req.SetCcePtr(cce_ptr);
+                req.SetCcePtr(cce_ptr, shard_->core_id_);
             }
         }
 
@@ -841,15 +852,7 @@ public:
                 // Updates last_vali_ts such that it is no smaller than (1) all
                 // read transactions that have read the item in all shards, and
                 // (2) the local time.
-                if (shard_->core_id_ == 0)
-                {
-                    acquire_all_result.last_vali_ts_ = shard_->LastReadTs();
-                }
-                else
-                {
-                    acquire_all_result.last_vali_ts_ = std::max(
-                        shard_->LastReadTs(), acquire_all_result.last_vali_ts_);
-                }
+                req.SetLastValidTs(shard_->LastReadTs());
 
                 if (shard_->core_id_ == tx_core_id)
                 {
@@ -862,23 +865,7 @@ public:
                     acquire_all_result.node_term_ = ng_term;
                 }
 
-                // AcquireAllCc request is executed at all shards consecutively.
-                // The request is set to be finished after executed at the last
-                // shard. At other shards, after the request is executed,
-                // MoveRequest() moves the request to the next shard to iterate
-                // through all shards.
-                if (shard_->core_id_ == shard_->core_cnt_ - 1)
-                {
-                    hd_res->SetFinished();
-                }
-                else
-                {
-                    req.SetCcePtr(nullptr);
-                    req.ResetCcm();
-                    MoveRequest(&req, shard_->core_id_ + 1);
-                    return false;
-                }
-                break;
+                return hd_res->SetFinished();
             }
             case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
             {
@@ -887,11 +874,9 @@ public:
                 // blocked.
                 if (!req.IsLocal())
                 {
-                    req.Result()->Value().node_term_ = ng_term;
-
                     remote::RemoteAcquireAll &remote_req =
                         static_cast<remote::RemoteAcquireAll &>(req);
-                    remote_req.Acknowledge();
+                    remote_req.Acknowledge(ng_term);
                 }
 
                 return false;
@@ -899,8 +884,7 @@ public:
             default:
             {
                 // lock confilct: back off and retry.
-                req.Result()->SetError(err_code);
-                return true;
+                return hd_res->SetError(err_code);
             }
             }  //-- end: switch
         }      //-- end: acquire lock

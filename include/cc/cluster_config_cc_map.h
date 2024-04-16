@@ -41,6 +41,10 @@ public:
     bool Execute(AcquireAllCc &req) override
     {
         CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
+        // cluster config map is only stored on the first core so there's no
+        // need to distribute the request to other cores. Reset the ref cnt
+        // to 1.
+        hd_res->ClearRefCnt();
         AcquireAllResult &acquire_all_result = hd_res->Value();
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
@@ -54,12 +58,12 @@ public:
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
         CcEntry<VoidKey, ClusterConfigRecord> *cce_ptr = nullptr;
         bool resume = false;
-        if (req.CcePtr() != nullptr)
+        if (req.CcePtr(shard_->core_id_) != nullptr)
         {
             // The request was blocked before and is now unblocked.
             resume = true;
             cce_ptr = static_cast<CcEntry<VoidKey, ClusterConfigRecord> *>(
-                req.CcePtr());
+                req.CcePtr(shard_->core_id_));
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce_ptr,
                                             neg_inf_.PayloadStatus(),
@@ -79,7 +83,7 @@ public:
             // is blocked previously because the cc map is full.
             // There's only one record in ClusterConfigCcMap, so we don't need
             // to worry about the key.
-            req.SetCcePtr(&neg_inf_);
+            req.SetCcePtr(&neg_inf_, shard_->core_id_);
         }
 
         // On execution resumption, the write lock has been acquired when
@@ -135,11 +139,9 @@ public:
             // blocked.
             if (!req.IsLocal())
             {
-                req.Result()->Value().node_term_ = ng_term;
-
                 remote::RemoteAcquireAll &remote_req =
                     static_cast<remote::RemoteAcquireAll &>(req);
-                remote_req.Acknowledge();
+                remote_req.Acknowledge(ng_term);
             }
 
             return false;

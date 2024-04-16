@@ -5,7 +5,6 @@
 #include <atomic>
 #include <memory>  // unique_ptr
 
-#include "butil/logging.h"
 #include "cc/cc_request.h"
 #include "proto/cc_request.pb.h"
 #include "tx_record.h"  // RecordStatus
@@ -61,7 +60,7 @@ public:
     RemoteAcquireAll(const RemoteAcquireAll &rhs) = delete;
     RemoteAcquireAll(RemoteAcquireAll &&rhs) = delete;
     void Reset(std::unique_ptr<CcMessage> input_msg);
-    void Acknowledge();
+    void Acknowledge(int64_t term);
     uint64_t handler_addr()
     {
         if (input_msg_)

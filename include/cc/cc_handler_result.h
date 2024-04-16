@@ -40,8 +40,8 @@ public:
     CcHandlerResultBase(CcHandlerResultBase &&rhs) = delete;
 
     virtual ~CcHandlerResultBase() = default;
-    virtual void SetError(CcErrorCode err_code) = 0;
-    virtual void SetFinished() = 0;
+    virtual bool SetError(CcErrorCode err_code) = 0;
+    virtual bool SetFinished() = 0;
 
     virtual bool ForceError() = 0;
 
@@ -246,9 +246,9 @@ public:
         return result_;
     }
 
-    void SetFinished() override;
+    bool SetFinished() override;
 
-    void SetError(CcErrorCode err_code) override;
+    bool SetError(CcErrorCode err_code) override;
 
     bool SetResultByStreamThread() override
     {

@@ -118,6 +118,7 @@ void txservice::LocalCcHandler::AcquireWriteAll(
                    tx_term,
                    is_insert,
                    &hres,
+                   cc_shards_.Count(),
                    proto,
                    cc_op);
         TX_TRACE_ACTION(this, req);

@@ -410,7 +410,10 @@ private:
 struct AcquireAllCc : public TemplatedCcRequest<AcquireAllCc, AcquireAllResult>
 {
 public:
-    AcquireAllCc() = default;
+    AcquireAllCc()
+    {
+        parallel_req_ = true;
+    }
     virtual ~AcquireAllCc() = default;
 
     AcquireAllCc(const AcquireAllCc &rhs) = delete;
@@ -423,6 +426,7 @@ public:
                int64_t tx_term,
                bool is_insert,
                CcHandlerResult<AcquireAllResult> *res,
+               uint16_t core_cnt,
                CcProtocol proto,
                CcOperation cc_op,
                IsolationLevel iso_level = IsolationLevel::ReadCommitted)
@@ -437,8 +441,10 @@ public:
         is_insert_ = is_insert;
         decoded_key_ = nullptr;
         cc_op_ = cc_op;
-        cce_ptr_ = nullptr;
+        cce_ptr_.clear();
+        cce_ptr_.resize(core_cnt, nullptr);
         is_local_ = true;
+        res->Value().last_vali_ts_ = 0;
     }
 
     void Reset(const TableName *tname,
@@ -449,6 +455,7 @@ public:
                int64_t tx_term,
                bool is_insert,
                CcHandlerResult<AcquireAllResult> *res,
+               uint16_t core_cnt,
                CcProtocol proto,
                CcOperation cc_op,
                IsolationLevel iso_level = IsolationLevel::ReadCommitted)
@@ -463,8 +470,10 @@ public:
         is_insert_ = is_insert;
         decoded_key_ = nullptr;
         cc_op_ = cc_op;
-        cce_ptr_ = nullptr;
+        cce_ptr_.clear();
+        cce_ptr_.resize(core_cnt, nullptr);
         is_local_ = false;
+        res->Value().last_vali_ts_ = 0;
     }
 
     const TxKey *Key() const
@@ -513,24 +522,27 @@ public:
         key_ = key;
     }
 
-    void SetCcePtr(LruEntry *ptr)
+    void SetCcePtr(LruEntry *ptr, uint16_t idx)
     {
-        cce_ptr_ = ptr;
+        cce_ptr_[idx] = ptr;
     }
 
-    LruEntry *CcePtr() const
+    LruEntry *CcePtr(uint16_t idx) const
     {
-        return cce_ptr_;
-    }
-
-    void ResetCcm()
-    {
-        ccm_ = nullptr;
+        return cce_ptr_[idx];
     }
 
     bool IsLocal() const
     {
         return is_local_;
+    }
+
+    void SetLastValidTs(uint64_t ts)
+    {
+        // All cores will try to update last valid ts, so we need mutex
+        // protection here.
+        std::lock_guard<std::mutex> lk(mux_);
+        res_->Value().last_vali_ts_ = std::max(res_->Value().last_vali_ts_, ts);
     }
 
 private:
@@ -546,8 +558,10 @@ private:
     // blocked due to conflicts in 2PL. After the request is unblocked and
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
-    LruEntry *cce_ptr_{nullptr};
+    std::vector<LruEntry *> cce_ptr_;
     bool is_local_{true};
+    // protects acquire all res in concurrent update from different cores.
+    std::mutex mux_;
 };
 
 struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, PostProcessResult>

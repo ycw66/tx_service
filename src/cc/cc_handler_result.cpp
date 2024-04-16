@@ -1,13 +1,7 @@
 #include "cc/cc_handler_result.h"
 
 #include <atomic>
-#include <cassert>
-#include <chrono>
-#include <functional>
 #include <string>
-#include <system_error>
-#include <utility>
-#include <variant>
 #include <vector>
 
 #include "tx_execution.h"
@@ -16,7 +10,7 @@
 namespace txservice
 {
 template <typename T>
-void CcHandlerResult<T>::SetFinished()
+bool CcHandlerResult<T>::SetFinished()
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -59,6 +53,7 @@ void CcHandlerResult<T>::SetFinished()
                     txm_->Enlist();
                 }
 #endif
+                return true;
             }
         }
     }
@@ -79,12 +74,15 @@ void CcHandlerResult<T>::SetFinished()
                 txm_->Enlist();
             }
 #endif
+            return true;
         }
     }
+
+    return false;
 };
 
 template <typename T>
-void CcHandlerResult<T>::SetError(CcErrorCode err_code)
+bool CcHandlerResult<T>::SetError(CcErrorCode err_code)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -106,7 +104,7 @@ void CcHandlerResult<T>::SetError(CcErrorCode err_code)
     CcErrorCode no_error = CcErrorCode::NO_ERROR;
     error_code_.compare_exchange_strong(
         no_error, err_code, std::memory_order_relaxed);
-    SetFinished();
+    return SetFinished();
 };
 
 template <typename T>

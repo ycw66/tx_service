@@ -831,11 +831,11 @@ public:
             std::forward_as_tuple(table_or_index_name),
             std::forward_as_tuple());
 
+        auto lk_vec = LockSamplePools(table_or_index_name);
         it->second.insert_or_assign(
             ng_id,
             TemplateCcMapSamplePool<KeyT>(&it->first, ng_id, param, this));
 
-        auto lk_vec = LockSamplePools(table_or_index_name);
         RebuildDistribution(table_or_index_name, key_schema);
 
         SetUpdatedSinceSync();

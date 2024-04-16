@@ -212,6 +212,7 @@ void txservice::remote::RemoteAcquireAll::Reset(
                         input_msg->tx_term(),
                         req.insert(),
                         &cc_res_,
+                        Sharder::Instance().GetLocalCcShardsCount(),
                         ToLocalType::ConvertProtocol(req.protocol()),
                         ToLocalType::ConvertCcOperation(req.cc_op()));
 
@@ -223,7 +224,7 @@ void txservice::remote::RemoteAcquireAll::Reset(
     }
 }
 
-void txservice::remote::RemoteAcquireAll::Acknowledge()
+void txservice::remote::RemoteAcquireAll::Acknowledge(int64_t term)
 {
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
@@ -235,7 +236,7 @@ void txservice::remote::RemoteAcquireAll::Acknowledge()
     acquire_all_resp->set_is_ack(true);
     acquire_all_resp->set_error_code(
         ToRemoteType::ConvertCcErrorCode(CcErrorCode::NO_ERROR));
-    acquire_all_resp->set_node_term(cc_res_.Value().node_term_);
+    acquire_all_resp->set_node_term(term);
 
     const AcquireAllRequest &req = input_msg_->acquire_all_req();
     hd_->SendMessageToNode(req.src_node_id(), output_msg_);

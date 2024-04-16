@@ -355,7 +355,7 @@ public:
     {
         if (shard_->core_id_ == 0 && req.Key() != nullptr)
         {
-            // If this we are the owner of this range, mark the StoreRange as
+            // If we are the owner of this range, mark the StoreRange as
             // locked. Note that req.Key() is always not null if we're the owner
             // since the owner if always the split range coordinator.
             const KeyT *range_key = static_cast<const KeyT *>(req.Key());

@@ -6592,7 +6592,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         if (prepare_bucket_lock_op_.fail_cnt_.load(std::memory_order_relaxed) >
             0)
         {
-            LOG(ERROR) << "Data Migration: failed to prepare acquire all, "
+            LOG(ERROR) << "Data Migration: failed to prepare acquire all"
                        << ", tx_number: " << txm->TxNumber()
                        << ", Keep retrying";
 
