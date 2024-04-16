@@ -232,6 +232,8 @@ void CcNode::OnLeaderStart(int64_t term)
         // It should reset the recovered_log_groups_ ahead.
         recovered_log_groups_.clear();
     }
+    // Invalidate terms smaller than the new term on this ng.
+    Sharder::Instance().SetInvalidLeaderTerm(ng_id_, term - 1);
 
     LOG(INFO) << "CC node " << node_id_ << " becomes the leader of ng#"
               << ng_id_ << ". Term: " << term;
@@ -293,6 +295,8 @@ void CcNode::OnLeaderStop()
     LOG(INFO) << "CC node " << node_id_ << " steps down as the leader of ng#"
               << ng_id_ << ".";
 
+    Sharder::Instance().SetInvalidLeaderTerm(
+        ng_id_, Sharder::Instance().LeaderTerm(ng_id_));
     Sharder::Instance().SetCandidateTerm(ng_id_, -1);
     Sharder::Instance().SetLeaderTerm(ng_id_, -1);
 

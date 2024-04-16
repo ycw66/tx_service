@@ -278,7 +278,9 @@ public:
      *
      * @param ccs
      */
-    void ClearLocks(CcShard &ccs, NodeGroupId ng_id);
+    void ClearLocks(CcShard &ccs,
+                    NodeGroupId ng_id,
+                    bool invalidate_owner_term = false);
 
     CcMap *GetCcMap() const;
 

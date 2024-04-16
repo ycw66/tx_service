@@ -118,6 +118,7 @@ int Sharder::Init(
             ng_leader_cache_[nid].store(nid);
             leader_term_cache_[nid].store(-1);
             candidate_leader_term_cache_[nid].store(-1);
+            invalid_leader_term_cache_[nid].store(-1);
         }
         if (ng_configs != nullptr)
         {

@@ -265,6 +265,29 @@ public:
 
     int64_t CandidateLeaderTerm(uint32_t ng_id) const;
 
+    int64_t InvalidLeaderTerm(uint32_t ng_id) const
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return -1;
+        }
+        return invalid_leader_term_cache_[ng_id].load(
+            std::memory_order_acquire);
+    }
+
+    void SetInvalidLeaderTerm(NodeGroupId ng_id, int64_t term)
+    {
+        int64_t cur_term = -1;
+        while (!invalid_leader_term_cache_[ng_id].compare_exchange_strong(
+            cur_term, term, std::memory_order_acq_rel))
+        {
+            if (cur_term >= term)
+            {
+                return;
+            }
+        }
+    }
+
     /**
      * @brief Updates the leader cache of all cc node groups.
      *
@@ -513,8 +536,11 @@ private:
     // Ng leader cache. We preallocate it to the max cluster size so that we
     // don't need to modify the size of it.
     std::atomic<uint32_t> ng_leader_cache_[1000];
-    std::atomic<int32_t> leader_term_cache_[1000];
-    std::atomic<int32_t> candidate_leader_term_cache_[1000];
+    std::atomic<int64_t> leader_term_cache_[1000];
+    std::atomic<int64_t> candidate_leader_term_cache_[1000];
+    // cache of the largest invalid term of each ng. Requests from nodes with
+    // invalid term will be rejected.
+    std::atomic<int64_t> invalid_leader_term_cache_[1000];
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
 

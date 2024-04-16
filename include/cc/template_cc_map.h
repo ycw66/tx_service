@@ -8448,6 +8448,7 @@ protected:
         bool clean_success = true;
         auto key_it = keys.begin();
         auto entry_it = entries.begin();
+        bool need_invalidate_lock_term = false;
         for (; key_it != keys.end(); key_it++, entry_it++)
         {
             CcEntry<KeyT, ValueT> *cce = entry_it->get();
@@ -8458,6 +8459,23 @@ protected:
                 is_clean_target = kickout_cc->IsCleanTarget(&(*key_it), cce);
                 can_be_cleaned = is_clean_target &&
                                  kickout_cc->CanBeCleaned(&(*key_it), cce);
+                CleanType type = kickout_cc->GetCleanType();
+                if (type == CleanType::CleanRangeData ||
+                    type == CleanType::CleanBucketData)
+                {
+                    // If the ccentry that expect to clean still has lock on it,
+                    // it must be that the owner of this lock has failed. The
+                    // reason is that the lock owner must have acquired
+                    // range/bucket read lock before accessing data in
+                    // range/bucket. And if we're doing clean data on the
+                    // range/bucket, that means the DDL has acquired write lock
+                    // on this range/bucket on all ngs. So it must be that the
+                    // data lock owner ng has failed and the read lock has
+                    // expired. In this case invalidate the lock term so that if
+                    // the failed node tries to access data with the deleted cce
+                    // addr, we can reject the request.
+                    need_invalidate_lock_term = true;
+                }
             }
             else
             {
@@ -8497,8 +8515,8 @@ protected:
                     free_cnt++;
                     // Check if the cce has any locks on it. If so recycle the
                     // lock entry before deleting cce.
-                    // TODO{liunyl}: invalidate cleared lock terms.
-                    (*entry_it)->ClearLocks(*shard_, cc_ng_id_);
+                    (*entry_it)->ClearLocks(
+                        *shard_, cc_ng_id_, need_invalidate_lock_term);
                 }
             }
             else

@@ -129,7 +129,9 @@ bool LruEntry::RecycleKeyLock(CcShard &ccs)
     return false;
 }
 
-void LruEntry::ClearLocks(CcShard &ccs, NodeGroupId ng_id)
+void LruEntry::ClearLocks(CcShard &ccs,
+                          NodeGroupId ng_id,
+                          bool invalidate_owner_term)
 {
     if (cc_lock_and_extra_ == nullptr)
     {
@@ -142,19 +144,19 @@ void LruEntry::ClearLocks(CcShard &ccs, NodeGroupId ng_id)
     auto [w_tx, w_type] = key_lock->WriteTx();
     if (w_type != NonBlockingLock::WriteLockType::NoWritelock)
     {
-        ccs.DeleteLockHoldingTx(w_tx, this, ng_id);
+        ccs.DeleteLockHoldingTx(w_tx, this, ng_id, invalidate_owner_term);
     }
 
     // Deletes key read locks.
     const std::unordered_set<TxNumber> &key_read_locks = key_lock->ReadLocks();
     for (const TxNumber &txn : key_read_locks)
     {
-        ccs.DeleteLockHoldingTx(txn, this, ng_id);
+        ccs.DeleteLockHoldingTx(txn, this, ng_id, invalidate_owner_term);
     }
 
     for (const TxNumber &txn : key_lock->ReadIntents())
     {
-        ccs.DeleteLockHoldingTx(txn, this, ng_id);
+        ccs.DeleteLockHoldingTx(txn, this, ng_id, invalidate_owner_term);
     }
 
     // reset lock entry in ccshard lock array to make it reusable.

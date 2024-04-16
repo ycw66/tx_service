@@ -366,7 +366,8 @@ public:
 
     void DeleteLockHoldingTx(TxNumber txn,
                              LruEntry *cce_ptr,
-                             NodeGroupId cc_ng_id);
+                             NodeGroupId cc_ng_id,
+                             bool invalidate_tx_term = false);
 
     void DropLockHoldingTxs(NodeGroupId cc_ng_id)
     {

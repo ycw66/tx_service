@@ -556,7 +556,8 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
 
 void CcShard::DeleteLockHoldingTx(TxNumber txn,
                                   LruEntry *cce_ptr,
-                                  NodeGroupId cc_ng_id)
+                                  NodeGroupId cc_ng_id,
+                                  bool invalidate_tx_term)
 {
     auto ng_it = lock_holding_txs_.find(cc_ng_id);
     if (ng_it == lock_holding_txs_.end())
@@ -570,6 +571,11 @@ void CcShard::DeleteLockHoldingTx(TxNumber txn,
         return;
     }
     TxLockInfo &lk_info = tx_it->second;
+    if (invalidate_tx_term)
+    {
+        Sharder::Instance().SetInvalidLeaderTerm(cc_ng_id,
+                                                 lk_info.tx_coord_term_);
+    }
     lk_info.cce_list_.erase(cce_ptr);
 
     if (lk_info.cce_list_.empty())

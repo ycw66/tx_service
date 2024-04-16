@@ -73,6 +73,11 @@ public:
 
     virtual bool ValidTermCheck()
     {
+        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
+        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
+        {
+            return false;
+        }
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         if (ng_term_ < 0)
         {
@@ -220,10 +225,16 @@ public:
         return node_group_id_;
     }
 
+    int64_t TxTerm() const
+    {
+        return tx_term_;
+    }
+
     void Reset(const TableName *tname,
                CcHandlerResult<ResultType> *res,
                uint32_t node_group_id,
                uint64_t tx_number,
+               int64_t tx_term,
                CcProtocol proto = CcProtocol::OCC,
                IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                int64_t ng_term = INIT_TERM)
@@ -235,6 +246,7 @@ public:
         ng_term_ = ng_term;
 
         tx_number_ = tx_number;
+        tx_term_ = tx_term;
         proto_ = proto;
         isolation_level_ = iso_level;
     }
@@ -261,6 +273,12 @@ protected:
     // since first execution and the term changes.
     int64_t ng_term_{-1};
 
+    // The term of which the request comes from. We have a cache of the largest
+    // invalid term on each node group. If the term is samller than the invalid
+    // term, we reject the request directly since the tx coordinate node is no
+    // longer the leader of ng.
+    int64_t tx_term_{-1};
+
     uint32_t node_group_id_{0};
     // whether request is running on multi threads in parallel. e.g.
     // RemoteScanOpen.
@@ -275,7 +293,6 @@ public:
         : key_(nullptr),
           key_str_(nullptr),
           key_shard_code_(0),
-          tx_term_(-1),
           ts_(0),
           is_insert_(false)
     {
@@ -300,12 +317,11 @@ public:
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
-            tname, res, ng_id, txn, proto, iso_level);
+            tname, res, ng_id, txn, tx_term, proto, iso_level);
 
         key_ = key;
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
-        tx_term_ = tx_term;
         ts_ = ts;
         is_insert_ = is_insert;
         cce_ptr_ = nullptr;
@@ -327,12 +343,11 @@ public:
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
-            tname, res, ng_id, txn, proto);
+            tname, res, ng_id, txn, tx_term, proto);
 
         key_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
-        tx_term_ = tx_term;
         ts_ = ts;
         is_insert_ = is_insert;
         cce_ptr_ = nullptr;
@@ -348,11 +363,6 @@ public:
     const std::string *KeyStr() const
     {
         return key_str_;
-    }
-
-    int64_t TxTerm() const
-    {
-        return tx_term_;
     }
 
     uint64_t Ts() const
@@ -394,7 +404,6 @@ private:
     const TxKey *key_;
     const std::string *key_str_;
     uint32_t key_shard_code_;
-    int64_t tx_term_;
     uint64_t ts_;
     bool is_insert_;
     // The pointer of the cc entry to which this request is directed. The
@@ -432,12 +441,11 @@ public:
                IsolationLevel iso_level = IsolationLevel::ReadCommitted)
     {
         TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
-            tname, res, node_group_id, tx_number, proto, iso_level);
+            tname, res, node_group_id, tx_number, tx_term, proto, iso_level);
 
         key_ = key;
         key_str_ = nullptr;
         key_str_type_ = nullptr;
-        tx_term_ = tx_term;
         is_insert_ = is_insert;
         decoded_key_ = nullptr;
         cc_op_ = cc_op;
@@ -461,12 +469,11 @@ public:
                IsolationLevel iso_level = IsolationLevel::ReadCommitted)
     {
         TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
-            tname, res, node_group_id, tx_number, proto, iso_level);
+            tname, res, node_group_id, tx_number, tx_term, proto, iso_level);
 
         key_ = nullptr;
         key_str_ = key_str;
         key_str_type_ = key_str_type;
-        tx_term_ = tx_term;
         is_insert_ = is_insert;
         decoded_key_ = nullptr;
         cc_op_ = cc_op;
@@ -489,11 +496,6 @@ public:
     const KeyType *KeyStrType() const
     {
         return key_str_type_;
-    }
-
-    int64_t TxTerm() const
-    {
-        return tx_term_;
     }
 
     bool IsInsert() const
@@ -550,7 +552,6 @@ private:
     const std::string *key_str_{nullptr};
     const KeyType *key_str_type_{nullptr};
     std::unique_ptr<TxKey> decoded_key_{nullptr};
-    int64_t tx_term_{-1};
     bool is_insert_{false};
     CcOperation cc_op_{CcOperation::Write};
     // The pointer of the cc entry to which this request is directed. The
@@ -582,6 +583,11 @@ public:
 
     bool ValidTermCheck() override
     {
+        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
+        if (tx_term_ <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
+        {
+            return false;
+        }
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         if (cce_addr_ != nullptr)
         {
@@ -627,6 +633,7 @@ public:
 
     void Reset(const CcEntryAddr *addr,
                uint64_t tx_number,
+               int64_t tx_term,
                uint64_t ts,
                const TxRecord *rec,
                OperationType operation_type,
@@ -634,7 +641,7 @@ public:
                CcHandlerResult<PostProcessResult> *res)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
-            nullptr, res, addr->NodeGroupId(), tx_number);
+            nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
 
         cce_addr_ = addr;
         commit_ts_ = ts;
@@ -651,6 +658,7 @@ public:
                const TableName &table_name,
                uint32_t ng_id,
                uint64_t tx_number,
+               int64_t tx_term,
                uint64_t ts,
                const TxRecord *rec,
                OperationType operation_type,
@@ -664,6 +672,7 @@ public:
             res,
             ng_id,
             tx_number,
+            tx_term,
             CcProtocol::OCC,
             IsolationLevel::ReadCommitted,
             ng_term);
@@ -681,6 +690,7 @@ public:
 
     void Reset(const CcEntryAddr *addr,
                uint64_t tx_number,
+               int64_t tx_term,
                uint64_t ts,
                const std::string *rec,
                OperationType operation_type,
@@ -688,7 +698,7 @@ public:
                CcHandlerResult<PostProcessResult> *res)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
-            nullptr, res, addr->NodeGroupId(), tx_number);
+            nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
 
         cce_addr_ = addr;
         key_str_ = nullptr;
@@ -705,6 +715,7 @@ public:
                const std::string *key_str,
                uint32_t node_group_id,
                uint64_t tx_number,
+               int64_t tx_term,
                uint64_t ts,
                const std::string *rec,
                OperationType operation_type,
@@ -718,6 +729,7 @@ public:
             res,
             node_group_id,
             tx_number,
+            tx_term,
             CcProtocol::OCC,
             IsolationLevel::ReadCommitted,
             ng_term);
@@ -817,7 +829,7 @@ public:
                int64_t tx_term)
     {
         TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
-            tname, res, node_group_id, tx_number, CcProtocol::OCC);
+            tname, res, node_group_id, tx_number, tx_term, CcProtocol::OCC);
 
         key_ = key;
         key_str_ = nullptr;
@@ -829,7 +841,6 @@ public:
         decoded_payload_ = nullptr;
         op_type_ = op_type;
         commit_type_ = commit_type;
-        tx_term_ = tx_term;
     }
 
     void Reset(const TableName *tname,
@@ -844,7 +855,7 @@ public:
                int64_t tx_term)
     {
         TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
-            tname, res, node_group_id, tx_number, CcProtocol::OCC);
+            tname, res, node_group_id, tx_number, tx_term, CcProtocol::OCC);
 
         key_ = key;
         key_str_type_ = nullptr;
@@ -856,7 +867,6 @@ public:
         decoded_payload_ = std::move(rec);
         op_type_ = op_type;
         commit_type_ = commit_type;
-        tx_term_ = tx_term;
     }
 
     void Reset(const TableName *tname,
@@ -872,7 +882,7 @@ public:
                int64_t tx_term)
     {
         TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
-            tname, res, node_group_id, tx_number, CcProtocol::OCC);
+            tname, res, node_group_id, tx_number, tx_term, CcProtocol::OCC);
 
         key_ = nullptr;
         key_str_ = key_str;
@@ -884,7 +894,6 @@ public:
         decoded_payload_ = nullptr;
         op_type_ = op_type;
         commit_type_ = commit_type;
-        tx_term_ = tx_term;
     }
 
     uint64_t CommitTs() const
@@ -980,7 +989,6 @@ private:
     std::unique_ptr<TxRecord> decoded_payload_{nullptr};
     OperationType op_type_{OperationType::Update};
     PostWriteType commit_type_;
-    int64_t tx_term_{0};
 };
 
 struct PostReadCc : public TemplatedCcRequest<PostReadCc, PostProcessResult>
@@ -1002,6 +1010,12 @@ public:
             return false;
         }
 
+        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
+        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
+        {
+            return false;
+        }
+
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
         ccm_ = lru_entry->GetCcMap();
@@ -1011,13 +1025,14 @@ public:
 
     void Reset(const CcEntryAddr *addr,
                uint64_t tx_number,
+               int64_t tx_term,
                uint64_t commit_ts,
                uint64_t key_ts,
                uint64_t gap_ts,
                CcHandlerResult<PostProcessResult> *res)
     {
         TemplatedCcRequest<PostReadCc, PostProcessResult>::Reset(
-            nullptr, res, addr->NodeGroupId(), tx_number);
+            nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
 
         cce_addr_ = addr;
         commit_ts_ = commit_ts;
@@ -1073,6 +1088,11 @@ public:
 
     bool ValidTermCheck() override
     {
+        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
+        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
+        {
+            return false;
+        }
         int64_t cc_ng_term = -1;
         if (is_in_recovering_)
         {
@@ -1135,14 +1155,13 @@ public:
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
-            nullptr, res, ng_id, tx_number, protocol, iso_level);
+            nullptr, res, ng_id, tx_number, tx_term, protocol, iso_level);
 
         key_ = key;
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
         rec_ = rec;
         rec_str_ = nullptr;
-        tx_term_ = tx_term;
         ts_ = ts;
         type_ = read_type;
         is_for_write_ = is_for_write;
@@ -1181,14 +1200,13 @@ public:
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
-            nullptr, res, ng_id, tx_number, protocol, iso_level);
+            nullptr, res, ng_id, tx_number, tx_term, protocol, iso_level);
 
         key_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
         rec_ = nullptr;
         rec_str_ = rec_str;
-        tx_term_ = tx_term;
         ts_ = ts;
         type_ = read_type;
         is_for_write_ = is_for_write;
@@ -1227,14 +1245,13 @@ public:
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
-            nullptr, res, ng_id, tx_number, protocol, iso_level);
+            nullptr, res, ng_id, tx_number, tx_term, protocol, iso_level);
 
         key_ = nullptr;
         key_str_ = &key_str;
         key_shard_code_ = key_shard_code;
         rec_ = rec;
         rec_str_ = nullptr;
-        tx_term_ = tx_term;
         ts_ = ts;
         type_ = read_type;
         is_for_write_ = is_for_write;
@@ -1279,11 +1296,6 @@ public:
     std::string *RecordBlob()
     {
         return rec_str_;
-    }
-
-    int64_t TxTerm() const
-    {
-        return tx_term_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1373,7 +1385,6 @@ private:
     uint32_t key_shard_code_;
     TxRecord *rec_;
     std::string *rec_str_;
-    int64_t tx_term_;
     uint64_t ts_;
     ReadType type_;
     bool is_for_write_;
@@ -1427,7 +1438,7 @@ public:
     )
     {
         TemplatedCcRequest<ScanOpenBatchCc, ScanOpenResult>::Reset(
-            tn, res, ng_id, tx_number, protocol, iso_level);
+            tn, res, ng_id, tx_number, term, protocol, iso_level);
 
         index_type_ = type;
         start_key_ = start_key;
@@ -1435,7 +1446,6 @@ public:
         direct_ = direction;
         ts_ = ts;
         scan_cache_ = cache;
-        term_ = term;
         is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
         is_covering_keys_ = is_covering_keys;
@@ -1446,11 +1456,6 @@ public:
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 #endif
-    }
-
-    int64_t TxTerm()
-    {
-        return term_;
     }
 
     bool IsForWrite() const
@@ -1515,7 +1520,6 @@ private:
     ScanDirection direct_{ScanDirection::Forward};
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
-    int64_t term_{-1};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
     bool is_ckpt_delta_{false};
@@ -1560,6 +1564,11 @@ public:
 
     bool ValidTermCheck() override
     {
+        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
+        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
+        {
+            return false;
+        }
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         if (cce_addr_->Term() != cc_ng_term)
         {
@@ -1592,11 +1601,10 @@ public:
     )
     {
         TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(
-            nullptr, next_res, ng_id, tx_number, protocol, iso_level);
+            nullptr, next_res, ng_id, tx_number, tx_term, protocol, iso_level);
 
         ts_ = ts;
         scan_cache_ = cache;
-        tx_term_ = tx_term;
         is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
         is_covering_keys_ = is_covering_keys;
@@ -1610,11 +1618,6 @@ public:
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 #endif
-    }
-
-    int64_t TxTerm()
-    {
-        return tx_term_;
     }
 
     bool IsForWrite() const
@@ -1676,7 +1679,6 @@ private:
     const CcEntryAddr *cce_addr_;
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
-    int64_t tx_term_{-1};
 
     bool is_for_write_{false};
     bool is_covering_keys_{false};
@@ -1773,7 +1775,7 @@ public:
         assert(hd_res.Value().is_local_);
 
         TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>::Reset(
-            &tbl_name, &hd_res, ng_id, tx_number, protocol, iso_level);
+            &tbl_name, &hd_res, ng_id, tx_number, tx_term, protocol, iso_level);
 
         range_id_ = range_id;
 
@@ -1795,7 +1797,6 @@ public:
 
         direction_ = hd_res.Value().ccm_scanner_->Direction();
         ts_ = read_ts;
-        tx_term_ = tx_term;
         cc_ng_term_ = ng_term;
         read_for_write_ = read_for_write;
         is_covering_keys_ = is_covering_keys;
@@ -1829,7 +1830,7 @@ public:
         assert(!hd_res.Value().is_local_);
 
         TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>::Reset(
-            &tbl_name, &hd_res, ng_id, tx_number, protocol, iso_level);
+            &tbl_name, &hd_res, ng_id, tx_number, tx_term, protocol, iso_level);
 
         range_id_ = range_id;
 
@@ -1851,7 +1852,6 @@ public:
 
         direction_ = direction;
         ts_ = read_ts;
-        tx_term_ = tx_term;
         cc_ng_term_ = ng_term;
         read_for_write_ = read_for_write;
         is_covering_keys_ = is_covering_keys;
@@ -2064,11 +2064,6 @@ public:
     uint64_t ReadTimestamp() const
     {
         return ts_;
-    }
-
-    int64_t TxTerm() const
-    {
-        return tx_term_;
     }
 
     ScanCache *GetLocalScanCache(size_t shard_id)
@@ -2299,7 +2294,6 @@ private:
     ScanDirection direction_{ScanDirection::Forward};
 
     uint64_t ts_{0};
-    int64_t tx_term_{-1};
 
     bool start_inclusive_{false};
     bool end_inclusive_{false};
@@ -3278,7 +3272,7 @@ public:
     {
         table_name_holder_ = TableName(table_name_view, table_type);
         TemplatedCcRequest<ReplayLogCc, Void>::Reset(
-            &table_name_holder_, &result_, ng_id, txn);
+            &table_name_holder_, &result_, ng_id, txn, -1);
         log_blob_view_ = blob;
         commit_ts_ = commit_ts;
         result_.Reset();
@@ -3547,10 +3541,11 @@ public:
                uint64_t schema_version,
                const remote::NodeGroupSamplePool &remote_sample_pool,
                TxNumber tx_number,
+               int64_t tx_term,
                CcHandlerResult<Void> *res)
     {
         TemplatedCcRequest<BroadcastStatisticsCc, Void>::Reset(
-            &catalog_ccm_name, res, ng_id, tx_number);
+            &catalog_ccm_name, res, ng_id, tx_number, tx_term);
 
         sampling_table_name_ = table_name;
         schema_version_ = schema_version;
@@ -3619,10 +3614,11 @@ public:
     void Reset(const TableName *table_name,
                uint32_t node_group_id,
                TxNumber tx_number,
+               int64_t tx_term,
                CcHandlerResult<Void> *res)
     {
         TemplatedCcRequest<AnalyzeTableAllCc, Void>::Reset(
-            table_name, res, node_group_id, tx_number);
+            table_name, res, node_group_id, tx_number, tx_term);
 
         Clear();
     }
@@ -3840,11 +3836,12 @@ public:
                bool flush,
                uint32_t key_shard_code,
                uint64_t tx_number,
+               int64_t tx_term,
                CcHandlerResult<bool> *res)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<CleanCcEntryForTestCc, bool>::Reset(
-            tn, res, ng_id, tx_number);
+            tn, res, ng_id, tx_number, tx_term);
         key_ = key;
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
@@ -3859,11 +3856,12 @@ public:
                bool flush,
                uint32_t key_shard_code,
                uint64_t tx_number,
+               int64_t tx_term,
                CcHandlerResult<bool> *res)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<CleanCcEntryForTestCc, bool>::Reset(
-            tn, res, ng_id, tx_number);
+            tn, res, ng_id, tx_number, tx_term);
         key_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
@@ -4436,6 +4434,7 @@ public:
             res,
             Sharder::Instance().ShardToCcNodeGroup(key_shard_code),
             txn,
+            tx_term,
             proto,
             iso_level);
 
@@ -4453,7 +4452,6 @@ public:
         local_input_.cmd_ = cmd;
 
         key_shard_code_ = key_shard_code;
-        tx_term_ = tx_term;
         tx_ts_ = tx_ts;
         cce_ptr_ = nullptr;
         apply_and_commit_ = commit;
@@ -4478,6 +4476,7 @@ public:
             res,
             Sharder::Instance().ShardToCcNodeGroup(key_shard_code),
             txn,
+            tx_term,
             proto);
 
         if (!is_local_)
@@ -4494,7 +4493,6 @@ public:
         remote_input_.cmd_str_ = cmd_str;
 
         key_shard_code_ = key_shard_code;
-        tx_term_ = tx_term;
         tx_ts_ = tx_ts;
         cce_ptr_ = nullptr;
         block_type_ = ApplyBlockType::NoBlocking;
@@ -4570,11 +4568,6 @@ public:
         cce_ptr_ = cce;
     }
 
-    int64_t TxTerm() const
-    {
-        return tx_term_;
-    }
-
     uint64_t TxTs() const
     {
         return tx_ts_;
@@ -4588,7 +4581,6 @@ public:
 
     bool is_local_{};
     uint32_t key_shard_code_{};
-    int64_t tx_term_{-1};
     uint64_t tx_ts_{1};
 
     // The pointer of the cc entry to which this request is directed. The

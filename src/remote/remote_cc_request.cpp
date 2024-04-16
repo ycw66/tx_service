@@ -303,6 +303,7 @@ void txservice::remote::RemotePostRead::Reset(
 
     PostReadCc::Reset(&cce_addr_,
                       input_msg->tx_number(),
+                      input_msg->tx_term(),
                       req.commit_ts(),
                       req.key_ts(),
                       req.gap_ts(),
@@ -548,6 +549,7 @@ void txservice::remote::RemotePostWrite::Reset(
         PostWriteCc::Reset(
             &cce_addr_,
             input_msg->tx_number(),
+            input_msg->tx_term(),
             commit_ts,
             rec_str,
             static_cast<OperationType>(post_commit.operation_type()),
@@ -571,6 +573,7 @@ void txservice::remote::RemotePostWrite::Reset(
                            &post_commit.key(),
                            post_commit.node_group_id(),
                            input_msg->tx_number(),
+                           input_msg->tx_term(),
                            commit_ts,
                            rec_str,
                            op_type,
@@ -1307,7 +1310,8 @@ void txservice::remote::RemoteBroadcastStatisticsCc::Reset(
                                  &remote_table_name_,
                                  req.schema_version(),
                                  req.node_group_sample_pool(),
-                                 0,
+                                 input_msg->tx_number(),
+                                 input_msg->tx_term(),
                                  &cc_res_);
     input_msg_ = std::move(input_msg);
     if (hd_ == nullptr)
@@ -1360,6 +1364,7 @@ void txservice::remote::RemoteAnalyzeTableAllCc::Reset(
     AnalyzeTableAllCc::Reset(&remote_table_name_,
                              req.node_group_id(),
                              input_msg->tx_number(),
+                             input_msg->tx_term(),
                              &cc_res_);
 
     input_msg_ = std::move(input_msg);
@@ -1418,6 +1423,7 @@ void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
                                  req.flush(),
                                  req.key_shard_code(),
                                  input_msg->tx_number(),
+                                 input_msg->tx_term(),
                                  &cc_res_);
 
     input_msg_ = std::move(input_msg);

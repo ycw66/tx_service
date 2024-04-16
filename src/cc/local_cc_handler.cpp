@@ -256,6 +256,7 @@ void txservice::LocalCcHandler::PostWrite(
         PostWriteCc *req = postwrite_pool.NextRequest();
         req->Reset(&cce_addr,
                    tx_number,
+                   tx_term,
                    commit_ts,
                    record,
                    operation_type,
@@ -308,6 +309,7 @@ void txservice::LocalCcHandler::UploadRecord(
                    table_name,
                    ng_id,
                    tx_number,
+                   tx_term,
                    commit_ts,
                    record,
                    operation_type,
@@ -370,7 +372,8 @@ void txservice::LocalCcHandler::PostRead(
         }
 
         PostReadCc *req = postread_pool_.NextRequest();
-        req->Reset(&cce_addr, tx_number, commit_ts, key_ts, gap_ts, &hres);
+        req->Reset(
+            &cce_addr, tx_number, tx_term, commit_ts, key_ts, gap_ts, &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
@@ -673,7 +676,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     {
         ccs = cc_shards_.cc_shards_[thd_id_].get();
     }
-    int64_t term;
+    int64_t term = -1;
     uint32_t shard_code = tx_number >> 32L;
     uint32_t cc_ng_id = shard_code >> 10;
     if (is_recovering)
@@ -1571,7 +1574,7 @@ void txservice::LocalCcHandler::AnalyzeTableAll(const TableName &table_name,
     if (dest_node_id == cc_shards_.NodeId())
     {
         AnalyzeTableAllCc *req = analyze_table_all_pool.NextRequest();
-        req->Reset(&table_name, ng_id, tx_number, &hres);
+        req->Reset(&table_name, ng_id, tx_number, tx_term, &hres);
         cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
     }
     else
@@ -1610,8 +1613,13 @@ void txservice::LocalCcHandler::BroadcastStatistics(
     if (dest_node_id == cc_shards_.NodeId())
     {
         BroadcastStatisticsCc *req = broadcast_stat_pool.NextRequest();
-        req->Reset(
-            ng_id, &table_name, schema_ts, sample_pool, tx_number, &hres);
+        req->Reset(ng_id,
+                   &table_name,
+                   schema_ts,
+                   sample_pool,
+                   tx_number,
+                   tx_term,
+                   &hres);
         cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
     }
     else
@@ -1737,6 +1745,7 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
                    flush,
                    shard_code,
                    tx_number,
+                   tx_term,
                    &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
