@@ -542,26 +542,31 @@ public:
                 // tx into the todo list.
                 // Each worker processes 10 buckets at a time, so each task
                 // should contain up to 10 buckets.
-                bucket_ids_per_task.emplace_back();
-                new_owner_ngs_per_task.emplace_back();
-                std::vector<uint16_t> *cur_task_bucekt_ids =
-                    &bucket_ids_per_task.back();
-                std::vector<NodeGroupId> *cur_task_new_owner_ngs =
-                    &new_owner_ngs_per_task.back();
-                for (size_t i = 0; i < pending_buckets.size(); i++)
+                if (!pending_buckets.empty())
                 {
-                    cur_task_bucekt_ids->push_back(
-                        pending_buckets[i]->bucket_id());
-                    cur_task_new_owner_ngs->push_back(
-                        pending_buckets[i]->new_owner());
-                    if (cur_task_bucekt_ids->size() == 10 &&
-                        i != pending_buckets.size() - 1)
+                    bucket_ids_per_task.emplace_back();
+                    new_owner_ngs_per_task.emplace_back();
+                    std::vector<uint16_t> *cur_task_bucekt_ids =
+                        &bucket_ids_per_task.back();
+                    std::vector<NodeGroupId> *cur_task_new_owner_ngs =
+                        &new_owner_ngs_per_task.back();
+                    for (size_t i = 0; i < pending_buckets.size(); i++)
                     {
-                        bucket_ids_per_task.push_back(std::vector<uint16_t>());
-                        new_owner_ngs_per_task.push_back(
-                            std::vector<NodeGroupId>());
-                        cur_task_bucekt_ids = &bucket_ids_per_task.back();
-                        cur_task_new_owner_ngs = &new_owner_ngs_per_task.back();
+                        cur_task_bucekt_ids->push_back(
+                            pending_buckets[i]->bucket_id());
+                        cur_task_new_owner_ngs->push_back(
+                            pending_buckets[i]->new_owner());
+                        if (cur_task_bucekt_ids->size() == 10 &&
+                            i != pending_buckets.size() - 1)
+                        {
+                            bucket_ids_per_task.push_back(
+                                std::vector<uint16_t>());
+                            new_owner_ngs_per_task.push_back(
+                                std::vector<NodeGroupId>());
+                            cur_task_bucekt_ids = &bucket_ids_per_task.back();
+                            cur_task_new_owner_ngs =
+                                &new_owner_ngs_per_task.back();
+                        }
                     }
                 }
 #else

@@ -1265,7 +1265,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER)
             {
                 Sharder::Instance().UpdateLeader(
-                    hd_result_.Value().node_group_id_);
+                    slice_hd_result_.Value().cc_ng_id_);
             }
             if (retry_num_ > 0)
             {
@@ -6452,6 +6452,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            assert(status_->bucket_ids_[migrate_bucket_idx_].size());
             std::string log_msg("Data migration: start migrate bucket: ");
             for (auto id : status_->bucket_ids_[migrate_bucket_idx_])
             {
