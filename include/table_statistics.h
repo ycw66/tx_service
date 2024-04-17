@@ -866,6 +866,7 @@ public:
             return nullptr;
         }
 
+        slk.unlock();
         const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool = it->second;
         Task task =
             [ccmap_sample_pool = const_cast<TemplateCcMapSamplePool<KeyT> *>(
@@ -884,8 +885,6 @@ public:
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
     MakeStoreStatistics(bool *updated_since_sync) const override
     {
-        std::shared_lock<std::shared_mutex> slk(index_sample_pool_map_mutex_);
-
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             sample_pool_map;
@@ -1322,6 +1321,8 @@ private:
                                std::pair<uint64_t, std::vector<TxKey::Uptr>>>
                 &sample_pool_map) const
     {
+        std::shared_lock<std::shared_mutex> slk(index_sample_pool_map_mutex_);
+
         for (const auto &[table_or_index_name, index_sample_pool] :
              index_sample_pool_map_)
         {
