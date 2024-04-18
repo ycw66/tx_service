@@ -1526,7 +1526,7 @@ public:
                     }
                 }
 #else
-                Iterator it = FindEmplace(*look_key);
+                Iterator it = FindEmplace(*look_key, false, !req.IsForWrite());
                 cce = it->second;
                 ccp = it.GetPage();
 
@@ -7222,10 +7222,12 @@ protected:
         }
     }
 
-    Iterator FindEmplace(const KeyT &key, bool force_emplace = false)
+    Iterator FindEmplace(const KeyT &key,
+                         bool force_emplace = false,
+                         bool read_only_req = false)
     {
         bool emplace;
-        return FindEmplace(key, emplace, force_emplace);
+        return FindEmplace(key, emplace, force_emplace, read_only_req);
     }
 
     bool BatchFillSlice(std::vector<SliceDataItem> &slice_items,
@@ -7561,13 +7563,18 @@ protected:
      * Find or Emplace the CcEntry with key @param key.
      *
      * @param key
+     * @param read_only_req For read only request we will try to find
+     * the cce regardless of shard memory. If we can't find it and shard
+     * is full, we will return End.
      * @return The Iterator pointing to the target CcEntry
      */
     Iterator FindEmplace(const KeyT &key,
                          bool &emplace,
-                         bool force_emplace = false)
+                         bool force_emplace = false,
+                         bool read_only_req = false)
     {
         emplace = false;
+        bool fail_if_not_found = false;
         if (&key == NegativeInfinity<KeyT>::Instance())
         {
             return Begin();
@@ -7588,12 +7595,23 @@ protected:
             if (shard_->Full() && !shard_->TryHeapCollect() &&
                 !table_name_.IsMeta() && !force_emplace)
             {
-                return End();
+                if (read_only_req)
+                {
+                    fail_if_not_found = true;
+                }
+                else
+                {
+                    return End();
+                }
             }
         }
 
         if (ccmp_.begin() == ccmp_.end())
         {
+            if (fail_if_not_found)
+            {
+                return End();
+            }
             // ccmap is empty, insert a page
             auto [it, inserted] =
                 ccmp_.try_emplace(key, this, &neg_inf_page_, &pos_inf_page_);
@@ -7620,6 +7638,10 @@ protected:
             shard_->UpdateLruList(target_page, false);
             Iterator iterator(target_page, idx_in_page, &neg_inf_);
             return iterator;
+        }
+        if (fail_if_not_found)
+        {
+            return End();
         }
 
         // not found, emplace key into target page, split the page if

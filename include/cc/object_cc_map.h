@@ -200,7 +200,7 @@ public:
                 look_key = &decoded_key;
             }
 
-            auto it = FindEmplace(*look_key);
+            auto it = FindEmplace(*look_key, false, req.IsReadOnly());
             cce = it->second;
             ccp = it.GetPage();
 
