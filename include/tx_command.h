@@ -45,7 +45,10 @@ public:
     /**
      * Execute cmd on object to get the result.
      * @param object
-     * @return success
+     * @return True: The object has been updated and need to write log;
+     *         False: The command is read only or failed to exec.
+     *         (Read only commands will neglect this value and should always
+     *          return FALSE)
      */
     virtual bool ExecuteOn(const TxObject &object) = 0;
 

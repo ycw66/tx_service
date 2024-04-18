@@ -93,7 +93,7 @@ public:
         ObjectCommandResult &obj_result = hd_res->Value();
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
         // TODO(lzx): replace "cmd_success" with TxCommand::IsPassed()
-        bool &cmd_success = obj_result.cmd_success_;
+        bool &need_write_log = obj_result.need_write_log_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
         CcPage<KeyT, ValueT> *ccp = nullptr;
         const KeyT *look_key = nullptr;
@@ -418,7 +418,7 @@ public:
             else if (req.Isolation() == IsolationLevel::ReadCommitted)
             {
                 ValueT &object = *cce->payload_;
-                cmd_success = cmd->ExecuteOn(object);
+                cmd->ExecuteOn(object);
                 obj_result.rec_status_ = cce->PayloadStatus();
             }
             else
@@ -434,7 +434,7 @@ public:
                     // Temporary object exists, execute and commit the command
                     // on the temporary object.
                     ValueT &dirty_object = *dirty_payload;
-                    cmd_success = cmd->ExecuteOn(dirty_object);
+                    cmd->ExecuteOn(dirty_object);
                     cce->SetDirtyPayload(std::move(dirty_payload));
                     cce->SetDirtyPayloadStatus(dirty_payload_status);
                     obj_result.rec_status_ = dirty_payload_status;
@@ -444,7 +444,7 @@ public:
                     assert(cce->PayloadStatus() == RecordStatus::Normal);
                     assert(cce->IsNullPendingCmd());
                     ValueT &object = *cce->payload_;
-                    cmd_success = cmd->ExecuteOn(object);
+                    cmd->ExecuteOn(object);
                     obj_result.rec_status_ = cce->PayloadStatus();
                 }
             }
@@ -567,8 +567,8 @@ public:
             // Temporary object exists, execute and commit the command on
             // the temporary object.
             ValueT &dirty_object = *dirty_payload;
-            cmd_success = cmd->ExecuteOn(dirty_object);
-            if (cmd_success)
+            need_write_log = cmd->ExecuteOn(dirty_object);
+            if (need_write_log)
             {
                 CommitCommandOnDirtyPayload(
                     dirty_payload, dirty_payload_status, *cmd);
@@ -583,9 +583,9 @@ public:
             // in PostWriteCc if the txn commits.
             assert(cce->IsNullPendingCmd());
             ValueT &object = *cce->payload_;
-            cmd_success = cmd->ExecuteOn(object);
+            need_write_log = cmd->ExecuteOn(object);
 
-            if (cmd_success && !req.apply_and_commit_)
+            if (need_write_log && !req.apply_and_commit_)
             {
                 // Copy the command to be committed in PostWriteCc or when
                 // executing subsequent commands of the same txn.
@@ -624,7 +624,7 @@ public:
             }
         }
 
-        if (cmd_success && req.apply_and_commit_)
+        if (need_write_log && req.apply_and_commit_)
         {
             // Skipping writing log, do the PostWrite and release the lock.
             assert(acquired_lock == LockType::WriteLock);

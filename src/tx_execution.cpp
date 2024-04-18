@@ -5464,7 +5464,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const ObjectCommandResult &cmd_result = hd_result.Value();
         RecordStatus obj_status = cmd_result.rec_status_;
         LockType lock_acquired = cmd_result.lock_acquired_;
-        bool cmd_success = cmd_result.cmd_success_;
+        bool need_write_log = cmd_result.need_write_log_;
         const TxCommand *cmd = obj_cmd_op.command_;
         const TableName *table_name = obj_cmd_op.table_name_;
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
@@ -5482,7 +5482,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                 cce_addr,
                 commit_ts,
                 obj_cmd_op.key_,
-                cmd_success ? obj_cmd_op.command_ : nullptr);
+                need_write_log ? obj_cmd_op.command_ : nullptr);
 
             uint64_t read_version = rw_set_.DedupRead(cce_addr);
             if (read_version > 0 && read_version != cmd_result.commit_ts_)
@@ -5686,7 +5686,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         cmd_res.cce_addr_,
                         cmd_res.commit_ts_,
                         vct_key->at(i),
-                        cmd_res.cmd_success_ ? vct_cmd->at(i) : nullptr);
+                        cmd_res.need_write_log_ ? vct_cmd->at(i) : nullptr);
 
                     uint64_t read_version =
                         rw_set_.DedupRead(cmd_res.cce_addr_);

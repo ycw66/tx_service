@@ -1656,7 +1656,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 obj_cmd_result.last_vali_ts_ = apply_res.last_vali_ts();
                 obj_cmd_result.lock_acquired_ =
                     ToLocalType::ConvertLockType(apply_res.lock_type());
-                obj_cmd_result.cmd_success_ = apply_res.cmd_success();
+                obj_cmd_result.need_write_log_ = apply_res.need_write_log();
 
                 hd_res->SetFinished();
             }
