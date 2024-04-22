@@ -476,12 +476,19 @@ public:
             if (commit_ts > 0)
             {
 #ifdef RANGE_PARTITION_ENABLED
-                if (op_type == OperationType::Insert && cce->CommitTs() == 1)
+                const uint64_t cce_version = cce->CommitTs();
+                if (cce_version == 1 ||
+                    (cce_version == 0 && op_type == OperationType::Insert))
                 {
-                    // At post write we have already loaded the latest version
-                    // of cce into memory. So if commit ts is 1 (entry does not
-                    // exist and has no previous version), that means it does
-                    // not exist in data store at all.
+                    // If commit ts is 1 (entry does not exist and has no
+                    // previous version), that means it does not exist in data
+                    // store at all.
+                    // If commit ts is 0 (entry does not exist in memory), that
+                    // means it does not known whether it exists in data store.
+                    // But for Insert operation, that means in data store it
+                    // does not exist at all, or there is an entry with the
+                    // Deleted status. In either case, the data store size of
+                    // this entry can be set to 0.
                     cce->data_store_size_.store(0, std::memory_order_relaxed);
                 }
 #endif

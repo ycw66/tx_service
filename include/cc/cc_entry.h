@@ -1004,6 +1004,7 @@ public:
             }
             else
             {
+                assert(false);
                 // Mark the delta as unknwon
                 ref.delta_size_ = INT32_MAX;
             }
