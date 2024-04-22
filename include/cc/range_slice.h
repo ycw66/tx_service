@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -8,8 +9,9 @@
 #include <shared_mutex>
 #include <vector>
 
-#include "catalog_factory.h"
-#include "cc_req_base.h"
+#include "cc_req_misc.h"
+#include "error_messages.h"
+#include "range_slice_type.h"
 #include "tx_key.h"
 #include "type.h"
 
@@ -17,36 +19,22 @@ namespace txservice
 {
 class CcShard;
 class CcMap;
-class LocalCcShards;
 struct FillStoreSliceCc;
 class StoreRange;
+class StoreSlice;
+template <typename KeyT>
+class TemplateStoreRange;
 struct LoadRangeSliceRequest;
+class LocalCcShards;
+struct KVCatalogInfo;
+struct CcRequestBase;
+struct TableSchema;
+struct FlushRecord;
 
 namespace store
 {
 class DataStoreHandler;
 }
-
-enum struct SliceStatus
-{
-    /**
-     * @brief The slice's data are not fully cached in memory.
-     *
-     */
-    PartiallyCached = 0,
-    /**
-     * @brief The slice's data are fully cached in memory.
-     *
-     */
-    FullyCached,
-    /**
-     * @brief The slice's data are being loaded into memory. The flag prevents
-     * cache replacement from kicking out records from the slice while a cc
-     * request is loading the slice's records into cc maps.
-     *
-     */
-    BeingLoaded
-};
 
 enum struct RangeSliceOpStatus
 {
@@ -95,23 +83,12 @@ struct SliceChangeInfo
     SliceChangeInfo() = default;
     SliceChangeInfo(const SliceChangeInfo &rhs) = delete;
     SliceChangeInfo &operator=(const SliceChangeInfo &rhs) = delete;
-    SliceChangeInfo(const TxKey *start_key,
-                    uint32_t cur_size,
-                    uint32_t post_update_size)
-        : is_key_owner_(false),
+
+    SliceChangeInfo(TxKey key, uint32_t cur_size, uint32_t post_update_size)
+        : key_(std::move(key)),
           cur_size_(cur_size),
           post_update_size_(post_update_size)
     {
-        key_.ptr_ = std::move(start_key);
-    }
-    SliceChangeInfo(TxKey::Uptr start_key,
-                    uint32_t cur_size,
-                    uint32_t post_update_size)
-        : is_key_owner_(true),
-          cur_size_(cur_size),
-          post_update_size_(post_update_size)
-    {
-        key_.uptr_ = std::move(start_key);
     }
 
     SliceChangeInfo &operator=(SliceChangeInfo &&rhs)
@@ -121,146 +98,185 @@ struct SliceChangeInfo
             return *this;
         }
 
-        if (rhs.is_key_owner_)
-        {
-            SetKey(std::move(rhs.key_.uptr_));
-            rhs.is_key_owner_ = false;
-        }
-        else
-        {
-            SetKey(rhs.key_.ptr_);
-        }
-
+        key_ = std::move(rhs.key_);
         cur_size_ = rhs.cur_size_;
         post_update_size_ = rhs.post_update_size_;
         return *this;
     }
 
     SliceChangeInfo(SliceChangeInfo &&rhs)
+        : key_(std::move(rhs.key_)),
+          cur_size_(rhs.cur_size_),
+          post_update_size_(rhs.post_update_size_)
     {
-        if (rhs.is_key_owner_)
-        {
-            SetKey(std::move(rhs.key_.uptr_));
-            rhs.is_key_owner_ = false;
-        }
-        else
-        {
-            SetKey(rhs.key_.ptr_);
-        }
-        cur_size_ = rhs.cur_size_;
-        post_update_size_ = rhs.post_update_size_;
     }
 
-    void Reset(const TxKey *key,
-               uint32_t cur_size,
-               uint32_t post_update_size,
-               bool is_clone)
+    void SetKey(TxKey key)
     {
-        if (!is_clone)
-        {
-            SetKey(key);
-        }
-        else
-        {
-            if (is_key_owner_)
-            {
-                // We can copy key to avoid memory allocation
-                assert(key_.uptr_ != nullptr);
-                key_.uptr_->Copy(*key);
-            }
-            else
-            {
-                // We need to create a new key
-                (void) key_.uptr_.release();
-                key_.uptr_ = key->Clone();
-                is_key_owner_ = true;
-            }
-        }
-        cur_size_ = cur_size;
-        post_update_size_ = post_update_size;
+        key_ = std::move(key);
     }
 
-    void SetKey(const TxKey *ptr)
-    {
-        if (is_key_owner_)
-        {
-            key_.uptr_.reset();
-        }
-        key_.ptr_ = ptr;
-        is_key_owner_ = false;
-    }
+    ~SliceChangeInfo() = default;
 
-    void SetKey(std::unique_ptr<TxKey> uptr)
-    {
-        if (is_key_owner_)
-        {
-            // The move op will de-allocate the old record and obtain the
-            // ownership of the input record.
-            key_.uptr_ = std::move(uptr);
-        }
-        else
-        {
-            // key_ is treated as a unique_ptr, first release ownership,
-            // otherwise ptr_ will be deleted
-            (void) key_.uptr_.release();
-            key_.uptr_ = std::move(uptr);
-        }
-        is_key_owner_ = true;
-    }
-
-    const TxKey *SliceStartKey() const
-    {
-        return is_key_owner_ ? key_.uptr_.get() : key_.ptr_;
-    }
-
-    ~SliceChangeInfo()
-    {
-        if (is_key_owner_)
-        {
-            key_.uptr_.reset();
-        }
-    }
-
-    union KeyPtr
-    {
-        const TxKey *ptr_;
-        std::unique_ptr<TxKey> uptr_;
-        ~KeyPtr()
-        {
-        }
-    };
-    KeyPtr key_{nullptr};
-    bool is_key_owner_{false};
+    TxKey key_;
     uint32_t cur_size_{0};
     uint32_t post_update_size_{0};
+};
+
+struct SplitRangeInfo
+{
+    SplitRangeInfo() = delete;
+
+    SplitRangeInfo(TxKey start_key,
+                   int32_t partition_id,
+                   std::vector<const StoreSlice *> slices)
+        : start_key_(std::move(start_key)),
+          partition_id_(partition_id),
+          slices_(std::move(slices))
+    {
+    }
+
+    SplitRangeInfo(SplitRangeInfo &&rhs)
+        : start_key_(std::move(rhs.start_key_)),
+          partition_id_(rhs.partition_id_),
+          slices_(std::move(rhs.slices_))
+    {
+    }
+
+    SplitRangeInfo(const SplitRangeInfo &rhs)
+    {
+        start_key_ = rhs.start_key_.GetShallowCopy();
+        partition_id_ = rhs.partition_id_;
+        slices_ = rhs.slices_;
+    }
+
+    TxKey start_key_;
+    int32_t partition_id_;
+    std::vector<const StoreSlice *> slices_;
+};
+
+/**
+ * @brief A wrapper that wraps an internal pointer to a range slice. It is
+ * passed to external users, e.g., tx state machines, who later use it to
+ * re-access the slice, e.g., unpin the slice in memory.
+ *
+ */
+struct RangeSliceId
+{
+public:
+    RangeSliceId() : range_ptr_(nullptr), slice_ptr_(nullptr)
+    {
+    }
+
+    explicit RangeSliceId(StoreRange *range, StoreSlice *slice)
+        : range_ptr_(range), slice_ptr_(slice)
+    {
+    }
+
+    RangeSliceId(const RangeSliceId &rhs)
+        : range_ptr_(rhs.range_ptr_), slice_ptr_(rhs.slice_ptr_)
+    {
+    }
+
+    RangeSliceId(RangeSliceId &&rhs)
+        : range_ptr_(rhs.range_ptr_), slice_ptr_(rhs.slice_ptr_)
+    {
+    }
+
+    RangeSliceId &operator=(const RangeSliceId &rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        range_ptr_ = rhs.range_ptr_;
+        slice_ptr_ = rhs.slice_ptr_;
+
+        return *this;
+    }
+
+    void Unpin();
+
+    StoreRange *Range()
+    {
+        return range_ptr_;
+    }
+
+    const StoreRange *Range() const
+    {
+        return range_ptr_;
+    }
+
+    StoreSlice *Slice()
+    {
+        return slice_ptr_;
+    }
+
+    const StoreSlice *Slice() const
+    {
+        return slice_ptr_;
+    }
+
+    TxKey RangeStartTxKey() const;
+    TxKey RangeEndTxKey() const;
+
+    void Reset()
+    {
+        range_ptr_ = nullptr;
+        slice_ptr_ = nullptr;
+    }
+
+    friend bool operator==(const RangeSliceId &lhs, const RangeSliceId &rhs)
+    {
+        if (&lhs != &rhs)
+        {
+            return lhs.range_ptr_ == rhs.range_ptr_ &&
+                   lhs.slice_ptr_ == rhs.slice_ptr_;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    friend bool operator!=(const RangeSliceId &lhs, const RangeSliceId &rhs)
+    {
+        return !(lhs == rhs);
+    }
+
+private:
+    StoreRange *range_ptr_;
+    StoreSlice *slice_ptr_;
+
+    friend class StoreRange;
 };
 
 class StoreSlice
 {
 public:
+    using uptr = std::unique_ptr<StoreSlice>;
+
     /**
      * @brief The size of a slice.
      *
      */
     static constexpr uint32_t slice_upper_bound = 16 * 1024;
 
-    StoreSlice() = default;
-    ~StoreSlice();
+    StoreSlice(size_t size, SliceStatus status)
+        : size_(size), status_(status), fetch_slice_cc_(nullptr)
+    {
+    }
+
+    virtual ~StoreSlice();
 
     StoreSlice(const StoreSlice &) = delete;
 
     void StartLoading(FillStoreSliceCc *fill_req, LocalCcShards &cc_shards);
     void CommitLoading(StoreRange &range, uint32_t slice_size);
 
-    const TxKey *StartKey() const
-    {
-        return start_key_;
-    }
-
-    const TxKey *EndKey() const
-    {
-        return end_key_;
-    }
+    virtual TxKey StartTxKey() const = 0;
+    virtual TxKey EndTxKey() const = 0;
 
     FillStoreSliceCc *FillCcRequest();
 
@@ -340,14 +356,12 @@ public:
 
     size_t MemUsage() const
     {
-        return sizeof(StoreSlice);
+        // The start and end key pointers are stored in the templated subclass.
+        return sizeof(StoreSlice) + 16;
     }
 
-private:
+protected:
     bool IsRecentLoad() const;
-
-    const TxKey *start_key_{nullptr};
-    const TxKey *end_key_{nullptr};
 
     uint64_t size_{0};
     // Use UINT64_MAX to indicate invalid post checkpoint slice size
@@ -386,6 +400,51 @@ private:
     std::mutex slice_mux_;
 
     friend class StoreRange;
+    template <typename KeyT>
+    friend class TemplateStoreRange;
+};
+
+template <typename KeyT>
+class TemplateStoreSlice : public StoreSlice
+{
+public:
+    TemplateStoreSlice(const KeyT *start,
+                       const KeyT *end,
+                       size_t size = 0,
+                       SliceStatus status = SliceStatus::PartiallyCached)
+        : StoreSlice(size, status), start_key_(start), end_key_(end)
+    {
+        assert(start != nullptr && end != nullptr);
+    }
+
+    TxKey StartTxKey() const override
+    {
+        return TxKey(start_key_);
+    }
+
+    TxKey EndTxKey() const override
+    {
+        return TxKey(end_key_);
+    }
+
+    const KeyT *StartKey() const
+    {
+        return start_key_;
+    }
+
+    const KeyT *EndKey() const
+    {
+        return end_key_;
+    }
+
+    void SetEndKey(const KeyT *end)
+    {
+        end_key_ = end;
+    }
+
+private:
+    const KeyT *start_key_{nullptr};
+    const KeyT *end_key_{nullptr};
 };
 
 struct RangeSliceId;
@@ -405,36 +464,13 @@ public:
     static constexpr uint32_t range_max_size = 134217728;
 #endif
 
-    StoreRange(const TxKey *start_key,
-               const TxKey *end_key,
-               uint32_t partition_id,
+    StoreRange(uint32_t partition_id,
                NodeGroupId range_owner,
                LocalCcShards &cc_shards);
 
     StoreRange(const StoreRange &) = delete;
 
-    ~StoreRange() = default;
-
-    RangeSliceId PinSlices(const TableName &tbl_name,
-                           int64_t ng_term,
-                           const TxKey &search_key,
-                           bool inclusive,
-                           const TxKey *end_key,
-                           bool end_inclusive,
-                           const Schema *key_schema,
-                           const Schema *rec_schema,
-                           uint64_t schema_ts,
-                           uint64_t snapshot_ts,
-                           const KVCatalogInfo *kv_info,
-                           CcRequestBase *cc_request,
-                           CcShard *cc_shard,
-                           store::DataStoreHandler *store_hd,
-                           bool force_load,
-                           uint8_t prefetch_size,
-                           uint8_t max_pin_cnt,
-                           bool forward_pin,
-                           RangeSliceOpStatus &pin_status,
-                           const StoreSlice *&last_pinned_slice);
+    virtual ~StoreRange() = default;
 
     RangeSliceOpStatus PinSlice(const TableName &tbl_name,
                                 int64_t ng_term,
@@ -475,77 +511,288 @@ public:
      * This function is NOT THREAD SAFE. Only checkpointer should be calling
      * this function and update range specs.
      */
-    std::vector<const TxKey *> CalculateRangeSplitKeys(
+    virtual std::vector<TxKey> CalculateRangeSplitKeys(
         const TableName &table_name,
         const TableSchema *schema,
         NodeGroupId ng_id,
         int64_t ng_term,
         uint64_t flush_ts,
-        size_t post_ckpt_size,
-        std::vector<FlushRecord>::const_iterator range_start_it,
-        std::vector<FlushRecord>::const_iterator range_end_it,
-        const std::vector<FlushRecord> &flush_vec);
+        size_t post_ckpt_size) = 0;
 
     // Update slice size after data flush. If flush is successful,
     // update slice size to precalculated post ckpt size. Otherwise,
     // reset post ckpt size.
-    bool UpdateSliceSizeAfterFlush(bool flush_res)
-    {
-        std::shared_lock<std::shared_mutex> s_lk(mux_);
-        bool updated = false;
-        // Iterate over all slices
-        for (auto &slice : slices_)
-        {
-            if (flush_res)
-            {
-                updated |= slice->UpdateSize();
-            }
-            else
-            {
-                slice->SetPostCkptSize(UINT64_MAX);
-            }
-        }
+    virtual bool UpdateSliceSizeAfterFlush(bool flush_res) = 0;
 
-        return updated;
-    }
-
-    const TxKey *RangeStartKey() const
-    {
-        return range_start_key_;
-    }
-
-    const TxKey *RangeEndKey() const
-    {
-        return range_end_key_;
-    }
-
-    bool KickoutSlice(const TxKey &kickout_key);
+    virtual TxKey RangeStartTxKey() const = 0;
+    virtual TxKey RangeEndTxKey() const = 0;
 
     uint32_t PartitionId() const
     {
         return partition_id_;
     }
 
-    StoreSlice *FindSlice(const TxKey &key);
+    virtual StoreSlice *FindSlice(const TxKey &key) = 0;
+    virtual StoreSlice *FindSlice(size_t idx) = 0;
 
-    StoreSlice *FindSlice(size_t idx);
+    virtual std::vector<const StoreSlice *> Slices() const = 0;
 
-    void InitSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slice_keys,
-                    bool fully_cached = false);
-
-    void InitSlices(std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
-                        &slice_keys);
-
-    const std::vector<std::unique_ptr<StoreSlice>> &Slices() const
-    {
-        return slices_;
-    }
-
-    size_t PostCkptSize();
+    virtual size_t PostCkptSize() = 0;
 
     uint32_t Pins()
     {
         return pins_.load(std::memory_order_acquire);
+    }
+
+    void Lock()
+    {
+        has_write_lock_.store(true, std::memory_order_relaxed);
+    }
+
+    bool HasLock()
+    {
+        return has_write_lock_.load(std::memory_order_relaxed);
+    }
+
+    void Unlock()
+    {
+        return has_write_lock_.store(false, std::memory_order_relaxed);
+    }
+
+    // virtual void SetRangeEndTxKey(TxKey end_key) = 0;
+
+    void UpdateLastAccessedTs(uint64_t ts)
+    {
+        last_accessed_ts_.store(ts, std::memory_order_relaxed);
+    }
+
+    uint64_t LastAccessedTs() const
+    {
+        return last_accessed_ts_.load(std::memory_order_relaxed);
+    }
+
+    size_t MemUsage() const
+    {
+        std::shared_lock<std::shared_mutex> lk(mux_);
+        return size_;
+    }
+
+protected:
+    enum struct LoadSliceStatus
+    {
+        Success,
+        Delay,
+        Retry,
+        Error
+    };
+
+    LoadSliceStatus LoadSlice(const TableName &tbl_name,
+                              int64_t cc_ng_term,
+                              StoreSlice &slice,
+                              const Schema *key_schema,
+                              const Schema *rec_schema,
+                              uint64_t schema_ts,
+                              uint64_t snapshot_ts,
+                              const KVCatalogInfo *kv_info,
+                              CcRequestBase *cc_request,
+                              CcShard *cc_shard,
+                              store::DataStoreHandler *store_hd,
+                              bool force_load,
+                              std::unique_lock<std::mutex> &slice_lk);
+
+    virtual std::pair<size_t, size_t> SearchSlice(
+        const StoreSlice *slice) const = 0;
+    virtual StoreSlice *GetSlice(size_t slice_idx) const = 0;
+    virtual size_t UpdateSlice(StoreSlice *slice,
+                               std::vector<SliceChangeInfo> &split_info) = 0;
+
+    void CollectCacheHit(CcShard &ccs);
+    void CollectCacheMiss(CcShard &ccs);
+
+    /**
+     * @brief The partition ID of the range.
+     *
+     */
+    uint32_t partition_id_;
+
+    NodeGroupId cc_ng_id_;
+
+    /**
+     * @brief A collection of slices the checkpointer intends to alter. The
+     * checkpointer adds a slice to this collection, when it detects that the
+     * slice's size in the data store exceeds the pre-defined threshold after
+     * flushing changed data items in this slice. Slices in the collection
+     * cannot be pinned by online tx's, until the checkpointer finishes
+     * splitting or merging the slice. The checkpointer is single-threaded and
+     * only splits one or merges two slices at a time. We use the vector rather
+     * than the hash map, because for very small collections searching in the
+     * vector is fast enough.
+     *
+     */
+
+    mutable std::shared_mutex mux_;
+
+    std::condition_variable_any wait_cv_;
+
+    LocalCcShards &local_cc_shards_;
+
+    std::atomic<bool> has_write_lock_{false};
+
+    std::atomic_uint64_t last_accessed_ts_;
+    // pins_ will increase in these cases:
+    // 1. Child store slice is pinned
+    // 2. Child store slice is being loaded
+    // 3. TableRangeEntry.PinStoreRange() is called.
+    // This is the value we rely on to decide if a StoreRange can be
+    // safely evicted from memory.
+    std::atomic_uint32_t pins_{0};
+    // Memory usage of StoreRange.
+    size_t size_;
+
+    friend class StoreSlice;
+    friend struct TableRangeEntry;
+    friend struct RangeSliceId;
+};
+
+template <typename KeyT>
+class TemplateStoreRange : public StoreRange
+{
+public:
+    TemplateStoreRange(const KeyT *start_key,
+                       const KeyT *end_key,
+                       uint32_t partition_id,
+                       NodeGroupId range_owner,
+                       LocalCcShards &cc_shards)
+        : StoreRange(partition_id, range_owner, cc_shards),
+          range_start_key_(start_key),
+          range_end_key_(end_key)
+    {
+        std::unique_ptr<TemplateStoreSlice<KeyT>> slice =
+            std::make_unique<TemplateStoreSlice<KeyT>>(start_key, end_key);
+        size_ = sizeof(TemplateStoreRange<KeyT>) + slice->MemUsage();
+        slices_.emplace_back(std::move(slice));
+    }
+
+    ~TemplateStoreRange() = default;
+
+    void SetRangeEndKey(const KeyT *end_key)
+    {
+        range_end_key_ = end_key;
+        assert(slices_.size() > 0);
+        slices_.back()->SetEndKey(end_key);
+    }
+
+    TxKey RangeStartTxKey() const override
+    {
+        return TxKey(range_start_key_);
+    }
+
+    TxKey RangeEndTxKey() const override
+    {
+        return TxKey(range_end_key_);
+    }
+
+    const KeyT *RangeStartKey() const
+    {
+        return range_start_key_;
+    }
+
+    const KeyT *RangeEndKey() const
+    {
+        return range_end_key_;
+    }
+
+    void InitSlices(std::vector<SliceInitInfo> &&slice_keys)
+    {
+        slices_.clear();
+        boundary_keys_.clear();
+
+        const KeyT *slice_start = range_start_key_;
+        const KeyT *slice_end = slice_keys.size() > 1
+                                    ? slice_keys[1].key_.GetKey<KeyT>()
+                                    : range_end_key_;
+        // The start of the first slice of the first range points to
+        // KeyT::NegativeInfinity().
+        assert(slice_start != nullptr);
+        // The end of the last slice of the last range points to positive
+        // infinity.
+        assert(slice_end != nullptr);
+        size_t slice_size = slice_keys.size() > 0 ? slice_keys[0].size_ : 0;
+        SliceStatus slice_status = slice_keys[0].status_;
+
+        std::unique_ptr<TemplateStoreSlice<KeyT>> slice =
+            std::make_unique<TemplateStoreSlice<KeyT>>(
+                slice_start, slice_end, slice_size, slice_status);
+
+        slices_.emplace_back(std::move(slice));
+
+        for (size_t idx = 1; idx < slice_keys.size(); ++idx)
+        {
+            slice_start = slice_keys[idx].key_.GetKey<KeyT>();
+            slice_end = idx == slice_keys.size() - 1
+                            ? range_end_key_
+                            : slice_keys[idx + 1].key_.GetKey<KeyT>();
+            slice_size = slice_keys[idx].size_;
+            slice_status = slice_keys[idx].status_;
+
+            slice = std::make_unique<TemplateStoreSlice<KeyT>>(
+                slice_start, slice_end, slice_size, slice_status);
+
+            slices_.emplace_back(std::move(slice));
+
+            assert(slice_keys[idx].key_.IsOwner());
+            std::unique_ptr<KeyT> boundary_key =
+                slice_keys[idx].key_.MoveKey<KeyT>();
+            boundary_keys_.emplace_back(std::move(boundary_key));
+        }
+
+        assert(slices_.size() == boundary_keys_.size() + 1);
+        size_ = sizeof(TemplateStoreRange<KeyT>);
+        size_ += boundary_keys_.capacity() * sizeof(std::unique_ptr<KeyT>);
+        for (const auto &slice_key : boundary_keys_)
+        {
+            size_ += slice_key->MemUsage();
+        }
+
+        size_ += slices_.capacity() *
+                 sizeof(std::unique_ptr<TemplateStoreSlice<KeyT>>);
+        if (!slices_.empty())
+        {
+            size_ += slices_.front()->MemUsage() * slices_.size();
+        }
+    }
+
+    StoreSlice *FindSlice(const TxKey &key) override
+    {
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        const KeyT *typed_key = key.GetKey<KeyT>();
+        size_t slice_idx = SearchSlice(*typed_key, true);
+        return slices_[slice_idx].get();
+    }
+
+    StoreSlice *FindSlice(size_t idx) override
+    {
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        return slices_.at(idx).get();
+    }
+
+    std::vector<const StoreSlice *> Slices() const override
+    {
+        std::vector<const StoreSlice *> slice_vec;
+        slice_vec.reserve(slices_.size());
+
+        for (const auto &slice : slices_)
+        {
+            slice_vec.emplace_back(slice.get());
+        }
+
+        return slice_vec;
+    }
+
+    const std::vector<std::unique_ptr<TemplateStoreSlice<KeyT>>> &TypedSlices()
+        const
+    {
+        return slices_;
     }
 
     /**
@@ -556,9 +803,8 @@ public:
      * @param new_end
      * @return std::vector<std::pair<TxKey::Uptr, uint32_t, SliceStatus>>
      */
-    bool SplitRange(const TxKey *new_end,
-                    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
-                        &removed_slices)
+    bool SplitRange(const KeyT *new_end,
+                    std::vector<SliceInitInfo> &removed_slices)
     {
         std::unique_lock<std::shared_mutex> range_lk(mux_);
         size_t remove_offset = SearchSlice(*new_end, true);
@@ -603,15 +849,20 @@ public:
             // Remove boundary keys >= new end key
             mem_decreased += (*boundary)->MemUsage();
             mem_decreased += (*slice)->MemUsage();
-            removed_slices.emplace_back(
-                std::move(*boundary), (*slice)->Size(), (*slice)->status_);
+            removed_slices.emplace_back(TxKey(std::move(*boundary)),
+                                        (*slice)->Size(),
+                                        (*slice)->status_);
             boundary++;
             slice++;
         }
         slices_.erase(slices_.begin() + remove_offset, slices_.end());
         boundary_keys_.erase(boundary_keys_.begin() + remove_offset - 1,
                              boundary_keys_.end());
-        range_end_key_ = std::get<0>(removed_slices.front()).get();
+        assert(!removed_slices.empty());
+        // We set the range's end key to nullptr for now. It will be updated
+        // when new ranges are inserted into the table range table in
+        // LocalCcShards, and set to the start of the first splitted range.
+        range_end_key_ = nullptr;
         // Update size
         assert(size_ > mem_decreased);
         size_ -= mem_decreased;
@@ -619,231 +870,491 @@ public:
         return true;
     }
 
-    void Lock()
+    RangeSliceId PinSlices(const TableName &tbl_name,
+                           int64_t ng_term,
+                           const KeyT &search_key,
+                           bool inclusive,
+                           const KeyT *end_key,
+                           bool end_inclusive,
+                           const Schema *key_schema,
+                           const Schema *rec_schema,
+                           uint64_t schema_ts,
+                           uint64_t snapshot_ts,
+                           const KVCatalogInfo *kv_info,
+                           CcRequestBase *cc_request,
+                           CcShard *cc_shard,
+                           store::DataStoreHandler *store_hd,
+                           bool force_load,
+                           uint8_t prefetch_size,
+                           uint8_t max_pin_cnt,
+                           bool forward_pin,
+                           RangeSliceOpStatus &pin_status,
+                           const StoreSlice *&last_pinned_slice)
     {
-        has_write_lock_.store(true, std::memory_order_relaxed);
+        // A shared lock on the range to prevent concurrent splitting or merging
+        // of slices.
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        size_t slice_idx = SearchSlice(search_key, inclusive);
+        StoreSlice *slice = slices_[slice_idx].get();
+        std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
+
+        if (slice->to_alter_)
+        {
+            // The checkpointer is waiting to alter this slice. The calling tx
+            // is pushed back for re-execution, if the request is processed for
+            // the first time. If the slice has been pinned, forcing the
+            // checkpointer to wait, the request must be allowed to proceed to
+            // finish and unpin the slice.
+            pin_status = RangeSliceOpStatus::Retry;
+            return RangeSliceId(this, slice);
+        }
+
+        if (slice->status_ == SliceStatus::FullyCached)
+        {
+            // collect metrics: slice cache hits
+            CollectCacheHit(*cc_shard);
+
+            ++slice->pins_;
+            pin_status = RangeSliceOpStatus::Successful;
+            last_pinned_slice = slice;
+
+            slice_lk.unlock();
+
+            size_t pin_slice_cnt = 1;
+
+            if (forward_pin)
+            {
+                for (size_t s_idx = slice_idx + 1;
+                     s_idx < slices_.size() && pin_slice_cnt < max_pin_cnt;
+                     ++s_idx)
+                {
+                    TemplateStoreSlice<KeyT> *prepin_slice =
+                        slices_[s_idx].get();
+
+                    if (end_key != nullptr)
+                    {
+                        // If the request (e.g., a scan) specifies the end key,
+                        // does not pin slices beyond the end key.
+                        const KeyT *slice_start = prepin_slice->StartKey();
+                        if (!(*slice_start < *end_key ||
+                              (end_inclusive && *slice_start == *end_key)))
+                        {
+                            break;
+                        }
+                    }
+
+                    std::unique_lock<std::mutex> s_lk(prepin_slice->slice_mux_);
+                    if (!prepin_slice->to_alter_ &&
+                        prepin_slice->status_ == SliceStatus::FullyCached)
+                    {
+                        last_pinned_slice = prepin_slice;
+                        ++prepin_slice->pins_;
+                        ++pin_slice_cnt;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+            else if (slice_idx > 0)
+            {
+                for (int32_t s_idx = slice_idx - 1;
+                     s_idx >= 0 && pin_slice_cnt < max_pin_cnt;
+                     --s_idx)
+                {
+                    TemplateStoreSlice<KeyT> *prepin_slice =
+                        slices_[s_idx].get();
+
+                    if (end_key != nullptr)
+                    {
+                        // If the request (e.g., a scan) specifies the end key,
+                        // does not pin slices beyond the end key.
+                        const KeyT *slice_end = prepin_slice->EndKey();
+                        if (!(*end_key < *slice_end))
+                        {
+                            break;
+                        }
+                    }
+
+                    std::unique_lock<std::mutex> s_lk(prepin_slice->slice_mux_);
+                    if (!prepin_slice->to_alter_ &&
+                        prepin_slice->status_ == SliceStatus::FullyCached)
+                    {
+                        last_pinned_slice = prepin_slice;
+                        ++prepin_slice->pins_;
+                        ++pin_slice_cnt;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+            pins_.fetch_add(pin_slice_cnt, std::memory_order_release);
+        }
+        else
+        {
+            last_pinned_slice = nullptr;
+
+            // collect metrics: slice cache miss
+            CollectCacheMiss(*cc_shard);
+
+            LoadSliceStatus load_ret = LoadSlice(tbl_name,
+                                                 ng_term,
+                                                 *slice,
+                                                 key_schema,
+                                                 rec_schema,
+                                                 schema_ts,
+                                                 snapshot_ts,
+                                                 kv_info,
+                                                 cc_request,
+                                                 cc_shard,
+                                                 store_hd,
+                                                 force_load,
+                                                 slice_lk);
+            switch (load_ret)
+            {
+            case LoadSliceStatus::Success:
+                pin_status = RangeSliceOpStatus::BlockedOnLoad;
+                break;
+            case LoadSliceStatus::Delay:
+                pin_status = RangeSliceOpStatus::Delay;
+                break;
+            case LoadSliceStatus::Retry:
+                pin_status = RangeSliceOpStatus::Retry;
+                break;
+            default:
+                pin_status = RangeSliceOpStatus::Error;
+                break;
+            }
+
+            slice_lk.unlock();
+
+            size_t sid = slice_idx + 1;
+            for (size_t fid = 0; fid < prefetch_size && sid < slices_.size();
+                 ++fid, ++sid)
+            {
+                StoreSlice *prefetch_slice = slices_[sid].get();
+                std::unique_lock<std::mutex> prefetch_lk(
+                    prefetch_slice->slice_mux_);
+
+                if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
+                {
+                    LoadSlice(tbl_name,
+                              ng_term,
+                              *prefetch_slice,
+                              key_schema,
+                              rec_schema,
+                              schema_ts,
+                              snapshot_ts,
+                              kv_info,
+                              nullptr,
+                              cc_shard,
+                              store_hd,
+                              false,
+                              prefetch_lk);
+                }
+            }
+        }
+
+        return RangeSliceId(this, slice);
     }
 
-    bool HasLock()
+    std::vector<TxKey> CalculateRangeSplitKeys(const TableName &table_name,
+                                               const TableSchema *schema,
+                                               NodeGroupId ng_id,
+                                               int64_t ng_term,
+                                               uint64_t flush_ts,
+                                               size_t post_ckpt_size) override
     {
-        return has_write_lock_.load(std::memory_order_relaxed);
+        std::vector<TxKey> new_range_keys;
+        uint32_t slice_idx = 0;
+        uint32_t subrange_slice_idx = 0;
+        size_t subrange_cnt =
+            std::ceil(post_ckpt_size / (StoreRange::range_max_size * 0.7));
+        size_t avg_subrange_size = post_ckpt_size / subrange_cnt;
+
+        while (slice_idx < slices_.size())
+        {
+            size_t curr_subrange_size = 0;
+            for (; curr_subrange_size < avg_subrange_size &&
+                   slice_idx < slices_.size();
+                 slice_idx++)
+            {
+                if (slices_.at(slice_idx)->PostCkptSize() != UINT64_MAX)
+                {
+                    curr_subrange_size += slices_.at(slice_idx)->PostCkptSize();
+                }
+                else
+                {
+                    curr_subrange_size += slices_.at(slice_idx)->Size();
+                }
+            }
+            // Skip the first subrange since it will reuse the
+            // current range entry
+            if (subrange_slice_idx != 0)
+            {
+                const KeyT *slice_start =
+                    slices_[subrange_slice_idx]->StartKey();
+                assert(slice_start->Type() == KeyType::Normal);
+                new_range_keys.emplace_back(
+                    std::make_unique<KeyT>(*slice_start));
+            }
+            subrange_slice_idx = slice_idx;
+        }
+        return new_range_keys;
     }
 
-    void Unlock()
+    bool KickoutSlice(const KeyT &kickout_key)
     {
-        return has_write_lock_.store(false, std::memory_order_relaxed);
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        size_t slice_idx = SearchSlice(kickout_key, true);
+        return slices_[slice_idx]->Kickout();
     }
 
-    void SetRangeEndKey(const TxKey *end_key)
+    size_t PostCkptSize() override
     {
-        range_end_key_ = end_key;
-        slices_.back()->end_key_ = end_key;
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        size_t size = 0;
+        for (size_t idx = 0; idx < slices_.size(); idx++)
+        {
+            if (slices_.at(idx)->post_ckpt_size_ != UINT64_MAX)
+            {
+                size += slices_.at(idx)->PostCkptSize();
+            }
+            else
+            {
+                size += slices_.at(idx)->Size();
+            }
+        }
+        return size;
     }
 
-    void UpdateLastAccessedTs(uint64_t ts)
+    bool UpdateSliceSizeAfterFlush(bool flush_res) override
     {
-        last_accessed_ts_.store(ts, std::memory_order_relaxed);
-    }
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        bool updated = false;
+        // Iterate over all slices
+        for (auto &slice : slices_)
+        {
+            if (flush_res)
+            {
+                updated |= slice->UpdateSize();
+            }
+            else
+            {
+                slice->SetPostCkptSize(UINT64_MAX);
+            }
+        }
 
-    uint64_t LastAccessedTs() const
-    {
-        return last_accessed_ts_.load(std::memory_order_relaxed);
-    }
-
-    size_t MemUsage()
-    {
-        std::shared_lock<std::shared_mutex> lk(mux_);
-        return size_;
+        return updated;
     }
 
 private:
     static size_t LowerBound(
-        const std::vector<std::unique_ptr<TxKey>> &slice_key_,
-        const TxKey &search_key);
+        const std::vector<std::unique_ptr<KeyT>> &slice_keys,
+        const KeyT &search_key);
 
-    size_t SearchSlice(const TxKey &search_key, bool inclusive) const;
-
-    enum struct LoadSliceStatus
+    size_t SearchSlice(const KeyT &search_key, bool inclusive) const
     {
-        Success,
-        Delay,
-        Retry,
-        Error
-    };
+        size_t slice_idx = 0;
+        size_t lower_bound_idx = LowerBound(boundary_keys_, search_key);
 
-    LoadSliceStatus LoadSlice(const TableName &tbl_name,
-                              int64_t cc_ng_term,
-                              StoreSlice &slice,
-                              const Schema *key_schema,
-                              const Schema *rec_schema,
-                              uint64_t schema_ts,
-                              uint64_t snapshot_ts,
-                              const KVCatalogInfo *kv_info,
-                              CcRequestBase *cc_request,
-                              CcShard *cc_shard,
-                              store::DataStoreHandler *store_hd,
-                              bool force_load,
-                              std::unique_lock<std::mutex> &slice_lk);
+        if (lower_bound_idx == boundary_keys_.size())
+        {
+            // The search key is greater than or equal to the last slice's
+            // starting key.
+
+            if (boundary_keys_.empty())
+            {
+                // The range contains a single slice. The slice ending with
+                // range_end_key_ is the slice [range_start_key,
+                // range_end_key_).
+                slice_idx = 0;
+            }
+            else if (*boundary_keys_.back() == search_key && !inclusive)
+            {
+                // The search key equals to the last boundary key and the
+                // inclusive flag is false, the containing slice is the second
+                // to last slice.
+                slice_idx = boundary_keys_.size() - 1;
+            }
+            else
+            {
+                // The search key falls into the slice [slice_key_.last,
+                // range_end_key_).
+                slice_idx = boundary_keys_.size();
+            }
+        }
+        else
+        {
+            // The search key equals to or is less than
+            // slice_key_[lower_bound_idx].
+
+            if (*boundary_keys_[lower_bound_idx] == search_key && inclusive)
+            {
+                // If the search key equals to slice_key_[lower_bound_idx], the
+                // containing slice is [lower_bound_idx, lower_bound_idx + 1),
+                // if the inclusive flag is true.
+                slice_idx = lower_bound_idx + 1;
+            }
+            else
+            {
+                // If the search key is less than slice_key_[lower_bound_idx],
+                // the containing slice is [lower_bound_idx - 1,
+                // lower_bound_idx).
+                slice_idx = lower_bound_idx;
+            }
+        }
+
+        return slice_idx;
+    }
+
+    std::pair<size_t, size_t> SearchSlice(
+        const StoreSlice *slice) const override
+    {
+        const TemplateStoreSlice<KeyT> *typed_slice =
+            static_cast<const TemplateStoreSlice<KeyT> *>(slice);
+        const KeyT *slice_start = typed_slice->StartKey();
+        assert(slice_start != nullptr);
+        size_t slice_idx = SearchSlice(*slice_start, true);
+        return {slice_idx, slices_.size()};
+    }
+
+    StoreSlice *GetSlice(size_t slice_idx) const override
+    {
+        return slice_idx < slices_.size() ? slices_[slice_idx].get() : nullptr;
+    }
+
+    size_t UpdateSlice(StoreSlice *slice,
+                       std::vector<SliceChangeInfo> &split_keys) override
+    {
+        assert(split_keys.size() > 1);
+
+        TemplateStoreSlice<KeyT> *typed_slice =
+            static_cast<TemplateStoreSlice<KeyT> *>(slice);
+
+        // A slice's start is never null. It points to negative infinity, if
+        // this is the first slice of the first range.
+        assert(typed_slice->StartKey() != nullptr);
+        size_t slice_idx = typed_slice->StartKey() == KeyT::NegativeInfinity()
+                               ? 0
+                               : SearchSlice(*typed_slice->StartKey(), true);
+        const KeyT *slice_end_key = typed_slice->EndKey();
+
+        std::unique_ptr<KeyT> next_slice_start_key = nullptr;
+        if (split_keys[1].key_.IsOwner())
+        {
+            next_slice_start_key = split_keys[1].key_.MoveKey<KeyT>();
+        }
+        else
+        {
+            next_slice_start_key =
+                std::make_unique<KeyT>(*split_keys[1].key_.GetKey<KeyT>());
+        }
+
+        typed_slice->SetEndKey(next_slice_start_key.get());
+        slice->size_ = split_keys[0].cur_size_;
+        slice->post_ckpt_size_ = split_keys[0].post_update_size_;
+        size_t mem_size_change = 0;
+
+        for (size_t idx = 1; idx < split_keys.size(); ++idx)
+        {
+            const KeyT *sub_slice_start = next_slice_start_key.get();
+            const KeyT *sub_slice_end = nullptr;
+
+            mem_size_change += next_slice_start_key->MemUsage();
+
+            size_t boundary_keys_idx = slice_idx + idx - 1;
+            // Inserts the new boundary keys.
+            boundary_keys_.emplace(boundary_keys_.begin() + boundary_keys_idx,
+                                   std::move(next_slice_start_key));
+
+            if (idx < split_keys.size() - 1)
+            {
+                if (split_keys[idx + 1].key_.IsOwner())
+                {
+                    next_slice_start_key =
+                        split_keys[idx + 1].key_.MoveKey<KeyT>();
+                }
+                else
+                {
+                    next_slice_start_key = std::make_unique<KeyT>(
+                        *split_keys[idx + 1].key_.GetKey<KeyT>());
+                }
+                sub_slice_end = next_slice_start_key.get();
+            }
+            else
+            {
+                // The last sub-slice's end key points to that of the
+                // original slice.
+                next_slice_start_key = nullptr;
+                sub_slice_end = slice_end_key;
+            }
+
+            std::unique_ptr<TemplateStoreSlice<KeyT>> sub_slice =
+                std::make_unique<TemplateStoreSlice<KeyT>>(
+                    sub_slice_start,
+                    sub_slice_end,
+                    split_keys[idx].cur_size_,
+                    SliceStatus::PartiallyCached);
+
+            sub_slice->post_ckpt_size_ = split_keys[idx].post_update_size_;
+            sub_slice->status_ = slice->status_;
+            sub_slice->last_load_ts_ = slice->last_load_ts_;
+
+            mem_size_change += sub_slice->MemUsage();
+
+            // Inserts the new sub-slices following the first sub-slice.
+            slices_.emplace(slices_.begin() + slice_idx + idx,
+                            std::move(sub_slice));
+        }
+
+        return mem_size_change;
+    }
 
     /**
-     * @brief The start and end keys of the range. The two boundary keys are raw
-     * pointers and point to external keys in the table's range entries at
-     * LocalCcShards.
+     * @brief The start and end keys of the range. The two boundary keys are
+     * raw pointers and point to external keys in the table's range entries
+     * at LocalCcShards.
      *
      */
-    const TxKey *range_start_key_, *range_end_key_;
-
-    /**
-     * @brief The partition ID of the range.
-     *
-     */
-    uint32_t partition_id_;
-
-    NodeGroupId cc_ng_id_;
+    const KeyT *range_start_key_, *range_end_key_;
 
     /**
      * @brief A sorted vector of keys that split the range into slices.
      *
      */
-    std::vector<std::unique_ptr<TxKey>> boundary_keys_;
+    std::vector<std::unique_ptr<KeyT>> boundary_keys_;
 
-    /**
-     * @brief A collection of slices the checkpointer intends to alter. The
-     * checkpointer adds a slice to this collection, when it detects that the
-     * slice's size in the data store exceeds the pre-defined threshold after
-     * flushing changed data items in this slice. Slices in the collection
-     * cannot be pinned by online tx's, until the checkpointer finishes
-     * splitting or merging the slice. The checkpointer is single-threaded and
-     * only splits one or merges two slices at a time. We use the vector rather
-     * than the hash map, because for very small collections searching in the
-     * vector is fast enough.
-     *
-     */
-    std::vector<std::unique_ptr<StoreSlice>> slices_;
+    std::vector<std::unique_ptr<TemplateStoreSlice<KeyT>>> slices_;
+};  // namespace txservice
 
-    std::shared_mutex mux_;
-
-    std::condition_variable_any wait_cv_;
-
-    LocalCcShards &local_cc_shards_;
-
-    std::atomic<bool> has_write_lock_{false};
-
-    std::atomic_uint64_t last_accessed_ts_;
-    // pins_ will increase in these cases:
-    // 1. Child store slice is pinned
-    // 2. Child store slice is being loaded
-    // 3. TableRangeEntry.PinStoreRange() is called.
-    // This is the value we rely on to decide if a StoreRange can be
-    // safely evicted from memory.
-    std::atomic_uint32_t pins_{0};
-    // Memory usage of StoreRange.
-    size_t size_;
-
-    friend class StoreSlice;
-    friend struct TableRangeEntry;
-    friend struct RangeSliceId;
-};
-
-/**
- * @brief A wrapper that wraps an internal pointer to a range slice. It is
- * passed to external users, e.g., tx state machines, who later use it to
- * re-access the slice, e.g., unpin the slice in memory.
- *
- */
-struct RangeSliceId
+template <typename KeyT>
+size_t TemplateStoreRange<KeyT>::LowerBound(
+    const std::vector<std::unique_ptr<KeyT>> &middle_keys,
+    const KeyT &search_key)
 {
-public:
-    RangeSliceId() : range_ptr_(nullptr), slice_ptr_(nullptr)
-    {
-    }
+    size_t len = middle_keys.size();
+    size_t first_idx = 0;
 
-    explicit RangeSliceId(StoreRange *range, StoreSlice *slice)
-        : range_ptr_(range), slice_ptr_(slice)
+    while (len > 0)
     {
-    }
-
-    RangeSliceId(const RangeSliceId &rhs)
-        : range_ptr_(rhs.range_ptr_), slice_ptr_(rhs.slice_ptr_)
-    {
-    }
-
-    RangeSliceId(RangeSliceId &&rhs)
-        : range_ptr_(rhs.range_ptr_), slice_ptr_(rhs.slice_ptr_)
-    {
-    }
-
-    RangeSliceId &operator=(const RangeSliceId &rhs)
-    {
-        if (this == &rhs)
+        size_t half_len = len >> 1;
+        size_t middle_idx = first_idx + half_len;
+        if (*middle_keys[middle_idx] < search_key)
         {
-            return *this;
-        }
-
-        range_ptr_ = rhs.range_ptr_;
-        slice_ptr_ = rhs.slice_ptr_;
-
-        return *this;
-    }
-
-    friend bool operator==(const RangeSliceId &lhs, const RangeSliceId &rhs)
-    {
-        if (&lhs != &rhs)
-        {
-            return lhs.range_ptr_ == rhs.range_ptr_ &&
-                   lhs.slice_ptr_ == rhs.slice_ptr_;
+            first_idx = middle_idx + 1;
+            len = len - half_len - 1;
         }
         else
         {
-            return true;
+            len = half_len;
         }
     }
 
-    friend bool operator!=(const RangeSliceId &lhs, const RangeSliceId &rhs)
-    {
-        return !(lhs == rhs);
-    }
+    return first_idx;
+}
 
-    void Unpin()
-    {
-        range_ptr_->UnpinSlice(slice_ptr_, true);
-    }
-
-    StoreRange *Range()
-    {
-        return range_ptr_;
-    }
-
-    StoreSlice *Slice()
-    {
-        return slice_ptr_;
-    }
-
-    const StoreSlice *Slice() const
-    {
-        return slice_ptr_;
-    }
-
-    const TxKey *RangeStartKey() const
-    {
-        return range_ptr_->RangeStartKey();
-    }
-
-    const TxKey *RangeEndKey() const
-    {
-        return range_ptr_->RangeEndKey();
-    }
-
-    void Reset()
-    {
-        range_ptr_ = nullptr;
-        slice_ptr_ = nullptr;
-    }
-
-private:
-    StoreRange *range_ptr_;
-    StoreSlice *slice_ptr_;
-
-    friend class StoreRange;
-};
 }  // namespace txservice

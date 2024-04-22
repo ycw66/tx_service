@@ -68,7 +68,7 @@ public:
                       uint16_t command_id,
                       uint64_t commit_ts,
                       int64_t ng_term,
-                      const TxKey *key,
+                      const TxKey &key,
                       const TableName &table_name,
                       const TxRecord *record,
                       OperationType operation_type,

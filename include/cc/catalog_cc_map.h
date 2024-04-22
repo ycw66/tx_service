@@ -20,6 +20,7 @@
 #include "range_cc_map.h"
 #include "sharder.h"
 #include "template_cc_map.h"
+#include "tx_operation.h"
 
 namespace txservice
 {
@@ -135,7 +136,7 @@ public:
                 size_t offset = 0;
                 decoded_key->Deserialize(key_str->data(), offset, KeySchema());
                 table_key = decoded_key.get();
-                req.SetDecodedKey(std::move(decoded_key));
+                req.SetDecodedKey(TxKey(std::move(decoded_key)));
                 break;
             }
         }
@@ -323,7 +324,7 @@ public:
                                 }
                                 for (auto &range : *ranges)
                                 {
-                                    range.second.SetVersion(req.CommitTs());
+                                    range.second->SetVersion(req.CommitTs());
                                 }
                             }
                         }
@@ -475,14 +476,14 @@ public:
 
                     // Use nullptr to represent negative infinity key here.
                     range_init_vec.emplace_back(
-                        nullptr, init_partition_id, req.CommitTs());
+                        TxKey(), init_partition_id, req.CommitTs());
 
                     TableName range_table_name(table_name_view,
                                                TableType::RangePartition);
-                    shard_->InitTableRanges(range_table_name,
-                                            range_init_vec,
-                                            req.NodeGroupId(),
-                                            true);
+                    shard_->local_shards_.InitTableRanges(range_table_name,
+                                                          range_init_vec,
+                                                          req.NodeGroupId(),
+                                                          true);
 
                     std::vector<TableName> index_names =
                         catalog_entry->dirty_schema_->IndexNames();
@@ -497,11 +498,12 @@ public:
                         init_partition_id = tbl_name_hash & 0xFFF;
                         range_init_vec.clear();
                         range_init_vec.emplace_back(
-                            nullptr, init_partition_id, req.CommitTs());
-                        shard_->InitTableRanges(index_range_table_name,
-                                                range_init_vec,
-                                                req.NodeGroupId(),
-                                                true);
+                            TxKey(), init_partition_id, req.CommitTs());
+                        shard_->local_shards_.InitTableRanges(
+                            index_range_table_name,
+                            range_init_vec,
+                            req.NodeGroupId(),
+                            true);
                     }
                     shard_->InitTableStatistics(
                         catalog_entry->dirty_schema_.get(), cc_ng_id_);

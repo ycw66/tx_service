@@ -2,8 +2,9 @@
 
 #include <mutex>
 
+#include "cc_entry.h"
+#include "cc_req_misc.h"
 #include "local_cc_shards.h"
-#include "range_slice.h"
 #include "type.h"
 
 namespace txservice
@@ -13,35 +14,6 @@ TableRangeEntry::~TableRangeEntry()
 {
 }
 
-bool TableRangeEntry::DropStoreRangeAndSyncInfo(size_t &mem_decreased)
-{
-    std::unique_lock<std::shared_mutex> lk(mux_);
-    mem_decreased = 0;
-    if (range_slices_)
-    {
-        if (range_slices_->Pins() == 0)
-        {
-            mem_decreased = range_slices_->MemUsage();
-            range_slices_ = nullptr;
-        }
-        else
-        {
-            return false;
-        }
-    }
-    else if (fetch_range_slices_req_ != nullptr)
-    {
-        // This function is only called during bucket migration and we're
-        // cleaning up range slices that are migrated away. In this case we
-        // should make sure that no range slices in this bucket is loaded into
-        // memory after this function returns true. So we need to wait til the
-        // current fetch req is finished.
-        return false;
-    }
-
-    return true;
-}
-
 void TableRangeEntry::FetchRangeSlices(const TableName &range_tbl_name,
                                        CcRequestBase *requester,
                                        NodeGroupId ng_id,
@@ -49,7 +21,7 @@ void TableRangeEntry::FetchRangeSlices(const TableName &range_tbl_name,
                                        CcShard *cc_shard)
 {
     std::unique_lock<std::shared_mutex> lk(mux_);
-    if (range_slices_ != nullptr)
+    if (RangeSlices() != nullptr)
     {
         cc_shard->Enqueue(requester);
         return;
@@ -68,25 +40,51 @@ void TableRangeEntry::FetchRangeSlices(const TableName &range_tbl_name,
     }
 }
 
-int64_t TableRangeEntry::InitRangeSlices(
-    std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slices,
-    NodeGroupId ng_id,
-    bool fully_cached)
+void RangeRecord::CopyForReadResult(const RangeRecord &other)
 {
-    auto range_slices =
-        std::make_unique<StoreRange>(range_info_->StartKey(),
-                                     range_info_->EndKey(),
-                                     range_info_->PartitionId(),
-                                     ng_id,
-                                     *Sharder::Instance().GetLocalCcShards());
-    range_slices->InitSlices(std::move(slices), fully_cached);
-    size_t old_size = 0;
-    if (range_slices_)
+    // Release RangeInfo ownership
+    if (is_info_owner_)
     {
-        old_size = range_slices_->MemUsage();
+        range_info_uptr_.reset();
+        is_info_owner_ = false;
     }
-    size_t current_size = range_slices->MemUsage();
-    range_slices_ = std::move(range_slices);
-    return current_size - old_size;
+
+    assert(!other.is_info_owner_);
+    range_info_ = other.range_info_;
+    is_info_owner_ = other.is_info_owner_;
+
+    // Free own unique ptr.
+    if (is_read_result_ && new_range_owner_bucket_)
+    {
+        new_range_owner_bucket_.reset();
+    }
+    else if (!is_read_result_ && new_range_owner_rec_)
+    {
+        new_range_owner_rec_.reset();
+    }
+    assert(!other.is_read_result_);
+    is_read_result_ = true;
+
+    range_owner_bucket_ =
+        static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+            other.range_owner_rec_)
+            ->payload_->GetBucketInfo();
+
+    if (other.new_range_owner_rec_)
+    {
+        new_range_owner_bucket_ =
+            std::make_unique<std::vector<const BucketInfo *>>();
+        for (auto &entry : *other.new_range_owner_rec_)
+        {
+            new_range_owner_bucket_->push_back(
+                static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                    entry)
+                    ->payload_->GetBucketInfo());
+        }
+    }
+    else
+    {
+        new_range_owner_bucket_ = nullptr;
+    }
 }
 };  // namespace txservice

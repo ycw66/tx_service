@@ -2,13 +2,12 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "scan.h"
+#include "cc_entry.h"
 #include "tx_command.h"
-#include "tx_container.h"
-#include "tx_key.h"
 #include "tx_record.h"
 #include "type.h"
 
@@ -21,16 +20,14 @@ struct WriteSetEntry
 {
     using Uptr = std::unique_ptr<WriteSetEntry>;
 
-    WriteSetEntry()
-        : key_(nullptr), rec_(nullptr), op_(OperationType::Upsert), cce_addr_()
+    WriteSetEntry() : rec_(nullptr), op_(OperationType::Upsert), cce_addr_()
     {
     }
 
     WriteSetEntry(const WriteSetEntry &other) = delete;
 
     WriteSetEntry(WriteSetEntry &&other) noexcept
-        : key_(std::move(other.key_)),
-          rec_(std::move(other.rec_)),
+        : rec_(std::move(other.rec_)),
           op_(other.op_),
           cce_addr_(other.cce_addr_),
           key_shard_code_(other.key_shard_code_),
@@ -40,7 +37,6 @@ struct WriteSetEntry
 
     WriteSetEntry &operator=(WriteSetEntry &&other)
     {
-        key_ = std::move(other.key_);
         rec_ = std::move(other.rec_);
         op_ = other.op_;
         cce_addr_ = other.cce_addr_;
@@ -50,13 +46,12 @@ struct WriteSetEntry
         return *this;
     }
 
-    TxKey::Uptr key_;
     TxRecord::Uptr rec_;
     OperationType op_;
     CcEntryAddr cce_addr_;
     uint32_t key_shard_code_{};
     // Used in double write scenarios during online DDL.
-    std::map<uint32_t, CcEntryAddr> forward_addr_;
+    std::unordered_map<uint32_t, CcEntryAddr> forward_addr_;
 };
 
 struct ReadSetEntry
@@ -147,7 +142,7 @@ struct CmdSetEntry
 struct WriteEntry
 {
     WriteEntry() = delete;
-    WriteEntry(TxKey::Uptr key, TxRecord::Uptr rec, uint64_t commit_ts)
+    WriteEntry(TxKey key, TxRecord::Uptr rec, uint64_t commit_ts)
         : key_(std::move(key)), rec_(std::move(rec)), commit_ts_(commit_ts)
     {
     }
@@ -162,6 +157,11 @@ struct WriteEntry
 
     WriteEntry &operator=(WriteEntry &&rhs)
     {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
         key_ = std::move(rhs.key_);
         rec_ = std::move(rhs.rec_);
         commit_ts_ = rhs.commit_ts_;
@@ -169,7 +169,7 @@ struct WriteEntry
         return *this;
     }
 
-    TxKey::Uptr key_;
+    TxKey key_;
     TxRecord::Uptr rec_;
     uint64_t commit_ts_;
 };

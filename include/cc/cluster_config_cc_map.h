@@ -190,14 +190,14 @@ public:
         if (req.Key() != nullptr)
         {
             // request comes from same node.
-            assert(req.Key() == NegativeInfinity<VoidKey>::Instance());
+            assert(req.Key() == VoidKey::NegativeInfinity());
             config_rec = static_cast<ClusterConfigRecord *>(req.Payload());
             ACTION_FAULT_INJECTOR("cluster_config_PostWriteAll_local");
         }
         else
         {
             assert(*req.KeyStrType() == KeyType::NegativeInf);
-            req.SetTxKey(NegativeInfinity<VoidKey>::Instance());
+            req.SetTxKey(VoidKey::NegativeInfinity());
             assert(req.PayloadStr() != nullptr);
             std::unique_ptr<ClusterConfigRecord> decoded_rec =
                 std::make_unique<ClusterConfigRecord>();

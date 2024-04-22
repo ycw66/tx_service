@@ -1,10 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "tx_key.h"
 #include "tx_record.h"
 
 namespace txservice
@@ -103,7 +105,7 @@ struct MultiObjectTxCommand
 {
     virtual ~MultiObjectTxCommand() = default;
 
-    virtual std::vector<const TxKey *> *KeyPointers() = 0;
+    virtual std::vector<TxKey> *KeyPointers() = 0;
 
     virtual std::vector<TxCommand *> *CommandPointers() = 0;
 

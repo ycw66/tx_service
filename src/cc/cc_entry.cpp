@@ -185,12 +185,18 @@ void LruEntry::UpdateCcPage(LruPage *page)
     }
 }
 
-const TxKey *FlushRecord::Key() const
+TxKey FlushRecord::Key() const
 {
-    if (is_key_owner_)
+    if (key_type_ == FlushKeyType::TxKey)
     {
-        return key_.uptr_.get();
+        return tx_key_.GetShallowCopy();
     }
-    return key_.ptr_;
+    else
+    {
+        assert(
+            "The flush key is of type KeyIndex and cannot return the key "
+            "pointer.");
+        return TxKey();
+    }
 }
 }  // namespace txservice

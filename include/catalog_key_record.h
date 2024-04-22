@@ -2,6 +2,7 @@
 
 #include <condition_variable>
 #include <memory>
+#include <queue>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -22,7 +23,7 @@ struct DataSyncTask;
  * catalogs.
  *
  */
-struct CatalogKey : public TxKey
+struct CatalogKey
 {
 public:
     CatalogKey();
@@ -33,15 +34,15 @@ public:
     ~CatalogKey() = default;
     CatalogKey(const CatalogKey &rhs, const Schema *);
 
-    bool operator==(const TxKey &rhs) const override;
-    bool operator<(const TxKey &rhs) const override;
-    size_t Hash() const override;
-    void Serialize(std::vector<char> &buf, size_t &offset) const override;
-    void Serialize(std::string &str) const override;
-    size_t SerializedLength() const override;
-    void Deserialize(const char *buf, size_t &offset, const Schema *) override;
+    bool operator==(const TxKey &rhs) const;
+    bool operator<(const TxKey &rhs) const;
+    size_t Hash() const;
+    void Serialize(std::vector<char> &buf, size_t &offset) const;
+    void Serialize(std::string &str) const;
+    size_t SerializedLength() const;
+    void Deserialize(const char *buf, size_t &offset, const Schema *);
 #ifdef ON_KEY_OBJECT
-    std::string_view KVSerialize() const override
+    std::string_view KVSerialize() const
     {
         assert(false);
         return std::string_view();
@@ -51,11 +52,11 @@ public:
         assert(false);
     }
 #endif
-    TxKey::Uptr Clone() const override;
-    std::string ToString() const override;
-    void Copy(const TxKey &rhs) override;
+    TxKey CloneTxKey() const;
+    std::string ToString() const;
+    void Copy(const CatalogKey &rhs);
 
-    KeyType Type() const override
+    KeyType Type() const
     {
         return KeyType::Normal;
     }
@@ -67,9 +68,32 @@ public:
     const TableName &Name() const;
     TableName &Name();
 
-    size_t Size() const override
+    size_t Size() const
     {
         return table_name_.StringView().size();
+    }
+
+    size_t MemUsage() const
+    {
+        return Size();
+    }
+
+    static const CatalogKey *NegativeInfinity()
+    {
+        static const CatalogKey neg_inf;
+        return &neg_inf;
+    }
+
+    static const CatalogKey *PositiveInfinity()
+    {
+        static const CatalogKey pos_inf;
+        return &pos_inf;
+    }
+
+    static const TxKeyInterface *TxKeyImpl()
+    {
+        static const TxKeyInterface tx_key_impl{CatalogKey()};
+        return &tx_key_impl;
     }
 
 private:

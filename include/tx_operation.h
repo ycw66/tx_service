@@ -380,7 +380,7 @@ struct ScanState
               bool end_inclusive,
               uint32_t range_id,
               NodeGroupId range_ng,
-              const TxKey *last_key,
+              TxKey last_key,
               bool inclusive,
               SlicePosition position)
         : scanner_(std::move(scanner)),
@@ -388,64 +388,27 @@ struct ScanState
           scan_end_inclusive_(end_inclusive),
           range_id_(range_id),
           range_ng_(range_ng),
-          slice_last_key_ptr_(last_key),
-          is_key_owner_(false),
+          slice_last_key_(std::move(last_key)),
           inclusive_(inclusive),
           slice_position_(position)
     {
     }
 
-    ScanState(std::unique_ptr<CcScanner> scanner,
-              const TxKey *end_key,
-              bool end_inclusive,
-              uint32_t range_id,
-              NodeGroupId range_ng,
-              std::unique_ptr<TxKey> last_key,
-              bool inclusive,
-              SlicePosition position)
-        : scanner_(std::move(scanner)),
-          scan_end_key_(end_key),
-          scan_end_inclusive_(end_inclusive),
-          range_id_(range_id),
-          range_ng_(range_ng),
-          slice_last_key_uptr_(std::move(last_key)),
-          is_key_owner_(true),
-          inclusive_(inclusive),
-          slice_position_(position)
-    {
-    }
+    ~ScanState() = default;
 
-    ~ScanState()
+    void SetSliceLastKey(TxKey slice_last_key)
     {
-        if (is_key_owner_)
-        {
-            slice_last_key_uptr_ = nullptr;
-        }
-    }
-
-    void SetSliceLastKey(TxKey::Uptr slice_last_key)
-    {
-        if (!is_key_owner_)
-        {
-            slice_last_key_uptr_.release();
-        }
-        slice_last_key_uptr_ = std::move(slice_last_key);
-        is_key_owner_ = true;
+        slice_last_key_ = std::move(slice_last_key);
     }
 
     const TxKey *SliceLastKey() const
     {
-        return is_key_owner_ ? slice_last_key_uptr_.get() : slice_last_key_ptr_;
+        return &slice_last_key_;
     }
 
     uint32_t range_id_;
     NodeGroupId range_ng_;
-    union
-    {
-        const TxKey *slice_last_key_ptr_;
-        TxKey::Uptr slice_last_key_uptr_;
-    };
-    bool is_key_owner_{false};
+    TxKey slice_last_key_;
     bool inclusive_;
     SlicePosition slice_position_;
     CcEntryAddr range_cce_addr_;
@@ -522,7 +485,7 @@ struct AcquireAllOp : public TransactionOperation
     std::atomic<int32_t> remote_ack_cnt_{0};
 
     const TableName *table_name_{nullptr};
-    std::vector<const TxKey *> keys_;
+    std::vector<TxKey> keys_;
 
     CcOperation cc_op_{CcOperation::ReadForWrite};
     CcProtocol protocol_{CcProtocol::OCC};
@@ -539,7 +502,7 @@ struct PostWriteAllOp : public TransactionOperation
     CcHandlerResult<PostProcessResult> hd_result_;
 
     const TableName *table_name_{nullptr};
-    std::vector<const TxKey *> keys_;
+    std::vector<TxKey> keys_;
     std::vector<TxRecord *> recs_;
     OperationType op_type_{OperationType::Upsert};
     PostWriteType write_type_{PostWriteType::PrepareCommit};
@@ -773,7 +736,7 @@ struct FlushDataOp : public TransactionOperation
     const TableSchema *schema_{nullptr};
     std::vector<FlushRecord> *data_sync_vec_{nullptr};
     std::vector<FlushRecord> *archive_vec_{nullptr};
-    std::vector<const TxKey *> *mv_vec_{nullptr};
+    std::vector<TxKey> *mv_vec_{nullptr};
     CcHandlerResult<Void> hd_result_;
     bool delay_update_ckpt_ts_{false};
 };
@@ -787,8 +750,8 @@ struct KickoutDataOp : public TransactionOperation
 
     const TableName *table_name_{nullptr};
     NodeGroupId node_group_;
-    const TxKey *start_key_{nullptr};
-    const TxKey *end_key_{nullptr};
+    TxKey start_key_;
+    TxKey end_key_;
     CleanType clean_type_{CleanType::CleanRangeData};
     // Clean ts for the kickout cc. Only valid if clean type is
     // CleanForAlterTable.
@@ -803,31 +766,26 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
 {
     SplitFlushRangeOp() = delete;
 
-    SplitFlushRangeOp(
-        const TableName &table_name,
-        const TableSchema *table_schema,
-        const TxKey *old_start_key,
-        const TxKey *old_end_key,
-        StoreRange *store_range,
-        const RangeInfo *old_range_info,
-        std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
-        uint64_t previous_scan_ts,
-        std::vector<FlushRecord> &&previous_data_sync_vec,
-        std::vector<FlushRecord> &&previous_archive_vec,
-        std::vector<const TxKey *> &&previous_mv_base_vec,
-        TransactionExecution *txm);
+    SplitFlushRangeOp(const TableName &table_name,
+                      const TableSchema *table_schema,
+                      StoreRange *store_range,
+                      const RangeInfo *old_range_info,
+                      std::vector<std::pair<TxKey, int32_t>> &&new_range_info,
+                      uint64_t previous_scan_ts,
+                      std::vector<FlushRecord> &&previous_data_sync_vec,
+                      std::vector<FlushRecord> &&previous_archive_vec,
+                      std::vector<TxKey> &&previous_mv_base_vec,
+                      TransactionExecution *txm);
 
     void Reset(const TableName &table_name,
                const TableSchema *table_schema,
-               const TxKey *old_start_key,
-               const TxKey *old_end_key,
                StoreRange *store_range,
                const RangeInfo *old_range_info,
-               std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+               std::vector<std::pair<TxKey, int32_t>> &&new_range_info,
                uint64_t previous_scan_ts,
                std::vector<FlushRecord> &&previous_data_sync_vec,
                std::vector<FlushRecord> &&previous_archive_vec,
-               std::vector<const TxKey *> &&previous_mv_base_vec,
+               std::vector<TxKey> &&previous_mv_base_vec,
                TransactionExecution *txm);
 
     void Forward(TransactionExecution *txm) override;
@@ -838,32 +796,31 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     CcHandlerResult<ReadKeyResult> read_cluster_result_;
     ClusterConfigRecord cluster_conf_rec_;
 
-    RangeInfo range_info_;
+    std::unique_ptr<RangeInfo> range_info_;
     std::unique_ptr<RangeRecord> range_record_;
     // TODO{liunyl}: change these to Uptr after we update inf key instance.
     // Now we need to use raw pointers to accomadate with inf key instance.
     // Now we make them point to the Uptr in range_info_ if they are normal key,
     // or raw pointers to inf key instances otherwise.
-    const TxKey *old_start_key_;
-    const TxKey *old_end_key_;
+    TxKey old_start_key_;
+    TxKey old_end_key_;
     StoreRange *store_range_;
     // vector< new start key, new partition id >
-    std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info_;
+    std::vector<std::pair<TxKey, int32_t>> new_range_info_;
 
     // vector buffer used during checkpoint scan
     std::vector<FlushRecord> data_sync_vec_;
     std::vector<FlushRecord> archive_vec_;
-    std::vector<const TxKey *> mv_base_vec_;
+    std::vector<TxKey> mv_base_vec_;
 
     uint64_t previous_scan_ts_{0};
     std::vector<FlushRecord> previous_data_sync_vec_;
     std::vector<FlushRecord> previous_archive_vec_;
-    std::vector<const TxKey *> previous_mv_base_vec_;
+    std::vector<TxKey> previous_mv_base_vec_;
     bool scan_finished_{false};
     std::unordered_map<size_t, int32_t> old_delta_sizes_;
 
-    std::vector<std::pair<TxKey::Uptr, int32_t>>::const_iterator
-        kickout_data_it_;
+    std::vector<std::pair<TxKey, int32_t>>::const_iterator kickout_data_it_;
 
     /**
      * @brief Acquire read lock on local cluster config ccmap to block cluster

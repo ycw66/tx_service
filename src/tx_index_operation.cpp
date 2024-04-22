@@ -115,33 +115,33 @@ UpsertTableIndexOp::UpsertTableIndexOp(
 
     lock_cluster_config_op_.table_name_ =
         TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
-    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
 
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_intent_op_.keys_.push_back(&table_key_);
+    acquire_all_intent_op_.keys_.emplace_back(&table_key_);
     acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
     acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
 
     upgrade_all_intent_to_lock_op_.table_name_ = &catalog_ccm_name;
-    upgrade_all_intent_to_lock_op_.keys_.push_back(&table_key_);
+    upgrade_all_intent_to_lock_op_.keys_.emplace_back(&table_key_);
     upgrade_all_intent_to_lock_op_.cc_op_ = CcOperation::Write;
     upgrade_all_intent_to_lock_op_.protocol_ = CcProtocol::Locking;
 
     downgrade_all_lock_to_intent_op_.table_name_ = &catalog_ccm_name;
-    downgrade_all_lock_to_intent_op_.keys_.push_back(&table_key_);
+    downgrade_all_lock_to_intent_op_.keys_.emplace_back(&table_key_);
     downgrade_all_lock_to_intent_op_.recs_.push_back(&catalog_rec_);
     downgrade_all_lock_to_intent_op_.op_type_ = op_type_;
     downgrade_all_lock_to_intent_op_.write_type_ = PostWriteType::PrepareCommit;
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_lock_op_.keys_.push_back(&table_key_);
+    acquire_all_lock_op_.keys_.emplace_back(&table_key_);
     acquire_all_lock_op_.cc_op_ = CcOperation::Write;
     acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
 
     post_all_lock_op_.table_name_ = &catalog_ccm_name;
-    post_all_lock_op_.keys_.push_back(&table_key_);
+    post_all_lock_op_.keys_.emplace_back(&table_key_);
     post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
@@ -159,14 +159,16 @@ UpsertTableIndexOp::UpsertTableIndexOp(
                                        index_it->first.Type());
     }
 
-    const TxKey *neg_key = Sharder::Instance()
-                               .GetLocalCcShards()
-                               ->GetCatalogFactory()
-                               ->NegativeInfKey();
-    last_scanned_end_key_ = neg_key;
+    TxKey neg_key = Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->GetCatalogFactory()
+                        ->NegativeInfKey();
+    last_scanned_end_key_.Release();
+    last_scanned_end_key_ = neg_key.GetShallowCopy();
     is_last_scanned_key_str_ = false;
     scanned_pk_range_count_ = 0;
-    last_finished_end_key_ = neg_key;
+    last_finished_end_key_.Release();
+    last_finished_end_key_ = neg_key.GetShallowCopy();
     is_last_finished_key_str_ = false;
     finished_pk_range_count_ = 0;
     total_scanned_pk_items_count_ = 0;
@@ -557,9 +559,6 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                       << static_cast<uint32_t>(scan_batch_range_size_)
                       << " of each node group for table: "
                       << table_key_.Name().Trace() << " with the start key: "
-                      << (is_last_finished_key_str_
-                              ? *last_finished_end_key_str_
-                              : last_finished_end_key_->ToString())
                       << ", txn: " << txm->TxNumber();
 
             if (is_last_finished_key_str_)
@@ -568,7 +567,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                last_scanned_end_key_ = last_finished_end_key_;
+                last_scanned_end_key_ = last_finished_end_key_.GetShallowCopy();
             }
             is_last_scanned_key_str_ = is_last_finished_key_str_;
             ResetLeaderTerms();
@@ -622,7 +621,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 }
                 else
                 {
-                    last_scanned_end_key_ = last_finished_end_key_;
+                    last_scanned_end_key_ =
+                        last_finished_end_key_.GetShallowCopy();
                 }
                 is_last_scanned_key_str_ = is_last_finished_key_str_;
                 // Reset scanned pk range count.
@@ -647,7 +647,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             op_ = &prepare_log_for_sk_op_;
             prepare_log_for_sk_op_.hd_result_.SetFinished();
             // Update the last finished end key.
-            last_finished_end_key_ = last_scanned_end_key_;
+            last_finished_end_key_ = last_scanned_end_key_.GetShallowCopy();
             is_last_finished_key_str_ = false;
             finished_pk_range_count_ = scanned_pk_range_count_;
             DLOG(INFO) << "Alter Table Indedx no need to perform flush sk "
@@ -740,7 +740,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                     }
                     else
                     {
-                        last_scanned_end_key_ = last_finished_end_key_;
+                        last_scanned_end_key_ =
+                            last_finished_end_key_.GetShallowCopy();
                     }
                     is_last_scanned_key_str_ = is_last_finished_key_str_;
                     // Reset scanned pk count.
@@ -780,14 +781,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             ACTION_FAULT_INJECTOR(
                 "term_AlterTableIndex_FlushPrepareIndexTableLogOp");
             // Update the last finished end key.
-            last_finished_end_key_ = last_scanned_end_key_;
+            last_finished_end_key_ = last_scanned_end_key_.GetShallowCopy();
             is_last_finished_key_str_ = false;
             finished_pk_range_count_ = scanned_pk_range_count_;
             LOG(INFO) << "Alter Table Index transaction write prepare index"
                       << " log with last finished end key: "
-                      << (last_finished_end_key_ != nullptr
-                              ? last_finished_end_key_->ToString()
-                              : "PositiveInf")
                       << ". Base table: " << table_key_.Name().Trace()
                       << ". Txn: " << txm->TxNumber();
             op_ = &prepare_log_for_sk_op_;
@@ -830,8 +828,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
 
         if (!is_last_finished_key_str_ &&
-            (last_finished_end_key_ == nullptr ||
-             last_finished_end_key_->Type() == KeyType::PositiveInf))
+            (last_finished_end_key_.Type() == KeyType::PositiveInf))
         {
             // Reach the end.
             LOG(INFO) << "Alter Table Index transaction lock cluster config"
@@ -846,9 +843,6 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             LOG(INFO) << "Alter Table Index transaction continue to generate "
                       << "sk parallel for table: " << table_key_.Name().Trace()
                       << " with the start key: "
-                      << (is_last_finished_key_str_
-                              ? *last_finished_end_key_str_
-                              : last_finished_end_key_->ToString())
                       << ". Txn: " << txm->TxNumber();
             // Reset last end key.
             if (is_last_finished_key_str_)
@@ -857,7 +851,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                last_scanned_end_key_ = last_finished_end_key_;
+                last_scanned_end_key_ = last_finished_end_key_.GetShallowCopy();
             }
             is_last_scanned_key_str_ = is_last_finished_key_str_;
             ResetLeaderTerms();
@@ -1153,7 +1147,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     read_cluster_result_.ResetTxm(txm);
     cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
-    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.table_name_ =
         TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
@@ -1174,19 +1168,19 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
 
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
     acquire_all_intent_op_.keys_.clear();
-    acquire_all_intent_op_.keys_.push_back(&table_key_);
+    acquire_all_intent_op_.keys_.emplace_back(&table_key_);
     acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
     acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
 
     upgrade_all_intent_to_lock_op_.table_name_ = &catalog_ccm_name;
     upgrade_all_intent_to_lock_op_.keys_.clear();
-    upgrade_all_intent_to_lock_op_.keys_.push_back(&table_key_);
+    upgrade_all_intent_to_lock_op_.keys_.emplace_back(&table_key_);
     upgrade_all_intent_to_lock_op_.cc_op_ = CcOperation::Write;
     upgrade_all_intent_to_lock_op_.protocol_ = CcProtocol::Locking;
 
     downgrade_all_lock_to_intent_op_.table_name_ = &catalog_ccm_name;
     downgrade_all_lock_to_intent_op_.keys_.clear();
-    downgrade_all_lock_to_intent_op_.keys_.push_back(&table_key_);
+    downgrade_all_lock_to_intent_op_.keys_.emplace_back(&table_key_);
     downgrade_all_lock_to_intent_op_.recs_.clear();
     downgrade_all_lock_to_intent_op_.recs_.push_back(&catalog_rec_);
     downgrade_all_lock_to_intent_op_.op_type_ = op_type_;
@@ -1197,13 +1191,13 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
     acquire_all_lock_op_.keys_.clear();
-    acquire_all_lock_op_.keys_.push_back(&table_key_);
+    acquire_all_lock_op_.keys_.emplace_back(&table_key_);
     acquire_all_lock_op_.cc_op_ = CcOperation::Write;
     acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
 
     post_all_lock_op_.table_name_ = &catalog_ccm_name;
     post_all_lock_op_.keys_.clear();
-    post_all_lock_op_.keys_.push_back(&table_key_);
+    post_all_lock_op_.keys_.emplace_back(&table_key_);
     post_all_lock_op_.recs_.clear();
     post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = op_type_;
@@ -1236,14 +1230,14 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     }
 
     ResetLeaderTerms();
-    const TxKey *neg_inf = Sharder::Instance()
-                               .GetLocalCcShards()
-                               ->GetCatalogFactory()
-                               ->NegativeInfKey();
-    last_scanned_end_key_ = neg_inf;
+    TxKey neg_inf = Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->GetCatalogFactory()
+                        ->NegativeInfKey();
+    last_scanned_end_key_ = neg_inf.GetShallowCopy();
     is_last_scanned_key_str_ = false;
     scanned_pk_range_count_ = 0;
-    last_finished_end_key_ = neg_inf;
+    last_finished_end_key_ = neg_inf.GetShallowCopy();
     is_last_finished_key_str_ = false;
     finished_pk_range_count_ = 0;
     total_scanned_pk_items_count_ = 0;
@@ -1295,8 +1289,7 @@ void UpsertTableIndexOp::FillPrepareIndexTableLogRequest(
     prepare_schema_for_sk_msg->set_stage(
         ::txlog::SchemaOpMessage_Stage_PrepareIndexTable);
 
-    if (last_finished_end_key_ == nullptr ||
-        last_finished_end_key_->Type() == KeyType::PositiveInf)
+    if (last_finished_end_key_.Type() == KeyType::PositiveInf)
     {
         // reach the last range
         prepare_schema_for_sk_msg->set_last_key_type(
@@ -1309,7 +1302,7 @@ void UpsertTableIndexOp::FillPrepareIndexTableLogRequest(
         prepare_schema_for_sk_msg->set_last_key_type(
             txlog::SchemaOpMessage::LastKeyType::
                 SchemaOpMessage_LastKeyType_NormalKey);
-        last_finished_end_key_->Serialize(
+        last_finished_end_key_.Serialize(
             *prepare_schema_for_sk_msg->mutable_last_key_value());
     }
 
@@ -1451,9 +1444,9 @@ void UpsertTableIndexOp::DispatchRangeTask(
     uint32_t local_ng_id = Sharder::Instance().NodeId();
     uint64_t tx_number = upsert_index_txm->TxNumber();
     int64_t tx_term = upsert_index_txm->TxTerm();
-    const TxKey *target_range_end_key =
+    TxKey target_range_end_key =
         cc_shards->GetCatalogFactory()->PositiveInfKey();
-    const TxKey *target_range_start_key = last_scanned_end_key_;
+    TxKey target_range_start_key = last_scanned_end_key_.GetShallowCopy();
 
     uint32_t node_group_cnt = 0;
     size_t batch_range_cnt = 0;
@@ -1466,11 +1459,11 @@ void UpsertTableIndexOp::DispatchRangeTask(
     uint32_t pk_items_count = 0;
     uint32_t dispatched_task_count = 0;
 
-    std::function<void(const TxKey *batch_range_start_key,
-                       const TxKey *batch_range_end_key,
+    std::function<void(TxKey batch_range_start_key,
+                       TxKey batch_range_end_key,
                        const std::string *batch_range_start_key_str,
                        const std::string *batch_range_end_key_str,
-                       const TxKey *&last_scanned_end_key,
+                       TxKey &last_scanned_end_key,
                        bool &is_last_scanned_key_str,
                        size_t batch_range_cnt,
                        uint32_t &actual_task_cnt)>
@@ -1492,11 +1485,11 @@ void UpsertTableIndexOp::DispatchRangeTask(
          &task_res,
          &pk_items_count,
          &dispatched_task_count,
-         &dispatch_batch_tasks](const TxKey *batch_range_start_key,
-                                const TxKey *batch_range_end_key,
+         &dispatch_batch_tasks](TxKey batch_range_start_key,
+                                TxKey batch_range_end_key,
                                 const std::string *batch_range_start_key_str,
                                 const std::string *batch_range_end_key_str,
-                                const TxKey *&last_scanned_end_key,
+                                TxKey &last_scanned_end_key,
                                 bool &is_last_scanned_key_str,
                                 size_t batch_range_cnt,
                                 uint32_t &actual_task_cnt)
@@ -1534,8 +1527,8 @@ void UpsertTableIndexOp::DispatchRangeTask(
 
         ReadTxRequest read_range_req;
         RangeRecord range_rec;
-        const TxKey *curr_range_start_key = batch_range_start_key;
-        const TxKey *curr_range_end_key = nullptr;
+        TxKey curr_range_start_key = batch_range_start_key.GetShallowCopy();
+        TxKey curr_range_end_key = TxKey();
         int32_t partition_id = 0;
         NodeGroupId range_owner = 0;
         size_t idx = 0;
@@ -1547,7 +1540,7 @@ void UpsertTableIndexOp::DispatchRangeTask(
             if (!is_last_scanned_key_str)
             {
                 read_range_req.Set(&range_table_name,
-                                   curr_range_start_key,
+                                   &curr_range_start_key,
                                    &range_rec,
                                    false,
                                    false,
@@ -1577,16 +1570,16 @@ void UpsertTableIndexOp::DispatchRangeTask(
                 break;
             }
 
-            curr_range_start_key = range_rec.GetRangeInfo()->StartKey();
-            curr_range_end_key = range_rec.GetRangeInfo()->EndKey();
+            curr_range_start_key = range_rec.GetRangeInfo()->StartTxKey();
+            curr_range_end_key = range_rec.GetRangeInfo()->EndTxKey();
             partition_id = range_rec.GetRangeInfo()->PartitionId();
             range_owner = range_rec.GetRangeOwnerNg()->BucketOwner();
-            if (curr_range_start_key == nullptr)
+            if (curr_range_start_key.KeyPtr() == nullptr)
             {
                 curr_range_start_key =
                     cc_shards->GetCatalogFactory()->NegativeInfKey();
             }
-            if (curr_range_end_key == nullptr)
+            if (curr_range_end_key.KeyPtr() == nullptr)
             {
                 curr_range_end_key =
                     cc_shards->GetCatalogFactory()->PositiveInfKey();
@@ -1594,8 +1587,8 @@ void UpsertTableIndexOp::DispatchRangeTask(
 
             HandleRangeTask(base_table_name,
                             partition_id,
-                            curr_range_start_key,
-                            curr_range_end_key,
+                            curr_range_start_key.GetShallowCopy(),
+                            curr_range_end_key.GetShallowCopy(),
                             range_owner,
                             scan_ts,
                             tx_number,
@@ -1614,22 +1607,22 @@ void UpsertTableIndexOp::DispatchRangeTask(
             {
                 acquire_next_range =
                     ++idx < batch_range_cnt &&
-                    curr_range_end_key->Type() == KeyType::Normal;
+                    curr_range_end_key.Type() == KeyType::Normal;
             }
             else
             {
-                if (batch_range_end_key)
+                if (batch_range_end_key.KeyPtr())
                 {
                     acquire_next_range =
-                        *curr_range_end_key < *batch_range_end_key;
+                        curr_range_end_key < batch_range_end_key;
                 }
                 else
                 {
                     assert(batch_range_end_key_str);
                     std::string serialized_end_key;
-                    if (curr_range_end_key->Type() == KeyType::Normal)
+                    if (curr_range_end_key.Type() == KeyType::Normal)
                     {
-                        curr_range_end_key->Serialize(serialized_end_key);
+                        curr_range_end_key.Serialize(serialized_end_key);
                     }
                     acquire_next_range =
                         serialized_end_key.length() !=
@@ -1639,9 +1632,9 @@ void UpsertTableIndexOp::DispatchRangeTask(
             }
             // Update the last range end key
             is_last_scanned_key_str = false;
-            last_scanned_end_key = curr_range_end_key;
+            last_scanned_end_key = curr_range_end_key.GetShallowCopy();
             // Read the next range.
-            curr_range_start_key = curr_range_end_key;
+            curr_range_start_key = curr_range_end_key.GetShallowCopy();
             log_info.append(std::to_string(partition_id)).append(",");
         } while (acquire_next_range);
 
@@ -1659,7 +1652,7 @@ void UpsertTableIndexOp::DispatchRangeTask(
     {
         node_group_cnt = Sharder::Instance().NodeGroupCount();
         batch_range_cnt = node_group_cnt * scan_batch_range_size_;
-        target_range_start_key = last_scanned_end_key_;
+        target_range_start_key = last_scanned_end_key_.GetShallowCopy();
         all_task_started = false;
         unfinished_task_cnt = 1;
         task_res = CcErrorCode::NO_ERROR;
@@ -1668,8 +1661,8 @@ void UpsertTableIndexOp::DispatchRangeTask(
         uint32_t actual_task_cnt = 0;
 
         dispatch_batch_tasks(
-            target_range_start_key,
-            target_range_end_key,
+            target_range_start_key.GetShallowCopy(),
+            target_range_end_key.GetShallowCopy(),
             (is_last_scanned_key_str_ ? last_scanned_end_key_str_ : nullptr),
             nullptr,
             last_scanned_end_key_,
@@ -1717,8 +1710,8 @@ void UpsertTableIndexOp::DispatchRangeTask(
 void UpsertTableIndexOp::HandleRangeTask(
     const TableName &base_table_name,
     int32_t partition_id,
-    const TxKey *range_start_key,
-    const TxKey *range_end_key,
+    TxKey range_start_key,
+    TxKey range_end_key,
     NodeGroupId range_owner,
     uint64_t scan_ts,
     uint64_t tx_number,
@@ -1730,11 +1723,11 @@ void UpsertTableIndexOp::HandleRangeTask(
     uint32_t &total_pk_items_count,
     uint32_t &dispatched_task_count,
     CcErrorCode &task_res,
-    std::function<void(const TxKey *batch_range_start_key,
-                       const TxKey *batch_range_end_key,
+    std::function<void(TxKey batch_range_start_key,
+                       TxKey batch_range_end_key,
                        const std::string *batch_range_start_key_str,
                        const std::string *batch_range_end_key_str,
-                       const TxKey *&last_scanned_end_key,
+                       TxKey &last_scanned_end_key,
                        bool &is_last_scanned_key_str,
                        size_t batch_range_cnt,
                        uint32_t &actual_task_cnt)> &dispatch_func)
@@ -1747,8 +1740,8 @@ void UpsertTableIndexOp::HandleRangeTask(
             [this,
              &base_table_name,
              partition_id,
-             range_start_key,
-             range_end_key,
+             range_start_key = std::move(range_start_key),
+             range_end_key = std::move(range_end_key),
              range_owner,
              scan_ts,
              tx_number,
@@ -1788,7 +1781,7 @@ void UpsertTableIndexOp::HandleRangeTask(
                     LOG(WARNING)
                         << "Terminate this generate sk task of ng#"
                         << range_owner << " for partition id: " << partition_id
-                        << " with end key: " << range_end_key->ToString()
+                        << " with end key: ,"
                         << " caused by the tx term is expired.";
                     std::unique_lock<std::mutex> lk(task_mux);
                     --unfinished_task_cnt;
@@ -1801,8 +1794,8 @@ void UpsertTableIndexOp::HandleRangeTask(
                     base_table_name, range_owner, partition_id);
                 size_t scanned_pk_items_count = 0;
                 CcErrorCode res_code = CcErrorCode::NO_ERROR;
-                sk_generator.GenerateSkFromPk(range_start_key,
-                                              range_end_key,
+                sk_generator.GenerateSkFromPk(range_start_key.GetShallowCopy(),
+                                              range_end_key.GetShallowCopy(),
                                               scan_ts,
                                               sk_names,
                                               scanned_pk_items_count,
@@ -1839,13 +1832,14 @@ void UpsertTableIndexOp::HandleRangeTask(
                     }
 
                     // Re-dispatch this range task.
-                    const TxKey *last_scanned_end_key = range_start_key;
+                    TxKey last_scanned_end_key =
+                        range_start_key.GetShallowCopy();
                     bool is_last_scanned_key_str = false;
                     uint32_t actual_task_cnt = 0;
                     do
                     {
-                        dispatch_func(range_start_key,
-                                      range_end_key,
+                        dispatch_func(range_start_key.GetShallowCopy(),
+                                      range_end_key.GetShallowCopy(),
                                       nullptr,
                                       nullptr,
                                       last_scanned_end_key,
@@ -1861,7 +1855,7 @@ void UpsertTableIndexOp::HandleRangeTask(
                                 return;
                             }
                         }
-                    } while (*last_scanned_end_key < *range_end_key);
+                    } while (last_scanned_end_key < range_end_key);
 
                     // Update the task status
                     {
@@ -1969,14 +1963,15 @@ void UpsertTableIndexOp::HandleRangeTask(
         req_ptr->set_tx_term(tx_term);
         req_ptr->set_scan_ts(scan_ts);
         req_ptr->set_partition_id(partition_id);
-        assert(range_start_key != nullptr && range_end_key != nullptr);
-        if (range_start_key->Type() == KeyType::Normal)
+        assert(range_start_key.KeyPtr() != nullptr &&
+               range_end_key.KeyPtr() != nullptr);
+        if (range_start_key.Type() == KeyType::Normal)
         {
-            range_start_key->Serialize(*req_ptr->mutable_start_key());
+            range_start_key.Serialize(*req_ptr->mutable_start_key());
         }
-        if (range_end_key->Type() == KeyType::Normal)
+        if (range_end_key.Type() == KeyType::Normal)
         {
-            range_end_key->Serialize(*req_ptr->mutable_end_key());
+            range_end_key.Serialize(*req_ptr->mutable_end_key());
         }
 
         for (size_t idx = 0; idx < new_indexes_name_.size(); ++idx)
@@ -1990,10 +1985,9 @@ void UpsertTableIndexOp::HandleRangeTask(
         // Asynchronous mode
         stub.GenerateSkFromPk(cntl_ptr, req_ptr, resp_ptr, closure);
         DLOG(INFO) << "Acquire GenerateSkFromPk service for partition id: "
-                   << partition_id
-                   << " with start key: " << range_start_key->ToString()
-                   << " and end key: " << range_end_key->ToString() << " of ng#"
-                   << range_owner;
+                   << partition_id << " with start key: "
+                   << " and end key: "
+                   << " of ng#" << range_owner;
     }
 
     {

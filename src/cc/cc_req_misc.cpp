@@ -386,8 +386,8 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                       key_schema,
                       rec_schema,
                       schema_ts,
-                      slice.StartKey(),
-                      slice.EndKey(),
+                      slice.StartTxKey(),
+                      slice.EndTxKey(),
                       snapshot_ts,
                       cc_ng_id,
                       cc_ng_term),
@@ -466,12 +466,12 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
 }
 
 void FillStoreSliceCc::AddDataItem(
-    txservice::TxKey::Uptr &&key,
+    TxKey key,
     std::unique_ptr<txservice::TxRecord> &&record,
     uint64_t version_ts,
     bool is_deleted)
 {
-    size_t hash = key->Hash();
+    size_t hash = key.Hash();
     // Uses the lower 10 bits of the hash code to shard the key across
     // CPU cores at this node.
     uint16_t core_code = hash & 0x3FF;
@@ -542,16 +542,6 @@ void FillStoreSliceCc::TerminateFilling()
     range_slice_.SetLoadingError(range_, CcErrorCode::DATA_STORE_ERR);
 }
 
-const TxKey *FillStoreSliceCc::SliceStart() const
-{
-    return range_slice_.StartKey();
-}
-
-const TxKey *FillStoreSliceCc::SliceEnd() const
-{
-    return range_slice_.EndKey();
-}
-
 GetPostCkptSlice::GetPostCkptSlice(
     const TableName &table_name,
     NodeGroupId ng_id,
@@ -572,7 +562,7 @@ GetPostCkptSlice::GetPostCkptSlice(
         slice_first_idxs_.emplace_back(0);
         slice_items_.emplace_back();
         slice_items_.back().resize(ScanBatchSize);
-        pause_keys_.emplace_back(nullptr, false);
+        pause_keys_.emplace_back(TxKey(), false);
     }
 }
 

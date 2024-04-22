@@ -289,7 +289,7 @@ void txservice::LocalCcHandler::UploadRecord(
     uint16_t command_id,
     uint64_t commit_ts,
     const TableName &table_name,
-    const TxKey *key,
+    const TxKey &key,
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
@@ -305,7 +305,7 @@ void txservice::LocalCcHandler::UploadRecord(
     if (dest_node_id == cc_shards_.node_id_)
     {
         PostWriteCc *req = postwrite_pool.NextRequest();
-        req->Reset(key,
+        req->Reset(&key,
                    table_name,
                    ng_id,
                    tx_number,

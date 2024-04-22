@@ -1,12 +1,12 @@
 #pragma once
 
+#include <assert.h>
+
 #include <memory>
 #include <string>
 #include <utility>  //std::move
-#include <variant>
-#include <vector>  //std::vector
+#include <vector>   //std::vector
 
-#include "tx_key.h"
 #include "tx_serialize.h"
 
 namespace txservice

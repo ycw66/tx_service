@@ -13,8 +13,7 @@
 
 namespace txservice
 {
-using TableWriteSet =
-    std::map<const TxKey *, WriteSetEntry, PtrLessThan<TxKey>>;
+using TableWriteSet = std::map<TxKey, WriteSetEntry>;
 
 enum class ReadEntryResult : uint8_t
 {
@@ -43,7 +42,6 @@ public:
         wset_cnt_ = 0;
         wset_.clear();
         rset_.clear();
-        read_cache_.clear();
         wset_bytes_cnt_ = 0;
         data_rset_cnt_ = 0;
         forward_write_cnt_ = 0;
@@ -266,14 +264,15 @@ public:
         }
     }
 
+    template <typename T>
     TxErrorCode AddWrite(const TableName &table_name,
-                         TxKey::Uptr key,
+                         std::unique_ptr<T> key,
                          TxRecord::Uptr rec,
                          OperationType op_type,
                          bool check_unqiue = false)
     {
         // Check write set bytes count.
-        wset_bytes_cnt_ += ((key.get() ? key.get()->SerializedLength() : 0) +
+        wset_bytes_cnt_ += ((key ? key->SerializedLength() : 0) +
                             (rec.get() ? rec.get()->SerializedLength() : 0));
         if (wset_bytes_cnt_ > ReadWriteSet::MaxWriteSetBytesCnt)
         {
@@ -296,12 +295,63 @@ public:
         TableWriteSet &tws = iter->second;
 
         WriteSetEntry wset_entry;
-        wset_entry.key_ = std::move(key);
         wset_entry.rec_ = std::move(rec);
         wset_entry.op_ = op_type;
 
         auto [it, inserted] =
-            tws.try_emplace(wset_entry.key_.get(), std::move(wset_entry));
+            tws.try_emplace(TxKey(std::move(key)), std::move(wset_entry));
+        if (inserted)
+        {
+            ++wset_cnt_;
+        }
+        else
+        {
+            if (check_unqiue)
+            {
+                return TxErrorCode::DUPLICATE_KEY;
+            }
+            // Modify old WriteSetEntry.
+            it->second.rec_ = std::move(wset_entry.rec_);
+            it->second.op_ = wset_entry.op_;
+        }
+        return TxErrorCode::NO_ERROR;
+    }
+
+    TxErrorCode AddWrite(const TableName &table_name,
+                         TxKey tx_key,
+                         TxRecord::Uptr rec,
+                         OperationType op_type,
+                         bool check_unqiue = false)
+    {
+        // Check write set bytes count.
+        wset_bytes_cnt_ += ((tx_key.KeyPtr() ? tx_key.SerializedLength() : 0) +
+                            (rec.get() ? rec.get()->SerializedLength() : 0));
+        if (wset_bytes_cnt_ > ReadWriteSet::MaxWriteSetBytesCnt)
+        {
+            return TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR;
+        }
+
+        auto iter = wset_.find(table_name);
+        if (iter == wset_.end())
+        {
+            auto insert_it =
+                wset_.emplace(std::piecewise_construct,
+                              std::forward_as_tuple(table_name.StringView(),
+                                                    table_name.Type()),
+                              std::forward_as_tuple(TableWriteSet()));
+            iter = insert_it.first;
+        }
+
+        assert(!iter->first.IsStringOwner());
+
+        TableWriteSet &tws = iter->second;
+
+        WriteSetEntry wset_entry;
+        wset_entry.rec_ = std::move(rec);
+        wset_entry.op_ = op_type;
+
+        auto [it, inserted] =
+            tws.try_emplace(std::move(tx_key), std::move(wset_entry));
         if (inserted)
         {
             ++wset_cnt_;
@@ -325,7 +375,7 @@ public:
         auto tab_it = wset_.find(table_name);
         if (tab_it != wset_.end())
         {
-            auto key_it = tab_it->second.find(&key);
+            auto key_it = tab_it->second.find(key);
             if (key_it != tab_it->second.end())
             {
                 return &key_it->second;
@@ -340,10 +390,10 @@ public:
         auto tab_it = wset_.find(table_name);
         assert(tab_it != wset_.end());
 
-        auto key_it = tab_it->second.find(&key);
+        auto key_it = tab_it->second.find(key);
         assert(key_it != tab_it->second.end());
 
-        wset_bytes_cnt_ -= (key_it->second.key_->SerializedLength() +
+        wset_bytes_cnt_ -= (key_it->first.SerializedLength() +
                             key_it->second.rec_->SerializedLength());
 
         tab_it->second.erase(key_it);
@@ -356,13 +406,13 @@ public:
 
     std::pair<TableWriteSet::const_iterator, TableWriteSet::const_iterator>
     InitIter(const TableWriteSet &table_wset,
-             const TxKey *start_key,
+             const TxKey &start_key,
              bool inclusive)
     {
         auto it = table_wset.lower_bound(start_key);
         if (it != table_wset.end())
         {
-            if (*it->first == *start_key && !inclusive)
+            if (it->first == start_key && !inclusive)
             {
                 ++it;
             }
@@ -373,14 +423,14 @@ public:
     std::pair<TableWriteSet::const_reverse_iterator,
               TableWriteSet::const_reverse_iterator>
     InitReverseIter(const TableWriteSet &table_wset,
-                    const TxKey *start_key,
+                    const TxKey &start_key,
                     bool inclusive)
     {
         auto rit = std::make_reverse_iterator(table_wset.upper_bound(
             start_key));  // return key not large than start_key
         if (rit != table_wset.rend())
         {
-            if (*rit->first == *start_key && !inclusive)
+            if (rit->first == start_key && !inclusive)
             {
                 ++rit;
             }
@@ -436,9 +486,7 @@ public:
             wset_cnt_ -= tab_wset.size();
             for (auto &key_it : tab_wset)
             {
-                assert(key_it.second.key_ != nullptr);
-
-                wset_bytes_cnt_ -= key_it.second.key_->SerializedLength();
+                wset_bytes_cnt_ -= key_it.first.SerializedLength();
                 wset_bytes_cnt_ -= key_it.second.rec_ != nullptr
                                        ? key_it.second.rec_->SerializedLength()
                                        : 0;
@@ -451,39 +499,6 @@ public:
     std::unordered_map<TableName, TableWriteSet> &WriteSet()
     {
         return wset_;
-    }
-
-    void AddCacheRead(const TableName &table_name,
-                      const TxKey &key,
-                      const TxRecord &record)
-    {
-        auto key_rec_it = read_cache_.find(table_name);
-        if (key_rec_it != read_cache_.end())
-        {
-            key_rec_it->second.first->Copy(key);
-            key_rec_it->second.second->Copy(record);
-        }
-        else
-        {
-            read_cache_.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(table_name.StringView(),
-                                      table_name.Type()),
-                std::forward_as_tuple(key.Clone(), record.Clone()));
-        }
-    }
-
-    const TxRecord *FindCacheRead(const TableName &table_name, const TxKey &key)
-    {
-        auto key_rec_it = read_cache_.find(table_name);
-        if (key_rec_it != read_cache_.end() && *key_rec_it->second.first == key)
-        {
-            return key_rec_it->second.second.get();
-        }
-        else
-        {
-            return nullptr;
-        }
     }
 
     void ClearReadSet(const TableName &table_name)
@@ -642,8 +657,6 @@ private:
     std::unordered_map<TableName, TableWriteSet> wset_;
     size_t wset_cnt_;
     size_t data_rset_cnt_;
-    std::unordered_map<TableName, std::pair<TxKey::Uptr, TxRecord::Uptr>>
-        read_cache_;
     size_t wset_bytes_cnt_;
     size_t forward_write_cnt_;
 

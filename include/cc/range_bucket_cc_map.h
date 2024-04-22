@@ -194,7 +194,7 @@ public:
             size_t offset = 0;
             decoded_key->Deserialize(key_str->data(), offset, KeySchema());
             target_key = decoded_key.get();
-            req.SetDecodedKey(std::move(decoded_key));
+            req.SetDecodedKey(TxKey(std::move(decoded_key)));
             assert(req.PayloadStr() != nullptr);
             std::unique_ptr<RangeBucketRecord> decoded_rec =
                 std::make_unique<RangeBucketRecord>();

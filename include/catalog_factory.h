@@ -11,6 +11,9 @@
 
 namespace txservice
 {
+struct TableRangeEntry;
+class StoreRange;
+
 struct KVCatalogInfo
 {
     using uptr = std::unique_ptr<KVCatalogInfo>;
@@ -54,7 +57,7 @@ struct SkEncoder
      * @param sk_idx Secondary key index of this table excluding the primary
      * key.
      */
-    virtual std::pair<TxKey::Uptr, TxRecord::Uptr> GeneratePackedSk(
+    virtual std::pair<TxKey, TxRecord::Uptr> GeneratePackedSk(
         const TxKey *pk, const TxRecord *record) const = 0;
 };
 
@@ -99,7 +102,7 @@ struct TableSchema
 
     virtual bool HasAutoIncrement() const = 0;
     virtual const TableName *GetSequenceTableName() const = 0;
-    virtual std::pair<TxKey::Uptr, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
+    virtual std::pair<TxKey, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
         const TableName &table_name) const = 0;
     virtual void AddDirtyIndex(const TableName &index_name) = 0;
     virtual const std::unordered_set<TableName> *DirtyIndexNames() const = 0;
@@ -134,6 +137,12 @@ public:
                                        CcShard *shard,
                                        NodeGroupId ng_id) = 0;
 
+    virtual std::unique_ptr<TableRangeEntry> CreateTableRange(
+        TxKey start_key,
+        uint64_t version_ts,
+        int64_t partition_id,
+        std::unique_ptr<StoreRange> slices = nullptr) = 0;
+
     virtual std::unique_ptr<CcScanner> CreatePkCcmScanner(
         ScanDirection direction, const Schema *key_schema) = 0;
 
@@ -154,13 +163,12 @@ public:
      */
     virtual std::unique_ptr<Statistics> CreateTableStatistics(
         const TableSchema *table_schema,
-        std::unordered_map<TableName,
-                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+        std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
             sample_pool_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id) = 0;
 
-    virtual const TxKey *NegativeInfKey() = 0;
-    virtual const TxKey *PositiveInfKey() = 0;
+    virtual TxKey NegativeInfKey() = 0;
+    virtual TxKey PositiveInfKey() = 0;
 };
 }  // namespace txservice

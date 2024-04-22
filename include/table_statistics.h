@@ -553,10 +553,9 @@ public:
         if (distribution_steps_.Available())
         {
             records = records_.load(std::memory_order_acquire) *
-                      distribution_steps_.Selectivity(
-                          key_schema,
-                          static_cast<const KeyT &>(min_key),
-                          static_cast<const KeyT &>(max_key));
+                      distribution_steps_.Selectivity(key_schema,
+                                                      *min_key.GetKey<KeyT>(),
+                                                      *max_key.GetKey<KeyT>());
         }
         else
         {
@@ -597,7 +596,8 @@ private:
         {
             size_t start_column_diff = 0;
             if (last_key == nullptr ||
-                key_schema->CompareKeys(*last_key, *key, &start_column_diff))
+                key_schema->CompareKeys(
+                    TxKey(last_key), TxKey(key), &start_column_diff))
             {
                 assert(start_column_diff < key_parts);
                 for (size_t i = start_column_diff; i < key_parts; i++)
@@ -689,8 +689,7 @@ public:
 
     TableStatistics(
         const TableSchema *table_schema,
-        std::unordered_map<TableName,
-                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+        std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
             sample_pool_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id)
@@ -882,11 +881,10 @@ public:
         return broadcast_sample_pool;
     }
 
-    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
     MakeStoreStatistics(bool *updated_since_sync) const override
     {
-        std::unordered_map<TableName,
-                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+        std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
             sample_pool_map;
 
         Task task = [this, &sample_pool_map](CcShard &ccs)
@@ -1096,7 +1094,7 @@ private:
 
     void InitSamplePool(const TableName &table_or_index_name,
                         uint64_t records,
-                        std::vector<TxKey::Uptr> samplekeys,
+                        std::vector<TxKey> samplekeys,
                         CcShard *ccs,
                         NodeGroupId cc_ng_id)
     {
@@ -1111,16 +1109,17 @@ private:
         NodeGroupSamplePoolMap &ng_sample_pool_map = it->second;
 
         std::vector<std::vector<KeyT>> sample_pool_vec(ng_cnt);
-        for (TxKey::Uptr &samplekey : samplekeys)
+        for (TxKey &samplekey : samplekeys)
         {
-            KeyT &key = static_cast<KeyT &>(*samplekey);
+            std::unique_ptr<KeyT> key = samplekey.MoveKey<KeyT>();
+            assert(key != nullptr);
 #ifdef RANGE_PARTITION_ENABLED
             NodeGroupId dest_ng_id =
-                RouteKeyByRange(*ccs, table_or_index_name, cc_ng_id, key);
+                RouteKeyByRange(*ccs, table_or_index_name, cc_ng_id, *key);
 #else
-            NodeGroupId dest_ng_id = RouteKeyByHash(key);
+            NodeGroupId dest_ng_id = RouteKeyByHash(*key);
 #endif
-            sample_pool_vec[dest_ng_id].emplace_back(std::move(key));
+            sample_pool_vec[dest_ng_id].emplace_back(std::move(*key));
         }
 
         std::vector<uint64_t> sp_size_vec;
@@ -1317,9 +1316,9 @@ private:
         cc_req.Wait();
     }
     // This method is called in tx_processor thread.
-    void To(std::unordered_map<TableName,
-                               std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-                &sample_pool_map) const
+    void To(
+        std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
+            &sample_pool_map) const
     {
         std::shared_lock<std::shared_mutex> slk(index_sample_pool_map_mutex_);
 
@@ -1327,10 +1326,10 @@ private:
              index_sample_pool_map_)
         {
             sample_pool_map.try_emplace(
-                table_or_index_name, 0, std::vector<TxKey::Uptr>());
+                table_or_index_name, 0, std::vector<TxKey>());
 
             uint64_t &records = sample_pool_map.at(table_or_index_name).first;
-            std::vector<TxKey::Uptr> &sample_keys =
+            std::vector<TxKey> &sample_keys =
                 sample_pool_map.at(table_or_index_name).second;
 
             for (const auto &[ng_id, ccmap_sample_pool] : index_sample_pool)
@@ -1341,7 +1340,8 @@ private:
 
                 for (const KeyT &sample_key : *ng_sample_keys)
                 {
-                    sample_keys.emplace_back(sample_key.Clone());
+                    sample_keys.emplace_back(
+                        std::make_unique<KeyT>(sample_key));
                 }
             }
 
@@ -1362,8 +1362,9 @@ private:
                                 const KeyT &key) const
     {
         // Safe to use TableRangeEntry *.
+        TxKey tx_key(&key);
         const TableRangeEntry *range_entry = ccs.GetTableRangeEntryNoLocking(
-            table_or_index_name, cc_ng_id, &key);
+            table_or_index_name, cc_ng_id, tx_key);
         assert(range_entry != nullptr);
 
         NodeGroupId ng_id =
@@ -1390,10 +1391,15 @@ private:
 
         for (const KeyT &key : *old_sample_keys)
         {
-            TableRangeEntry *range_entry = ccs->GetTableRangeEntry(
-                old_sample_pool.GetTableOrIndexName(), cc_ng_id, &key);
+            TxKey tx_key(&key);
+            TemplateTableRangeEntry<KeyT> *range_entry =
+                static_cast<TemplateTableRangeEntry<KeyT> *>(
+                    ccs->GetTableRangeEntry(
+                        old_sample_pool.GetTableOrIndexName(),
+                        cc_ng_id,
+                        tx_key));
             NodeGroupId new_ng_id =
-                ccs->GetRangeOwner(range_entry->GetRangeInfo()->PartitionId(),
+                ccs->GetRangeOwner(range_entry->TypedRangeInfo()->PartitionId(),
                                    cc_ng_id)
                     ->BucketOwner();
             if (new_ng_id != old_ng_id)

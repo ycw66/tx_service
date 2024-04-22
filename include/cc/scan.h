@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <memory>  // shared_ptr
 
 #include "cc_entry.h"
@@ -51,7 +50,7 @@ public:
 
     virtual ~ScanTuple() = default;
 
-    virtual const TxKey *Key() const = 0;
+    virtual TxKey Key() const = 0;
     virtual const TxRecord *Record() const = 0;
 
     uint64_t key_ts_;
@@ -84,9 +83,9 @@ public:
 
     ~TemplateScanTuple() = default;
 
-    const TxKey *Key() const override
+    TxKey Key() const override
     {
-        return &key_obj_;
+        return TxKey(&key_obj_);
     }
 
     const TxRecord *Record() const override

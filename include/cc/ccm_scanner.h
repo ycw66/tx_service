@@ -1,21 +1,15 @@
 #pragma once
 
-#include <chrono>
 #include <cstdint>
 #include <memory>  // std::shared_ptr
 #include <mutex>
-#include <queue>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "butil/logging.h"
-#include "cc_handler_result.h"
 #include "scan.h"
-#include "sharder.h"
 #include "tx_key.h"
 #include "tx_record.h"
-#include "type.h"
 
 namespace txservice
 {
@@ -329,9 +323,9 @@ public:
 
     virtual void SetDrainCacheMode(bool drain_cache_mode) = 0;
     virtual bool GetDrainCacheMode() = 0;
-    virtual std::unique_ptr<TxKey> DecodeKey(const std::string &blob) const
+    virtual TxKey DecodeKey(const std::string &blob) const
     {
-        return nullptr;
+        return TxKey();
     }
 
     virtual int64_t PartitionNgTerm() const
@@ -778,13 +772,13 @@ public:
         partition_ng_term_ = partition_ng_term;
     }
 
-    std::unique_ptr<TxKey> DecodeKey(const std::string &blob) const override
+    TxKey DecodeKey(const std::string &blob) const override
     {
         std::unique_ptr<KeyT> key = std::make_unique<KeyT>();
         size_t offset = 0;
         key->Deserialize(blob.data(), offset, key_schema_);
 
-        return key;
+        return TxKey(std::move(key));
     }
 
     uint32_t CacheCount() const override

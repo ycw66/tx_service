@@ -436,13 +436,13 @@ void TransactionExecution::CloseTxScan(uint64_t alias,
 }
 
 TxErrorCode TransactionExecution::TxUpsert(const TableName &table_name,
-                                           TxKey::Uptr key,
+                                           TxKey key,
                                            TxRecord::Uptr rec,
                                            OperationType op,
-                                           bool check_unqiue)
+                                           bool check_unique)
 {
     return rw_set_.AddWrite(
-        table_name, std::move(key), std::move(rec), op, check_unqiue);
+        table_name, std::move(key), std::move(rec), op, check_unique);
 }
 
 void TransactionExecution::TxRevert(const TableName &table_name,
@@ -661,7 +661,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
         });
     void_resp_ = &upsert_req.tx_result_;
     Upsert(*upsert_req.tab_name_,
-           std::move(upsert_req.key_),
+           std::move(upsert_req.tx_key_),
            std::move(upsert_req.rec_),
            upsert_req.operation_type_);
 }
@@ -907,8 +907,6 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
         split_flush_op_ = std::make_unique<SplitFlushRangeOp>(
             *req.table_name_,
             req.schema_,
-            req.old_start_key_,
-            req.old_end_key_,
             req.store_range_,
             req.old_range_info_,
             std::move(req.new_range_info_),
@@ -926,8 +924,6 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
         assert(split_flush_op_ != nullptr);
         split_flush_op_->Reset(*req.table_name_,
                                req.schema_,
-                               req.old_start_key_,
-                               req.old_end_key_,
                                req.store_range_,
                                req.old_range_info_,
                                std::move(req.new_range_info_),
@@ -1200,7 +1196,11 @@ void TransactionExecution::ProcessTxRequest(
                         SchemaOpMessage_LastKeyType_PosInfKey)
                 {
                     // The positive inf key
-                    index_op_->last_finished_end_key_ = nullptr;
+                    index_op_->last_finished_end_key_ =
+                        Sharder::Instance()
+                            .GetLocalCcShards()
+                            ->GetCatalogFactory()
+                            ->PositiveInfKey();
                     index_op_->is_last_finished_key_str_ = false;
                 }
                 else
@@ -1251,7 +1251,7 @@ void TransactionExecution::ProcessTxRequest(
         TableName{range_table_name.StringView(),
                   TableName::Type(range_table_name.StringView())};
 
-    std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info;
+    std::vector<std::pair<TxKey, int32_t>> new_range_info;
     for (size_t i = 0; i < recover_req.new_range_keys_.size(); i++)
     {
         new_range_info.emplace_back(std::move(recover_req.new_range_keys_[i]),
@@ -1261,7 +1261,7 @@ void TransactionExecution::ProcessTxRequest(
     uint64_t previous_scan_ts = 0;
     std::vector<FlushRecord> previous_data_sync_vec;
     std::vector<FlushRecord> previous_archive_vec;
-    std::vector<const TxKey *> previous_mv_base_vec;
+    std::vector<TxKey> previous_mv_base_vec;
 
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     std::unique_ptr<SplitFlushRangeOp> split_range_op = nullptr;
@@ -1272,8 +1272,6 @@ void TransactionExecution::ProcessTxRequest(
         split_range_op = std::make_unique<SplitFlushRangeOp>(
             table_name,
             recover_req.table_schema_,
-            recover_req.start_key_,
-            recover_req.end_key_,
             recover_req.store_range_,
             recover_req.range_info_,
             std::move(new_range_info),
@@ -1291,8 +1289,6 @@ void TransactionExecution::ProcessTxRequest(
         assert(split_range_op != nullptr);
         split_range_op->Reset(table_name,
                               recover_req.table_schema_,
-                              recover_req.start_key_,
-                              recover_req.end_key_,
                               recover_req.store_range_,
                               recover_req.range_info_,
                               std::move(new_range_info),
@@ -1536,21 +1532,6 @@ void TransactionExecution::Process(ReadOperation &read)
                 }
 
                 // Step 2: fast path if key is the same as last read key.
-                const TxRecord *cache_rec =
-                    rw_set_.FindCacheRead(table_name, key);
-                // read_cache_ deos not have commit ts info that unique
-                // secondary index read needs. So it is incorrect to use
-                // this fast path when table type is UniqueSecondary.
-                if (cache_rec != nullptr &&
-                    table_name.Type() != TableType::UniqueSecondary)
-                {
-                    rec.Copy(*cache_rec);
-                    state_stack_.pop_back();
-                    assert(state_stack_.empty());
-                    rtp_resp_->Finish(std::pair<RecordStatus, uint64_t>(
-                        RecordStatus::Normal, 0));
-                    return;
-                }
             }
 
             read.local_cache_miss_ = true;
@@ -2010,8 +1991,9 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     {
         if (scan_open.direction_ == ScanDirection::Forward)
         {
-            auto wset_it = rw_set_.InitIter(
-                table_iter->second, scan_open.start_key_, scan_open.inclusive_);
+            auto wset_it = rw_set_.InitIter(table_iter->second,
+                                            *scan_open.start_key_,
+                                            scan_open.inclusive_);
             if (wset_it.first != wset_it.second)
             {
                 wset_iters_.emplace(open_result.scan_alias_, wset_it);
@@ -2019,8 +2001,9 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         }
         else
         {
-            auto wset_rit = rw_set_.InitReverseIter(
-                table_iter->second, scan_open.start_key_, scan_open.inclusive_);
+            auto wset_rit = rw_set_.InitReverseIter(table_iter->second,
+                                                    *scan_open.start_key_,
+                                                    scan_open.inclusive_);
             if (wset_rit.first != wset_rit.second)
             {
                 wset_reverse_iters_.emplace(open_result.scan_alias_, wset_rit);
@@ -2034,34 +2017,17 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     // Constructs a pseudo slice prior to the first slice of the scan. And sets
     // the status of the scanner "Blocked".
     open_result.scanner_->SetStatus(ScannerStatus::Blocked);
-    if (scan_open.tx_req_->StartKey()->Type() == KeyType::Normal)
-    {
-        scans_.try_emplace(open_result.scan_alias_,
-                           std::move(open_result.scanner_),
-                           scan_open.tx_req_->EndKey(),
-                           scan_open.tx_req_->end_inclusive_,
-                           UINT32_MAX,
-                           UINT32_MAX,
-                           scan_open.tx_req_->StartKey()->Clone(),
-                           !scan_open.tx_req_->start_inclusive_,
-                           scan_open.direction_ == ScanDirection::Forward
-                               ? SlicePosition::LastSliceInRange
-                               : SlicePosition::FirstSliceInRange);
-    }
-    else
-    {
-        scans_.try_emplace(open_result.scan_alias_,
-                           std::move(open_result.scanner_),
-                           scan_open.tx_req_->EndKey(),
-                           scan_open.tx_req_->end_inclusive_,
-                           UINT32_MAX,
-                           UINT32_MAX,
-                           scan_open.tx_req_->StartKey(),
-                           !scan_open.tx_req_->start_inclusive_,
-                           scan_open.direction_ == ScanDirection::Forward
-                               ? SlicePosition::LastSliceInRange
-                               : SlicePosition::FirstSliceInRange);
-    }
+    scans_.try_emplace(open_result.scan_alias_,
+                       std::move(open_result.scanner_),
+                       scan_open.tx_req_->EndKey(),
+                       scan_open.tx_req_->end_inclusive_,
+                       UINT32_MAX,
+                       UINT32_MAX,
+                       scan_open.tx_req_->StartKey()->GetShallowCopy(),
+                       !scan_open.tx_req_->start_inclusive_,
+                       scan_open.direction_ == ScanDirection::Forward
+                           ? SlicePosition::LastSliceInRange
+                           : SlicePosition::FirstSliceInRange);
 #else
     scans_.try_emplace(open_result.scan_alias_,
                        std::move(open_result.scanner_),
@@ -2413,12 +2379,13 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             else
             {
                 auto &wset_it = it->second.first;
-                const WriteSetEntry &local_write = wset_it->second;
-                if (*local_write.key_ < *cc_scan_tuple->Key())
+                const TxKey &write_key = wset_it->first;
+                TxKey ccm_key = cc_scan_tuple->Key();
+                if (write_key < ccm_key)
                 {
                     advance_type = AdvanceType::WriteSet;
                 }
-                else if (*cc_scan_tuple->Key() < *local_write.key_.get())
+                else if (ccm_key < write_key)
                 {
                     advance_type = AdvanceType::Ccm;
                 }
@@ -2431,17 +2398,18 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             if (advance_type == AdvanceType::WriteSet)
             {
                 auto &wset_it = it->second.first;
+                const TxKey &write_key = wset_it->first;
                 const WriteSetEntry &local_write = wset_it->second;
                 if (local_write.op_ == OperationType::Delete)
                 {
-                    scan_batch.emplace_back(local_write.key_.get(),
+                    scan_batch.emplace_back(write_key.GetShallowCopy(),
                                             nullptr,
                                             RecordStatus::Deleted,
                                             1);
                 }
                 else
                 {
-                    scan_batch.emplace_back(local_write.key_.get(),
+                    scan_batch.emplace_back(write_key.GetShallowCopy(),
                                             local_write.rec_.get(),
                                             RecordStatus::Normal,
                                             1);
@@ -2544,18 +2512,19 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 else
                 {
                     auto &wset_it = it->second.first;
+                    const TxKey &write_key = wset_it->first;
                     const WriteSetEntry &local_write = wset_it->second;
                     // Returns the key-value pair in the local write set.
                     if (local_write.op_ == OperationType::Delete)
                     {
-                        scan_batch.emplace_back(local_write.key_.get(),
+                        scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 nullptr,
                                                 RecordStatus::Deleted,
                                                 cc_scan_tuple->key_ts_);
                     }
                     else
                     {
-                        scan_batch.emplace_back(local_write.key_.get(),
+                        scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 local_write.rec_.get(),
                                                 RecordStatus::Normal,
                                                 cc_scan_tuple->key_ts_);
@@ -2579,25 +2548,28 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 #else
                 batch_end_key = scan_batch.empty()
                                     ? nullptr
-                                    : scan_batch[scan_batch.size() - 1].key_;
+                                    : &scan_batch[scan_batch.size() - 1].key_;
 #endif
             }
 
-            while (wset_it != wset_end && (batch_end_key == nullptr ||
-                                           *wset_it->first < *batch_end_key))
+            while (wset_it != wset_end &&
+                   (batch_end_key == nullptr ||
+                    batch_end_key->Type() != KeyType::Normal ||
+                    wset_it->first < *batch_end_key))
             {
+                const TxKey &write_key = wset_it->first;
                 const WriteSetEntry &local_write = wset_it->second;
                 // Returns the key-value pair in the local write set.
                 if (local_write.op_ != OperationType::Delete)
                 {
-                    scan_batch.emplace_back(local_write.key_.get(),
+                    scan_batch.emplace_back(write_key.GetShallowCopy(),
                                             local_write.rec_.get(),
                                             RecordStatus::Normal,
                                             1);
                 }
                 else
                 {
-                    scan_batch.emplace_back(local_write.key_.get(),
+                    scan_batch.emplace_back(write_key.GetShallowCopy(),
                                             nullptr,
                                             RecordStatus::Deleted,
                                             1);
@@ -2631,12 +2603,13 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             else
             {
                 auto &wset_it = rit->second.first;
-                const WriteSetEntry &local_write = wset_it->second;
-                if (*cc_scan_tuple->Key() < *local_write.key_)
+                const TxKey &write_key = wset_it->first;
+                TxKey ccm_key = cc_scan_tuple->Key();
+                if (ccm_key < write_key)
                 {
                     advance_type = AdvanceType::WriteSet;
                 }
-                else if (*local_write.key_.get() < *cc_scan_tuple->Key())
+                else if (write_key < ccm_key)
                 {
                     advance_type = AdvanceType::Ccm;
                 }
@@ -2649,17 +2622,18 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             if (advance_type == AdvanceType::WriteSet)
             {
                 auto &wset_it = rit->second.first;
+                const TxKey &write_key = wset_it->first;
                 const WriteSetEntry &local_write = wset_it->second;
                 if (local_write.op_ != OperationType::Delete)
                 {
-                    scan_batch.emplace_back(local_write.key_.get(),
+                    scan_batch.emplace_back(write_key.GetShallowCopy(),
                                             local_write.rec_.get(),
                                             RecordStatus::Normal,
                                             1);
                 }
                 else
                 {
-                    scan_batch.emplace_back(local_write.key_.get(),
+                    scan_batch.emplace_back(write_key.GetShallowCopy(),
                                             nullptr,
                                             RecordStatus::Deleted,
                                             1);
@@ -2760,18 +2734,19 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 else
                 {
                     auto &wset_it = rit->second.first;
+                    const TxKey &write_key = wset_it->first;
                     const WriteSetEntry &local_write = wset_it->second;
                     // Returns the key-value pair in the local write set.
                     if (local_write.op_ == OperationType::Delete)
                     {
-                        scan_batch.emplace_back(local_write.key_.get(),
+                        scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 nullptr,
                                                 RecordStatus::Deleted,
                                                 cc_scan_tuple->key_ts_);
                     }
                     else
                     {
-                        scan_batch.emplace_back(local_write.key_.get(),
+                        scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 local_write.rec_.get(),
                                                 RecordStatus::Normal,
                                                 cc_scan_tuple->key_ts_);
@@ -2794,26 +2769,29 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 batch_start_key = scan_next.scan_state_->SliceLastKey();
 #else
                 batch_start_key =
-                    scan_batch.empty() ? nullptr : scan_batch[0].key_;
+                    scan_batch.empty() ? nullptr : &scan_batch[0].key_;
 #endif
             }
 
-            while (wset_it != wset_end && (batch_start_key == nullptr ||
-                                           *batch_start_key < *wset_it->first ||
-                                           *batch_start_key == *wset_it->first))
+            while (wset_it != wset_end &&
+                   (batch_start_key == nullptr ||
+                    batch_start_key->Type() != KeyType::Normal ||
+                    *batch_start_key < wset_it->first ||
+                    *batch_start_key == wset_it->first))
             {
+                const TxKey &write_key = wset_it->first;
                 const WriteSetEntry &local_write = wset_it->second;
                 // Returns the key-value pair in the local write set.
                 if (local_write.op_ != OperationType::Delete)
                 {
-                    scan_batch.emplace_back(local_write.key_.get(),
+                    scan_batch.emplace_back(write_key.GetShallowCopy(),
                                             local_write.rec_.get(),
                                             RecordStatus::Normal,
                                             1);
                 }
                 else
                 {
-                    scan_batch.emplace_back(local_write.key_.get(),
+                    scan_batch.emplace_back(write_key.GetShallowCopy(),
                                             nullptr,
                                             RecordStatus::Deleted,
                                             1);
@@ -2975,34 +2953,22 @@ void TransactionExecution::ScanClose(
     scans_.erase(scan_it);
 }
 
-void TransactionExecution::Update(const TableName &table_name,
-                                  TxKey::Uptr key,
-                                  TxRecord::Uptr rec)
-{
-    Upsert(table_name, std::move(key), std::move(rec), OperationType::Update);
-}
-
 TxErrorCode TransactionExecution::Insert(const TableName &table_name,
-                                         TxKey::Uptr key,
+                                         TxKey tx_key,
                                          TxRecord::Uptr rec)
 {
     TxResult<Void> tx_result(nullptr, nullptr);
     void_resp_ = &tx_result;
-    Upsert(table_name, std::move(key), std::move(rec), OperationType::Insert);
+    Upsert(
+        table_name, std::move(tx_key), std::move(rec), OperationType::Insert);
     assert(tx_result.Status() != TxResultStatus::Unknown);
 
     return tx_result.ErrorCode();
 }
 
-void TransactionExecution::Delete(const TableName &table_name, TxKey::Uptr key)
-{
-    TxRecord::Uptr rec{nullptr};
-    Upsert(table_name, std::move(key), std::move(rec), OperationType::Delete);
-}
-
 // Upsert modify tuple without locking in OCC protocol.
 void TransactionExecution::Upsert(const TableName &table_name,
-                                  TxKey::Uptr key,
+                                  TxKey key,
                                   TxRecord::Uptr rec,
                                   OperationType op)
 {
@@ -3145,7 +3111,7 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
     assert(lock_write_ranges.table_it_ != lock_write_ranges.table_end_);
     assert(lock_write_ranges.write_key_it_ != lock_write_ranges.write_key_end_);
 
-    const TxKey *write_key = lock_write_ranges.write_key_it_->first;
+    const TxKey &write_key = lock_write_ranges.write_key_it_->first;
 
     lock_write_ranges.lock_range_result_->Value().Reset();
     lock_write_ranges.lock_range_result_->Reset();
@@ -3157,7 +3123,7 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
 
     bool finished =
         cc_handler_->ReadLocal(lock_write_ranges.range_table_name_,
-                               *write_key,
+                               write_key,
                                range_rec_,
                                ReadType::Inside,
                                tx_number_.load(std::memory_order_relaxed),
@@ -3192,18 +3158,25 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
         return;
     }
 
-    const TxKey *range_start_key = range_rec_.GetRangeInfo()->StartKey();
-    const TxKey *range_end_key = range_rec_.GetRangeInfo()->EndKey();
-
     const ReadKeyResult &read_res =
         lock_write_ranges.lock_range_result_->Value();
     const TableName &tbl_name = lock_write_ranges.table_it_->first;
     TableName range_tbl_name(tbl_name.StringView(), TableType::RangePartition);
     rw_set_.AddRead(read_res.cce_addr_, read_res.ts_, &range_tbl_name);
 
-    const TxKey *write_key = lock_write_ranges.write_key_it_->first;
-    assert(range_start_key == nullptr || !(*write_key < *range_start_key));
-    assert(range_end_key == nullptr || *write_key < *range_end_key);
+    assert(
+        [&]()
+        {
+            TxKey range_start_key = range_rec_.GetRangeInfo()->StartTxKey();
+            return !(lock_write_ranges.write_key_it_->first < range_start_key);
+        }());
+
+    assert(
+        [&]()
+        {
+            TxKey range_end_key = range_rec_.GetRangeInfo()->EndTxKey();
+            return lock_write_ranges.write_key_it_->first < range_end_key;
+        }());
 
     lock_write_ranges.Advance(this);
 
@@ -3253,10 +3226,10 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
     std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
     for (auto &[table_name, table_write_set] : wset)
     {
-        for (auto &[key_ptr, write_entry] : table_write_set)
+        for (auto &[write_key, write_entry] : table_write_set)
         {
 #ifndef RANGE_PARTITION_ENABLED
-            size_t hash = write_entry.key_->Hash();
+            size_t hash = write_key.Hash();
             write_entry.key_shard_code_ = Sharder::Instance().ShardCode(hash);
 #endif
             acquire_write.acquire_write_entries_[entry_idx++] = &write_entry;
@@ -3265,7 +3238,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
             // supported.
             cc_handler_->AcquireWrite(
                 table_name,
-                *write_entry.key_,
+                write_key,
                 write_entry.key_shard_code_,
                 TxNumber(),
                 tx_term_,
@@ -3281,7 +3254,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
             {
                 cc_handler_->AcquireWrite(
                     table_name,
-                    *write_entry.key_,
+                    write_key,
                     forward_shard_code,
                     TxNumber(),
                     tx_term_,
@@ -3701,13 +3674,15 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
     // new structure
     std::unordered_map<
         NodeGroupId,
-        std::unordered_map<TableName, std::vector<const WriteSetEntry *>>>
+        std::unordered_map<
+            TableName,
+            std::vector<std::pair<const TxKey *, const WriteSetEntry *>>>>
         ng_table_rec_set;
 
     // reorganize all WriteSetEntries from old structure to new structure
     for (const auto &[table_name, table_write_set] : wset)
     {
-        for (const auto &[key_ptr, wset_entry] : table_write_set)
+        for (const auto &[write_key, wset_entry] : table_write_set)
         {
             const CcEntryAddr &addr = wset_entry.cce_addr_;
             uint32_t cc_node_id = addr.NodeGroupId();
@@ -3731,7 +3706,9 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
             }
 
             auto table_rec_it = ng_table_rec_set.try_emplace(cc_node_id);
-            std::unordered_map<TableName, std::vector<const WriteSetEntry *>>
+            std::unordered_map<
+                TableName,
+                std::vector<std::pair<const TxKey *, const WriteSetEntry *>>>
                 &table_rec_set = table_rec_it.first->second;
 
             auto rec_vec_it = table_rec_set.emplace(
@@ -3740,7 +3717,7 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                                       table_name.Type()),
                 std::forward_as_tuple());
 
-            rec_vec_it.first->second.emplace_back(&wset_entry);
+            rec_vec_it.first->second.emplace_back(&write_key, &wset_entry);
 
             for (const auto &[forward_shard_code, addr] :
                  wset_entry.forward_addr_)
@@ -3750,17 +3727,18 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 uint32_t forward_ng_id =
                     Sharder::Instance().ShardToCcNodeGroup(forward_shard_code);
                 auto table_rec_it = ng_table_rec_set.try_emplace(forward_ng_id);
-                std::unordered_map<TableName,
-                                   std::vector<const WriteSetEntry *>>
+                std::unordered_map<
+                    TableName,
+                    std::vector<
+                        std::pair<const TxKey *, const WriteSetEntry *>>>
                     &table_rec_set = table_rec_it.first->second;
 
                 auto rec_vec_it = table_rec_set.emplace(
                     std::piecewise_construct,
                     std::forward_as_tuple(table_name.StringView(),
                                           table_name.Type()),
-                    std::forward_as_tuple(
-                        std::vector<const WriteSetEntry *>()));
-                rec_vec_it.first->second.emplace_back(&wset_entry);
+                    std::forward_as_tuple());
+                rec_vec_it.first->second.emplace_back(&write_key, &wset_entry);
             }
         }
     }
@@ -3813,16 +3791,18 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 
             for (const auto &wset_entry : wset_entry_vec)
             {
-                wset_entry->key_->Serialize(*log_ng_blob);
+                const TxKey *write_key = wset_entry.first;
+                const WriteSetEntry *write_entry = wset_entry.second;
+                write_key->Serialize(*log_ng_blob);
 
-                uint8_t operation = static_cast<uint8_t>(wset_entry->op_);
+                uint8_t operation = static_cast<uint8_t>(write_entry->op_);
                 log_ng_blob->append(reinterpret_cast<const char *>(&operation),
                                     1);
 
-                if (wset_entry->op_ != OperationType::Delete &&
-                    wset_entry->rec_ != nullptr)
+                if (write_entry->op_ != OperationType::Delete &&
+                    write_entry->rec_ != nullptr)
                 {
-                    wset_entry->rec_->Serialize(*log_ng_blob);
+                    write_entry->rec_->Serialize(*log_ng_blob);
                 }
             }
 
@@ -4546,7 +4526,7 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
             hres.Value().remote_ack_cnt_ = &acq_all_op.remote_ack_cnt_;
             cc_handler_->AcquireWriteAll(
                 *acq_all_op.table_name_,
-                *acq_all_op.keys_[key_idx],
+                acq_all_op.keys_[key_idx],
                 nid,
                 tx_number_.load(std::memory_order_relaxed),
                 tx_term_,
@@ -4604,7 +4584,7 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
         {
             cc_handler_->PostWriteAll(
                 *post_write_all_op.table_name_,
-                *post_write_all_op.keys_[keyid],
+                post_write_all_op.keys_[keyid],
                 *post_write_all_op.recs_[keyid],
                 ngid,
                 tx_number_.load(std::memory_order_relaxed),
@@ -4620,7 +4600,7 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
     for (uint32_t keyid = 0; keyid < post_write_all_op.keys_.size(); ++keyid)
     {
         cc_handler_->PostWriteAll(*post_write_all_op.table_name_,
-                                  *post_write_all_op.keys_[keyid],
+                                  post_write_all_op.keys_[keyid],
                                   *post_write_all_op.recs_[keyid],
                                   TxCcNodeId(),
                                   tx_number_.load(std::memory_order_relaxed),
@@ -5314,8 +5294,8 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
                              kickout_data_op.hd_result_,
                              kickout_data_op.clean_type_,
                              kickout_data_op.bucket_ids_,
-                             kickout_data_op.start_key_,
-                             kickout_data_op.end_key_,
+                             &kickout_data_op.start_key_,
+                             &kickout_data_op.end_key_,
                              kickout_data_op.clean_ts_);
 }
 
@@ -5558,7 +5538,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
 void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 {
     MultiObjectCommandTxRequest *req = obj_cmd_op.tx_req_;
-    const std::vector<const TxKey *> *vct_key = req->VctKey();
+    const std::vector<TxKey> *vct_key = req->VctKey();
     const std::vector<TxCommand *> *vct_cmd = req->VctCommand();
 #ifdef RANGE_PARTITION_ENABLED
     while (obj_cmd_op.range_lock_cur_ < vct_key->size())
@@ -5569,7 +5549,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 
         lock_range_op_.Reset(TableName(req->table_name_->StringView(),
                                        TableType::RangePartition),
-                             vct_key->at(obj_cmd_op.range_lock_cur_),
+                             &vct_key->at(obj_cmd_op.range_lock_cur_),
                              &range_rec_,
                              &lock_range_result_);
         PushOperation(&lock_range_op_);
@@ -5587,7 +5567,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
     {
         auto &hd_res = obj_cmd_op.vct_hd_result_[i];
 
-        const TxKey &key = *vct_key->at(i);
+        const TxKey &key = vct_key->at(i);
         uint32_t key_shard_code = 0;
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -5643,7 +5623,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
     }
 #endif
     MultiObjectCommandTxRequest *req = obj_cmd_op.tx_req_;
-    const std::vector<const TxKey *> *vct_key = req->VctKey();
+    const std::vector<TxKey> *vct_key = req->VctKey();
     const std::vector<TxCommand *> *vct_cmd = req->VctCommand();
 
     CcErrorCode err = obj_cmd_op.atm_err_code_.load(std::memory_order_relaxed);
@@ -5685,7 +5665,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         *req->table_name_,
                         cmd_res.cce_addr_,
                         cmd_res.commit_ts_,
-                        vct_key->at(i),
+                        &vct_key->at(i),
                         cmd_res.need_write_log_ ? vct_cmd->at(i) : nullptr);
 
                     uint64_t read_version =
@@ -5868,7 +5848,7 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
     {
         for (size_t idx = 0; idx < read_batch.size(); ++idx)
         {
-            const TxKey &key = *read_batch[idx].key_;
+            const TxKey &key = read_batch[idx].key_;
             TxRecord &rec = *read_batch[idx].record_;
             RecordStatus &rec_status = read_batch[idx].status_;
 
@@ -5919,7 +5899,7 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
 
         lock_range_op_.Reset(
             TableName(table_name.StringView(), TableType::RangePartition),
-            batch_read_op.lock_it_->key_,
+            &batch_read_op.lock_it_->key_,
             &range_rec_,
             &lock_range_result_);
         PushOperation(&lock_range_op_);
@@ -5953,7 +5933,7 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
             continue;
         }
 
-        const TxKey &key = *read_batch[idx].key_;
+        const TxKey &key = read_batch[idx].key_;
         TxRecord &rec = *read_batch[idx].record_;
 
         uint32_t sharding_code = 0;
@@ -6293,8 +6273,8 @@ void TransactionExecution::RecoverClusterScale(
             {
                 op->op_ = &op->install_cluster_config_op_;
                 op->install_cluster_config_op_.keys_.clear();
-                op->install_cluster_config_op_.keys_.push_back(
-                    NegativeInfinity<VoidKey>::Instance());
+                op->install_cluster_config_op_.keys_.emplace_back(
+                    TxKey(VoidKey::NegativeInfinity()));
                 op->install_cluster_config_op_.Reset(1);
                 op->install_cluster_config_op_.hd_result_.SetFinished();
                 op->SetStatus(

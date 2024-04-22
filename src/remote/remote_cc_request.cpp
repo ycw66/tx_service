@@ -1023,8 +1023,16 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
         output_msg_.clear_last_key();
         auto [last_key, key_set] = slice_result.PeekLastKey();
         assert(key_set || cc_res_.IsError());
-        if (last_key != nullptr)
+        // Only sends back the last key if this scan batch is not the last. The
+        // next scan batch will use this last key as the beginning of the next
+        // batch.
+        if (!cc_res_.IsError() &&
+            slice_result.slice_position_ !=
+                txservice::SlicePosition::LastSlice &&
+            slice_result.slice_position_ !=
+                txservice::SlicePosition::FirstSlice)
         {
+            assert(last_key->Type() == KeyType::Normal);
             last_key->Serialize(*output_msg_.mutable_last_key());
         }
         output_msg_.set_slice_position(

@@ -129,11 +129,11 @@ static inline void MergeSortedVectors(std::vector<std::vector<T>> &&vecs,
     while (pq.size())
     {
         // Move the top object to output vec before popping it.
-        const auto &top = pq.top();
+        const std::pair<T, size_t> &top = pq.top();
         if (!dedup || output.empty() || greater(output.back(), top.first) ||
             greater(top.first, output.back()))
         {
-            output.push_back(std::move(const_cast<T &>(top.first)));
+            output.emplace_back(std::move(const_cast<T &>(top.first)));
         }
         size_t grp = top.second;
         pq.pop();

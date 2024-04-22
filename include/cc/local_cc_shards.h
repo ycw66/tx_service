@@ -20,18 +20,19 @@
 #include <utility>
 #include <vector>
 
-#include "catalog.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc_shard.h"
+#include "data_sync_task.h"
 #include "error_messages.h"
 #include "local_cc_handler.h"
 #include "raft_log.pb.h"
 #include "range_record.h"
+#include "range_slice.h"
 #include "store/data_store_handler.h"
 #include "system_handler.h"
 #include "tx_service_common.h"
-#include "tx_service_metrics.h"
+#include "tx_start_ts_collector.h"
 #include "type.h"
 
 namespace txservice
@@ -42,205 +43,8 @@ class RemoteCcHandler;
 };
 class Checkpointer;
 class TxService;
-
-struct DataSyncStatus
-{
-    explicit DataSyncStatus(bool need_truncate_log)
-        : need_truncate_log_(need_truncate_log)
-    {
-    }
-
-    void SetNoTruncateLog()
-    {
-        std::lock_guard<std::mutex> lk(mux_);
-        need_truncate_log_ = false;
-    }
-
-    int32_t unfinished_tasks_{0};
-    bool all_task_started_{false};
-    CcErrorCode err_code_{CcErrorCode::NO_ERROR};
-    // True if need to truncate redo log when all tasks succeed.
-    bool need_truncate_log_{true};
-    uint64_t truncate_log_ts_{0};
-    std::mutex mux_;
-    std::condition_variable cv_;
-};
-
-struct DataSyncTask
-{
-public:
-    DataSyncTask(const TableName &table_name,
-                 int32_t range_id,
-                 uint64_t range_version,
-                 uint32_t ng_id,
-                 int64_t ng_term,
-                 uint64_t data_sync_ts,
-                 std::shared_ptr<DataSyncStatus> status,
-                 bool is_dirty,
-                 bool need_adjust_ts,
-                 CcHandlerResult<Void> *hres
-#ifndef RANGE_PARTITION_ENABLED
-                 ,
-                 std::function<bool(size_t)> filter_lambda
-#endif
-                 )
-        : table_name_(table_name),
-          range_id_(range_id),
-          range_version_(range_version),
-          node_group_id_(ng_id),
-          node_group_term_(ng_term),
-          data_sync_ts_(data_sync_ts)
-#ifndef RANGE_PARTITION_ENABLED
-          ,
-          filter_lambda_(filter_lambda)
-#endif
-          ,
-          status_(status),
-          is_dirty_(is_dirty),
-          sync_ts_adjustable_(need_adjust_ts),
-          task_res_(hres)
-    {
-    }
-
-    void SetFinish()
-    {
-        std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
-        status_->unfinished_tasks_--;
-        // The default value of `truncate_log_ts_` is `0`.
-        if (status_->truncate_log_ts_ == 0)
-        {
-            status_->truncate_log_ts_ = data_sync_ts_;
-        }
-        else
-        {
-            // Update minimum checkpoint timestamp. We use this timestamp to
-            // truncate log at the end.
-            status_->truncate_log_ts_ =
-                std::min(status_->truncate_log_ts_, data_sync_ts_);
-        }
-
-        if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
-        {
-            if (status_->need_truncate_log_)
-            {
-                if (status_->err_code_ == CcErrorCode::NO_ERROR)
-                {
-                    // Truncate redo log
-                    LOG(INFO) << "Checkpoint of node group #" << node_group_id_
-                              << " succeeded with timestamp: "
-                              << status_->truncate_log_ts_;
-                    Sharder::Instance().UpdateNodeGroupCkptTs(
-                        node_group_id_, status_->truncate_log_ts_);
-                    Sharder::Instance().GetLogAgent()->UpdateCheckpointTs(
-                        node_group_id_,
-                        node_group_term_,
-                        status_->truncate_log_ts_);
-                }
-                else
-                {
-                    LOG(INFO) << "Checkpoint of node group #" << node_group_id_
-                              << " finished with timestamp: " << data_sync_ts_
-                              << " with result code: "
-                              << static_cast<uint32_t>(status_->err_code_);
-                }
-            }
-
-            if (task_res_)
-            {
-                if (status_->err_code_ == CcErrorCode::NO_ERROR)
-                {
-                    task_res_->SetFinished();
-                }
-                else
-                {
-                    task_res_->SetError(status_->err_code_);
-                }
-            }
-            status_->cv_.notify_all();
-        }
-    }
-
-    void SetError(CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR)
-    {
-        std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
-        status_->unfinished_tasks_--;
-        status_->err_code_ = err_code;
-        // The default value of `truncate_log_ts_` is `0`.
-        if (status_->truncate_log_ts_ == 0)
-        {
-            status_->truncate_log_ts_ = data_sync_ts_;
-        }
-        else
-        {
-            // Update minimum checkpoint timestamp. We use this timestamp to
-            // truncate log at the end.
-            status_->truncate_log_ts_ =
-                std::min(status_->truncate_log_ts_, data_sync_ts_);
-        }
-
-        if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
-        {
-            if (task_res_)
-            {
-                task_res_->SetError(status_->err_code_);
-            }
-            status_->cv_.notify_all();
-        }
-    }
-
-    void SetErrorCode(CcErrorCode err_code)
-    {
-        std::unique_lock<std::mutex> lk(status_->mux_);
-        status_->err_code_ = err_code;
-    }
-
-    bool SyncTsAdjustable() const
-    {
-        return sync_ts_adjustable_;
-    }
-
-    void UnsetSyncTsAdjustable()
-    {
-        sync_ts_adjustable_ = false;
-    }
-
-    const TableName table_name_;
-    int32_t range_id_;
-    uint64_t range_version_;
-    uint32_t node_group_id_;
-    int64_t node_group_term_{-1};
-    uint64_t data_sync_ts_{0};
-
-#ifndef RANGE_PARTITION_ENABLED
-    enum class CkptErrorCode
-    {
-        NO_ERROR = 0,
-        // Failed on data sync scan
-        SCAN_ERROR,
-        // Failed on flush data
-        FLUSH_ERROR,
-    };
-
-    std::mutex flight_task_mux_;
-    std::condition_variable flight_task_cv_;
-    // Flush data task cnt + 1 (Data sync task)
-    int64_t flight_task_cnt_{0};
-    CkptErrorCode ckpt_err_{CkptErrorCode::NO_ERROR};
-    std::function<bool(size_t)> filter_lambda_;
-#endif
-
-    std::shared_ptr<DataSyncStatus> status_{nullptr};
-    // True if need to use the dirty schema.
-    bool is_dirty_{false};
-    // The PendingTaskQueue allows only one normal checkpoint task. Subsequent
-    // tasks with larger timestamps will not be added to the PendingTaskqueue.
-    // Instead, it will only update the latest_pending_ts_. When the task in the
-    // queue is executed, the data_sync_ts_ of task will be updated using
-    // latest_pending_ts_.
-    bool sync_ts_adjustable_{true};
-    // Indicate the single task result.
-    CcHandlerResult<Void> *task_res_{nullptr};
-};
+struct ClusterScaleOp;
+struct DataMigrationOp;
 
 struct DataMigrationStatus
 {
@@ -506,7 +310,6 @@ public:
         {
             CcShard &shard = *cc_shard;
 
-            size_t entry_cnt = 0;
             for (auto map_iter = shard.native_ccms_.begin();
                  map_iter != shard.native_ccms_.end();
                  ++map_iter)
@@ -528,9 +331,6 @@ public:
                                               tab_name.Type()),
                         std::forward_as_tuple(map_iter->second->size()));
                 }
-
-                // Excludes negative and positive infinity.
-                entry_cnt += map_iter->second->size();
 
                 std::cout << "Table '" << tab_name.StringView() << "' core ID "
                           << shard.core_id_ << ": " << map_iter->second->size()
@@ -648,10 +448,8 @@ public:
         const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
         const TableSchema *table_schema,
         int32_t partition_id,
-        const TxKey *start_key,
-        const TxKey *end_key,
         const RangeInfo *range_info,
-        std::vector<std::unique_ptr<TxKey>> &&new_range_key,
+        std::vector<TxKey> &&new_range_key,
         std::vector<int32_t> &&new_partition_ids,
         uint32_t node_group_id,
         int64_t tx_term);
@@ -660,14 +458,117 @@ public:
      * @brief Create a new table range entry and fill current range info with
      * given partition id and start key.
      */
-    const TableRangeEntry *CreateTableRange(
+    template <typename KeyT>
+    const TemplateTableRangeEntry<KeyT> *CreateTableRange(
         const TableName &table_name,
         const NodeGroupId ng_id,
         int32_t partition_id,
-        TxKey::Uptr start_key,
+        const KeyT &start_key,
         uint64_t version,
-        std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
-            *slice_keys = nullptr);
+        std::vector<SliceInitInfo> *slice_keys = nullptr)
+    {
+        std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+        std::vector<TableRangeEntry *> new_entries;
+        bool range_slice_mem_full =
+            range_slice_mem_usage_.load(std::memory_order_relaxed) >
+            range_slice_memory_limit_;
+
+        std::map<TxKey, TableRangeEntry::uptr> *ranges =
+            GetTableRangesForATableInternal(table_name, ng_id);
+        std::unordered_map<uint32_t, TableRangeEntry *> *range_ids =
+            GetTableRangeIdsForATableInternal(table_name, ng_id);
+        std::unique_ptr<TemplateStoreRange<KeyT>> range_slices = nullptr;
+        NodeGroupId range_ng =
+            GetRangeOwnerInternal(partition_id, ng_id)->BucketOwner();
+
+        TxKey range_tx_key(&start_key);
+        auto range_it = ranges->find(range_tx_key);
+        if (range_it == ranges->end())
+        {
+            // The created range entry copies the start key and references the
+            // input end key, which points to the containing range's end key.
+            std::unique_ptr<TemplateTableRangeEntry<KeyT>> new_range_entry =
+                std::make_unique<TemplateTableRangeEntry<KeyT>>(
+                    &start_key, version, partition_id);
+
+            TemplateTableRangeEntry<KeyT> *new_range_ptr =
+                new_range_entry.get();
+            auto [new_range_it, is_insert] =
+                ranges->try_emplace(TxKey(new_range_entry->RangeStartKey()),
+                                    std::move(new_range_entry));
+            assert(is_insert);
+
+            auto next_range_it = std::next(new_range_it);
+            if (next_range_it != ranges->end())
+            {
+                const TemplateTableRangeEntry<KeyT> *next_entry =
+                    static_cast<const TemplateTableRangeEntry<KeyT> *>(
+                        next_range_it->second.get());
+                const KeyT *next_start = next_entry->RangeStartKey();
+                new_range_ptr->SetRangeEndKey(next_start);
+            }
+            else
+            {
+                new_range_ptr->SetRangeEndKey(KeyT::PositiveInfinity());
+            }
+
+            // Update previous range entry's end key if the range is inserted
+            // into table_ranges. The new inserted range is always not the
+            // smallest range since negative inf is one of the first default
+            // range start key.
+            auto prev_it = std::prev(new_range_it);
+            const KeyT *new_range_start = new_range_ptr->RangeStartKey();
+            TemplateTableRangeEntry<KeyT> *prev_range_entry =
+                static_cast<TemplateTableRangeEntry<KeyT> *>(
+                    prev_it->second.get());
+            prev_range_entry->SetRangeEndKey(new_range_start);
+
+            range_ids->try_emplace(partition_id, new_range_ptr);
+
+            if (ng_id == range_ng && slice_keys && !range_slice_mem_full)
+            {
+                int64_t size = new_range_ptr->InitRangeSlices(
+                    std::move(*slice_keys), range_ng);
+                assert(size > 0);
+                IncreaseRangeSliceMemUsage(size);
+            }
+
+            return new_range_ptr;
+        }
+        else if (range_it->second->Version() < version)
+        {
+            // Update existing range entry's version range slice info if the
+            // passed in version is newer.
+            TemplateTableRangeEntry<KeyT> *range_entry =
+                static_cast<TemplateTableRangeEntry<KeyT> *>(
+                    range_it->second.get());
+
+            if (ng_id == range_ng && slice_keys)
+            {
+                const KeyT *r_start = range_entry->TypedRangeInfo()->StartKey();
+                const KeyT *r_end = range_entry->TypedRangeInfo()->EndKey();
+                range_slices = std::make_unique<TemplateStoreRange<KeyT>>(
+                    r_start, r_end, partition_id, range_ng, *this);
+                range_slices->InitSlices(std::move(*slice_keys));
+            }
+            int64_t mem_change =
+                range_entry->UpdateRangeEntry(version, std::move(range_slices));
+            if (mem_change > 0)
+            {
+                // This would only happen rarely during recover when the old
+                // range slice version is read from data store. To avoid
+                // blocking tx processor, do not call KickoutRangeSlices.
+                IncreaseRangeSliceMemUsage(mem_change);
+            }
+            else if (mem_change < 0)
+            {
+                DecreaseRangeSliceMemUsage(-mem_change);
+            }
+        }
+        return static_cast<TemplateTableRangeEntry<KeyT> *>(
+            range_it->second.get());
+    }
+
     /**
      * @brief Initialize TableRangeEntry for a table in range_maps_.
      */
@@ -679,21 +580,44 @@ public:
     /**
      * @brief Get the All Table Ranges for a table.
      */
-    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
-        *GetTableRangesForATable(const TableName &range_table_name,
-                                 const NodeGroupId ng_id);
+    std::map<TxKey, TableRangeEntry::uptr> *GetTableRangesForATable(
+        const TableName &range_table_name, const NodeGroupId ng_id);
 
     /**
      * @brief Upload new range info into range_info_ in TableRangeEntry
      * object.
      */
-    const TableRangeEntry *UploadNewRangeInfo(
+    template <typename KeyT>
+    TemplateTableRangeEntry<KeyT> *UploadNewRangeInfo(
         const TableName &table_name,
         const NodeGroupId ng_id,
-        const TxKey *key,
-        const std::vector<std::unique_ptr<TxKey>> &new_key,
+        const KeyT &key,
+        const std::vector<TxKey> &new_key,
         const std::vector<int32_t> &new_partition_id,
-        uint64_t commit_ts);
+        uint64_t commit_ts)
+    {
+        std::vector<TxKey> new_key_copy;
+        new_key_copy.reserve(new_key.size());
+        for (const TxKey &key : new_key)
+        {
+            const KeyT *typed_key = key.GetKey<KeyT>();
+            assert(typed_key->Type() == KeyType::Normal);
+            new_key_copy.emplace_back(std::make_unique<KeyT>(*typed_key));
+        }
+        std::vector<int32_t> partition_copy{new_partition_id};
+
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        TxKey map_key(&key);
+        TemplateTableRangeEntry<KeyT> *range_entry =
+            static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(table_name, ng_id, map_key));
+        assert(range_entry);
+        // Set dirty range in local cc shard range entry.
+        range_entry->UploadNewRangeInfo(
+            std::move(new_key_copy), std::move(partition_copy), commit_ts);
+
+        return range_entry;
+    }
 
     /**
      * @brief Remove all ranges of table_name from local cc shard.
@@ -719,15 +643,16 @@ public:
      */
     TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
                                         const NodeGroupId ng_id,
-                                        const TxKey *key);
+                                        const TxKey &key);
 
     const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
                                               const NodeGroupId ng_id,
                                               int32_t range_id);
 
     const TableRangeEntry *GetTableRangeEntryNoLocking(
-        const TableName &table_name, const NodeGroupId ng_id, const TxKey *key);
+        const TableName &table_name, const NodeGroupId ng_id, const TxKey &key);
 
+    template <typename KeyT>
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                NodeGroupId cc_ng_id,
                                int64_t cc_ng_term,
@@ -735,14 +660,86 @@ public:
                                const Schema *rec_schema,
                                uint64_t schema_ts,
                                const KVCatalogInfo *kv_info,
-                               const TxKey &key,
+                               const KeyT &key,
                                bool inclusive,
                                CcRequestBase *cc_request,
                                CcShard *cc_shard,
                                RangeSliceOpStatus &pin_status,
                                bool force_load,
-                               uint8_t prefetch_size);
+                               uint8_t prefetch_size)
+    {
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
+        TableName range_table_name(table_name.StringView(),
+                                   TableType::RangePartition);
+        TxKey slice_key(&key);
+
+        TemplateTableRangeEntry<KeyT> *range_entry =
+            static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(
+                    range_table_name, cc_ng_id, slice_key));
+        if (!range_entry)
+        {
+            // Table range info not initialized, initialize range info first
+            cc_shard->FetchTableRanges(
+                range_table_name, cc_request, cc_ng_id, cc_ng_term);
+            pin_status = RangeSliceOpStatus::BlockedOnLoad;
+            return RangeSliceId();
+        }
+        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
+        TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
+        if (store_range == nullptr)
+        {
+            // Check if range is owned by cc_ng_id. If so, load range slices
+            // from data store
+            if (GetBucketInfoInternal(
+                    Sharder::Instance().MapRangeIdToBucketId(
+                        range_entry->GetRangeInfo()->PartitionId()),
+                    cc_ng_id)
+                    ->BucketOwner() == cc_ng_id)
+            {
+                // release shared lock since FetchRangeSlices will acquire
+                // unique lock.
+                range_lk.unlock();
+                range_entry->FetchRangeSlices(range_table_name,
+                                              cc_request,
+                                              cc_ng_id,
+                                              cc_ng_term,
+                                              cc_shard);
+                pin_status = RangeSliceOpStatus::BlockedOnLoad;
+            }
+            else
+            {
+                pin_status = RangeSliceOpStatus::NotOwner;
+            }
+            return RangeSliceId();
+        }
+
+        store_range->UpdateLastAccessedTs(ClockTs());
+        const StoreSlice *last_pinned_slice;
+        return store_range->PinSlices(table_name,
+                                      cc_ng_term,
+                                      key,
+                                      inclusive,
+                                      nullptr,
+                                      false,
+                                      key_schema,
+                                      rec_schema,
+                                      schema_ts,
+                                      INT64_MAX,
+                                      kv_info,
+                                      cc_request,
+                                      cc_shard,
+                                      store_hd_,
+                                      force_load,
+                                      prefetch_size,
+                                      1,
+                                      true,
+                                      pin_status,
+                                      last_pinned_slice);
+    }
+
+    template <typename KeyT>
     RangeSliceId PinRangeSlices(const TableName &table_name,
                                 NodeGroupId cc_ng_id,
                                 int64_t cc_ng_term,
@@ -751,9 +748,9 @@ public:
                                 uint64_t schema_ts,
                                 const KVCatalogInfo *kv_info,
                                 uint32_t range_id,
-                                const TxKey &start_key,
+                                const KeyT &start_key,
                                 bool start_inclusive,
-                                const TxKey *end_key,
+                                const KeyT *end_key,
                                 bool end_inclusive,
                                 CcRequestBase *cc_request,
                                 CcShard *cc_shard,
@@ -762,7 +759,81 @@ public:
                                 uint8_t max_pin_cnt,
                                 bool forward_pin,
                                 RangeSliceOpStatus &pin_status,
-                                const StoreSlice *&last_pinned_slice);
+                                const StoreSlice *&last_pinned_slice)
+    {
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+
+        TableName range_table_name(table_name.StringView(),
+                                   TableType::RangePartition);
+
+        TemplateTableRangeEntry<KeyT> *range_entry =
+            static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(
+                    range_table_name, cc_ng_id, range_id));
+        if (!range_entry)
+        {
+            // Table range info not initialized, initialize range info first
+            cc_shard->FetchTableRanges(
+                range_table_name, cc_request, cc_ng_id, cc_ng_term);
+            pin_status = RangeSliceOpStatus::BlockedOnLoad;
+            return RangeSliceId();
+        }
+        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
+        TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
+        if (store_range == nullptr)
+        {
+            // Check if range is owned by cc_ng_id. If so, load range slices
+            // from data store
+            if (GetBucketInfoInternal(
+                    Sharder::Instance().MapRangeIdToBucketId(
+                        range_entry->GetRangeInfo()->PartitionId()),
+                    cc_ng_id)
+                    ->BucketOwner() == cc_ng_id)
+            {
+                // release shared lock since FetchRangeSlices will acquire
+                // unique lock.
+                range_lk.unlock();
+                range_entry->FetchRangeSlices(range_table_name,
+                                              cc_request,
+                                              cc_ng_id,
+                                              cc_ng_term,
+                                              cc_shard);
+                pin_status = RangeSliceOpStatus::BlockedOnLoad;
+            }
+            else
+            {
+                pin_status = RangeSliceOpStatus::NotOwner;
+            }
+            return RangeSliceId();
+        }
+        uint64_t snapshot_ts = 0;
+        if (EnableMvcc())
+        {
+            snapshot_ts = TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
+        }
+
+        store_range->UpdateLastAccessedTs(ClockTs());
+        return store_range->PinSlices(table_name,
+                                      cc_ng_term,
+                                      start_key,
+                                      start_inclusive,
+                                      end_key,
+                                      end_inclusive,
+                                      key_schema,
+                                      rec_schema,
+                                      schema_ts,
+                                      snapshot_ts,
+                                      kv_info,
+                                      cc_request,
+                                      cc_shard,
+                                      store_hd_,
+                                      force_load,
+                                      prefetch_size,
+                                      max_pin_cnt,
+                                      forward_pin,
+                                      pin_status,
+                                      last_pinned_slice);
+    }
 
     uint64_t CountRanges(const TableName &table_name,
                          const NodeGroupId ng_id,
@@ -785,7 +856,7 @@ public:
                    uint64_t node_group,
                    std::vector<FlushRecord> *ckpt_vec,
                    std::vector<FlushRecord> *archive_vec,
-                   std::vector<const TxKey *> *mv_vec,
+                   std::vector<TxKey> *mv_vec,
                    CcHandlerResult<Void> &hres,
                    bool delay_update_ckpt_ts);
 
@@ -872,9 +943,28 @@ public:
     std::shared_ptr<TableSchema> GetSharedTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
 
+    template <typename KeyT>
     bool KickoutKeyInSlice(const TableName &tbl_name,
                            const NodeGroupId ng_id,
-                           const TxKey &key);
+                           const KeyT &key)
+    {
+        std::shared_lock<std::shared_mutex> s_lk(meta_data_mux_);
+
+        TableName range_tbl_name(tbl_name.StringView(),
+                                 TableType::RangePartition);
+        TxKey tx_key(&key);
+        TemplateTableRangeEntry<KeyT> *entry =
+            static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(range_tbl_name, ng_id, tx_key));
+        if (entry == nullptr)
+        {
+            return true;
+        }
+        else
+        {
+            return entry->KickoutKeyInSlice(key);
+        }
+    }
 
     /**
      * Create table statistics and bind it to table_schema
@@ -890,8 +980,7 @@ public:
         TableSchema *table_schema,
         TableSchema *dirty_table_schema,
         NodeGroupId ng_id,
-        std::unordered_map<TableName,
-                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+        std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
             sample_pool_map,
         CcShard *ccs);
 
@@ -1037,7 +1126,7 @@ private:
     TableRangeEntry *GetTableRangeEntryInternal(
         const TableName &range_table_name,
         const NodeGroupId ng_id,
-        const TxKey *key);
+        const TxKey &key);
 
     TableRangeEntry *GetTableRangeEntryInternal(
         const TableName &range_table_name,
@@ -1048,9 +1137,8 @@ private:
         *GetTableRangeIdsForATableInternal(const TableName &range_table_name,
                                            const NodeGroupId ng_id);
 
-    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
-        *GetTableRangesForATableInternal(const TableName &range_table_name,
-                                         const NodeGroupId ng_id);
+    std::map<TxKey, TableRangeEntry::uptr> *GetTableRangesForATableInternal(
+        const TableName &range_table_name, const NodeGroupId ng_id);
 
     // These 2 FindRange should only be used when we need to update range and
     // slice spec during data sync of a range. StoreRange should not be accessed
@@ -1157,11 +1245,10 @@ private:
         table_catalogs_;  // string owner
 
     // map<table name, map<partition id, range record>>
-    std::unordered_map<
-        TableName,
-        std::unordered_map<
-            NodeGroupId,
-            std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>>>
+    std::unordered_map<TableName,
+                       std::unordered_map<NodeGroupId,
+                                          std::map<TxKey,
+                                                   TableRangeEntry::uptr>>>
         table_ranges_;  // string owner
 
     // map from range id to TableRangeEntry. TableRangeEntry* here is the
@@ -1338,7 +1425,7 @@ private:
         std::vector<FlushRecord> &data_sync_vec,
         uint64_t data_sync_ts,
         StoreRange *store_range,
-        std::vector<const TxKey *> &splitting_info);
+        std::vector<TxKey> &splitting_info);
     /**
      * @brief Worker thread that split the target range and flush the data into
      * data store in their new partitions. This is called during checkpoint on a
@@ -1350,11 +1437,11 @@ private:
                          NodeGroupId node_group,
                          TransactionExecution *txm,
                          TableRangeEntry *range_entry,
-                         std::vector<const TxKey *> &&split_keys,
+                         std::vector<TxKey> &&split_keys,
                          std::shared_ptr<DataSyncTask> data_sync_task,
                          std::vector<FlushRecord> &&previous_data_sync_vec,
                          std::vector<FlushRecord> &&previous_archive_vec,
-                         std::vector<const TxKey *> &&previous_mv_base_vec,
+                         std::vector<TxKey> &&previous_mv_base_vec,
                          std::shared_ptr<void> defer_unpin);
 
     struct UpdateSliceSpecWork
@@ -1437,9 +1524,9 @@ private:
     public:
         FlushDataTask(std::shared_ptr<DataSyncTask> data_sync_task,
                       const TableSchema *schema,
-                      std::unique_ptr<std::vector<FlushRecord>> &&data_sync_vec,
-                      std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
-                      std::unique_ptr<std::vector<const TxKey *>> &&mv_base_vec,
+                      std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
+                      std::unique_ptr<std::vector<FlushRecord>> archive_vec,
+                      std::unique_ptr<std::vector<TxKey>> mv_base_vec,
                       TransactionExecution *data_sync_txm,
                       bool delay_update_ckpt_ts,
                       size_t scan_task_worker_idx)
@@ -1467,7 +1554,7 @@ private:
                       const TableSchema *schema,
                       std::vector<FlushRecord> *data_sync_vec,
                       std::vector<FlushRecord> *archive_vec,
-                      std::vector<const TxKey *> *mv_base_vec,
+                      std::vector<TxKey> *mv_base_vec,
                       CcHandlerResult<Void> *res,
                       bool delay_update_ckpt_ts)
             : node_group_id_(node_group_id),
@@ -1491,10 +1578,10 @@ private:
         const TableSchema *schema_;
         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
-        std::unique_ptr<std::vector<const TxKey *>> mv_base_vec_{nullptr};
+        std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
         std::vector<FlushRecord> *data_sync_vec_ptr_{nullptr};
         std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
-        std::vector<const TxKey *> *mv_base_vec_ptr_{nullptr};
+        std::vector<TxKey> *mv_base_vec_ptr_{nullptr};
         bool vec_owner_{true};
         bool delay_update_ckpt_ts_{false};
         size_t scan_task_worker_idx_{0};

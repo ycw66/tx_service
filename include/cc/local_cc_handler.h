@@ -99,7 +99,7 @@ public:
                       uint16_t command_id,
                       uint64_t commit_ts,
                       const TableName &table_name,
-                      const TxKey *key,
+                      const TxKey &key,
                       const TxRecord *record,
                       OperationType operation_type,
                       uint32_t key_shard_code,

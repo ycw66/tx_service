@@ -2,18 +2,17 @@
 
 #include <cstddef>
 #include <memory>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "catalog_factory.h"
 #include "cc/cc_entry.h"
+#include "cc_handler_result.h"
 #include "range_record.h"
-#include "range_slice.h"
+// #include "range_slice.h"
 #include "store/data_store_scanner.h"
 #include "tx_key.h"
-#include "tx_operation_result.h"
 #include "tx_record.h"
 #include "tx_service_metrics.h"
 #include "type.h"
@@ -165,7 +164,7 @@ public:
     virtual bool UpsertTableStatistics(
         const TableName &ccm_table_name,
         const std::unordered_map<TableName,
-                                 std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+                                 std::pair<uint64_t, std::vector<TxKey>>>
             &sample_pool_map,
         uint64_t version) = 0;
 
@@ -178,12 +177,11 @@ public:
         return LoadRangeSliceStatus::Error;
     }
 
-    virtual bool UpdateRangeSlices(
-        const TableName &table_name,
-        uint64_t schema_ts,
-        const TxKey *range_start_key,
-        const std::vector<std::unique_ptr<StoreSlice>> &slices,
-        bool update_slice_keys)
+    virtual bool UpdateRangeSlices(const TableName &table_name,
+                                   uint64_t schema_ts,
+                                   TxKey range_start_key,
+                                   std::vector<const StoreSlice *> slices,
+                                   bool update_slice_keys)
     {
         return false;
     }
@@ -192,12 +190,9 @@ public:
      * @brief Upsert list of ranges into range table. This will also update
      * range slice sizes.
      */
-    virtual bool UpsertRanges(
-        const TableName &table_name,
-        std::vector<
-            std::tuple<const TxKey *, int32_t, std::vector<StoreSlice *>>>
-            range_info,
-        uint64_t version)
+    virtual bool UpsertRanges(const TableName &table_name,
+                              std::vector<SplitRangeInfo> range_info,
+                              uint64_t version)
     {
         return false;
     }
@@ -241,7 +236,7 @@ public:
      * @brief Copy record from base/sk table to mvcc_archives.
      */
     virtual bool CopyBaseToArchive(
-        std::vector<const TxKey *> &batch,
+        std::vector<TxKey> &batch,
         uint32_t node_group,
         const txservice::TableName &table_name,
         const txservice::TableSchema *table_schema) = 0;

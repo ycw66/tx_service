@@ -131,9 +131,9 @@ public:
 
                     // The request is toward a special cc map that contains a
                     // table's range meta data.
-                    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
-                        *ranges = ccs.GetTableRangesForATable(*table_name_,
-                                                              node_group_id_);
+                    std::map<TxKey, TableRangeEntry::uptr> *ranges =
+                        ccs.GetTableRangesForATable(*table_name_,
+                                                    node_group_id_);
                     if (ranges != nullptr)
                     {
                         ccs.CreateOrUpdateRangeCcMap(*table_name_,
@@ -290,7 +290,7 @@ struct AcquireCc
 {
 public:
     AcquireCc()
-        : key_(nullptr),
+        : key_ptr_(nullptr),
           key_str_(nullptr),
           key_shard_code_(0),
           ts_(0),
@@ -319,7 +319,7 @@ public:
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
             tname, res, ng_id, txn, tx_term, proto, iso_level);
 
-        key_ = key;
+        key_ptr_ = key->KeyPtr();
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
         ts_ = ts;
@@ -345,7 +345,7 @@ public:
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
             tname, res, ng_id, txn, tx_term, proto);
 
-        key_ = nullptr;
+        key_ptr_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
         ts_ = ts;
@@ -355,9 +355,9 @@ public:
         is_local_ = false;
     }
 
-    const TxKey *Key() const
+    const void *Key() const
     {
-        return key_;
+        return key_ptr_;
     }
 
     const std::string *KeyStr() const
@@ -401,7 +401,7 @@ public:
     }
 
 private:
-    const TxKey *key_;
+    const void *key_ptr_;
     const std::string *key_str_;
     uint32_t key_shard_code_;
     uint64_t ts_;
@@ -443,11 +443,11 @@ public:
         TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
             tname, res, node_group_id, tx_number, tx_term, proto, iso_level);
 
-        key_ = key;
+        key_ptr_ = key->KeyPtr();
         key_str_ = nullptr;
         key_str_type_ = nullptr;
         is_insert_ = is_insert;
-        decoded_key_ = nullptr;
+        decoded_key_ = TxKey();
         cc_op_ = cc_op;
         cce_ptr_.clear();
         cce_ptr_.resize(core_cnt, nullptr);
@@ -471,11 +471,11 @@ public:
         TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
             tname, res, node_group_id, tx_number, tx_term, proto, iso_level);
 
-        key_ = nullptr;
+        key_ptr_ = nullptr;
         key_str_ = key_str;
         key_str_type_ = key_str_type;
         is_insert_ = is_insert;
-        decoded_key_ = nullptr;
+        decoded_key_ = TxKey();
         cc_op_ = cc_op;
         cce_ptr_.clear();
         cce_ptr_.resize(core_cnt, nullptr);
@@ -483,9 +483,9 @@ public:
         res->Value().last_vali_ts_ = 0;
     }
 
-    const TxKey *Key() const
+    const void *Key() const
     {
-        return key_;
+        return key_ptr_;
     }
 
     const std::string *KeyStr() const
@@ -508,20 +508,16 @@ public:
         return cc_op_;
     }
 
-    TxKey *DecodedKey() const
+    void SetDecodedKey(TxKey decoded_key)
     {
-        return decoded_key_ == nullptr ? nullptr : decoded_key_.get();
-    }
-
-    void SetDecodedKey(std::unique_ptr<TxKey> decoded_key)
-    {
+        assert(decoded_key.IsOwner());
         decoded_key_ = std::move(decoded_key);
-        key_ = decoded_key_.get();
+        key_ptr_ = decoded_key_.KeyPtr();
     }
 
-    void SetTxKey(const TxKey *key)
+    void SetTxKey(const void *key)
     {
-        key_ = key;
+        key_ptr_ = key;
     }
 
     void SetCcePtr(LruEntry *ptr, uint16_t idx)
@@ -548,10 +544,10 @@ public:
     }
 
 private:
-    const TxKey *key_{nullptr};
+    const void *key_ptr_{nullptr};
     const std::string *key_str_{nullptr};
     const KeyType *key_str_type_{nullptr};
-    std::unique_ptr<TxKey> decoded_key_{nullptr};
+    TxKey decoded_key_{};
     bool is_insert_{false};
     CcOperation cc_op_{CcOperation::Write};
     // The pointer of the cc entry to which this request is directed. The
@@ -678,7 +674,7 @@ public:
             ng_term);
 
         cce_addr_ = nullptr;
-        key_ = key;
+        key_ = key != nullptr ? key->KeyPtr() : nullptr;
         commit_ts_ = ts;
         payload_ = rec;
         operation_type_ = operation_type;
@@ -775,7 +771,7 @@ public:
         return key_shard_code_;
     }
 
-    const TxKey *Key() const
+    const void *Key() const
     {
         return is_remote_ ? nullptr : key_;
     }
@@ -804,7 +800,7 @@ private:
     uint32_t key_shard_code_;
     union
     {
-        const TxKey *key_;
+        const void *key_;
         const std::string *key_str_;
     };
 };
@@ -831,10 +827,10 @@ public:
         TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
             tname, res, node_group_id, tx_number, tx_term, CcProtocol::OCC);
 
-        key_ = key;
+        key_ = key->KeyPtr();
         key_str_ = nullptr;
         key_str_type_ = nullptr;
-        decoded_key_ = nullptr;
+        decoded_key_ = TxKey();
         commit_ts_ = ts;
         payload_ = rec;
         payload_str_ = nullptr;
@@ -857,10 +853,10 @@ public:
         TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
             tname, res, node_group_id, tx_number, tx_term, CcProtocol::OCC);
 
-        key_ = key;
+        key_ = key->KeyPtr();
         key_str_type_ = nullptr;
         key_str_ = nullptr;
-        decoded_key_ = nullptr;
+        decoded_key_ = TxKey();
         commit_ts_ = ts;
         payload_ = rec.get();
         payload_str_ = nullptr;
@@ -887,7 +883,7 @@ public:
         key_ = nullptr;
         key_str_ = key_str;
         key_str_type_ = key_str_type;
-        decoded_key_ = nullptr;
+        decoded_key_ = TxKey();
         commit_ts_ = ts;
         payload_ = nullptr;
         payload_str_ = rec;
@@ -916,12 +912,12 @@ public:
         return op_type_;
     }
 
-    void SetTxKey(const TxKey *key)
+    void SetTxKey(const void *key)
     {
         key_ = key;
     }
 
-    const TxKey *Key() const
+    const void *Key() const
     {
         return key_;
     }
@@ -936,15 +932,10 @@ public:
         return key_str_type_;
     }
 
-    const TxKey *DecodedKey() const
-    {
-        return decoded_key_ == nullptr ? nullptr : decoded_key_.get();
-    }
-
-    void SetDecodedKey(std::unique_ptr<TxKey> decoded_key)
+    void SetDecodedKey(TxKey decoded_key)
     {
         decoded_key_ = std::move(decoded_key);
-        key_ = decoded_key_.get();
+        key_ = decoded_key_.KeyPtr();
     }
 
     const TxRecord *DecodedPayload() const
@@ -969,10 +960,10 @@ public:
     }
 
 private:
-    const TxKey *key_{nullptr};
+    const void *key_{nullptr};
     const std::string *key_str_{nullptr};
     const KeyType *key_str_type_{nullptr};
-    std::unique_ptr<TxKey> decoded_key_{nullptr};
+    TxKey decoded_key_;
     uint64_t commit_ts_{0};
     TxRecord *payload_{nullptr};
     const std::string *payload_str_{nullptr};
@@ -1073,7 +1064,7 @@ struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>
 {
 public:
     ReadCc()
-        : key_(nullptr),
+        : key_ptr_(nullptr),
           key_str_(nullptr),
           rec_(nullptr),
           rec_str_(nullptr),
@@ -1157,7 +1148,7 @@ public:
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
             nullptr, res, ng_id, tx_number, tx_term, protocol, iso_level);
 
-        key_ = key;
+        key_ptr_ = key->KeyPtr();
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
         rec_ = rec;
@@ -1202,7 +1193,7 @@ public:
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
             nullptr, res, ng_id, tx_number, tx_term, protocol, iso_level);
 
-        key_ = nullptr;
+        key_ptr_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
         rec_ = nullptr;
@@ -1247,7 +1238,7 @@ public:
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
             nullptr, res, ng_id, tx_number, tx_term, protocol, iso_level);
 
-        key_ = nullptr;
+        key_ptr_ = nullptr;
         key_str_ = &key_str;
         key_shard_code_ = key_shard_code;
         rec_ = rec;
@@ -1278,9 +1269,9 @@ public:
         return key_shard_code_;
     }
 
-    const TxKey *Key() const
+    const void *Key() const
     {
-        return key_;
+        return key_ptr_;
     }
 
     const std::string *KeyBlob() const
@@ -1369,7 +1360,7 @@ public:
     }
 
 private:
-    const TxKey *key_;
+    const void *key_ptr_;
     const std::string *key_str_;
     /**
      * @brief The key sharding code shards a key into one of the cores in the tx
@@ -1441,7 +1432,7 @@ public:
             tn, res, ng_id, tx_number, term, protocol, iso_level);
 
         index_type_ = type;
-        start_key_ = start_key;
+        start_key_ = start_key->KeyPtr();
         inclusive_ = inclusive;
         direct_ = direction;
         ts_ = ts;
@@ -1515,7 +1506,7 @@ public:
 
 private:
     ScanIndexType index_type_{ScanIndexType::Primary};
-    const TxKey *start_key_{nullptr};
+    const void *start_key_{nullptr};
     bool inclusive_{false};
     ScanDirection direct_{ScanDirection::Forward};
     uint64_t ts_{0};
@@ -1746,11 +1737,11 @@ public:
     {
         if (start_key_type_ == RangeKeyType::UniquePtr)
         {
-            start_key_uptr_ = nullptr;
+            start_key_uptr_.~TxKey();
         }
         if (end_key_type_ == RangeKeyType::UniquePtr)
         {
-            end_key_uptr_ = nullptr;
+            end_key_uptr_.~TxKey();
         }
     }
 
@@ -1781,17 +1772,17 @@ public:
 
         if (start_key_type_ == RangeKeyType::UniquePtr)
         {
-            start_key_uptr_ = nullptr;
+            start_key_uptr_.~TxKey();
         }
-        start_key_ = start_key;
+        start_key_ = start_key != nullptr ? start_key->KeyPtr() : nullptr;
         start_key_type_ = RangeKeyType::RawPtr;
         start_inclusive_ = start_inclusive;
 
         if (end_key_type_ == RangeKeyType::UniquePtr)
         {
-            end_key_uptr_ = nullptr;
+            end_key_uptr_.~TxKey();
         }
-        end_key_ = end_key;
+        end_key_ = end_key != nullptr ? end_key->KeyPtr() : nullptr;
         end_key_type_ = RangeKeyType::RawPtr;
         end_inclusive_ = end_inclusive;
 
@@ -1836,7 +1827,7 @@ public:
 
         if (start_key_type_ == RangeKeyType::UniquePtr)
         {
-            start_key_uptr_ = nullptr;
+            start_key_uptr_.~TxKey();
         }
         start_key_str_ = start_key_str;
         start_key_type_ = RangeKeyType::Binary;
@@ -1844,7 +1835,7 @@ public:
 
         if (end_key_type_ == RangeKeyType::UniquePtr)
         {
-            end_key_uptr_ = nullptr;
+            end_key_uptr_.~TxKey();
         }
         end_key_str_ = end_key_str;
         end_key_type_ = RangeKeyType::Binary;
@@ -1977,7 +1968,7 @@ public:
         }
     }
 
-    const TxKey *StartKey() const
+    const void *StartKey() const
     {
         switch (start_key_type_)
         {
@@ -1986,13 +1977,13 @@ public:
         case RangeKeyType::Binary:
             return nullptr;
         case RangeKeyType::UniquePtr:
-            return start_key_uptr_.get();
+            return start_key_uptr_.KeyPtr();
         default:
             return nullptr;
         }
     }
 
-    const TxKey *EndKey() const
+    const void *EndKey() const
     {
         switch (end_key_type_)
         {
@@ -2001,7 +1992,7 @@ public:
         case RangeKeyType::Binary:
             return nullptr;
         case RangeKeyType::UniquePtr:
-            return end_key_uptr_.get();
+            return end_key_uptr_.KeyPtr();
         default:
             return nullptr;
         }
@@ -2018,7 +2009,7 @@ public:
         return end_key_type_ == RangeKeyType::Binary ? end_key_str_ : nullptr;
     }
 
-    void SetStartKey(std::unique_ptr<TxKey> start_key)
+    void SetStartKey(TxKey start_key)
     {
         if (start_key_type_ == RangeKeyType::UniquePtr)
         {
@@ -2027,12 +2018,14 @@ public:
         else
         {
             start_key_type_ = RangeKeyType::UniquePtr;
-            (void) start_key_uptr_.release();
+            // Clears the ownership bit, so that the following move assignment
+            // does not accidentally trigger de-allocation.
+            start_key_uptr_.Release();
             start_key_uptr_ = std::move(start_key);
         }
     }
 
-    void SetEndKey(std::unique_ptr<TxKey> end_key)
+    void SetEndKey(TxKey end_key)
     {
         if (end_key_type_ == RangeKeyType::UniquePtr)
         {
@@ -2041,7 +2034,9 @@ public:
         else
         {
             end_key_type_ = RangeKeyType::UniquePtr;
-            (void) end_key_uptr_.release();
+            end_key_uptr_.Release();
+            // Clears the ownership bit, so that the following move assignment
+            // does not accidentally trigger de-allocation.
             end_key_uptr_ = std::move(end_key);
         }
     }
@@ -2266,7 +2261,7 @@ public:
     }
 
 private:
-    enum struct RangeKeyType
+    enum struct RangeKeyType : uint8_t
     {
         RawPtr,
         Binary,
@@ -2275,39 +2270,40 @@ private:
 
     union
     {
-        const TxKey *start_key_;
+        const void *start_key_;
         const std::string *start_key_str_;
-        std::unique_ptr<TxKey> start_key_uptr_;
+        TxKey start_key_uptr_;
     };
 
     union
     {
-        const TxKey *end_key_;
+        const void *end_key_;
         const std::string *end_key_str_;
-        std::unique_ptr<TxKey> end_key_uptr_;
+        TxKey end_key_uptr_;
     };
 
     RangeKeyType start_key_type_;
     RangeKeyType end_key_type_;
-
-    uint32_t range_id_{0};
-    ScanDirection direction_{ScanDirection::Forward};
-
-    uint64_t ts_{0};
-
     bool start_inclusive_{false};
     bool end_inclusive_{false};
 
+    ScanDirection direction_{ScanDirection::Forward};
     /**
      * @brief Number of slices to prefetch when a cache-miss slice is loaded.
      *
      */
     uint8_t prefetch_size_{0};
     bool read_for_write_{false};
+    bool is_covering_keys_{false};
+
+    uint32_t range_id_{0};
 
     std::atomic<uint16_t> unfinished_core_cnt_{1};
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
+
+    uint64_t ts_{0};
+
     const StoreSlice *last_pinned_slice_{nullptr};
-    bool is_covering_keys_{false};
 
     int64_t cc_ng_term_{-1};
 
@@ -2320,7 +2316,6 @@ private:
     std::vector<ScanBlockingInfo> blocking_vec_;
 
     RangeSliceId range_slice_id_;
-    CcErrorCode err_{CcErrorCode::NO_ERROR};
 };
 
 struct CkptTsCc : public CcRequestBase
@@ -2500,7 +2495,7 @@ public:
             if (tuple_idx == tuple_cnt)
             {
                 auto [scan_end, is_set] = scan_slice_result.PeekLastKey();
-                assert(is_set);
+                assert(is_set && scan_end != nullptr);
 
                 // For remote scans, the scan result is a string representation
                 // of scanned key-value pairs. It may include keys beyond the
@@ -2509,28 +2504,30 @@ public:
                 // the scan's end.
                 if (range_scanner.Direction() == ScanDirection::Forward)
                 {
-                    assert(scan_end == nullptr ||
+                    assert(scan_end->KeyPtr() == nullptr ||
                            scan_slice_result.slice_position_ ==
                                txservice::SlicePosition::Middle ||
                            scan_slice_result.slice_position_ ==
                                txservice::SlicePosition::LastSliceInRange);
 
-                    while (scan_end != nullptr && shard_cache->Size() > 0 &&
-                           *scan_end < *shard_cache->LastTuple()->Key())
+                    while (scan_end->KeyPtr() != nullptr &&
+                           shard_cache->Size() > 0 &&
+                           *scan_end < shard_cache->LastTuple()->Key())
                     {
                         shard_cache->RemoveLast();
                     }
                 }
                 else
                 {
-                    assert(scan_end == nullptr ||
+                    assert(scan_end->KeyPtr() == nullptr ||
                            scan_slice_result.slice_position_ ==
                                txservice::SlicePosition::Middle ||
                            scan_slice_result.slice_position_ ==
                                txservice::SlicePosition::FirstSliceInRange);
 
-                    while (scan_end != nullptr && shard_cache->Size() > 0 &&
-                           *shard_cache->LastTuple()->Key() < *scan_end)
+                    while (scan_end->KeyPtr() != nullptr &&
+                           shard_cache->Size() > 0 &&
+                           shard_cache->LastTuple()->Key() < *scan_end)
                     {
                         shard_cache->RemoveLast();
                     }
@@ -2729,7 +2726,11 @@ public:
                 mv_base_idx_vec_.emplace_back();
                 mv_base_idx_vec_.back().reserve(scan_batch_size);
             }
+#ifdef RANGE_PARTITION_ENABLED
+            pause_pos_.emplace_back(TxKey(), false);
+#else
             pause_pos_.emplace_back(nullptr, false);
+#endif
             accumulated_scan_cnt_.emplace_back(0);
         }
 
@@ -2810,7 +2811,7 @@ public:
     }
 
 #ifdef RANGE_PARTITION_ENABLED
-    std::pair<TxKey::Uptr, bool> &PausePos(size_t core_idx)
+    std::pair<TxKey, bool> &PausePos(size_t core_idx)
 #else
     std::pair<LruEntry *, bool> &PausePos(size_t core_idx)
 #endif
@@ -2971,13 +2972,13 @@ private:
 
     // Start/end key of target range if the scan is on a range only, nullptr if
     // it's on entire table.
-    const TxKey *start_key_;
-    const TxKey *end_key_;
+    const TxKey *start_key_{nullptr};
+    const TxKey *end_key_{nullptr};
     // Position that we left off during last round of ckpt scan.
     // pause_pos_.first is the key that we stopped at (has not been scanned
     // though), bool is if this core has finished scanning all keys already.
 #ifdef RANGE_PARTITION_ENABLED
-    std::vector<std::pair<TxKey::Uptr, bool>> pause_pos_;
+    std::vector<std::pair<TxKey, bool>> pause_pos_;
 #else
     std::vector<std::pair<LruEntry *, bool>> pause_pos_;
 #endif
@@ -3007,69 +3008,6 @@ private:
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::DataSyncScanCc *r);
-};
-
-// This cc request is used to convert parallel access on ccmap/samplepool into
-// serial access.
-struct RunOnTxProcessorCc : public CcRequestBase
-{
-public:
-    explicit RunOnTxProcessorCc(std::function<void(CcShard &ccs)> task)
-        : task_(std::move(task)), is_finished_(false), mux_(), cv_()
-    {
-    }
-
-    void Reset()
-    {
-        is_finished_ = false;
-        error_code_ = CcErrorCode::NO_ERROR;
-    }
-
-    void Wait()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this]() { return is_finished_; });
-    }
-
-    bool IsError()
-    {
-        std::lock_guard<std::mutex> lk(mux_);
-        return error_code_ != CcErrorCode::NO_ERROR;
-    }
-
-    CcErrorCode ErrorCode()
-    {
-        std::lock_guard<std::mutex> lk(mux_);
-        return error_code_;
-    }
-
-    void AbortCcRequest(CcErrorCode error_code) override
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        is_finished_ = true;
-        error_code_ = error_code;
-        cv_.notify_one();
-    }
-
-    bool Execute(CcShard &ccs) override
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-
-        task_(ccs);
-
-        error_code_ = CcErrorCode::NO_ERROR;
-        is_finished_ = true;
-        cv_.notify_one();
-
-        return false;
-    }
-
-private:
-    std::function<void(CcShard &ccs)> task_;
-    bool is_finished_{false};
-    CcErrorCode error_code_{CcErrorCode::NO_ERROR};
-    std::mutex mux_;
-    std::condition_variable cv_;
 };
 
 struct NegotiateCc : public CcRequestBase
@@ -3634,35 +3572,35 @@ public:
 
         TableName range_table_name(table_name_->StringView(),
                                    TableType::RangePartition);
-        std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
-            *range_map = shard->GetTableRangesForATable(range_table_name,
-                                                        node_group_id_);
+        std::map<TxKey, TableRangeEntry::uptr> *range_map =
+            shard->GetTableRangesForATable(range_table_name, node_group_id_);
 
         for (auto &[range_key, range_entry] : *range_map)
         {
-            uint32_t partition_id = range_entry.GetRangeInfo()->PartitionId();
+            uint32_t partition_id = range_entry->GetRangeInfo()->PartitionId();
             uint32_t bucket_owner =
                 shard->GetRangeOwner(partition_id, node_group_id_)
                     ->BucketOwner();
             if (bucket_owner == node_group_id_)
             {
-                bool pinned = pinned_store_ranges_.count(&range_entry) > 0;
+                bool pinned = pinned_store_ranges_.count(range_entry.get()) > 0;
                 if (!pinned)
                 {
                     // Pin store range so that it cannot be kicked out
                     // during analyze.
-                    const StoreRange *store_range = range_entry.PinStoreRange();
+                    const StoreRange *store_range =
+                        range_entry->PinStoreRange();
                     if (store_range)
                     {
-                        pinned_store_ranges_.insert(&range_entry);
+                        pinned_store_ranges_.insert(range_entry.get());
                     }
                     else
                     {
-                        range_entry.FetchRangeSlices(range_table_name,
-                                                     this,
-                                                     node_group_id_,
-                                                     ng_term_,
-                                                     shard);
+                        range_entry->FetchRangeSlices(range_table_name,
+                                                      this,
+                                                      node_group_id_,
+                                                      ng_term_,
+                                                      shard);
                         all_pinned = false;
                         break;
                     }
@@ -3695,7 +3633,7 @@ private:
         pinned_store_ranges_.clear();
         pin_slice_idx_ = 0;
         pinned_slice_id_.Reset();
-        continue_key_.reset(nullptr);
+        continue_key_ = TxKey();
         visit_keys_ = 0;
         visit_slices_ = 0;
     }
@@ -3711,7 +3649,7 @@ public:
     size_t pin_slice_idx_{0};
     RangeSliceId pinned_slice_id_;
 
-    std::unique_ptr<TxKey> continue_key_{nullptr};
+    TxKey continue_key_;
 
     uint32_t visit_keys_{0};
     uint32_t visit_slices_{0};
@@ -4107,7 +4045,7 @@ public:
         res_ = res;
         for (uint16_t i = 0; i < core_cnt; ++i)
         {
-            resume_key_.emplace_back(nullptr);
+            resume_key_.emplace_back(TxKey());
         }
     }
 
@@ -4135,10 +4073,7 @@ public:
         resume_key_.clear();
         start_key_ = start_key;
         end_key_ = end_key;
-        for (uint16_t i = 0; i < core_cnt; ++i)
-        {
-            resume_key_.emplace_back(nullptr);
-        }
+        resume_key_.resize(core_cnt);
     }
 
     bool Execute(CcShard &ccs) override
@@ -4157,14 +4092,15 @@ public:
         }
     }
 
-    TxKey *ResumeKey(uint16_t core_id) const
+    const TxKey *ResumeKey(uint16_t core_id) const
     {
-        return resume_key_.at(core_id).get();
+        return &resume_key_.at(core_id);
     }
 
-    void SetResumeKey(const TxKey *key, uint16_t core_id)
+    void SetResumeKey(TxKey key, uint16_t core_id)
     {
-        resume_key_.at(core_id) = key->Clone();
+        assert(key.IsOwner());
+        resume_key_.at(core_id) = std::move(key);
     }
 
     const TxKey *StartKey() const
@@ -4190,18 +4126,23 @@ public:
         return false;
     }
 
-    bool IsCleanTarget(const TxKey *key, const LruEntry *entry)
+    template <typename KeyT>
+    bool IsCleanTarget(const KeyT &key, const LruEntry *entry)
     {
         switch (clean_type_)
         {
         case CleanType::CleanRangeData:
         {
-            if (start_key_ == nullptr || *start_key_ < *key ||
-                *start_key_ == *key)
+            const KeyT *start =
+                start_key_ != nullptr ? start_key_->GetKey<KeyT>() : nullptr;
+            const KeyT *end =
+                end_key_ != nullptr ? end_key_->GetKey<KeyT>() : nullptr;
+
+            if (start == nullptr || *start < key || *start == key)
             {
-                if (end_key_)
+                if (end)
                 {
-                    return *key < *end_key_;
+                    return key < *end;
                 }
                 else
                 {
@@ -4215,7 +4156,7 @@ public:
         case CleanType::CleanBucketData:
         {
             assert(bucket_ids_ && !bucket_ids_->empty());
-            uint16_t bucket_id = key->Hash() & 0x3FFF;
+            uint16_t bucket_id = key.Hash() & 0x3FFF;
             for (uint16_t id : *bucket_ids_)
             {
                 if (bucket_id == id)
@@ -4235,7 +4176,7 @@ public:
         }
     }
 
-    bool CanBeCleaned(const TxKey *key, const LruEntry *entry)
+    bool CanBeCleaned(const LruEntry *entry)
     {
         switch (clean_type_)
         {
@@ -4265,7 +4206,7 @@ private:
     uint64_t clean_ts_{0};
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
-    std::vector<TxKey::Uptr> resume_key_;
+    std::vector<TxKey> resume_key_;
     std::atomic_uint16_t unfinished_cnt_{0};
 };
 

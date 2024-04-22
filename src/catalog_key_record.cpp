@@ -2,7 +2,7 @@
 
 #include <butil/logging.h>
 
-#include "local_cc_shards.h"
+#include "data_sync_task.h"
 
 namespace txservice
 {
@@ -150,18 +150,17 @@ void CatalogKey::Deserialize(const char *buf, size_t &offset, const Schema *)
     }
     offset += sizeof(uint8_t);
 
-    table_name_ = std::move(TableName{str_view, table_type});
+    table_name_ = TableName{str_view, table_type};
 }
 
-TxKey::Uptr CatalogKey::Clone() const
+TxKey CatalogKey::CloneTxKey() const
 {
-    return std::make_unique<CatalogKey>(table_name_);
+    return TxKey(std::make_unique<CatalogKey>(table_name_));
 }
 
-void CatalogKey::Copy(const TxKey &rhs)
+void CatalogKey::Copy(const CatalogKey &rhs)
 {
-    const CatalogKey &typed_rhs = static_cast<const CatalogKey &>(rhs);
-    table_name_.CopyFrom(typed_rhs.table_name_);
+    table_name_.CopyFrom(rhs.table_name_);
 }
 
 std::string CatalogKey::ToString() const

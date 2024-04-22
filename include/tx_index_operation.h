@@ -32,6 +32,14 @@ struct UpsertTableIndexOp : public SchemaOp
                        OperationType op_type,
                        TransactionExecution *txm);
 
+    ~UpsertTableIndexOp()
+    {
+        if (!is_last_finished_key_str_)
+        {
+            last_finished_end_key_.~TxKey();
+        }
+    }
+
     void Forward(TransactionExecution *txm) override;
 
     void Reset(const std::string_view table_name_str,
@@ -128,7 +136,7 @@ struct UpsertTableIndexOp : public SchemaOp
     // The last finished end key.
     union
     {
-        const TxKey *last_finished_end_key_;
+        TxKey last_finished_end_key_;
         const std::string *last_finished_end_key_str_;
     };
     bool is_last_finished_key_str_;
@@ -151,16 +159,15 @@ private:
     bool NeedTriggerFlushSkOp()
     {
         return (scanned_pk_range_count_ % 60 == 0) ||
-               (last_scanned_end_key_ == nullptr ||
-                last_scanned_end_key_->Type() == KeyType::PositiveInf);
+               (last_scanned_end_key_.Type() == KeyType::PositiveInf);
     }
     void DispatchRangeTask(TransactionExecution *upsert_index_txm,
                            CcHandlerResult<Void> &hd_res);
     void HandleRangeTask(
         const TableName &base_table_name,
         int32_t partition_id,
-        const TxKey *range_start_key,
-        const TxKey *range_end_key,
+        TxKey range_start_key,
+        TxKey range_end_key,
         NodeGroupId range_owner,
         uint64_t scan_ts,
         uint64_t tx_number,
@@ -172,11 +179,11 @@ private:
         uint32_t &total_pk_items_count,
         uint32_t &dispatched_task_count,
         CcErrorCode &task_res,
-        std::function<void(const TxKey *batch_range_start_key,
-                           const TxKey *batch_range_end_key,
+        std::function<void(TxKey batch_range_start_key,
+                           TxKey batch_range_end_key,
                            const std::string *batch_range_start_key_str,
                            const std::string *batch_range_end_key_str,
-                           const TxKey *&last_scanned_end_key,
+                           TxKey &last_scanned_end_key,
                            bool &is_last_scanned_key_str,
                            size_t batch_range_cnt,
                            uint32_t &actual_task_cnt)> &dispatch_func);
@@ -201,7 +208,7 @@ private:
 
     union
     {
-        const TxKey *last_scanned_end_key_;
+        TxKey last_scanned_end_key_;
         const std::string *last_scanned_end_key_str_;
     };
     bool is_last_scanned_key_str_;

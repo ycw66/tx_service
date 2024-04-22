@@ -157,14 +157,25 @@ public:
                      std::vector<UnlockTuple> &unlock_vec);
 
     TxErrorCode Insert(const TableName &table_name,
-                       TxKey::Uptr key,
+                       TxKey tx_key,
                        TxRecord::Uptr rec);
 
+    template <typename KeyT>
     TxErrorCode TxUpsert(const TableName &table_name,
-                         TxKey::Uptr key,
+                         std::unique_ptr<KeyT> key,
                          TxRecord::Uptr rec,
                          OperationType op,
-                         bool check_unqiue = false);
+                         bool check_unqiue = false)
+    {
+        return rw_set_.AddWrite(
+            table_name, std::move(key), std::move(rec), op, check_unqiue);
+    }
+
+    TxErrorCode TxUpsert(const TableName &table_name,
+                         TxKey key,
+                         TxRecord::Uptr rec,
+                         OperationType op,
+                         bool check_unique);
 
     void TxRevert(const TableName &table_name, const TxKey &key);
 
@@ -356,14 +367,8 @@ private:
                    size_t alias,
                    const TableName &table_name);
 
-    void Update(const TableName &table_name,
-                TxKey::Uptr key,
-                TxRecord::Uptr rec);
-
-    void Delete(const TableName &table_name, TxKey::Uptr key);
-
     void Upsert(const TableName &table_name,
-                TxKey::Uptr key,
+                TxKey key,
                 TxRecord::Uptr rec,
                 OperationType op);
 

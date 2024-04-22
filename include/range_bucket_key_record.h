@@ -125,7 +125,7 @@ struct BucketMigrateInfo
     bool has_migration_tx_{false};
 };
 
-struct RangeBucketKey : public TxKey
+struct RangeBucketKey
 {
 public:
     RangeBucketKey() = default;
@@ -137,15 +137,15 @@ public:
     RangeBucketKey &operator=(RangeBucketKey &&) = default;
     ~RangeBucketKey() = default;
 
-    bool operator==(const TxKey &rhs) const override;
-    bool operator<(const TxKey &rhs) const override;
-    size_t Hash() const override;
-    void Serialize(std::vector<char> &buf, size_t &offset) const override;
-    void Serialize(std::string &str) const override;
-    size_t SerializedLength() const override;
-    void Deserialize(const char *buf, size_t &offset, const Schema *) override;
+    bool operator==(const TxKey &rhs) const;
+    bool operator<(const TxKey &rhs) const;
+    size_t Hash() const;
+    void Serialize(std::vector<char> &buf, size_t &offset) const;
+    void Serialize(std::string &str) const;
+    size_t SerializedLength() const;
+    void Deserialize(const char *buf, size_t &offset, const Schema *);
 #ifdef ON_KEY_OBJECT
-    std::string_view KVSerialize() const override
+    std::string_view KVSerialize() const
     {
         assert(false);
         return std::string_view();
@@ -155,16 +155,33 @@ public:
         assert(false);
     }
 #endif
-    TxKey::Uptr Clone() const override;
-    std::string ToString() const override;
-    void Copy(const TxKey &rhs) override;
-    KeyType Type() const override
+    TxKey CloneTxKey() const;
+    std::string ToString() const;
+    void Copy(const RangeBucketKey &rhs);
+    KeyType Type() const
     {
         return KeyType::Normal;
     }
-    size_t Size() const override
+    size_t Size() const
     {
         return sizeof(bucket_id_);
+    }
+
+    size_t MemUsage() const
+    {
+        return Size();
+    }
+
+    static const RangeBucketKey *NegativeInfinity()
+    {
+        static const RangeBucketKey neg_inf;
+        return &neg_inf;
+    }
+
+    static const RangeBucketKey *PositiveInfinity()
+    {
+        static const RangeBucketKey pos_inf;
+        return &pos_inf;
     }
 
     friend bool operator==(const RangeBucketKey &lhs,
@@ -174,6 +191,12 @@ public:
     friend bool operator<(const RangeBucketKey &lhs, const RangeBucketKey &rhs);
     friend bool operator<=(const RangeBucketKey &lhs,
                            const RangeBucketKey &rhs);
+
+    static const TxKeyInterface *TxKeyImpl()
+    {
+        static const TxKeyInterface tx_key_impl{RangeBucketKey()};
+        return &tx_key_impl;
+    }
 
     uint16_t bucket_id_{UINT16_MAX};
 };

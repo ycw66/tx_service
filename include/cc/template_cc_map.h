@@ -185,10 +185,9 @@ public:
         {
             // First time the request is processed.
 
-            const TxKey *req_key = req.Key();
-            if (req_key != nullptr)
+            if (req.Key() != nullptr)
             {
-                target_key = static_cast<const KeyT *>(req_key);
+                target_key = static_cast<const KeyT *>(req.Key());
             }
             else
             {
@@ -413,14 +412,9 @@ public:
             if (is_upload)
             {
                 // Find the cce location first
-                const TxKey *req_key = req.Key();
-                const KeyT *key;
+                const KeyT *key = static_cast<const KeyT *>(req.Key());
                 KeyT decoded_key;
-                if (req_key != nullptr)
-                {
-                    key = static_cast<const KeyT *>(req_key);
-                }
-                else
+                if (key == nullptr)
                 {
                     const std::string *key_str = req.KeyStr();
 
@@ -699,10 +693,9 @@ public:
             // First time the request is processed in this shard. Or the request
             // is blocked previously because the cc map is full.
 
-            const TxKey *req_key = req.Key();
-            if (req_key != nullptr)
+            if (req.Key() != nullptr)
             {
-                target_key = static_cast<const KeyT *>(req_key);
+                target_key = static_cast<const KeyT *>(req.Key());
             }
             else
             {
@@ -710,11 +703,11 @@ public:
                 switch (*req.KeyStrType())
                 {
                 case KeyType::NegativeInf:
-                    target_key = NegativeInfinity<KeyT>::Instance();
+                    target_key = KeyT::NegativeInfinity();
                     req.SetTxKey(target_key);
                     break;
                 case KeyType::PositiveInf:
-                    target_key = PositiveInfinity<KeyT>::Instance();
+                    target_key = KeyT::PositiveInfinity();
                     req.SetTxKey(target_key);
                     break;
                 case KeyType::Normal:
@@ -726,7 +719,7 @@ public:
                     decoded_key->Deserialize(
                         key_str->data(), offset, KeySchema());
                     target_key = decoded_key.get();
-                    req.SetDecodedKey(std::move(decoded_key));
+                    req.SetDecodedKey(TxKey(std::move(decoded_key)));
                     break;
                 }
             }
@@ -931,11 +924,11 @@ public:
             switch (*req.KeyStrType())
             {
             case KeyType::NegativeInf:
-                target_key = NegativeInfinity<KeyT>::Instance();
+                target_key = KeyT::NegativeInfinity();
                 req.SetTxKey(target_key);
                 break;
             case KeyType::PositiveInf:
-                target_key = PositiveInfinity<KeyT>::Instance();
+                target_key = KeyT::PositiveInfinity();
                 req.SetTxKey(target_key);
                 break;
             case KeyType::Normal:
@@ -945,7 +938,7 @@ public:
                 size_t offset = 0;
                 decoded_key->Deserialize(key_str->data(), offset, KeySchema());
                 target_key = decoded_key.get();
-                req.SetDecodedKey(std::move(decoded_key));
+                req.SetDecodedKey(TxKey(std::move(decoded_key)));
                 break;
             }
         }
@@ -1413,20 +1406,22 @@ public:
                         Type() == TableType::UniqueSecondary)
                     {
                         RangeSliceOpStatus pin_status;
-                        RangeSliceId slice_id = shard_->PinRangeSlice(
-                            table_name_,
-                            cc_ng_id_,
-                            ng_term,
-                            KeySchema(),
-                            RecordSchema(),
-                            schema_ts_,
-                            table_schema_->GetKVCatalogInfo(),
-                            *look_key,
-                            true,
-                            &req,
-                            pin_status,
-                            false,
-                            0);
+                        RangeSliceId slice_id =
+                            shard_->local_shards_.PinRangeSlice(
+                                table_name_,
+                                cc_ng_id_,
+                                ng_term,
+                                KeySchema(),
+                                RecordSchema(),
+                                schema_ts_,
+                                table_schema_->GetKVCatalogInfo(),
+                                *look_key,
+                                true,
+                                &req,
+                                shard_,
+                                pin_status,
+                                false,
+                                0);
 
                         if (pin_status == RangeSliceOpStatus::Successful)
                         {
@@ -2807,10 +2802,10 @@ public:
         switch (req.key_type_)
         {
         case KeyType::NegativeInf:
-            look_key = NegativeInfinity<KeyT>::Instance();
+            look_key = KeyT::NegativeInfinity();
             break;
         case KeyType::PositiveInf:
-            look_key = PositiveInfinity<KeyT>::Instance();
+            look_key = KeyT::PositiveInfinity();
             break;
         default:
             size_t offset = 0;
@@ -3496,15 +3491,15 @@ public:
                 req.StartKeyStr()->data(), offset, KeySchema());
             req_start_key = decoded_key.get();
 
-            req.SetStartKey(std::move(decoded_key));
+            req.SetStartKey(TxKey(std::move(decoded_key)));
         }
         else if (req.Direction() == ScanDirection::Forward)
         {
-            req_start_key = NegativeInfinity<KeyT>::Instance();
+            req_start_key = KeyT::NegativeInfinity();
         }
         else
         {
-            req_start_key = PositiveInfinity<KeyT>::Instance();
+            req_start_key = KeyT::PositiveInfinity();
         }
 
         const KeyT *req_end_key = nullptr;
@@ -3520,7 +3515,7 @@ public:
                 req.EndKeyStr()->data(), offset, KeySchema());
             req_end_key = decoded_end_key.get();
 
-            req.SetEndKey(std::move(decoded_end_key));
+            req.SetEndKey(TxKey(std::move(decoded_end_key)));
         }
 
         uint16_t core_id = shard_->LocalCoreId();
@@ -3592,7 +3587,7 @@ public:
             {
                 max_pin_cnt = shard_->core_cnt_;
             }
-            RangeSliceId slice_id = shard_->PinRangeSlices(
+            RangeSliceId slice_id = shard_->local_shards_.PinRangeSlices(
                 table_name_,
                 req.NodeGroupId(),
                 ng_term,
@@ -3606,6 +3601,7 @@ public:
                 req_end_key,
                 req.EndInclusive(),
                 &req,
+                shard_,
                 false,
                 req.PrefetchSize(),
                 max_pin_cnt,
@@ -3892,10 +3888,12 @@ public:
         }
 
         RangeScanSliceResult &slice_result = hd_res->Value();
-        auto [final_end_key, end_finalized] = slice_result.PeekLastKey();
+        auto [final_end_tx_key, end_finalized] = slice_result.PeekLastKey();
         if (req.Direction() == ScanDirection::Forward)
         {
-            const StoreSlice *last_slice = req.LastPinnedSlice();
+            const TemplateStoreSlice<KeyT> *last_slice =
+                static_cast<const TemplateStoreSlice<KeyT> *>(
+                    req.LastPinnedSlice());
 
             // The scan at core 0 sets the scan's end key. By default, the
             // scan's end is the exclusive end of the slice or the request's
@@ -3920,22 +3918,15 @@ public:
                 const KeyT *end = nullptr;
                 bool inclusive = false;
 
-                // The scan batch's end key has been finalized. If the final
-                // end key is null, it means that either the request specifies
-                // the end key, which falls into the slice, or the scanned slice
-                // is the last ending with positive infinity.
-                if (batch_end_key == nullptr)
+                assert(batch_end_key != nullptr);
+                // If the request specifies the end key and it is the scan
+                // batch's end key, the scan's inclusiveness is determined by
+                // the request. Or, the scan batch's end must be the exclusive
+                // end of a slice or positive infinity.
+                if (batch_end_key == req_end_key)
                 {
-                    if (req_end_key != nullptr)
-                    {
-                        end = req_end_key;
-                        inclusive = req_inclusive;
-                    }
-                    else
-                    {
-                        end = PositiveInfinity<KeyT>::Instance();
-                        inclusive = false;
-                    }
+                    end = req_end_key;
+                    inclusive = req_inclusive;
                 }
                 else
                 {
@@ -3954,12 +3945,8 @@ public:
                 // another core finishes earlier and finalizes the batch's end
                 // before this core. The final end may be smaller or greater
                 // than the initial end.
-                const KeyT *slice_end =
-                    static_cast<const KeyT *>(last_slice->EndKey());
-                if (slice_end == nullptr)
-                {
-                    slice_end = PositiveInfinity<KeyT>::Instance();
-                }
+                const KeyT *slice_end = last_slice->EndKey();
+                assert(slice_end != nullptr);
 
                 // If the request specifies the end key and it falls into the
                 // slice, initializes the local scan's end to the request's end
@@ -3982,7 +3969,7 @@ public:
                 // This scan batch's end key has been finalized by one of the
                 // cores. Deduces the local scan's end and inclusiveness.
                 std::tie(initial_end, init_end_inclusive) =
-                    deduce_scan_end(static_cast<const KeyT *>(final_end_key),
+                    deduce_scan_end(final_end_tx_key->GetKey<KeyT>(),
                                     req_end_key,
                                     req.EndInclusive());
             }
@@ -4087,18 +4074,20 @@ public:
                     // batches are needed. So, we pretend that the scan has
                     // reached the last slice ending with positive infinity.
                     // The calling tx will terminate the scan.
-                    if (initial_end == PositiveInfinity<KeyT>::Instance() ||
+                    if (initial_end == KeyT::PositiveInfinity() ||
                         req_end_key == initial_end)
                     {
+                        local_end = initial_end;
                         slice_position = SlicePosition::LastSlice;
                     }
                     else
                     {
                         // The local scan end must be the end of the slice.
                         local_end = initial_end;
-
-                        const KeyT *range_end = static_cast<const KeyT *>(
-                            req.SliceId().RangeEndKey());
+                        const TemplateStoreRange<KeyT> *range =
+                            static_cast<const TemplateStoreRange<KeyT> *>(
+                                req.SliceId().Range());
+                        const KeyT *range_end = range->RangeEndKey();
                         if (range_end != nullptr && *initial_end == *range_end)
                         {
                             slice_position = SlicePosition::LastSliceInRange;
@@ -4124,10 +4113,8 @@ public:
                     // results need to be adjusted, if the results include the
                     // keys greater than the batch's end, or the results miss
                     // some keys smaller than the batch's end.
-                    auto [end_key, end_inclusive] =
-                        deduce_scan_end(static_cast<const KeyT *>(batch_end),
-                                        req_end_key,
-                                        req.EndInclusive());
+                    auto [end_key, end_inclusive] = deduce_scan_end(
+                        batch_end, req_end_key, req.EndInclusive());
                     size_t trailing_cnt = 0;
 
                     // Excludes keys from the scan cache greater than the
@@ -4230,7 +4217,9 @@ public:
         }
         else
         {
-            const StoreSlice *last_slice = req.LastPinnedSlice();
+            const TemplateStoreSlice<KeyT> *last_slice =
+                static_cast<const TemplateStoreSlice<KeyT> *>(
+                    req.LastPinnedSlice());
 
             const KeyT *initial_end = nullptr;
             bool init_end_inclusive = false;
@@ -4243,22 +4232,10 @@ public:
                 const KeyT *end = nullptr;
                 bool inclusive = false;
 
-                // The scan batch's end key has been finalized. If the final
-                // end key is null, it means that either the request specifies
-                // the end key, which falls into the slice, or the scanned slice
-                // is the first starting from negative infinity.
-                if (batch_end_key == nullptr)
+                if (batch_end_key == req_end_key)
                 {
-                    if (req_end_key != nullptr)
-                    {
-                        end = req_end_key;
-                        inclusive = req_inclusive;
-                    }
-                    else
-                    {
-                        end = NegativeInfinity<KeyT>::Instance();
-                        inclusive = true;
-                    }
+                    end = req_end_key;
+                    inclusive = req_inclusive;
                 }
                 else
                 {
@@ -4271,12 +4248,8 @@ public:
 
             if (!end_finalized)
             {
-                const KeyT *slice_begin =
-                    static_cast<const KeyT *>(last_slice->StartKey());
-                if (slice_begin == nullptr)
-                {
-                    slice_begin = NegativeInfinity<KeyT>::Instance();
-                }
+                const KeyT *slice_begin = last_slice->StartKey();
+                assert(slice_begin != nullptr);
 
                 if (req_end_key != nullptr && (*slice_begin < *req_end_key ||
                                                *slice_begin == *req_end_key))
@@ -4295,7 +4268,7 @@ public:
                 // This scan batch's end key has been finalized by one of the
                 // cores. Deduces the local scan's end and inclusiveness.
                 std::tie(initial_end, init_end_inclusive) =
-                    deduce_scan_end(static_cast<const KeyT *>(final_end_key),
+                    deduce_scan_end(final_end_tx_key->GetKey<KeyT>(),
                                     req_end_key,
                                     req.EndInclusive());
             }
@@ -4400,9 +4373,10 @@ public:
                     // batches are needed. So, we pretend that the scan has
                     // reached the first slice (starting with negative
                     // infinity). The calling tx will terminate the scan.
-                    if (initial_end == NegativeInfinity<KeyT>::Instance() ||
+                    if (initial_end == KeyT::NegativeInfinity() ||
                         req_end_key == initial_end)
                     {
+                        local_end = initial_end;
                         slice_position = SlicePosition::FirstSlice;
                     }
                     else
@@ -4410,8 +4384,10 @@ public:
                         // The local scan end must be the start of the slice.
                         local_end = initial_end;
 
-                        const KeyT *range_start = static_cast<const KeyT *>(
-                            req.SliceId().RangeStartKey());
+                        const TemplateStoreRange<KeyT> *range =
+                            static_cast<const TemplateStoreRange<KeyT> *>(
+                                req.SliceId().Range());
+                        const KeyT *range_start = range->RangeStartKey();
                         if (range_start != nullptr &&
                             *initial_end == *range_start)
                         {
@@ -4438,10 +4414,8 @@ public:
                     // results need to be adjusted, if the results include the
                     // keys smaller than the batch's end, or the results miss
                     // some keys greater than the batch's end.
-                    auto [end_key, end_inclusive] =
-                        deduce_scan_end(static_cast<const KeyT *>(batch_end),
-                                        req_end_key,
-                                        req.EndInclusive());
+                    auto [end_key, end_inclusive] = deduce_scan_end(
+                        batch_end, req_end_key, req.EndInclusive());
                     size_t trailing_cnt = 0;
 
                     // Excludes keys from the scan cache smaller than the
@@ -4619,12 +4593,12 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        const KeyT *const req_start_key =
-            req.start_key_ ? static_cast<const KeyT *>(req.start_key_)
-                           : NegativeInfinity<KeyT>::Instance();
-        const KeyT *const req_end_key =
-            req.end_key_ ? static_cast<const KeyT *>(req.end_key_)
-                         : PositiveInfinity<KeyT>::Instance();
+        const KeyT *const req_start_key = req.start_key_ != nullptr
+                                              ? req.start_key_->GetKey<KeyT>()
+                                              : KeyT::NegativeInfinity();
+        const KeyT *const req_end_key = req.end_key_ != nullptr
+                                            ? req.end_key_->GetKey<KeyT>()
+                                            : KeyT::PositiveInfinity();
 
         Iterator it;
         Iterator end_it;
@@ -4642,11 +4616,10 @@ public:
             nullptr == req.slice_ids_[shard_->core_id_].Slice())
         {
             const KeyT *slice_start_key = nullptr;
-            if (pause_key_and_is_drained.first != nullptr)
+            if (pause_key_and_is_drained.first.KeyPtr() != nullptr)
             {
                 // Pin slice failed in the previous execution. Now, retry to pin
-                slice_start_key = static_cast<const KeyT *>(
-                    pause_key_and_is_drained.first.get());
+                slice_start_key = pause_key_and_is_drained.first.GetKey<KeyT>();
             }
             else
             {
@@ -4663,20 +4636,21 @@ public:
                 assert(req.slice_ids_[shard_->core_id_].Slice() == nullptr);
 
                 RangeSliceOpStatus pin_status;
-                RangeSliceId new_slice_id =
-                    shard_->PinRangeSlice(table_name_,
-                                          req.NodeGroupId(),
-                                          req.NodeGroupTerm(),
-                                          KeySchema(),
-                                          RecordSchema(),
-                                          schema_ts_,
-                                          table_schema_->GetKVCatalogInfo(),
-                                          *slice_start_key,
-                                          true,
-                                          &req,
-                                          pin_status,
-                                          true,
-                                          32);
+                RangeSliceId new_slice_id = shard_->local_shards_.PinRangeSlice(
+                    table_name_,
+                    req.NodeGroupId(),
+                    req.NodeGroupTerm(),
+                    KeySchema(),
+                    RecordSchema(),
+                    schema_ts_,
+                    table_schema_->GetKVCatalogInfo(),
+                    *slice_start_key,
+                    true,
+                    &req,
+                    shard_,
+                    pin_status,
+                    true,
+                    32);
 
                 switch (pin_status)
                 {
@@ -4686,12 +4660,14 @@ public:
                 }
                 case RangeSliceOpStatus::BlockedOnLoad:
                 {
-                    pause_key_and_is_drained.first = slice_start_key->Clone();
+                    pause_key_and_is_drained.first =
+                        slice_start_key->CloneTxKey();
                     return false;
                 }
                 case RangeSliceOpStatus::Retry:
                 {
-                    pause_key_and_is_drained.first = slice_start_key->Clone();
+                    pause_key_and_is_drained.first =
+                        slice_start_key->CloneTxKey();
                     shard_->Enqueue(shard_->LocalCoreId(), &req);
                     return false;
                 }
@@ -4704,7 +4680,7 @@ public:
                 }
 
                 // The slice has been pinned.
-                if (slice_start_key == NegativeInfinity<KeyT>::Instance())
+                if (slice_start_key == KeyT::NegativeInfinity())
                 {
                     it = Begin();
                     it++;
@@ -4712,19 +4688,18 @@ public:
                 else
                 {
                     it = LowerBound(*slice_start_key);
-                    if (it->first == NegativeInfinity<KeyT>::Instance())
+                    if (it->first == KeyT::NegativeInfinity())
                     {
                         it++;
                     }
                 }
 
-                const KeyT *slice_end_key =
-                    new_slice_id.Slice()->EndKey()
-                        ? static_cast<const KeyT *>(
-                              new_slice_id.Slice()->EndKey())
-                        : PositiveInfinity<KeyT>::Instance();
+                const TemplateStoreSlice<KeyT> *slice =
+                    static_cast<const TemplateStoreSlice<KeyT> *>(
+                        new_slice_id.Slice());
+                const KeyT *slice_end_key = slice->EndKey();
 
-                if (slice_end_key == PositiveInfinity<KeyT>::Instance())
+                if (slice_end_key == KeyT::PositiveInfinity())
                 {
                     end_it = End();
                 }
@@ -4757,11 +4732,11 @@ public:
         }
         else
         {
-            if (pause_key_and_is_drained.first == nullptr)
+            if (pause_key_and_is_drained.first.KeyPtr() == nullptr)
             {
                 // If this is a new scan cc, start from the specified start
                 // key or negative inf.
-                if (req_start_key == NegativeInfinity<KeyT>::Instance())
+                if (req_start_key == KeyT::NegativeInfinity())
                 {
                     it = Begin();
                     it++;
@@ -4769,7 +4744,7 @@ public:
                 else
                 {
                     it = LowerBound(*req_start_key);
-                    if (it->first == NegativeInfinity<KeyT>::Instance())
+                    if (it->first == KeyT::NegativeInfinity())
                     {
                         it++;
                     }
@@ -4777,8 +4752,8 @@ public:
             }
             else
             {
-                const KeyT *pause_key = static_cast<const KeyT *>(
-                    pause_key_and_is_drained.first.get());
+                const KeyT *pause_key =
+                    pause_key_and_is_drained.first.GetKey<KeyT>();
                 it = LowerBound(*pause_key);
             }
 
@@ -4786,18 +4761,16 @@ public:
 
             if (req.export_base_table_rec_if_need_)
             {
-                assert(req.slice_ids_[shard_->core_id_].Slice() != nullptr);
+                const TemplateStoreSlice<KeyT> *slice =
+                    static_cast<const TemplateStoreSlice<KeyT> *>(
+                        req.slice_ids_[shard_->core_id_].Slice());
 
-                search_end_key =
-                    req.slice_ids_[shard_->core_id_].Slice()->EndKey()
-                        ? static_cast<const KeyT *>(
-                              req.slice_ids_[shard_->core_id_]
-                                  .Slice()
-                                  ->EndKey())
-                        : PositiveInfinity<KeyT>::Instance();
+                assert(slice != nullptr);
+
+                search_end_key = slice->EndKey();
             }
 
-            if (search_end_key == PositiveInfinity<KeyT>::Instance())
+            if (search_end_key == KeyT::PositiveInfinity())
             {
                 end_it = End();
             }
@@ -4897,20 +4870,22 @@ public:
                         // store size is required to decide slice & range
                         // update plan.
                         RangeSliceOpStatus pin_status;
-                        RangeSliceId slice_id = shard_->PinRangeSlice(
-                            table_name_,
-                            req.NodeGroupId(),
-                            req.NodeGroupTerm(),
-                            KeySchema(),
-                            RecordSchema(),
-                            schema_ts_,
-                            table_schema_->GetKVCatalogInfo(),
-                            *key,
-                            true,
-                            &req,
-                            pin_status,
-                            true,
-                            UINT8_MAX);
+                        RangeSliceId slice_id =
+                            shard_->local_shards_.PinRangeSlice(
+                                table_name_,
+                                req.NodeGroupId(),
+                                req.NodeGroupTerm(),
+                                KeySchema(),
+                                RecordSchema(),
+                                schema_ts_,
+                                table_schema_->GetKVCatalogInfo(),
+                                *key,
+                                true,
+                                &req,
+                                shard_,
+                                pin_status,
+                                true,
+                                UINT8_MAX);
                         if (pin_status == RangeSliceOpStatus::Successful)
                         {
                             if (cce->data_store_size_.load(
@@ -4926,14 +4901,14 @@ public:
                         }
                         else if (pin_status == RangeSliceOpStatus::Retry)
                         {
-                            pause_key_and_is_drained.first = key->Clone();
+                            pause_key_and_is_drained.first = key->CloneTxKey();
                             shard_->Enqueue(shard_->LocalCoreId(), &req);
                             return false;
                         }
                         else if (pin_status ==
                                  RangeSliceOpStatus::BlockedOnLoad)
                         {
-                            pause_key_and_is_drained.first = key->Clone();
+                            pause_key_and_is_drained.first = key->CloneTxKey();
                             return false;
                         }
                         else if (pin_status == RangeSliceOpStatus::NotOwner)
@@ -5002,19 +4977,20 @@ public:
 
             if (req.export_base_table_rec_if_need_)
             {
+                TemplateStoreSlice<KeyT> *slice =
+                    static_cast<TemplateStoreSlice<KeyT> *>(
+                        req.slice_ids_[shard_->core_id_].Slice());
+
                 bool pin_next_slice =
                     it == end_it &&
-                    req.slice_ids_[shard_->core_id_].Slice()->EndKey() !=
-                        nullptr &&
-                    (!(*req.slice_ids_[shard_->core_id_].Slice()->EndKey() ==
-                       *req_end_key));
+                    slice->EndKey() != KeyT::PositiveInfinity() &&
+                    !(*slice->EndKey() == *req_end_key);
 
                 // FIXME(lokax): Only loop X times to avoid blocking TxProcesser
                 // when the range has many empty slices.
                 while (pin_next_slice)
                 {
-                    const KeyT *slice_start_key = static_cast<const KeyT *>(
-                        req.slice_ids_[shard_->core_id_].Slice()->EndKey());
+                    const KeyT *slice_start_key = slice->EndKey();
 
                     // Unpin current slice
                     req.slice_ids_[shard_->core_id_].Unpin();
@@ -5023,38 +4999,48 @@ public:
                     // Pin next slice
                     RangeSliceOpStatus pin_status;
                     RangeSliceId new_slice_id =
-                        shard_->PinRangeSlice(table_name_,
-                                              req.NodeGroupId(),
-                                              req.NodeGroupTerm(),
-                                              KeySchema(),
-                                              RecordSchema(),
-                                              schema_ts_,
-                                              table_schema_->GetKVCatalogInfo(),
-                                              *slice_start_key,
-                                              true,
-                                              &req,
-                                              pin_status,
-                                              true,
-                                              32);
+                        shard_->local_shards_.PinRangeSlice(
+                            table_name_,
+                            req.NodeGroupId(),
+                            req.NodeGroupTerm(),
+                            KeySchema(),
+                            RecordSchema(),
+                            schema_ts_,
+                            table_schema_->GetKVCatalogInfo(),
+                            *slice_start_key,
+                            true,
+                            &req,
+                            shard_,
+                            pin_status,
+                            true,
+                            32);
 
                     switch (pin_status)
                     {
                     case RangeSliceOpStatus::Successful:
                     {
-                        assert(*slice_start_key ==
-                               *new_slice_id.Slice()->StartKey());
+                        assert(
+                            [&]()
+                            {
+                                const TemplateStoreSlice<KeyT> *new_slice =
+                                    static_cast<
+                                        const TemplateStoreSlice<KeyT> *>(
+                                        new_slice_id.Slice());
+                                return *slice_start_key ==
+                                       *new_slice->StartKey();
+                            }());
                         break;
                     }
                     case RangeSliceOpStatus::BlockedOnLoad:
                     {
                         pause_key_and_is_drained.first =
-                            slice_start_key->Clone();
+                            slice_start_key->CloneTxKey();
                         return false;
                     }
                     case RangeSliceOpStatus::Retry:
                     {
                         pause_key_and_is_drained.first =
-                            slice_start_key->Clone();
+                            slice_start_key->CloneTxKey();
                         shard_->Enqueue(shard_->LocalCoreId(), &req);
                         return false;
                     }
@@ -5067,11 +5053,10 @@ public:
                     }
                     }
 
-                    const KeyT *slice_end_key =
-                        new_slice_id.Slice()->EndKey()
-                            ? static_cast<const KeyT *>(
-                                  new_slice_id.Slice()->EndKey())
-                            : PositiveInfinity<KeyT>::Instance();
+                    TemplateStoreSlice<KeyT> *new_slice =
+                        static_cast<TemplateStoreSlice<KeyT> *>(
+                            new_slice_id.Slice());
+                    const KeyT *slice_end_key = new_slice->EndKey();
 
                     it = LowerBound(*slice_start_key);
                     std::pair<Iterator, ScanType> end_pair =
@@ -5086,11 +5071,11 @@ public:
 
                     // This slice is not empty or this empty slice is last slice
                     // of range. We stop to loop.
+                    slice = new_slice;
+
                     if (it != end_it ||
-                        req.slice_ids_[shard_->core_id_].Slice()->EndKey() ==
-                            nullptr ||
-                        (*req.slice_ids_[shard_->core_id_].Slice()->EndKey() ==
-                         *req_end_key))
+                        slice->EndKey() == KeyT::PositiveInfinity() ||
+                        *slice->EndKey() == *req_end_key)
                     {
                         end_it_next_page_it = end_it;
                         pin_next_slice = false;
@@ -5099,11 +5084,11 @@ public:
             }
         }
 
-        TxKey::Uptr next_pause_key = nullptr;
+        TxKey next_pause_key;
         bool no_more_data = (it == end_it) || (it == end_it_next_page_it);
         if (!no_more_data)
         {
-            next_pause_key = it->first->Clone();
+            next_pause_key = it->first->CloneTxKey();
         }
 
         if (no_more_data)
@@ -5117,7 +5102,7 @@ public:
                 req.slice_ids_[shard_->core_id_].Reset();
             }
 
-            pause_key_and_is_drained = {nullptr, true};
+            pause_key_and_is_drained = {TxKey(), true};
             req.SetFinish(shard_->core_id_);
         }
         else
@@ -5158,12 +5143,12 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        const KeyT *const req_start_key =
-            req.start_key_ ? static_cast<const KeyT *>(req.start_key_)
-                           : NegativeInfinity<KeyT>::Instance();
-        const KeyT *const req_end_key =
-            req.end_key_ ? static_cast<const KeyT *>(req.end_key_)
-                         : PositiveInfinity<KeyT>::Instance();
+        const KeyT *const req_start_key = req.start_key_ != nullptr
+                                              ? req.start_key_->GetKey<KeyT>()
+                                              : KeyT::NegativeInfinity();
+        const KeyT *const req_end_key = req.end_key_ != nullptr
+                                            ? req.end_key_->GetKey<KeyT>()
+                                            : KeyT::PositiveInfinity();
 
         size_t vec_idx;
         if (!req.only_scan_one_core_)
@@ -5198,7 +5183,7 @@ public:
         {
             // If this is a new scan cc, start from the specified start
             // key or negative inf.
-            if (req_start_key == NegativeInfinity<KeyT>::Instance())
+            if (req_start_key == KeyT::NegativeInfinity())
             {
                 it = Begin();
                 it++;
@@ -5206,7 +5191,7 @@ public:
             else
             {
                 it = LowerBound(*req_start_key);
-                if (it->first == NegativeInfinity<KeyT>::Instance())
+                if (it->first == KeyT::NegativeInfinity())
                 {
                     it++;
                 }
@@ -5226,7 +5211,7 @@ public:
 
         const KeyT *search_end_key = req_end_key;
 
-        if (search_end_key == PositiveInfinity<KeyT>::Instance())
+        if (search_end_key == KeyT::PositiveInfinity())
         {
             end_it = End();
         }
@@ -5303,7 +5288,7 @@ public:
 #ifndef ON_KEY_OBJECT
             if (shard_->EnableMvcc())
             {
-                shard_->DecrementMemory(cce->KickOutArchiveRecords(recycle_ts));
+                cce->KickOutArchiveRecords(recycle_ts);
             }
 #endif
 
@@ -5406,8 +5391,8 @@ public:
             typename TemplateCcMapSamplePool<KeyT>::CopyKey>;
         using StoreSliceSamplePool = AnalyzeTableAllCc::SamplePool<
             AnalyzeTableAllCc::sample_pool_capacity_,
-            std::pair<int32_t /*range_id*/, const StoreSlice *>,
-            Copy<std::pair<int32_t, const StoreSlice *>>>;
+            std::pair<int32_t /*range_id*/, const TemplateStoreSlice<KeyT> *>,
+            Copy<std::pair<int32_t, const TemplateStoreSlice<KeyT> *>>>;
 
         KeySamplePool *key_sample_pool = [&req]
         {
@@ -5440,14 +5425,17 @@ public:
                 for (const TableRangeEntry *range_entry :
                      req.PinnedStoreRanges())
                 {
-                    const StoreRange *store_range = range_entry->RangeSlices();
+                    const TemplateTableRangeEntry<KeyT> *typed_range_entry =
+                        static_cast<const TemplateTableRangeEntry<KeyT> *>(
+                            range_entry);
+                    const TemplateStoreRange<KeyT> *store_range =
+                        typed_range_entry->TypedStoreRange();
                     assert(store_range != nullptr);
 
                     // Total slice count is unknown, thus it is unsuitable to
                     // use Kunth's algorithm S. Have to use an reservoir
                     // sampling algorithm here.
-                    for (const std::unique_ptr<StoreSlice> &store_slice :
-                         store_range->Slices())
+                    for (const auto &store_slice : store_range->TypedSlices())
                     {
                         // Since StoreRange has been pinned, it is safe to keep
                         // pointer to StoreSlice into StoreSliceSamplePool.
@@ -5482,38 +5470,37 @@ public:
             const auto [range_id, store_slice] =
                 store_slice_sample_pool->SampleKeys().at(req.pin_slice_idx_);
 
-            const TxKey *store_slice_start_key =
-                store_slice->StartKey() ? store_slice->StartKey()
-                                        : NegativeInfinity<KeyT>::Instance();
-            const TxKey *store_slice_end_key =
-                store_slice->EndKey() ? store_slice->EndKey()
-                                      : PositiveInfinity<KeyT>::Instance();
-            const TxKey *scan_start_key = req.continue_key_
-                                              ? req.continue_key_.get()
-                                              : store_slice_start_key;
+            const KeyT *store_slice_start_key = store_slice->StartKey();
+            assert(store_slice_start_key != nullptr);
+            const KeyT *store_slice_end_key = store_slice->EndKey();
+            assert(store_slice_end_key != nullptr);
+            const KeyT *scan_start_key = req.continue_key_.KeyPtr()
+                                             ? req.continue_key_.GetKey<KeyT>()
+                                             : store_slice_start_key;
 
             RangeSliceOpStatus pin_status;
             const StoreSlice *last_pinned_slice;
-            RangeSliceId slice_id =
-                shard_->PinRangeSlices(table_name_,
-                                       cc_ng_id_,
-                                       ng_term,
-                                       KeySchema(),
-                                       table_schema_->RecordSchema(),
-                                       schema_ts_,
-                                       table_schema_->GetKVCatalogInfo(),
-                                       range_id,
-                                       *scan_start_key,
-                                       true,
-                                       store_slice_end_key,
-                                       false,
-                                       &req,
-                                       false,
-                                       UINT8_MAX,
-                                       1,
-                                       true,
-                                       pin_status,
-                                       last_pinned_slice);
+            RangeSliceId slice_id = shard_->local_shards_.PinRangeSlices(
+                table_name_,
+                cc_ng_id_,
+                ng_term,
+                KeySchema(),
+                table_schema_->RecordSchema(),
+                schema_ts_,
+                table_schema_->GetKVCatalogInfo(),
+                range_id,
+                *scan_start_key,
+                true,
+                store_slice_end_key,
+                false,
+                &req,
+                shard_,
+                false,
+                UINT8_MAX,
+                1,
+                true,
+                pin_status,
+                last_pinned_slice);
 
             if (pin_status == RangeSliceOpStatus::Retry)
             {
@@ -5562,20 +5549,16 @@ public:
             uint32_t n = 0;
             constexpr uint32_t scan_batch_keys = 1024;
 
-            auto [iter, scan_type] = ForwardScanStart(
-                static_cast<const KeyT &>(*scan_start_key), scan_start_key);
+            auto [iter, scan_type] = ForwardScanStart(*scan_start_key, true);
 
-            const TxKey *slice_end_key = req.pinned_slice_id_.Slice()->EndKey();
-            if (slice_end_key == nullptr)
-            {
-                slice_end_key = PositiveInfinity<KeyT>::Instance();
-            }
+            TemplateStoreSlice<KeyT> *typed_slice =
+                static_cast<TemplateStoreSlice<KeyT> *>(
+                    req.pinned_slice_id_.Slice());
+            const KeyT *slice_end_key = typed_slice->EndKey();
+            assert(slice_end_key != nullptr);
 
-            while (iter != End() &&
-                   *iter->first <
-                       static_cast<const KeyT &>(*store_slice_end_key) &&
-                   *iter->first < static_cast<const KeyT &>(*slice_end_key) &&
-                   n < scan_batch_keys)
+            while (iter != End() && *iter->first < *store_slice_end_key &&
+                   *iter->first < *slice_end_key && n < scan_batch_keys)
             {
                 const KeyT &key = *iter->first;
                 const CcEntry<KeyT, ValueT> &cc_entry = *iter->second;
@@ -5593,18 +5576,17 @@ public:
 
             req.pinned_slice_id_.Unpin();
 
-            if (*iter->first < static_cast<const KeyT &>(*store_slice_end_key))
+            if (*iter->first < *store_slice_end_key)
             {
                 // Yield tx_processor
-                assert(req.continue_key_ == nullptr ||
-                       static_cast<const KeyT &>(*req.continue_key_) !=
-                           *iter->first);
-                req.continue_key_ = iter->first->Clone();
+                assert(req.continue_key_.KeyPtr() == nullptr ||
+                       *req.continue_key_.GetKey<KeyT>() != *iter->first);
+                req.continue_key_ = iter->first->CloneTxKey();
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
             }
             else
             {
-                req.continue_key_ = nullptr;
+                req.continue_key_ = TxKey();
                 req.pinned_slice_id_.Reset();
 
                 if (shard_->core_id_ < shard_->core_cnt_ - 1)
@@ -5755,7 +5737,7 @@ public:
 
             // Skip records that no longer belong to this ng.
             const TableRangeEntry *range_entry =
-                shard_->GetTableRangeEntry(table_name_, cc_ng_id_, &key);
+                shard_->GetTableRangeEntry(table_name_, cc_ng_id_, TxKey(&key));
 
             const BucketInfo *bucket_info = shard_->GetBucketInfo(
                 Sharder::MapRangeIdToBucketId(
@@ -5767,7 +5749,7 @@ public:
                 bucket_info->DirtyBucketOwner() != cc_ng_id_)
             {
                 int32_t new_range_id =
-                    range_entry->GetRangeInfo()->GetKeyNewRangeId(&key);
+                    range_entry->GetRangeInfo()->GetKeyNewRangeId(TxKey(&key));
                 // If range is splitting, check if new range belongs to
                 // this ng.
                 if (new_range_id >= 0)
@@ -5925,13 +5907,13 @@ public:
 
     bool Execute(CleanCcEntryForTestCc &req) override
     {
-        const TxKey *key_ptr = req.Key();
+        const TxKey *tx_key = req.Key();
         bool only_archives = req.OnlyCleanArchives();
-        assert(key_ptr != nullptr);
-        if (key_ptr != nullptr)
+        assert(tx_key != nullptr);
+        if (tx_key != nullptr)
         {
             // find cc entry
-            const KeyT *typed_key_ptr = dynamic_cast<const KeyT *>(key_ptr);
+            const KeyT *typed_key_ptr = tx_key->GetKey<KeyT>();
             const KeyT &key = *typed_key_ptr;
             Iterator it = Find(key);
             const KeyT *cce_key = it->first;
@@ -5946,7 +5928,7 @@ public:
 
                     std::vector<FlushRecord> tmp_akv_vec;
                     std::vector<size_t> tmp_mv_base_idx_vec;
-                    std::vector<const TxKey *> tmp_mv_base_key_vec;
+                    std::vector<TxKey> tmp_mv_base_key_vec;
 
                     cce->ExportForCkpt(*cce_key,
                                        tmp_ckpt_vec,
@@ -5973,8 +5955,8 @@ public:
                     for (size_t i = 0; i < tmp_mv_base_idx_vec.size(); ++i)
                     {
                         size_t key_idx = tmp_mv_base_idx_vec[i];
-                        const TxKey *key_raw_ptr = tmp_ckpt_vec[key_idx].Key();
-                        tmp_mv_base_key_vec.emplace_back(key_raw_ptr);
+                        TxKey key_raw = tmp_ckpt_vec[key_idx].Key();
+                        tmp_mv_base_key_vec.emplace_back(std::move(key_raw));
                     }
 
                     bool res = shard_->FlushEntryForTest(table_name_,
@@ -6042,13 +6024,13 @@ public:
             req.SliceChangeInfoVec(shard_->core_id_);
 
         // Caller should have already pinned the slice.
-        auto &pause_key_and_is_drained = req.PauseKey(shard_->core_id_);
-        auto &pause_key_uptr = pause_key_and_is_drained.first;
-        bool is_drained = pause_key_and_is_drained.second;
+        std::pair<TxKey, bool> &pause_pair = req.PauseKey(shard_->core_id_);
+        const KeyT *pause_key = pause_pair.first.GetKey<KeyT>();
+        bool is_drained = pause_pair.second;
 
         if (is_drained)
         {
-            assert(pause_key_uptr == nullptr);
+            assert(pause_key == KeyT::PositiveInfinity());
             req.SetFinish();
             return false;
         }
@@ -6057,12 +6039,10 @@ public:
 
         Iterator map_it, map_end_it;
 
-        if (pause_key_uptr != nullptr)
+        if (pause_key != nullptr)
         {
-            const KeyT *pause_key_raw_ptr =
-                static_cast<const KeyT *>(pause_key_uptr.get());
             std::pair<Iterator, ScanType> start_pair =
-                ForwardScanStart(*pause_key_raw_ptr, true);
+                ForwardScanStart(*pause_key, true);
             map_it = start_pair.first;
             if (start_pair.second == ScanType::ScanGap)
             {
@@ -6071,8 +6051,7 @@ public:
         }
         else
         {
-            const KeyT *start_key =
-                static_cast<const KeyT *>(req.Slice()->StartKey());
+            const KeyT *start_key = req.Slice()->StartTxKey().GetKey<KeyT>();
 
             if (start_key == nullptr ||
                 start_key->Type() == KeyType::NegativeInf)
@@ -6091,7 +6070,9 @@ public:
             }
         }
 
-        const KeyT *end_key = static_cast<const KeyT *>(req.Slice()->EndKey());
+        const TemplateStoreSlice<KeyT> *slice =
+            static_cast<const TemplateStoreSlice<KeyT> *>(req.Slice());
+        const KeyT *end_key = slice->EndKey();
         // nullptr end key means PositiveInfinity
         if (end_key == nullptr || end_key->Type() == KeyType::PositiveInf)
         {
@@ -6149,20 +6130,21 @@ public:
                 // checkpoint, so the data store size before and post
                 // ckpt are the same.
 
-                item_vec[next_vec_idx++].Reset(
-                    cce_key, data_store_size, data_store_size, true);
+                item_vec[next_vec_idx++] = SliceChangeInfo(
+                    cce_key->CloneTxKey(), data_store_size, data_store_size);
             }
         }
 
         if (map_it == map_end_it)
         {
-            pause_key_and_is_drained = {nullptr, true};
+            TxKey tx_key{KeyT::PositiveInfinity()};
+            pause_pair = {std::move(tx_key), true};
             req.SetFinish();
         }
         else
         {
             assert(map_it != map_end_it);
-            pause_key_and_is_drained = {map_it->first->Clone(), false};
+            pause_pair = {map_it->first->CloneTxKey(), false};
             req.UpdateFirstIdx(shard_->core_id_, ckpt_idx);
             req.SetFinish();
         }
@@ -6194,8 +6176,16 @@ public:
         }
 
         // Iterate the cc map using the original page list.
-        const KeyT *start_key = static_cast<const KeyT *>(req.StartKey());
-        const KeyT *end_key = static_cast<const KeyT *>(req.EndKey());
+        const TxKey *start_tx_key = req.StartKey();
+        const KeyT *start_key =
+            start_tx_key != nullptr && start_tx_key->KeyPtr() != nullptr
+                ? req.StartKey()->GetKey<KeyT>()
+                : KeyT::NegativeInfinity();
+        const TxKey *end_tx_key = req.EndKey();
+        const KeyT *end_key =
+            end_tx_key != nullptr && end_tx_key->KeyPtr() != nullptr
+                ? req.EndKey()->GetKey<KeyT>()
+                : KeyT::PositiveInfinity();
         LruPage *lru_page;
         uint16_t pause_idx = shard_->core_id_;
         if (req.GetCleanType() == CleanType::CleanBucketData)
@@ -6203,33 +6193,25 @@ public:
             // For clean bucket data, cc req is only sent to 1 core.
             pause_idx = 0;
         }
-        if (req.ResumeKey(pause_idx) != nullptr)
+        if (req.ResumeKey(pause_idx)->KeyPtr() != nullptr)
         {
             // resume key is the first key we need to start with, find
             // the floor key of it in case resume key has already been
             // kicked out.
-            const KeyT *resume_key =
-                static_cast<const KeyT *>(req.ResumeKey(pause_idx));
+            const KeyT *resume_key = req.ResumeKey(pause_idx)->GetKey<KeyT>();
             Iterator it = Floor(*resume_key);
             lru_page = it.GetPage();
         }
         else
         {
-            if (req.StartKey() == nullptr)
+            Iterator it = Floor(*start_key);
+            if (it->first == KeyT::NegativeInfinity())
             {
                 lru_page = neg_inf_page_.next_page_;
             }
             else
             {
-                Iterator it = Floor(*start_key);
-                if (it->first == NegativeInfinity<KeyT>::Instance())
-                {
-                    lru_page = neg_inf_page_.next_page_;
-                }
-                else
-                {
-                    lru_page = it.GetPage();
-                }
+                lru_page = it.GetPage();
             }
         }
 
@@ -6241,8 +6223,7 @@ public:
         size_t scan_page_cnt = 0;
         bool is_success = true;
         while (scan_page_cnt < KickoutCcEntryCc::KickoutPageBatchSize &&
-               (end_key == nullptr || ccp->FirstKey() < *end_key) &&
-               ccp != &pos_inf_page_)
+               ccp->FirstKey() < *end_key && ccp != &pos_inf_page_)
         {
             auto [freed_cnt, next_page] =
                 CleanPageAndReBalance(ccp, &req, &is_success);
@@ -6258,15 +6239,16 @@ public:
             }
         }
 
-        if (ccp == &pos_inf_page_ ||
-            (end_key != nullptr && !(ccp->FirstKey() < *end_key)))
+        if (ccp == &pos_inf_page_ || !(ccp->FirstKey() < *end_key))
         {
             return req.SetFinish();
         }
         else
         {
             // Set the resume key for next round
-            req.SetResumeKey(&ccp->FirstKey(), pause_idx);
+            std::unique_ptr<KeyT> clone_key =
+                std::make_unique<KeyT>(ccp->FirstKey());
+            req.SetResumeKey(TxKey(std::move(clone_key)), pause_idx);
             shard_->Enqueue(&req);
             return false;
         }
@@ -6290,7 +6272,6 @@ public:
         size_t batch_size = req.BatchSize();
         size_t start_key_index = req.StartKeyIndex();
 
-        const TxKey *req_key = nullptr;
         const TxRecord *req_rec = nullptr;
 
         const KeyT *key = nullptr;
@@ -6328,8 +6309,7 @@ public:
             {
                 key_idx = start_key_index + key_pos;
                 // get key
-                req_key = entry_vec->at(key_idx)->key_.get();
-                key = static_cast<const KeyT *>(req_key);
+                key = entry_vec->at(key_idx)->key_.GetKey<KeyT>();
                 // get record
                 req_rec = entry_vec->at(key_idx)->rec_.get();
                 commit_val = static_cast<const ValueT *>(req_rec);
@@ -6373,27 +6353,28 @@ public:
             if (current_slice_id.Slice() == nullptr)
             {
                 RangeSliceOpStatus pin_status;
-                current_slice_id =
-                    shard_->PinRangeSlice(table_name_,
-                                          req.NodeGroupId(),
-                                          req.CcNgTerm(),
-                                          KeySchema(),
-                                          RecordSchema(),
-                                          schema_ts_,
-                                          table_schema_->GetKVCatalogInfo(),
-                                          *key,
-                                          true,
-                                          &req,
-                                          pin_status,
-                                          false,
-                                          0);
+                current_slice_id = shard_->local_shards_.PinRangeSlice(
+                    table_name_,
+                    req.NodeGroupId(),
+                    req.CcNgTerm(),
+                    KeySchema(),
+                    RecordSchema(),
+                    schema_ts_,
+                    table_schema_->GetKVCatalogInfo(),
+                    *key,
+                    true,
+                    &req,
+                    shard_,
+                    pin_status,
+                    false,
+                    0);
                 if (pin_status == RangeSliceOpStatus::Successful)
                 {
-                    slice_end_key =
-                        current_slice_id.Slice()->EndKey() != nullptr
-                            ? static_cast<const KeyT *>(
-                                  current_slice_id.Slice()->EndKey())
-                            : PositiveInfinity<KeyT>::Instance();
+                    const TemplateStoreSlice<KeyT> *typed_slice =
+                        static_cast<const TemplateStoreSlice<KeyT> *>(
+                            current_slice_id.Slice());
+                    slice_end_key = typed_slice->EndKey();
+                    assert(slice_end_key != nullptr);
                 }
                 else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
                 {
@@ -6931,18 +6912,16 @@ protected:
 
         void DebugPrint()
         {
-            bool is_neg_inf =
-                (current_.first == NegativeInfinity<KeyT>::Instance());
-            bool is_pos_inf =
-                (current_.first == PositiveInfinity<KeyT>::Instance());
+            bool is_neg_inf = (current_.first == KeyT::NegativeInfinity());
+            bool is_pos_inf = (current_.first == KeyT::PositiveInfinity());
             LOG(INFO) << "key: " << current_.first
                       << ", cce: " << current_.second
                       << ", is neg inf: " << is_neg_inf
                       << ", is pos inf: " << is_pos_inf
                       << ", current_page_: " << current_page_
                       << ", idx_in_page_: " << idx_in_page_;
-            LOG(INFO) << "neg_inf key: " << NegativeInfinity<KeyT>::Instance()
-                      << ", pos_inf key: " << PositiveInfinity<KeyT>::Instance()
+            LOG(INFO) << "neg_inf key: " << KeyT::NegativeInfinity()
+                      << ", pos_inf key: " << KeyT::PositiveInfinity()
                       << ", neg_inf cce: " << neg_inf_cce_;
             if (!is_neg_inf && !is_pos_inf)
             {
@@ -6967,13 +6946,13 @@ protected:
         {
             if (cc_page->IsNegInf())
             {
-                current_.first = NegativeInfinity<KeyT>::Instance();
+                current_.first = KeyT::NegativeInfinity();
                 current_.second = neg_inf_cce_;
                 current_page_ = cc_page;
             }
             else if (cc_page->IsPosInf())
             {
-                current_.first = PositiveInfinity<KeyT>::Instance();
+                current_.first = KeyT::PositiveInfinity();
                 current_.second = nullptr;
                 current_page_ = cc_page;
             }
@@ -7023,7 +7002,7 @@ protected:
         // Prefix increment
         Iterator &operator++()
         {
-            if (current_.first == NegativeInfinity<KeyT>::Instance())
+            if (current_.first == KeyT::NegativeInfinity())
             {
                 // The iterator points to negative infinity. Increments
                 // the iterator to the first page in the map, if the map
@@ -7031,10 +7010,10 @@ protected:
                 CcPage<KeyT, ValueT> *next_page = current_page_->next_page_;
                 if (next_page->IsPosInf())
                 {
-                    // If the next page is the positive infinity page,
-                    // the map is empty. The advanced iterator points to
+                    // If the next page is the positive infinity page, the
+                    // map is empty. The advanced iterator points to
                     // positive infinity.
-                    current_.first = PositiveInfinity<KeyT>::Instance();
+                    current_.first = KeyT::PositiveInfinity();
                     current_.second = nullptr;
                     current_page_ = next_page;
                 }
@@ -7045,7 +7024,7 @@ protected:
                     UpdateCurrent();
                 }
             }
-            else if (current_.first != PositiveInfinity<KeyT>::Instance())
+            else if (current_.first != KeyT::PositiveInfinity())
             {
                 if (idx_in_page_ + 1 == current_page_->Size())
                 {
@@ -7053,7 +7032,7 @@ protected:
                     if (current_page_->IsPosInf())
                     {
                         // The next entry points to positive infinity.
-                        current_.first = PositiveInfinity<KeyT>::Instance();
+                        current_.first = KeyT::PositiveInfinity();
                         current_.second = nullptr;
                     }
                     else
@@ -7077,7 +7056,7 @@ protected:
         // Prefix decrement
         Iterator &operator--()
         {
-            if (current_.first == PositiveInfinity<KeyT>::Instance())
+            if (current_.first == KeyT::PositiveInfinity())
             {
                 // The iterator points to positive infinity. Decrements
                 // the iterator to the last entry in the map, if the map
@@ -7085,10 +7064,10 @@ protected:
                 CcPage<KeyT, ValueT> *prev_page = current_page_->prev_page_;
                 if (prev_page->IsNegInf())
                 {
-                    // If the previous page is the negative infinity
-                    // page, the map is empty. The advanced iterator
-                    // points to negative infinity.
-                    current_.first = NegativeInfinity<KeyT>::Instance();
+                    // If the previous page is the negative infinity page,
+                    // the map is empty. The advanced iterator points to
+                    // negative infinity.
+                    current_.first = KeyT::NegativeInfinity();
                     current_.second = neg_inf_cce_;
                     current_page_ = prev_page;
                 }
@@ -7099,7 +7078,7 @@ protected:
                     UpdateCurrent();
                 }
             }
-            else if (current_.first != NegativeInfinity<KeyT>::Instance())
+            else if (current_.first != KeyT::NegativeInfinity())
             {
                 if (idx_in_page_ == 0)
                 {
@@ -7107,7 +7086,7 @@ protected:
                     current_page_ = current_page_->prev_page_;
                     if (current_page_->IsNegInf())
                     {
-                        current_.first = NegativeInfinity<KeyT>::Instance();
+                        current_.first = KeyT::NegativeInfinity();
                         current_.second = neg_inf_cce_;
                     }
                     else
@@ -7203,7 +7182,7 @@ protected:
 
     Iterator Find(const KeyT &key)
     {
-        if (&key == NegativeInfinity<KeyT>::Instance())
+        if (&key == KeyT::NegativeInfinity())
         {
             return Begin();
         }
@@ -7264,7 +7243,7 @@ protected:
 #ifdef RANGE_PARTITION_ENABLED
             uint32_t rec_store_size =
                 data_item.is_deleted_ ? 0
-                                      : data_item.key_->Size() + record->Size();
+                                      : data_item.key_.Size() + record->Size();
 #endif
 
             // If the in-memory version is from a upload request (i.e.
@@ -7336,17 +7315,17 @@ protected:
         {
             bool inserted;
             // ccmap is empty, insert a page
+            const KeyT *search_key = static_cast<const KeyT *>(
+                slice_items[first_index].key_.KeyPtr());
             std::tie(target_iter, inserted) = ccmp_.try_emplace(
-                static_cast<const KeyT &>(*slice_items[first_index].key_),
-                this,
-                &neg_inf_page_,
-                &pos_inf_page_);
+                *search_key, this, &neg_inf_page_, &pos_inf_page_);
             assert(inserted);
         }
         else
         {
-            target_iter = ccmp_.upper_bound(
-                static_cast<const KeyT &>(*slice_items[first_index].key_));
+            const KeyT *search_key = static_cast<const KeyT *>(
+                slice_items[first_index].key_.KeyPtr());
+            target_iter = ccmp_.upper_bound(*search_key);
 
             if (target_iter != ccmp_.begin())
             {
@@ -7366,7 +7345,7 @@ protected:
         for (size_t item_idx = first_index; item_idx < end_idx;)
         {
             const KeyT *target_key =
-                static_cast<const KeyT *>(slice_items[item_idx].key_.get());
+                static_cast<const KeyT *>(slice_items[item_idx].key_.KeyPtr());
 
             size_t idx_in_page = target_page->Find(*target_key);
 
@@ -7575,11 +7554,11 @@ protected:
     {
         emplace = false;
         bool fail_if_not_found = false;
-        if (&key == NegativeInfinity<KeyT>::Instance())
+        if (&key == KeyT::NegativeInfinity())
         {
             return Begin();
         }
-        if (&key == PositiveInfinity<KeyT>::Instance())
+        if (&key == KeyT::PositiveInfinity())
         {
             return End();
         }
@@ -7760,7 +7739,7 @@ protected:
      */
     Iterator LowerBound(const KeyT &key)
     {
-        if (&key == NegativeInfinity<KeyT>::Instance())
+        if (&key == KeyT::NegativeInfinity())
         {
             return Begin();
         }
@@ -7967,7 +7946,7 @@ protected:
         {
             auto start_it = End();
             --start_it;
-            if (start_it->first == NegativeInfinity<KeyT>::Instance())
+            if (start_it->first == KeyT::NegativeInfinity())
             {
                 return std::make_pair(start_it, ScanType::ScanGap);
             }
@@ -8106,10 +8085,10 @@ protected:
 #ifndef ON_KEY_OBJECT
                     tuple->SetRecord(cce->payload_);
 #else
-                    // Redis KEYS command doesn't need value. But ObjectCcMap
-                    // doesn't override ScanKey() on local ccmap. Thus,
-                    // TemplateCcMap::ScanKey() on local ccmp may be called, and
-                    // it need not set record.
+                    // Redis KEYS command doesn't need value. But
+                    // ObjectCcMap doesn't override ScanKey() on local
+                    // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
+                    // may be called, and it need not set record.
 #endif
                     // We're only copying the shared_ptr here so we
                     // exclude the actual payload size.
@@ -8195,10 +8174,10 @@ protected:
                     cce->payload_->Serialize(remote_cache->records_);
                     tuple_size += cce->payload_->SerializedLength();
 #else
-                    // Redis KEYS command doesn't need value. But ObjectCcMap
-                    // doesn't override ScanKey() on local ccmap. Thus,
-                    // TemplateCcMap::ScanKey() on local ccmp may be called, and
-                    // it need not set record.
+                    // Redis KEYS command doesn't need value. But
+                    // ObjectCcMap doesn't override ScanKey() on local
+                    // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
+                    // may be called, and it need not set record.
 #endif
                 }
             }
@@ -8310,10 +8289,10 @@ protected:
                     cce->payload_->Serialize(*tuple->mutable_record());
                     tuple_size += cce->payload_->Size();
 #else
-                    // Redis KEYS command doesn't need value. But ObjectCcMap
-                    // doesn't override ScanKey() on local ccmap. Thus,
-                    // TemplateCcMap::ScanKey() on local ccmp may be called, and
-                    // it need not set record.
+                    // Redis KEYS command doesn't need value. But
+                    // ObjectCcMap doesn't override ScanKey() on local
+                    // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
+                    // may be called, and it need not set record.
 #endif
                 }
             }
@@ -8478,9 +8457,9 @@ protected:
             bool is_clean_target = false;
             if (kickout_cc)
             {
-                is_clean_target = kickout_cc->IsCleanTarget(&(*key_it), cce);
-                can_be_cleaned = is_clean_target &&
-                                 kickout_cc->CanBeCleaned(&(*key_it), cce);
+                is_clean_target = kickout_cc->IsCleanTarget(*key_it, cce);
+                can_be_cleaned =
+                    is_clean_target && kickout_cc->CanBeCleaned(cce);
                 CleanType type = kickout_cc->GetCleanType();
                 if (type == CleanType::CleanRangeData ||
                     type == CleanType::CleanBucketData)

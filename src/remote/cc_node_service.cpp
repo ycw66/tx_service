@@ -668,7 +668,7 @@ void CcNodeService::GetClusterNodes(
     ReadTxRequest read_req;
     ClusterConfigRecord rec;
     read_req.Set(&cluster_config_ccm_name,
-                 NegativeInfinity<VoidKey>::Instance(),
+                 VoidKey::NegInfTxKey(),
                  &rec,
                  false,
                  false,

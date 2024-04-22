@@ -12,6 +12,8 @@
 #include "cc/cc_entry.h"      // LruEntry
 #include "cc_req_base.h"
 #include "error_messages.h"
+// #include "range_slice.h"
+#include "range_slice_type.h"
 #include "tx_key.h"
 #include "tx_record.h"
 #include "tx_service_metrics.h"
@@ -117,9 +119,9 @@ public:
     }
 
     void SamplePoolMergeFrom(const TableName &table_or_index_name,
-                             std::vector<TxKey::Uptr> &&samplekeys)
+                             std::vector<TxKey> &&samplekeys)
     {
-        for (TxKey::Uptr &samplekey : samplekeys)
+        for (TxKey &samplekey : samplekeys)
         {
             sample_pool_map_[table_or_index_name].second.emplace_back(
                 std::move(samplekey));
@@ -147,7 +149,7 @@ private:
     const TableName table_name_;
     store::DataStoreHandler *store_hd_{nullptr};
     uint64_t current_version_{0};
-    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
         sample_pool_map_;
     int error_code_{0};
 };
@@ -201,7 +203,7 @@ public:
     int64_t cc_ng_term_;
     TableRangeEntry *range_entry_;
     std::vector<std::pair<CcRequestBase *, CcShard *>> requesters_;
-    std::vector<std::pair<TxKey::Uptr, uint32_t>> slice_info_;
+    std::vector<SliceInitInfo> slice_info_;
 };
 
 /**
@@ -241,7 +243,7 @@ struct SliceDataItem
 {
     SliceDataItem() = delete;
 
-    SliceDataItem(txservice::TxKey::Uptr &&key,
+    SliceDataItem(txservice::TxKey key,
                   std::unique_ptr<txservice::TxRecord> &&rec,
                   uint64_t version_ts,
                   bool is_deleted)
@@ -252,7 +254,7 @@ struct SliceDataItem
     {
     }
 
-    txservice::TxKey::Uptr key_;
+    txservice::TxKey key_;
     std::unique_ptr<txservice::TxRecord> record_;
     uint64_t version_ts_;
     bool is_deleted_;
@@ -269,8 +271,8 @@ public:
                           const Schema *key_schema,
                           const Schema *rec_schema,
                           uint64_t schema_ts,
-                          const TxKey *start_key,
-                          const TxKey *end_key,
+                          TxKey start_key,
+                          TxKey end_key,
                           uint64_t snapshot_ts,
                           NodeGroupId cc_ng_id,
                           int64_t cc_ng_term)
@@ -278,8 +280,8 @@ public:
           key_schema_(key_schema),
           rec_schema_(rec_schema),
           schema_ts_(schema_ts),
-          start_key_(start_key),
-          end_key_(end_key),
+          start_key_(std::move(start_key)),
+          end_key_(std::move(end_key)),
           snapshot_ts_(snapshot_ts),
           slice_size_(0),
           cc_ng_id_(cc_ng_id),
@@ -294,12 +296,12 @@ public:
         slice_data_.clear();
     }
 
-    void AddDataItem(txservice::TxKey::Uptr &&key,
+    void AddDataItem(txservice::TxKey key,
                      std::unique_ptr<txservice::TxRecord> &&record,
                      uint64_t version_ts,
                      bool is_deleted)
     {
-        slice_size_ += key->Size();
+        slice_size_ += key.Size();
         slice_size_ += record->Size();
         slice_data_.emplace_back(
             std::move(key), std::move(record), version_ts, is_deleted);
@@ -333,12 +335,12 @@ public:
         return schema_ts_;
     }
 
-    const TxKey *StartKey() const
+    const TxKey &StartKey() const
     {
         return start_key_;
     }
 
-    const TxKey *EndKey() const
+    const TxKey &EndKey() const
     {
         return end_key_;
     }
@@ -378,8 +380,8 @@ private:
     const Schema *key_schema_;
     const Schema *rec_schema_;
     const uint64_t schema_ts_;
-    const TxKey *start_key_;
-    const TxKey *end_key_;
+    TxKey start_key_;
+    TxKey end_key_;
     uint64_t snapshot_ts_;
     uint32_t slice_size_;
     NodeGroupId cc_ng_id_;
@@ -414,7 +416,7 @@ public:
         return partitioned_slice_data_[core_id];
     }
 
-    void AddDataItem(txservice::TxKey::Uptr &&key,
+    void AddDataItem(TxKey key,
                      std::unique_ptr<txservice::TxRecord> &&record,
                      uint64_t version_ts,
                      bool is_deleted);
@@ -434,9 +436,6 @@ public:
     {
         return range_;
     }
-
-    const TxKey *SliceStart() const;
-    const TxKey *SliceEnd() const;
 
     LoadRangeSliceRequest *LoadRequest()
     {
@@ -528,13 +527,10 @@ public:
 
     bool IsDrained(size_t core_idx) const
     {
-        assert(pause_keys_[core_idx].first != nullptr ||
-               pause_keys_[core_idx].second);
-
         return pause_keys_[core_idx].second;
     }
 
-    std::pair<TxKey::Uptr, bool> &PauseKey(size_t core_idx)
+    std::pair<TxKey, bool> &PauseKey(size_t core_idx)
     {
         return pause_keys_[core_idx];
     }
@@ -604,7 +600,7 @@ private:
     StoreRange *range_;
     std::vector<size_t> slice_first_idxs_;
 
-    std::vector<std::pair<TxKey::Uptr, bool>> pause_keys_;
+    std::vector<std::pair<TxKey, bool>> pause_keys_;
     std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vecs_;
 
     /**
@@ -645,6 +641,69 @@ public:
     RecordStatus rec_status_{RecordStatus::Unknown};
     std::unique_ptr<TxRecord> rec_{nullptr};
     int error_code_{0};
+};
+
+// This cc request is used to convert parallel access on ccmap/samplepool into
+// serial access.
+struct RunOnTxProcessorCc : public CcRequestBase
+{
+public:
+    explicit RunOnTxProcessorCc(std::function<void(CcShard &ccs)> task)
+        : task_(std::move(task)), is_finished_(false), mux_(), cv_()
+    {
+    }
+
+    void Reset()
+    {
+        is_finished_ = false;
+        error_code_ = CcErrorCode::NO_ERROR;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this]() { return is_finished_; });
+    }
+
+    bool IsError()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return error_code_ != CcErrorCode::NO_ERROR;
+    }
+
+    CcErrorCode ErrorCode()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return error_code_;
+    }
+
+    void AbortCcRequest(CcErrorCode error_code) override
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        is_finished_ = true;
+        error_code_ = error_code;
+        cv_.notify_one();
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+
+        task_(ccs);
+
+        error_code_ = CcErrorCode::NO_ERROR;
+        is_finished_ = true;
+        cv_.notify_one();
+
+        return false;
+    }
+
+private:
+    std::function<void(CcShard &ccs)> task_;
+    bool is_finished_{false};
+    CcErrorCode error_code_{CcErrorCode::NO_ERROR};
+    std::mutex mux_;
+    std::condition_variable cv_;
 };
 
 }  // namespace txservice

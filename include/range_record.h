@@ -5,12 +5,14 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "cc_req_misc.h"
+// #include "cc_req_misc.h"
+#include "data_sync_task.h"
 #include "range_bucket_key_record.h"
 #include "range_slice.h"
 #include "sharder.h"
@@ -22,20 +24,22 @@ namespace txservice
 {
 struct DataSyncTask;
 struct FetchRangeSlicesReq;
+struct LruEntry;
+template <typename KeyT, typename ValueT>
+struct CcEntry;
+
 // struct that stores range related info that we read from
 // KV storage during table range initialization.
 struct InitRangeEntry
 {
-    InitRangeEntry() : key_(nullptr), partition_id_(-1), version_ts_(0)
+    InitRangeEntry() : key_(), partition_id_(-1), version_ts_(0)
     {
     }
 
     InitRangeEntry(const InitRangeEntry &rhs) = delete;
     InitRangeEntry &operator=(const InitRangeEntry &rhs) = delete;
 
-    InitRangeEntry(std::unique_ptr<TxKey> start_key,
-                   int32_t partition_id,
-                   uint64_t version_ts)
+    InitRangeEntry(TxKey start_key, int32_t partition_id, uint64_t version_ts)
         : key_(std::move(start_key)),
           partition_id_(partition_id),
           version_ts_(version_ts)
@@ -49,129 +53,105 @@ struct InitRangeEntry
     {
     }
 
-    std::unique_ptr<TxKey> key_{nullptr};
+    TxKey key_;
     int32_t partition_id_{0};
     uint64_t version_ts_{0};
 };
 
 struct RangeInfo
 {
+public:
     RangeInfo() = delete;
-    RangeInfo(std::unique_ptr<TxKey> start_key,
-              const TxKey *end_key,
-              uint64_t version_ts,
-              uint32_t partition_id,
-              bool is_dirty = false)
-        : start_key_(std::move(start_key)),
-          end_key_(end_key),
-          partition_id_(partition_id),
+    RangeInfo(uint64_t version_ts, uint32_t partition_id, bool is_dirty = false)
+        : partition_id_(partition_id),
+          is_dirty_(is_dirty),
           version_ts_(version_ts),
-          dirty_ts_(0),
-          is_dirty_(is_dirty)
+          dirty_ts_(0)
     {
     }
 
-    RangeInfo(const RangeInfo &other)
-        : end_key_(other.end_key_),
-          partition_id_(other.partition_id_),
-          version_ts_(other.version_ts_),
-          new_partition_id_(other.new_partition_id_),
-          dirty_ts_(other.dirty_ts_),
-          is_dirty_(other.is_dirty_)
-    {
-        if (!other.start_key_)
-        {
-            start_key_ = nullptr;
-        }
-        else
-        {
-            start_key_ = other.start_key_->Clone();
-        }
-        for (auto &key : other.new_key_)
-        {
-            new_key_.push_back(key->Clone());
-        }
-    }
+    virtual ~RangeInfo() = default;
 
-    void Clear()
-    {
-        start_key_ = nullptr;
-        end_key_ = nullptr;
-        partition_id_ = 0;
-        version_ts_ = 1;
-        new_key_.clear();
-        new_partition_id_.clear();
-        dirty_ts_ = 0;
-        is_dirty_ = false;
-    }
+    RangeInfo(const RangeInfo &other) = delete;
 
-    RangeInfo &operator=(const RangeInfo &other)
-    {
-        if (this != &other)
-        {
-            end_key_ = other.end_key_;
-            partition_id_ = other.partition_id_;
-            version_ts_ = other.version_ts_;
-            new_partition_id_ = other.new_partition_id_;
-            dirty_ts_ = other.dirty_ts_;
-            is_dirty_ = other.is_dirty_;
+    // RangeInfo(RangeInfo &&other)
+    //     : end_key_(other.end_key_),
+    //       partition_id_(other.partition_id_),
+    //       version_ts_(other.version_ts_),
+    //       new_partition_id_(other.new_partition_id_),
+    //       dirty_ts_(other.dirty_ts_),
+    //       is_dirty_(other.is_dirty_)
+    // {
+    //     if (!other.start_key_)
+    //     {
+    //         start_key_ = nullptr;
+    //     }
+    //     else
+    //     {
+    //         start_key_ = other.start_key_->Clone();
+    //     }
+    //     for (auto &key : other.new_key_)
+    //     {
+    //         new_key_.push_back(key->Clone());
+    //     }
+    // }
 
-            if (!other.start_key_)
-            {
-                start_key_ = nullptr;
-            }
-            else
-            {
-                start_key_ = other.start_key_->Clone();
-            }
+    // RangeInfo &operator=(const RangeInfo &other)
+    // {
+    //     if (this != &other)
+    //     {
+    //         end_key_ = other.end_key_;
+    //         partition_id_ = other.partition_id_;
+    //         version_ts_ = other.version_ts_;
+    //         new_partition_id_ = other.new_partition_id_;
+    //         dirty_ts_ = other.dirty_ts_;
+    //         is_dirty_ = other.is_dirty_;
 
-            new_key_.clear();
-            for (const auto &key : other.new_key_)
-            {
-                new_key_.push_back(key->Clone());
-            }
+    //         if (!other.start_key_)
+    //         {
+    //             start_key_ = nullptr;
+    //         }
+    //         else
+    //         {
+    //             start_key_ = other.start_key_->Clone();
+    //         }
 
-            assert(new_partition_id_.size() == new_key_.size());
-        }
-        return *this;
-    }
+    //         new_key_.clear();
+    //         for (const auto &key : other.new_key_)
+    //         {
+    //             new_key_.push_back(key->Clone());
+    //         }
 
-    std::unique_ptr<RangeInfo> Clone() const
-    {
-        std::unique_ptr<TxKey> start_key_clone =
-            start_key_ == nullptr ? nullptr : start_key_->Clone();
-        RangeInfo *that = new RangeInfo(
-            std::move(start_key_clone), end_key_, version_ts_, partition_id_);
-        for (auto &key : new_key_)
-        {
-            that->new_key_.push_back(key->Clone());
-        }
-        that->new_partition_id_ = new_partition_id_;
-        that->is_dirty_ = is_dirty_;
-        assert(that->new_partition_id_.size() == that->new_key_.size());
-        return std::unique_ptr<RangeInfo>(that);
-    }
+    //         assert(new_partition_id_.size() == new_key_.size());
+    //     }
+    //     return *this;
+    // }
 
-    void SetDirty(const std::vector<std::unique_ptr<TxKey>> &new_key,
-                  const std::vector<int32_t> &new_partition_id,
-                  uint64_t dirty_ts)
-    {
-        if (dirty_ts >= version_ts_ && dirty_ts >= dirty_ts_)
-        {
-            new_key_.clear();
-            for (auto &key_uptr : new_key)
-            {
-                new_key_.push_back(key_uptr->Clone());
-            }
-            new_partition_id_ = new_partition_id;
-            assert(new_key_.size() == new_partition_id_.size());
-            dirty_ts_ = dirty_ts;
-            is_dirty_ = true;
-        }
-    }
+    virtual std::unique_ptr<RangeInfo> Clone() const = 0;
 
-    void SetDirty(std::vector<std::unique_ptr<TxKey>> &&new_key,
-                  std::vector<int32_t> &&new_partition_id,
+    virtual void SetNewRanges(
+        const std::vector<std::pair<TxKey, int32_t>> &new_ranges) = 0;
+
+    // void SetDirty(const std::vector<TxKey> &new_key,
+    //               const std::vector<int32_t> &new_partition_id,
+    //               uint64_t dirty_ts)
+    // {
+    //     if (dirty_ts >= version_ts_ && dirty_ts >= dirty_ts_)
+    //     {
+    //         new_key_.clear();
+    //         for (const auto &key : new_key)
+    //         {
+    //             new_key_.emplace_back(key.Clone());
+    //         }
+    //         new_partition_id_ = new_partition_id;
+    //         assert(new_key_.size() == new_partition_id_.size());
+    //         dirty_ts_ = dirty_ts;
+    //         is_dirty_ = true;
+    //     }
+    // }
+
+    void SetDirty(std::vector<TxKey> new_key,
+                  std::vector<int32_t> new_partition_id,
                   uint64_t dirty_ts)
     {
         if (dirty_ts >= version_ts_ && dirty_ts >= dirty_ts_)
@@ -210,15 +190,16 @@ struct RangeInfo
         return is_dirty_;
     }
 
-    int32_t GetKeyNewRangeId(const TxKey *key) const
+    int32_t GetKeyNewRangeId(const TxKey &key) const
     {
         if (!IsDirty())
         {
             return -1;
         }
 
+        assert(!new_key_.empty());
         // Does not belong to any of the new ranges
-        if (*key < *new_key_.front())
+        if (key < new_key_.front())
         {
             return -1;
         }
@@ -226,7 +207,7 @@ struct RangeInfo
         uint idx = 1;
         for (; idx < new_key_.size(); idx++)
         {
-            if (*key < *new_key_.at(idx))
+            if (key < new_key_.at(idx))
             {
                 break;
             }
@@ -235,15 +216,8 @@ struct RangeInfo
         return new_partition_id_.at(idx - 1);
     }
 
-    const TxKey *StartKey() const
-    {
-        return start_key_.get();
-    }
-
-    const TxKey *EndKey() const
-    {
-        return end_key_;
-    }
+    virtual TxKey StartTxKey() const = 0;
+    virtual TxKey EndTxKey() const = 0;
 
     int32_t PartitionId() const
     {
@@ -255,7 +229,7 @@ struct RangeInfo
         return version_ts_;
     }
 
-    const std::vector<std::unique_ptr<TxKey>> *NewKey() const
+    const std::vector<TxKey> *NewKey() const
     {
         return is_dirty_ ? &new_key_ : nullptr;
     }
@@ -275,110 +249,168 @@ struct RangeInfo
         return is_dirty_ ? dirty_ts_ : 0;
     }
 
-    size_t MemUsage() const
-    {
-        size_t mem_usage = sizeof(RangeInfo);
-        if (start_key_)
-        {
-            mem_usage += start_key_->MemUsage();
-        }
-        for (auto &key : new_key_)
-        {
-            mem_usage += key->MemUsage();
-        }
-        return mem_usage;
-    }
+    virtual size_t MemUsage() const = 0;
 
-private:
-    std::unique_ptr<TxKey> start_key_;
-    const TxKey *end_key_;
+protected:
     int32_t partition_id_{0};
-    uint64_t version_ts_{1};
-
-    std::vector<std::unique_ptr<TxKey>> new_key_;
-    std::vector<int32_t> new_partition_id_;
-    uint64_t dirty_ts_{0};
     // is_dirty_ means if the new key and partition ids are visible to regular
     // requests. During post commit phase of range split, we have a short period
     // where we need to keep the new partition info but make them invisible to
     // regular range read request.
     bool is_dirty_{false};
+
+    uint64_t version_ts_{1};
+
+    std::vector<int32_t> new_partition_id_;
+    std::vector<TxKey> new_key_;
+    uint64_t dirty_ts_{0};
+
     template <typename KeyT>
     friend class RangeCcMap;
     friend struct RangeRecord;
     friend struct TableRangeEntry;
+    template <typename KeyT>
+    friend struct TemplateTableRangeEntry;
     friend struct SplitFlushRangeOp;
+};
+
+template <typename KeyT>
+struct TemplateRangeInfo : public RangeInfo
+{
+public:
+    TemplateRangeInfo() = delete;
+
+    TemplateRangeInfo(const KeyT *start_key,
+                      uint64_t version_ts,
+                      uint32_t partition_id,
+                      const KeyT *end_key = nullptr,
+                      bool is_dirty = false)
+        : RangeInfo(version_ts, partition_id, is_dirty), end_key_(end_key)
+    {
+        if (start_key == KeyT::NegativeInfinity())
+        {
+            is_start_neg_inf_ = true;
+        }
+        else
+        {
+            start_key_ = KeyT(*start_key);
+            is_start_neg_inf_ = false;
+        }
+    }
+
+    std::unique_ptr<RangeInfo> Clone() const override
+    {
+        std::unique_ptr<TemplateRangeInfo<KeyT>> that =
+            std::make_unique<TemplateRangeInfo<KeyT>>(
+                is_start_neg_inf_ ? KeyT::NegativeInfinity() : &start_key_,
+                version_ts_,
+                partition_id_,
+                end_key_,
+                is_dirty_);
+
+        for (const auto &key : new_key_)
+        {
+            that->new_key_.emplace_back(key.Clone());
+        }
+        that->new_partition_id_ = new_partition_id_;
+        that->dirty_ts_ = dirty_ts_;
+        assert(that->new_partition_id_.size() == that->new_key_.size());
+
+        return that;
+    }
+
+    void SetEndKey(const KeyT *end_key)
+    {
+        end_key_ = end_key;
+    }
+
+    TxKey StartTxKey() const override
+    {
+        return TxKey(StartKey());
+    }
+
+    TxKey EndTxKey() const override
+    {
+        return TxKey(EndKey());
+    }
+
+    const KeyT *StartKey() const
+    {
+        return is_start_neg_inf_ ? KeyT::NegativeInfinity() : &start_key_;
+    }
+
+    const KeyT *EndKey() const
+    {
+        return end_key_;
+    }
+
+    size_t MemUsage() const override
+    {
+        size_t mem_usage = sizeof(TemplateRangeInfo<KeyT>);
+        for (const auto &key : new_key_)
+        {
+            mem_usage += key.MemUsage();
+        }
+        mem_usage += sizeof(int32_t) * new_partition_id_.size();
+        return mem_usage;
+    }
+
+    void SetNewRanges(
+        const std::vector<std::pair<TxKey, int32_t>> &new_ranges) override
+    {
+        new_partition_id_.clear();
+        new_partition_id_.reserve(new_ranges.size());
+        new_key_.clear();
+        new_key_.reserve(new_ranges.size());
+
+        for (const auto &[range_start, range_id] : new_ranges)
+        {
+            assert(range_start.Type() == KeyType::Normal);
+            new_key_.emplace_back(
+                std::make_unique<KeyT>(*range_start.template GetKey<KeyT>()));
+            new_partition_id_.emplace_back(range_id);
+        }
+    }
+
+private:
+    // For the first range starting from negative infinity, the field start_key_
+    // is meaningless. For the last range ending with positive infinity, the end
+    // key points to KeyT::PositiveInfinity();
+    KeyT start_key_;
+    bool is_start_neg_inf_{false};
+    const KeyT *end_key_{nullptr};
 };
 
 struct TableRangeEntry
 {
 public:
+    using uptr = std::unique_ptr<TableRangeEntry>;
+
     TableRangeEntry() = default;
     TableRangeEntry(const TableRangeEntry &) = delete;
     TableRangeEntry &operator=(const TableRangeEntry &) = delete;
 
-    TableRangeEntry(std::unique_ptr<TxKey> start_key,
-                    const TxKey *end_key,
-                    uint64_t version_ts,
-                    int64_t partition_id,
-                    std::unique_ptr<StoreRange> slices = nullptr)
-        : range_info_(std::make_unique<RangeInfo>(
-              std::move(start_key), end_key, version_ts, partition_id)),
-          mux_(),
-          range_slices_(std::move(slices)),
-          fetch_range_slices_req_(nullptr)
+    TableRangeEntry(uint64_t version_ts, int64_t partition_id)
+        : mux_(), fetch_range_slices_req_(nullptr)
     {
     }
 
-    ~TableRangeEntry();
+    virtual ~TableRangeEntry();
 
-    int64_t UpdateRangeEntry(uint64_t version_ts,
-                             const TxKey *end_key,
-                             std::unique_ptr<StoreRange> slices)
-    {
-        range_info_->version_ts_ = version_ts;
-        range_info_->end_key_ = end_key;
-        std::lock_guard<std::shared_mutex> lk(mux_);
-        int64_t orig_size = range_slices_ ? range_slices_->MemUsage() : 0;
-        int64_t new_size = slices ? slices->MemUsage() : 0;
-        range_slices_ = std::move(slices);
-        return new_size - orig_size;
-    }
+    virtual const RangeInfo *GetRangeInfo() const = 0;
 
-    /**
-     * @brief Set new table range info in range_info_.
-     */
-    void UploadNewRangeInfo(const std::vector<std::unique_ptr<TxKey>> &new_key,
-                            const std::vector<int32_t> &new_partition_id,
-                            uint64_t commit_ts)
-    {
-        assert(commit_ts >= range_info_->DirtyTs());
+    virtual uint64_t Version() const = 0;
 
-        range_info_->SetDirty(new_key, new_partition_id, commit_ts);
-    }
-
-    const RangeInfo *GetRangeInfo() const
-    {
-        return range_info_.get();
-    }
-
-    uint64_t Version() const
-    {
-        return range_info_->VersionTs();
-    }
-
-    uint64_t DirtyVersion() const
-    {
-        return range_info_->DirtyTs();
-    }
+    virtual uint64_t DirtyVersion() const = 0;
 
     StoreRange *PinStoreRange()
     {
         std::shared_lock<std::shared_mutex> lk(mux_);
-        if (range_slices_)
+        StoreRange *store_range = RangeSlices();
+        if (store_range != nullptr)
         {
-            range_slices_->pins_.fetch_add(1, std::memory_order_release);
-            return range_slices_.get();
+            store_range->pins_.fetch_add(1, std::memory_order_release);
+            return store_range;
         }
         return nullptr;
     }
@@ -386,56 +418,23 @@ public:
     void UnPinStoreRange()
     {
         std::shared_lock<std::shared_mutex> lk(mux_);
-        if (range_slices_)
+        StoreRange *store_range = RangeSlices();
+        if (store_range != nullptr)
         {
-            range_slices_->pins_.fetch_sub(1, std::memory_order_release);
+            store_range->pins_.fetch_sub(1, std::memory_order_release);
         }
     }
 
-    bool KickoutKeyInSlice(const TxKey &key)
-    {
-        std::shared_lock<std::shared_mutex> lk(mux_);
-        if (range_slices_)
-        {
-            return range_slices_->KickoutSlice(key);
-        }
-        return true;
-    }
+    virtual bool DropStoreRangeAndSyncInfo(size_t &mem_decreased) = 0;
 
-    bool DropStoreRangeAndSyncInfo(size_t &mem_decreased);
+    virtual void SetRangeEndTxKey(TxKey end_tx_key) = 0;
 
-    void SetRangeEndKey(const TxKey *end_key)
-    {
-        range_info_->end_key_ = end_key;
-        if (range_slices_)
-        {
-            range_slices_->SetRangeEndKey(end_key);
-        }
-    }
+    virtual void SetVersion(uint64_t version) = 0;
 
-    void SetVersion(uint64_t version)
-    {
-        range_info_->version_ts_ = version;
-    }
+    virtual int64_t InitRangeSlices(std::vector<SliceInitInfo> &&slices,
+                                    NodeGroupId ng_id) = 0;
 
-    int64_t InitRangeSlices(
-        std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slices,
-        NodeGroupId ng_id,
-        bool fully_cached = false);
-
-    size_t DropStoreRange()
-    {
-        // We need to make sure that there's no one accesing StoreRange before
-        // dropping store range.
-        std::unique_lock<std::shared_mutex> lk(mux_);
-        size_t mem_decreased = 0;
-        if (range_slices_ && range_slices_->Pins() == 0)
-        {
-            mem_decreased += range_slices_->MemUsage();
-            range_slices_ = nullptr;
-        }
-        return mem_decreased;
-    }
+    virtual size_t DropStoreRange() = 0;
 
     uint64_t GetLastSyncTs()
     {
@@ -460,32 +459,17 @@ public:
                           int64_t ng_term,
                           CcShard *cc_shard);
 
-    const StoreRange *RangeSlices() const
-    {
-        return range_slices_.get();
-    }
+    virtual StoreRange *RangeSlices() = 0;
+    virtual TxKey RangeStartTxKey() = 0;
 
-private:
-    StoreRange *RangeSlices()
-    {
-        return range_slices_.get();
-    }
-
+protected:
     uint64_t last_sync_ts_{0};
-    std::unique_ptr<RangeInfo> range_info_{nullptr};
 
     // Protects range_slices_, fetch_range_slices_cc_
     // Any update on these pointers requres unique lock on mux. But updating
     // the object that these pointers point to only requires shared lock.
     std::shared_mutex mux_;
 
-    // range_slices_ stores the slice info in this range. This is only
-    // initialized on the node group that owns this range, and it is initialized
-    // lazily when needed. range_slices_ is only safe to accessed in the
-    // following cases:
-    // 1. StoreRange is pinned.
-    // 2. mutex lock is acquried on TableRangeEntry.mux_.
-    std::unique_ptr<StoreRange> range_slices_{nullptr};
     std::unique_ptr<FetchRangeSlicesReq> fetch_range_slices_req_{nullptr};
 
     template <typename KeyT>
@@ -493,6 +477,197 @@ private:
     friend class LocalCcShards;
     friend struct FetchRangeSlicesReq;
 };
+
+template <typename KeyT>
+struct TemplateTableRangeEntry : public TableRangeEntry
+{
+public:
+    TemplateTableRangeEntry(
+        const KeyT *start_key,
+        uint64_t version_ts,
+        int64_t partition_id,
+        std::unique_ptr<TemplateStoreRange<KeyT>> slices = nullptr)
+        : range_info_(start_key, version_ts, partition_id),
+          range_slices_(std::move(slices))
+    {
+    }
+
+    int64_t UpdateRangeEntry(uint64_t version_ts,
+                             std::unique_ptr<TemplateStoreRange<KeyT>> slices)
+    {
+        range_info_.version_ts_ = version_ts;
+        std::lock_guard<std::shared_mutex> lk(mux_);
+        int64_t orig_size = range_slices_ ? range_slices_->MemUsage() : 0;
+        int64_t new_size = slices ? slices->MemUsage() : 0;
+        range_slices_ = std::move(slices);
+        return new_size - orig_size;
+    }
+
+    void SetRangeEndTxKey(TxKey end_tx_key) override
+    {
+        const KeyT *typed_end = end_tx_key.template GetKey<KeyT>();
+        SetRangeEndKey(typed_end);
+    }
+
+    void SetRangeEndKey(const KeyT *end_key)
+    {
+        range_info_.SetEndKey(end_key);
+        if (range_slices_)
+        {
+            range_slices_->SetRangeEndKey(end_key);
+        }
+    }
+
+    StoreRange *RangeSlices() override
+    {
+        return range_slices_.get();
+    }
+
+    TemplateStoreRange<KeyT> *TypedStoreRange() const
+    {
+        return range_slices_.get();
+    }
+
+    int64_t InitRangeSlices(std::vector<SliceInitInfo> &&slices,
+                            NodeGroupId ng_id) override
+    {
+        std::unique_ptr<TemplateStoreRange<KeyT>> range_slices =
+            std::make_unique<TemplateStoreRange<KeyT>>(
+                range_info_.StartKey(),
+                range_info_.EndKey(),
+                range_info_.PartitionId(),
+                ng_id,
+                *Sharder::Instance().GetLocalCcShards());
+
+        range_slices->InitSlices(std::move(slices));
+        size_t old_size = 0;
+        if (range_slices_)
+        {
+            old_size = range_slices_->MemUsage();
+        }
+        size_t current_size = range_slices->MemUsage();
+        range_slices_ = std::move(range_slices);
+        return current_size - old_size;
+    }
+
+    size_t DropStoreRange() override
+    {
+        // We need to make sure that there's no one accesing StoreRange before
+        // dropping store range.
+        std::unique_lock<std::shared_mutex> lk(mux_);
+        size_t mem_decreased = 0;
+        if (range_slices_ && range_slices_->Pins() == 0)
+        {
+            mem_decreased += range_slices_->MemUsage();
+            range_slices_ = nullptr;
+        }
+        return mem_decreased;
+    }
+
+    const RangeInfo *GetRangeInfo() const override
+    {
+        return &range_info_;
+    }
+
+    const TemplateRangeInfo<KeyT> *TypedRangeInfo() const
+    {
+        return &range_info_;
+    }
+
+    TemplateRangeInfo<KeyT> *TypedRangeInfo()
+    {
+        return &range_info_;
+    }
+
+    /**
+     * @brief Set new table range info in range_info_.
+     */
+    void UploadNewRangeInfo(std::vector<TxKey> new_key,
+                            std::vector<int32_t> new_partition_id,
+                            uint64_t commit_ts)
+    {
+        assert(commit_ts >= range_info_.DirtyTs());
+
+        range_info_.SetDirty(
+            std::move(new_key), std::move(new_partition_id), commit_ts);
+    }
+
+    bool DropStoreRangeAndSyncInfo(size_t &mem_decreased) override
+    {
+        std::unique_lock<std::shared_mutex> lk(mux_);
+        mem_decreased = 0;
+        if (range_slices_)
+        {
+            if (range_slices_->Pins() == 0)
+            {
+                mem_decreased = range_slices_->MemUsage();
+                range_slices_ = nullptr;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        else if (fetch_range_slices_req_ != nullptr)
+        {
+            // This function is only called during bucket migration and we're
+            // cleaning up range slices that are migrated away. In this case we
+            // should make sure that no range slices in this bucket is loaded
+            // into memory after this function returns true. So we need to wait
+            // til the current fetch req is finished.
+            return false;
+        }
+
+        return true;
+    }
+
+    uint64_t Version() const override
+    {
+        return range_info_.VersionTs();
+    }
+
+    uint64_t DirtyVersion() const override
+    {
+        return range_info_.DirtyTs();
+    }
+
+    void SetVersion(uint64_t version) override
+    {
+        range_info_.version_ts_ = version;
+    }
+
+    bool KickoutKeyInSlice(const KeyT &key)
+    {
+        std::shared_lock<std::shared_mutex> lk(mux_);
+        if (range_slices_ != nullptr)
+        {
+            return range_slices_->KickoutSlice(key);
+        }
+        return true;
+    }
+
+    const KeyT *RangeStartKey() const
+    {
+        return range_info_.StartKey();
+    }
+
+    TxKey RangeStartTxKey() override
+    {
+        return TxKey(RangeStartKey());
+    }
+
+private:
+    TemplateRangeInfo<KeyT> range_info_;
+
+    // range_slices_ stores the slice info in this range. This is only
+    // initialized on the node group that owns this range, and it is initialized
+    // lazily when needed. range_slices_ is only safe to accessed in the
+    // following cases:
+    // 1. StoreRange is pinned.
+    // 2. mutex lock is acquried on TableRangeEntry.mux_.
+    std::unique_ptr<TemplateStoreRange<KeyT>> range_slices_{nullptr};
+};
+
 struct RangeRecord : public TxRecord
 {
 public:
@@ -599,12 +774,12 @@ public:
     {
         assert(!is_read_result_);
         // handle neg inf key
-        bool is_normal = range_info_->start_key_ != nullptr &&
-                         range_info_->start_key_->Type() == KeyType::Normal;
+        TxKey start_tx_key = range_info_->StartTxKey();
+        bool is_normal = start_tx_key.Type() == KeyType::Normal;
         SerializeToStr(&is_normal, str);
         if (is_normal)
         {
-            range_info_->start_key_->Serialize(str);
+            start_tx_key.Serialize(str);
         }
         SerializeToStr(&range_info_->partition_id_, str);
         SerializeToStr(&range_info_->version_ts_, str);
@@ -612,9 +787,9 @@ public:
         // serialize dirty range info
         uint16_t new_part_size = range_info_->new_key_.size();
         SerializeToStr(&new_part_size, str);
-        for (const TxKey::Uptr &new_key : range_info_->new_key_)
+        for (const TxKey &new_key : range_info_->new_key_)
         {
-            new_key->Serialize(str);
+            new_key.Serialize(str);
         }
         for (const int32_t &new_id : range_info_->new_partition_id_)
         {
@@ -622,12 +797,12 @@ public:
         }
         SerializeToStr(&range_info_->dirty_ts_, str);
         // Serialize end key
-        is_normal = range_info_->end_key_ != nullptr &&
-                    range_info_->end_key_->Type() == KeyType::Normal;
+        TxKey end_tx_key = range_info_->EndTxKey();
+        is_normal = end_tx_key.Type() == KeyType::Normal;
         SerializeToStr(&is_normal, str);
         if (is_normal)
         {
-            range_info_->end_key_->Serialize(str);
+            end_tx_key.Serialize(str);
         }
     }
 
@@ -644,16 +819,16 @@ public:
         assert(!is_read_result_);
         size_t size = 0;
         size += sizeof(bool);
-        if (range_info_->start_key_ != nullptr &&
-            range_info_->start_key_->Type() == KeyType::Normal)
+        TxKey start_tx_key = range_info_->StartTxKey();
+        if (start_tx_key.Type() == KeyType::Normal)
         {
-            size += range_info_->start_key_->SerializedLength();
+            size += start_tx_key.SerializedLength();
         }
         // version_ts, dirty_ts, partition_id, new_key_cnt, slice_cnt
         size += (2 * sizeof(uint64_t) + sizeof(int32_t) + 2 * sizeof(uint16_t));
-        for (const TxKey::Uptr &new_key : range_info_->new_key_)
+        for (const TxKey &new_key : range_info_->new_key_)
         {
-            size += new_key->SerializedLength();
+            size += new_key.SerializedLength();
         }
         size += (sizeof(int32_t) * range_info_->new_partition_id_.size());
         return size;
@@ -759,7 +934,7 @@ public:
         return is_info_owner_ ? range_info_uptr_.get() : range_info_;
     }
 
-    void SetRangeInfo(std::unique_ptr<RangeInfo> &&range_info)
+    void SetRangeInfo(std::unique_ptr<RangeInfo> range_info)
     {
         if (!is_info_owner_)
         {
@@ -779,53 +954,7 @@ public:
         range_info_ = range_info;
     }
 
-    void CopyForReadResult(const RangeRecord &other)
-    {
-        // Release RangeInfo ownership
-        if (is_info_owner_)
-        {
-            range_info_uptr_.reset();
-            is_info_owner_ = false;
-        }
-
-        assert(!other.is_info_owner_);
-        range_info_ = other.range_info_;
-        is_info_owner_ = other.is_info_owner_;
-
-        // Free own unique ptr.
-        if (is_read_result_ && new_range_owner_bucket_)
-        {
-            new_range_owner_bucket_.reset();
-        }
-        else if (!is_read_result_ && new_range_owner_rec_)
-        {
-            new_range_owner_rec_.reset();
-        }
-        assert(!other.is_read_result_);
-        is_read_result_ = true;
-
-        range_owner_bucket_ =
-            static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                other.range_owner_rec_)
-                ->payload_->GetBucketInfo();
-
-        if (other.new_range_owner_rec_)
-        {
-            new_range_owner_bucket_ =
-                std::make_unique<std::vector<const BucketInfo *>>();
-            for (auto &entry : *other.new_range_owner_rec_)
-            {
-                new_range_owner_bucket_->push_back(
-                    static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord>
-                                    *>(entry)
-                        ->payload_->GetBucketInfo());
-            }
-        }
-        else
-        {
-            new_range_owner_bucket_ = nullptr;
-        }
-    }
+    void CopyForReadResult(const RangeRecord &other);
 
     /**
      * @brief Get range owner node group. Should only be called if

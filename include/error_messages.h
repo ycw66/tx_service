@@ -1,9 +1,8 @@
 #pragma once
 
-#include <map>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 namespace txservice
 {
@@ -106,7 +105,7 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::TX_REQUEST_TO_COMMITTED_ABORTED_TX,
      "Execute TxRequest failed, transaction has committed/aborted"}};
 
-enum struct CcErrorCode
+enum struct CcErrorCode : uint8_t
 {
     NO_ERROR = 0,
     UNDEFINED_ERR,

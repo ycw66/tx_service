@@ -7,8 +7,8 @@
 
 namespace txservice
 {
-void SkGenerator::GenerateSkFromPk(const TxKey *start_key,
-                                   const TxKey *end_key,
+void SkGenerator::GenerateSkFromPk(TxKey start_key,
+                                   TxKey end_key,
                                    uint64_t scan_ts,
                                    std::vector<TableName> &new_indexes_name,
                                    size_t &scanned_pk_count,
@@ -75,7 +75,7 @@ void SkGenerator::GenerateSkFromPk(const TxKey *start_key,
     ReadTxRequest read_range_req;
     RangeRecord range_rec;
     read_range_req.Set(
-        &range_table_name, start_key, &range_rec, false, false, true);
+        &range_table_name, &start_key, &range_rec, false, false, true);
     read_range_req.Reset();
     acq_range_lock_txm->Execute(&read_range_req);
     read_range_req.Wait();
@@ -93,11 +93,9 @@ void SkGenerator::GenerateSkFromPk(const TxKey *start_key,
 
     CommitTxRequest commit_req;
     // Check the range boundary.
-    const TxKey *range_end_key = range_rec.GetRangeInfo()->EndKey();
-    range_end_key = !range_end_key
-                        ? cc_shards->GetCatalogFactory()->PositiveInfKey()
-                        : range_end_key;
-    if (!(*range_end_key == *end_key))
+    TxKey range_end_key = range_rec.GetRangeInfo()->EndTxKey();
+
+    if (!(range_end_key == end_key))
     {
         // The range have changed, return error.
         LOG(ERROR) << "GenerateSkFromPk: The boundary of range#"
@@ -116,8 +114,8 @@ void SkGenerator::GenerateSkFromPk(const TxKey *start_key,
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
     leader_terms_.resize(ng_cnt, INIT_TERM);
 
-    res_code = ScanPkAndGenerateSk(start_key,
-                                   end_key,
+    res_code = ScanPkAndGenerateSk(&start_key,
+                                   &end_key,
                                    scan_ts,
                                    ng_term,
                                    acq_range_lock_txm->TxNumber(),
@@ -221,7 +219,7 @@ void SkGenerator::RemoteGenerateSkFromPk(
     // Acquire the range read lock
     ReadTxRequest read_range_req;
     RangeRecord range_rec;
-    const TxKey *range_start_key = nullptr;
+    TxKey range_start_key;
     if (start_key_str.size() > 0)
     {
         read_range_req.Set(
@@ -230,8 +228,12 @@ void SkGenerator::RemoteGenerateSkFromPk(
     else
     {
         range_start_key = cc_shards->GetCatalogFactory()->NegativeInfKey();
-        read_range_req.Set(
-            &range_table_name, range_start_key, &range_rec, false, false, true);
+        read_range_req.Set(&range_table_name,
+                           &range_start_key,
+                           &range_rec,
+                           false,
+                           false,
+                           true);
     }
     read_range_req.Reset();
     acq_range_lock_txm->Execute(&read_range_req);
@@ -250,18 +252,13 @@ void SkGenerator::RemoteGenerateSkFromPk(
 
     CommitTxRequest commit_req;
     // Check the range boundary.
-    range_start_key = range_rec.GetRangeInfo()->StartKey();
-    range_start_key = !range_start_key
-                          ? cc_shards->GetCatalogFactory()->NegativeInfKey()
-                          : range_start_key;
-    const TxKey *range_end_key = range_rec.GetRangeInfo()->EndKey();
-    range_end_key = !range_end_key
-                        ? cc_shards->GetCatalogFactory()->PositiveInfKey()
-                        : range_end_key;
+    range_start_key = range_rec.GetRangeInfo()->StartTxKey();
+    TxKey range_end_key = range_rec.GetRangeInfo()->EndTxKey();
+
     std::string serialized_end_key;
-    if (range_end_key->Type() == KeyType::Normal)
+    if (range_end_key.Type() == KeyType::Normal)
     {
-        range_end_key->Serialize(serialized_end_key);
+        range_end_key.Serialize(serialized_end_key);
     }
     if (serialized_end_key.length() != end_key_str.length() ||
         serialized_end_key.compare(end_key_str))
@@ -283,8 +280,8 @@ void SkGenerator::RemoteGenerateSkFromPk(
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
     leader_terms_.resize(ng_cnt, INIT_TERM);
 
-    res_code = ScanPkAndGenerateSk(range_start_key,
-                                   range_end_key,
+    res_code = ScanPkAndGenerateSk(&range_start_key,
+                                   &range_end_key,
                                    scan_ts,
                                    ng_term,
                                    acq_range_lock_txm->TxNumber(),
@@ -352,7 +349,7 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
     CcErrorCode scan_res = CcErrorCode::NO_ERROR;
     bool scan_data_drained = false;
     bool scan_pk_finished = false;
-    std::vector<TxKey::Uptr> last_finished_pos;
+    std::vector<TxKey> last_finished_pos;
     last_finished_pos.reserve(core_cnt);
     for (size_t i = 0; i < core_cnt; ++i)
     {
@@ -361,7 +358,7 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
 
     std::vector<SkEncoder::uptr> sk_encoder_vec;
     sk_encoder_vec.reserve(new_indexes_name.size());
-    const TxKey *target_key = nullptr;
+    TxKey target_key;
     const TxRecord *target_rec = nullptr;
     uint64_t version_ts = 0;
 
@@ -413,7 +410,9 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                     auto &paused_key = scan_req.PausePos(i).first;
                     if (!scan_req.IsDrained(i))
                     {
+#ifdef RANGE_PARTITION_ENABLED
                         paused_key = std::move(last_finished_pos[i]);
+#endif
                     }
                 }
 #endif
@@ -505,12 +504,13 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                         // Skip the deleted record.
                         continue;
                     }
-                    assert(target_key != nullptr && target_rec != nullptr);
+                    assert(target_key.KeyPtr() != nullptr &&
+                           target_rec != nullptr);
 
                     auto packed_sk =
-                        sk_encoder->GeneratePackedSk(target_key, target_rec);
+                        sk_encoder->GeneratePackedSk(&target_key, target_rec);
 
-                    if (packed_sk.first.get() == nullptr)
+                    if (packed_sk.first.KeyPtr() == nullptr)
                     {
                         LOG(ERROR)
                             << "ScanPkAndGenerateSk: Failed to generate "
@@ -556,7 +556,9 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                     auto &paused_key = scan_req.PausePos(core_idx).first;
                     if (!scan_req.IsDrained(core_idx))
                     {
-                        last_finished_pos[core_idx] = paused_key->Clone();
+#ifdef RANGE_PARTITION_ENABLED
+                        last_finished_pos[core_idx] = paused_key.Clone();
+#endif
                     }
 #endif
                     // If the data is drained
@@ -689,7 +691,7 @@ CcErrorCode SkGenerator::UploadWithoutDataLog(
              item_it != table_write_entrys.end();
              ++item_it)
         {
-            hash = item_it->key_->Hash();
+            hash = item_it->key_.Hash();
             key_shard_code = Sharder::Instance().ShardCode(hash);
             dest_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
             auto ng_it = ng_table_write_entrys.try_emplace(dest_ng_id);
@@ -873,7 +875,7 @@ void SkGenerator::UploadBatch(
         const char *val_ptr = nullptr;
         for (size_t idx = start_key_idx; idx < end_key_idx; ++idx)
         {
-            write_entry_vec.at(idx)->key_->Serialize(*keys_str);
+            write_entry_vec.at(idx)->key_.Serialize(*keys_str);
             write_entry_vec.at(idx)->rec_->Serialize(*recs_str);
             val_ptr = reinterpret_cast<const char *>(
                 &(write_entry_vec.at(idx)->commit_ts_));
@@ -914,7 +916,7 @@ CcErrorCode SkGenerator::AcquireRangeReadLocks(
         for (auto write_entry_it = table_write_entrys.begin();
              write_entry_it != table_write_entrys.end();)
         {
-            write_key = write_entry_it->key_.get();
+            write_key = &write_entry_it->key_;
 
             RangeRecord range_rec;
             ReadTxRequest read_range_req(
@@ -969,20 +971,19 @@ void SkGenerator::AdvanceWriteEntryForRangeInfo(
 {
     // Advances the write entry iterator such that it points to the first key
     // belonging to the next range.
-    const TxKey *range_end_key = range_record.GetRangeInfo()->EndKey();
+    TxKey range_end_key = range_record.GetRangeInfo()->EndTxKey();
     auto next_range_start = cur_write_entry_it;
-    if (range_end_key == nullptr ||
-        range_end_key->Type() == KeyType::PositiveInf)
+    if (range_end_key.Type() == KeyType::PositiveInf)
     {
         next_range_start = write_entry_end;
     }
     else
     {
-        next_range_start = std::lower_bound(cur_write_entry_it,
-                                            write_entry_end,
-                                            range_end_key,
-                                            [](WriteEntry &a, const TxKey *val)
-                                            { return *(a.key_) < *val; });
+        next_range_start = std::lower_bound(
+            cur_write_entry_it,
+            write_entry_end,
+            range_end_key,
+            [](const WriteEntry &a, const TxKey &val) { return a.key_ < val; });
     }
 
     NodeGroupId range_ng = range_record.GetRangeOwnerNg()->BucketOwner();
@@ -1017,7 +1018,7 @@ void SkGenerator::AdvanceWriteEntryForRangeInfo(
         // entry needs to be double written.
         while (range_info->IsDirty() &&
                new_range_idx < range_info->NewKey()->size() &&
-               !(*write_entry.key_ < *range_info->NewKey()->at(new_range_idx)))
+               !(write_entry.key_ < range_info->NewKey()->at(new_range_idx)))
         {
             new_range_ng =
                 splitting_range_ngs->at(new_range_idx)->BucketOwner();
@@ -1098,7 +1099,7 @@ void SkGenerator::UploadBatchWorker()
             std::sort(table_it->second.begin(),
                       table_it->second.end(),
                       [](const WriteEntry &e1, const WriteEntry &e2)
-                      { return *(e1.key_) < *(e2.key_); });
+                      { return e1.key_ < e2.key_; });
         }
 #endif
 

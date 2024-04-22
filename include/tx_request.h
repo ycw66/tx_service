@@ -2,11 +2,9 @@
 
 #include <algorithm>
 #include <memory>
-#include <tuple>
 #include <utility>
 #include <vector>
 
-#include "catalog_key_record.h"
 #include "range_slice.h"
 #include "scan.h"
 #include "tx_command.h"
@@ -301,21 +299,21 @@ public:
 struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 {
     UpsertTxRequest(const TableName *tab_name,
-                    TxKey::Uptr key,
+                    TxKey tx_key,
                     TxRecord::Uptr rec,
                     OperationType operation_type,
                     const std::function<void()> *yield_fptr = nullptr,
                     const std::function<void()> *resume_fptr = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr),
           tab_name_(tab_name),
-          key_(std::move(key)),
+          tx_key_(std::move(tx_key)),
           rec_(std::move(rec)),
           operation_type_(operation_type)
     {
     }
 
     const TableName *tab_name_;
-    TxKey::Uptr key_;
+    TxKey tx_key_;
     TxRecord::Uptr rec_;
     OperationType operation_type_;
 };
@@ -445,23 +443,28 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 struct ScanBatchTuple
 {
     ScanBatchTuple() = default;
-    ScanBatchTuple(const TxKey *key, TxRecord *rec) : key_(key), record_(rec)
+
+    ScanBatchTuple(TxKey key, TxRecord *rec)
+        : key_(std::move(key)), record_(rec)
     {
     }
-    ScanBatchTuple(const TxKey *key,
+    ScanBatchTuple(TxKey key,
                    TxRecord *rec,
                    RecordStatus status,
                    uint64_t version)
-        : key_(key), record_(rec), status_(status), version_ts_(version)
+        : key_(std::move(key)),
+          record_(rec),
+          status_(status),
+          version_ts_(version)
     {
     }
 
-    ScanBatchTuple(const TxKey *key,
+    ScanBatchTuple(TxKey key,
                    TxRecord *rec,
                    RecordStatus status,
                    uint64_t version,
                    const CcEntryAddr &cce_addr)
-        : key_(key),
+        : key_(std::move(key)),
           record_(rec),
           status_(status),
           version_ts_(version),
@@ -469,8 +472,10 @@ struct ScanBatchTuple
     {
     }
 
-    ScanBatchTuple(const ScanBatchTuple &rhs)
-        : key_(rhs.key_),
+    ScanBatchTuple(const ScanBatchTuple &rhs) = delete;
+
+    ScanBatchTuple(ScanBatchTuple &&rhs)
+        : key_(std::move(rhs.key_)),
           record_(rhs.record_),
           status_(rhs.status_),
           version_ts_(rhs.version_ts_),
@@ -478,7 +483,7 @@ struct ScanBatchTuple
     {
     }
 
-    const TxKey *key_{nullptr};
+    TxKey key_;
     TxRecord *record_{nullptr};
     RecordStatus status_{RecordStatus::Unknown};
     uint64_t version_ts_{0};
@@ -648,23 +653,18 @@ struct UpsertTableTxRequest
 
 struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
 {
-    SplitFlushTxRequest(
-        const TableName &table_name,
-        const TableSchema *schema,
-        const TxKey *old_start_key,
-        const TxKey *old_end_key,
-        StoreRange *store_range,
-        const RangeInfo *old_info,
-        std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
-        uint64_t previous_scan_ts,
-        std::vector<FlushRecord> &&previous_data_sync_vec,
-        std::vector<FlushRecord> &&previous_archive_vec,
-        std::vector<const TxKey *> &&previous_mv_base_vec)
+    SplitFlushTxRequest(const TableName &table_name,
+                        const TableSchema *schema,
+                        StoreRange *store_range,
+                        const RangeInfo *old_info,
+                        std::vector<std::pair<TxKey, int32_t>> &&new_range_info,
+                        uint64_t previous_scan_ts,
+                        std::vector<FlushRecord> &&previous_data_sync_vec,
+                        std::vector<FlushRecord> &&previous_archive_vec,
+                        std::vector<TxKey> &&previous_mv_base_vec)
         : TemplateTxRequest(nullptr, nullptr, nullptr),
           table_name_(&table_name),
           schema_(schema),
-          old_start_key_(old_start_key),
-          old_end_key_(old_end_key),
           store_range_(store_range),
           old_range_info_(old_info),
           new_range_info_(std::move(new_range_info)),
@@ -676,15 +676,13 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
     }
     const TableName *table_name_{nullptr};
     const TableSchema *schema_{nullptr};
-    const TxKey *old_start_key_{nullptr};
-    const TxKey *old_end_key_{nullptr};
     StoreRange *store_range_{nullptr};
     const RangeInfo *old_range_info_{nullptr};
-    std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info_;
+    std::vector<std::pair<TxKey, int32_t>> new_range_info_;
     uint64_t previous_scan_ts_;
     std::vector<FlushRecord> previous_data_sync_vec_;
     std::vector<FlushRecord> previous_archive_vec_;
-    std::vector<const TxKey *> previous_mv_base_vec_;
+    std::vector<TxKey> previous_mv_base_vec_;
 };
 
 struct DataMigrationTxRequest
@@ -742,8 +740,9 @@ struct ObjectCommandTxRequest
     {
     }
 
+    template <typename KeyT>
     ObjectCommandTxRequest(const TableName *table_name,
-                           const TxKey *key,
+                           const KeyT *key,
                            TxCommand *command,
                            bool auto_commit = true,
                            TransactionExecution *txm = nullptr)
@@ -752,14 +751,13 @@ struct ObjectCommandTxRequest
           key_(key),
           command_(command),
           auto_commit_(auto_commit),
-          is_key_owner_(false),
           is_cmd_owner_(false)
-
     {
     }
 
+    template <typename KeyT>
     ObjectCommandTxRequest(const TableName *table_name,
-                           const TxKey *key,
+                           const KeyT *key,
                            std::unique_ptr<TxCommand> command,
                            bool auto_commit = true,
                            TransactionExecution *txm = nullptr)
@@ -768,22 +766,21 @@ struct ObjectCommandTxRequest
           key_(key),
           command_uptr_(std::move(command)),
           auto_commit_(auto_commit),
-          is_key_owner_(false),
           is_cmd_owner_(true)
     {
     }
 
+    template <typename KeyT>
     ObjectCommandTxRequest(const TableName *table_name,
-                           std::unique_ptr<TxKey> key,
+                           std::unique_ptr<KeyT> key,
                            std::unique_ptr<TxCommand> command,
                            bool auto_commit = true,
                            TransactionExecution *txm = nullptr)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
-          key_uptr_(std::move(key)),
+          key_(std::move(key)),
           command_uptr_(std::move(command)),
           auto_commit_(auto_commit),
-          is_key_owner_(true),
           is_cmd_owner_(true)
     {
     }
@@ -791,18 +788,10 @@ struct ObjectCommandTxRequest
     ObjectCommandTxRequest(ObjectCommandTxRequest &&rhs)
         : TemplateTxRequest(nullptr, nullptr, rhs.txm_),
           table_name_(rhs.table_name_),
+          key_(std::move(rhs.key_)),
           auto_commit_(rhs.auto_commit_),
-          is_key_owner_(rhs.is_key_owner_),
           is_cmd_owner_(rhs.is_cmd_owner_)
     {
-        if (rhs.is_key_owner_)
-        {
-            key_uptr_ = std::move(rhs.key_uptr_);
-        }
-        else
-        {
-            key_ = rhs.key_;
-        }
         if (rhs.is_cmd_owner_)
         {
             command_uptr_ = std::move(rhs.command_uptr_);
@@ -815,10 +804,6 @@ struct ObjectCommandTxRequest
 
     ~ObjectCommandTxRequest()
     {
-        if (is_key_owner_)
-        {
-            key_uptr_.reset();
-        }
         if (is_cmd_owner_)
         {
             command_uptr_.reset();
@@ -827,7 +812,7 @@ struct ObjectCommandTxRequest
 
     const TxKey *Key() const
     {
-        return is_key_owner_ ? key_uptr_.get() : key_;
+        return &key_;
     }
 
     TxCommand *Command() const
@@ -836,11 +821,7 @@ struct ObjectCommandTxRequest
     }
 
     const TableName *table_name_;
-    union
-    {
-        const TxKey *key_{};
-        std::unique_ptr<const TxKey> key_uptr_;
-    };
+    TxKey key_;
     union
     {
         TxCommand *command_{};
@@ -849,7 +830,6 @@ struct ObjectCommandTxRequest
 
     bool auto_commit_{};
     // whether this object is pointer owner
-    bool is_key_owner_{};
     bool is_cmd_owner_{};
 
     bool operator<(const ObjectCommandTxRequest &r) const
@@ -929,32 +909,32 @@ struct MultiObjectCommandTxRequest
 
     bool operator<(const ObjectCommandTxRequest &r) const
     {
-        const auto &max_key =
-            *std::max_element(this->VctKey()->begin(),
-                              this->VctKey()->end(),
-                              [](const TxKey *lhs, const TxKey *rhs) -> bool
-                              { return *lhs < *rhs; });
-        return *max_key < *r.Key();
+        auto max_key_it =
+            std::max_element(this->VctKey()->begin(),
+                             this->VctKey()->end(),
+                             [](const TxKey &lhs, const TxKey &rhs) -> bool
+                             { return lhs < rhs; });
+        return *max_key_it < *r.Key();
     }
 
     bool operator<(const MultiObjectCommandTxRequest &r) const
     {
         const auto &key_ptrs = this->VctKey();
         const auto &r_key_ptrs = r.VctKey();
-        const auto &max_key =
-            *std::max_element(key_ptrs->begin(),
-                              key_ptrs->end(),
-                              [](const TxKey *lhs, const TxKey *rhs) -> bool
-                              { return *lhs < *rhs; });
-        const auto &r_min_key =
-            *std::min_element(r_key_ptrs->begin(),
-                              r_key_ptrs->end(),
-                              [](const TxKey *lhs, const TxKey *rhs) -> bool
-                              { return *lhs < *rhs; });
-        return *max_key < *r_min_key;
+        auto max_key_it =
+            std::max_element(key_ptrs->begin(),
+                             key_ptrs->end(),
+                             [](const TxKey &lhs, const TxKey &rhs) -> bool
+                             { return lhs < rhs; });
+        auto r_min_key_it =
+            std::min_element(r_key_ptrs->begin(),
+                             r_key_ptrs->end(),
+                             [](const TxKey &lhs, const TxKey &rhs) -> bool
+                             { return lhs < rhs; });
+        return *max_key_it < *r_min_key_it;
     }
 
-    const std::vector<const TxKey *> *VctKey() const
+    const std::vector<TxKey> *VctKey() const
     {
         MultiObjectTxCommand *cmd =
             is_cmd_owner_ ? multi_obj_cmd_ : multi_obj_cmd_uptr_.get();
@@ -988,13 +968,13 @@ struct MultiObjectCommandTxRequest
 inline bool ObjectCommandTxRequest::operator<(
     const MultiObjectCommandTxRequest &r) const
 {
-    const auto &key_ptr = this->Key();
+    const TxKey *key_ptr = Key();
     const auto &r_key_ptrs = r.VctKey();
-    const auto &r_min_key = *std::min_element(
+    auto r_min_key_it = std::min_element(
         r_key_ptrs->begin(),
         r_key_ptrs->end(),
-        [](const TxKey *lhs, const TxKey *rhs) -> bool { return *lhs < *rhs; });
-    return *key_ptr < *r_min_key;
+        [](const TxKey &lhs, const TxKey &rhs) -> bool { return lhs < rhs; });
+    return *key_ptr < *r_min_key_it;
 }
 
 struct PublishTxRequest : public TemplateTxRequest<PublishTxRequest, Void>
@@ -1051,19 +1031,15 @@ struct RangeSplitRecoveryTxRequest
         const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
         const TableSchema *table_schema,
         int32_t partition_id,
-        const TxKey *start_key,
-        const TxKey *end_key,
         StoreRange *store_range,
         const RangeInfo *range_info,
-        std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
+        std::vector<TxKey> &&new_range_keys,
         std::vector<int32_t> &&new_partition_ids,
         uint32_t node_group_id)
         : TemplateTxRequest(nullptr, nullptr),
           ds_split_range_op_msg_(ds_split_range_op_msg),
           table_schema_(table_schema),
           partition_id_(partition_id),
-          start_key_(start_key),
-          end_key_(end_key),
           store_range_(store_range),
           range_info_(range_info),
           new_range_keys_(std::move(new_range_keys)),
@@ -1075,11 +1051,9 @@ struct RangeSplitRecoveryTxRequest
     const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg_;
     const TableSchema *table_schema_;
     int32_t partition_id_;
-    const TxKey *start_key_;
-    const TxKey *end_key_;
     StoreRange *store_range_;
     const RangeInfo *range_info_;
-    std::vector<std::unique_ptr<TxKey>> new_range_keys_;
+    std::vector<TxKey> new_range_keys_;
     std::vector<int32_t> new_partition_ids_;
     uint32_t node_group_id_;
 };

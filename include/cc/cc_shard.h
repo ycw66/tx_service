@@ -11,7 +11,6 @@
 #include <iostream>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,12 +26,10 @@
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
 #include "error_messages.h"
-#include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
 #include "meter.h"
 #include "metrics.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
-#include "range_slice.h"
 #include "sharder.h"
 #include "system_handler.h"
 #include "tentry.h"
@@ -511,37 +508,19 @@ public:
                          const NodeGroupId ng_id,
                          bool fully_cached = false);
 
-    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
-        *GetTableRangesForATable(const TableName &range_table_name,
-                                 const NodeGroupId ng_id);
-
-    const TableRangeEntry *CreateTableRange(
-        const TableName &table_name,
-        const NodeGroupId ng_id,
-        int32_t partition_id,
-        TxKey::Uptr start_key,
-        uint64_t version,
-        std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
-            *slice_keys = nullptr);
-
-    const TableRangeEntry *UploadNewRangeInfo(
-        const TableName &table_name,
-        const NodeGroupId ng_id,
-        const TxKey *key,
-        const std::vector<std::unique_ptr<TxKey>> &new_key,
-        const std::vector<int32_t> &new_partition_id,
-        uint64_t commit_ts);
+    std::map<TxKey, TableRangeEntry::uptr> *GetTableRangesForATable(
+        const TableName &range_table_name, const NodeGroupId ng_id);
 
     TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
                                         const NodeGroupId ng_id,
-                                        const TxKey *key);
+                                        const TxKey &key);
 
     const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
                                               const NodeGroupId ng_id,
                                               int32_t range_id);
 
     const TableRangeEntry *GetTableRangeEntryNoLocking(
-        const TableName &table_name, const NodeGroupId ng_id, const TxKey *key);
+        const TableName &table_name, const NodeGroupId ng_id, const TxKey &key);
 
     uint64_t CountRanges(const TableName &table_name,
                          const NodeGroupId ng_id,
@@ -564,8 +543,7 @@ public:
         TableSchema *table_name,
         TableSchema *dirty_table_schema,
         NodeGroupId ng_id,
-        std::unordered_map<TableName,
-                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+        std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
             sample_pool_map);
 
     StatisticsEntry *GetTableStatistics(const TableName &table_name,
@@ -688,40 +666,6 @@ public:
                                   bool is_create = true);
 
     void DecreaseLockCount();
-
-    RangeSliceId PinRangeSlice(const TableName &table_name,
-                               NodeGroupId cc_ng_id,
-                               int64_t cc_ng_term,
-                               const Schema *key_schema,
-                               const Schema *rec_schema,
-                               uint64_t schema_ts,
-                               const KVCatalogInfo *kv_info,
-                               const TxKey &key,
-                               bool inclusive,
-                               CcRequestBase *cc_request,
-                               RangeSliceOpStatus &pin_status,
-                               bool force_load,
-                               uint8_t prefetch_size);
-
-    RangeSliceId PinRangeSlices(const TableName &table_name,
-                                NodeGroupId cc_ng_id,
-                                int64_t cc_ng_term,
-                                const Schema *key_schema,
-                                const Schema *rec_schema,
-                                uint64_t schema_ts,
-                                const KVCatalogInfo *kv_info,
-                                uint32_t range_id,
-                                const TxKey &start_key,
-                                bool start_inclusive,
-                                const TxKey *end_key,
-                                bool end_inclusive,
-                                CcRequestBase *cc_request,
-                                bool force_load,
-                                uint8_t prefetch_size,
-                                uint8_t max_pin_cnt,
-                                bool forward_pin,
-                                RangeSliceOpStatus &pin_status,
-                                const StoreSlice *&last_pinned_slice);
 
     /**
      * Used for unit test to verify the lru link is complete.

@@ -7,10 +7,8 @@
 #include "cc_handler_result.h"
 #include "cc_protocol.h"
 #include "ccm_scanner.h"
-#include "read_write_entry.h"
 #include "scan.h"
 #include "tx_key.h"
-#include "tx_operation.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
 #include "type.h"
@@ -148,7 +146,7 @@ public:
                               uint16_t command_id,
                               uint64_t commit_ts,
                               const TableName &table_name,
-                              const TxKey *key,
+                              const TxKey &key,
                               const TxRecord *record,
                               OperationType operation_type,
                               uint32_t key_shard_code,

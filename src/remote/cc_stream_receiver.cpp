@@ -3,7 +3,6 @@
 #include <brpc/controller.h>
 
 #include "cc/local_cc_shards.h"
-#include "constants.h"
 #include "error_messages.h"  //CcErrorCode
 #include "remote/remote_type.h"
 #include "sharder.h"
@@ -267,7 +266,7 @@ void CcStreamReceiver::PreProcessScanResp(
     }
     else
     {
-        scan_slice_result.SetLastKey(nullptr);
+        scan_slice_result.SetLastKey(TxKey());
     }
 
     scan_slice_result.slice_position_ =

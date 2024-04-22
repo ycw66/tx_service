@@ -6,15 +6,19 @@
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "cc_protocol.h"
 #include "cc_req_base.h"
 #include "circular_queue.h"
 #include "error_messages.h"
-#include "tx_command.h"
 #include "tx_id.h"
+
+#ifdef ON_KEY_OBJECT
+#include "tx_command.h"
 #include "tx_object.h"
+#endif
 
 namespace txservice
 {
@@ -199,6 +203,8 @@ public:
     void AbortQueueRequest(TxNumber txid,
                            CcErrorCode err = CcErrorCode::DEAD_LOCK_ABORT);
     bool FindQueueRequest(TxNumber txid);
+
+    LockType SearchLock(TxNumber txn);
 
 private:
     struct LockQueueEntry

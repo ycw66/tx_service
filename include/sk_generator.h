@@ -38,8 +38,8 @@ public:
     }
     ~SkGenerator() = default;
 
-    void GenerateSkFromPk(const TxKey *start_key,
-                          const TxKey *end_key,
+    void GenerateSkFromPk(TxKey start_key,
+                          TxKey end_key,
                           uint64_t scan_ts,
                           std::vector<TableName> &new_indexes_name,
                           size_t &scanned_pk_count,

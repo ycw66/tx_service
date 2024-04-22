@@ -540,6 +540,28 @@ bool NonBlockingLock::FindQueueRequest(TxNumber txid)
     return false;
 }
 
+LockType NonBlockingLock::SearchLock(TxNumber txn)
+{
+    if (write_lk_type_ != WriteLockType::NoWritelock && write_txn_ == txn)
+    {
+        return write_lk_type_ == WriteLockType::WriteLock
+                   ? LockType::WriteLock
+                   : LockType::WriteIntent;
+    }
+    else if (read_locks_.find(txn) != read_locks_.end())
+    {
+        return LockType::ReadLock;
+    }
+    else if (read_intentions_.find(txn) == read_intentions_.end())
+    {
+        return LockType::ReadIntent;
+    }
+    else
+    {
+        return LockType::NoLock;
+    }
+}
+
 void KeyGapLockAndExtraData::SetUsedStatus(bool is_used)
 {
     in_use_ = is_used;

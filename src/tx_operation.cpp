@@ -591,10 +591,9 @@ void LockWriteRangesOp::Advance(TransactionExecution *txm)
 #ifdef RANGE_PARTITION_ENABLED
     // Advances the write key iterator such that it points to the first key
     // belonging to the next range.
-    const TxKey *range_end_key = txm->range_rec_.GetRangeInfo()->EndKey();
+    TxKey range_end_key = txm->range_rec_.GetRangeInfo()->EndTxKey();
     auto next_range_start = write_key_it_;
-    if (range_end_key == nullptr ||
-        range_end_key->Type() == KeyType::PositiveInf)
+    if (range_end_key.Type() == KeyType::PositiveInf)
     {
         next_range_start = write_key_end_;
     }
@@ -620,8 +619,9 @@ void LockWriteRangesOp::Advance(TransactionExecution *txm)
     auto *range_info = txm->range_rec_.GetRangeInfo();
     while (write_key_it_ != next_range_start)
     {
+        const TxKey &write_tx_key = write_key_it_->first;
         WriteSetEntry &write_entry = write_key_it_->second;
-        size_t hash = write_entry.key_->Hash();
+        size_t hash = write_tx_key.Hash();
         write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
         // If current range is migrating, forward to new range owner.
         if (new_bucket_ng != UINT32_MAX)
@@ -635,7 +635,7 @@ void LockWriteRangesOp::Advance(TransactionExecution *txm)
         // entry needs to be double written.
         while (range_info->IsDirty() &&
                new_range_idx < range_info->NewKey()->size() &&
-               !(*write_entry.key_ < *range_info->NewKey()->at(new_range_idx)))
+               !(write_tx_key < range_info->NewKey()->at(new_range_idx)))
         {
             new_range_ng =
                 splitting_range_ngs->at(new_range_idx)->BucketOwner();
@@ -1317,7 +1317,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 }
             }
 
-            scan_state_->SetSliceLastKey(scan_slice_result.LastKey());
+            scan_state_->SetSliceLastKey(scan_slice_result.MoveLastKey());
             scan_state_->inclusive_ =
                 Direction() == ScanDirection::Forward ? false : true;
             scan_state_->slice_position_ = scan_slice_result.slice_position_;
@@ -1880,28 +1880,28 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
 
     lock_cluster_config_op_.table_name_ =
         TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
-    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
 
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_intent_op_.keys_.push_back(&table_key_);
+    acquire_all_intent_op_.keys_.emplace_back(&table_key_);
     acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
     acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
 
     post_all_intent_op_.table_name_ = &catalog_ccm_name;
-    post_all_intent_op_.keys_.push_back(&table_key_);
+    post_all_intent_op_.keys_.emplace_back(&table_key_);
     post_all_intent_op_.recs_.push_back(&catalog_rec_);
     post_all_intent_op_.op_type_ = op_type_;
     post_all_intent_op_.write_type_ = PostWriteType::PrepareCommit;
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_lock_op_.keys_.push_back(&table_key_);
+    acquire_all_lock_op_.keys_.emplace_back(&table_key_);
     acquire_all_lock_op_.cc_op_ = CcOperation::Write;
     acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
 
     post_all_lock_op_.table_name_ = &catalog_ccm_name;
-    post_all_lock_op_.keys_.push_back(&table_key_);
+    post_all_lock_op_.keys_.emplace_back(&table_key_);
     post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
@@ -2265,9 +2265,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             TableWriteSet &table_write_set = wset_it->second;
             assert(table_write_set.size() == 1);
             auto write_entry_it = table_write_set.begin();
-            auto &write_entry = write_entry_it->second;
+            const TxKey &write_key = write_entry_it->first;
+            WriteSetEntry &write_entry = write_entry_it->second;
 
-            size_t hash = write_entry.key_->Hash();
+            size_t hash = write_key.Hash();
 #ifdef RANGE_PARTITION_ENABLED
             // Make sure current node is still ng leader before visiting range
             // and bucket meta data.
@@ -2352,12 +2353,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             assert(table_write_set.size() == 1);
             auto write_entry_it = table_write_set.begin();
             auto &write_entry = write_entry_it->second;
-            const TxKey *tx_key = write_entry_it->first;
+            const TxKey &tx_key = write_entry_it->first;
 
             reset_sequence_record_op_.op_func_ =
                 [txm,
                  seq_table_name,
-                 tx_key,
+                 &tx_key,
                  &write_entry,
                  &hd_res = reset_sequence_record_op_.hd_result_]
             {
@@ -2680,7 +2681,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     read_cluster_result_.Reset();
     cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
-    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.table_name_ =
         TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
@@ -2695,13 +2696,13 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
 
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
     acquire_all_intent_op_.keys_.clear();
-    acquire_all_intent_op_.keys_.push_back(&table_key_);
+    acquire_all_intent_op_.keys_.emplace_back(&table_key_);
     acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
     acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
 
     post_all_intent_op_.table_name_ = &catalog_ccm_name;
     post_all_intent_op_.keys_.clear();
-    post_all_intent_op_.keys_.push_back(&table_key_);
+    post_all_intent_op_.keys_.emplace_back(&table_key_);
     post_all_intent_op_.recs_.clear();
     post_all_intent_op_.recs_.push_back(&catalog_rec_);
     post_all_intent_op_.op_type_ = op_type_;
@@ -2712,13 +2713,13 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
     acquire_all_lock_op_.keys_.clear();
-    acquire_all_lock_op_.keys_.push_back(&table_key_);
+    acquire_all_lock_op_.keys_.emplace_back(&table_key_);
     acquire_all_lock_op_.cc_op_ = CcOperation::Write;
     acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
 
     post_all_lock_op_.table_name_ = &catalog_ccm_name;
     post_all_lock_op_.keys_.clear();
-    post_all_lock_op_.keys_.push_back(&table_key_);
+    post_all_lock_op_.keys_.emplace_back(&table_key_);
     post_all_lock_op_.recs_.clear();
     post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = op_type_;
@@ -3012,8 +3013,8 @@ KickoutDataOp::KickoutDataOp(TransactionExecution *txm) : hd_result_(txm)
 void KickoutDataOp::Reset()
 {
     table_name_ = nullptr;
-    start_key_ = nullptr;
-    end_key_ = nullptr;
+    start_key_ = TxKey();
+    end_key_ = TxKey();
     node_group_ = 0;
     hd_result_.Reset();
 }
@@ -3055,23 +3056,19 @@ void KickoutDataOp::Forward(TransactionExecution *txm)
 SplitFlushRangeOp::SplitFlushRangeOp(
     const TableName &table_name,
     const TableSchema *table_schema,
-    const TxKey *old_start_key,
-    const TxKey *old_end_key,
     StoreRange *store_range,
     const RangeInfo *old_range_info,
-    std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+    std::vector<std::pair<TxKey, int32_t>> &&new_range_info,
     uint64_t previous_scan_ts,
     std::vector<FlushRecord> &&previous_data_sync_vec,
     std::vector<FlushRecord> &&previous_archive_vec,
-    std::vector<const TxKey *> &&previous_mv_base_vec,
+    std::vector<TxKey> &&previous_mv_base_vec,
     TransactionExecution *txm)
     : CompositeTransactionOperation(),
       table_schema_(table_schema),
       table_name_(table_name.String(), table_name.Type()),
       range_table_name_(table_name_.StringView(), TableType::RangePartition),
       read_cluster_result_(txm),
-      range_info_(*old_range_info),
-      old_end_key_(old_end_key),
       store_range_(store_range),
       new_range_info_(std::move(new_range_info)),
       previous_scan_ts_(previous_scan_ts),
@@ -3095,26 +3092,33 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       ds_clean_old_range_op_(txm),
       clean_log_op_(txm)
 {
-    range_info_.end_key_ = old_end_key;
-    range_record_ = std::make_unique<RangeRecord>(&range_info_, nullptr);
-    old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
-                                                       : old_start_key;
+    // The clone of the input range info makes a new copy of the range's start
+    // key, while the range's end key references that of the old range info in
+    // LocalCcShards. The new copy is necessary, because we may have separate
+    // threads to persist range updates to stable storage, while the tx's node
+    // group fails over and the old range is invalidated.
+    range_info_ = old_range_info->Clone();
+    old_start_key_ = range_info_->StartTxKey();
+    old_end_key_ = range_info_->EndTxKey();
+
+    range_record_ = std::make_unique<RangeRecord>(range_info_.get(), nullptr);
 
     lock_cluster_config_op_.table_name_ =
         TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
-    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
 
     prepare_acquire_all_write_op_.table_name_ = &range_table_name_;
     prepare_acquire_all_write_op_.cc_op_ = CcOperation::Write;
     prepare_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
-    prepare_acquire_all_write_op_.keys_.push_back(old_start_key_);
+    prepare_acquire_all_write_op_.keys_.emplace_back(
+        old_start_key_.GetShallowCopy());
 
     install_new_range_op_.table_name_ = &range_table_name_;
     install_new_range_op_.write_type_ = PostWriteType::PrepareCommit;
     install_new_range_op_.op_type_ = OperationType::Update;
-    install_new_range_op_.keys_.push_back(old_start_key_);
+    install_new_range_op_.keys_.emplace_back(old_start_key_.GetShallowCopy());
     install_new_range_op_.recs_.push_back(range_record_.get());
 
     flush_op_.tab_name_ = &table_name_;
@@ -3128,7 +3132,8 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     commit_acquire_all_write_op_.table_name_ = &range_table_name_;
     commit_acquire_all_write_op_.cc_op_ = CcOperation::Write;
     commit_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
-    commit_acquire_all_write_op_.keys_.push_back(old_start_key_);
+    commit_acquire_all_write_op_.keys_.emplace_back(
+        old_start_key_.GetShallowCopy());
 
     kickout_old_range_data_op_.table_name_ = &table_name_;
     kickout_old_range_data_op_.node_group_ = txm->TxCcNodeId();
@@ -3136,7 +3141,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     post_all_lock_op_.table_name_ = &range_table_name_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
     post_all_lock_op_.op_type_ = OperationType::Update;
-    post_all_lock_op_.keys_.push_back(old_start_key_);
+    post_all_lock_op_.keys_.emplace_back(old_start_key_.GetShallowCopy());
     post_all_lock_op_.recs_.push_back(range_record_.get());
 
     TX_TRACE_ASSOCIATE(
@@ -3157,15 +3162,13 @@ SplitFlushRangeOp::SplitFlushRangeOp(
 void SplitFlushRangeOp::Reset(
     const TableName &table_name,
     const TableSchema *table_schema,
-    const TxKey *old_start_key,
-    const TxKey *old_end_key,
     StoreRange *store_range,
     const RangeInfo *old_range_info,
-    std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+    std::vector<std::pair<TxKey, int32_t>> &&new_range_info,
     uint64_t previous_scan_ts,
     std::vector<FlushRecord> &&previous_data_sync_vec,
     std::vector<FlushRecord> &&previous_archive_vec,
-    std::vector<const TxKey *> &&previous_mv_base_vec,
+    std::vector<TxKey> &&previous_mv_base_vec,
     TransactionExecution *txm)
 {
     // Reset TransactionOperation
@@ -3182,17 +3185,12 @@ void SplitFlushRangeOp::Reset(
     range_table_name_ =
         TableName(table_name_.StringView(), TableType::RangePartition);
 
-    assert(old_range_info->new_partition_id_.size() ==
-           old_range_info->new_key_.size());
-
     store_range_ = store_range;
-    range_info_ = *old_range_info;
-    range_info_.end_key_ = old_end_key;
-    assert(range_info_.new_partition_id_.size() == range_info_.new_key_.size());
+    range_info_ = old_range_info->Clone();
+    old_start_key_ = range_info_->StartTxKey();
+    old_end_key_ = range_info_->EndTxKey();
 
-    range_record_ = std::make_unique<RangeRecord>(&range_info_, nullptr);
-
-    old_end_key_ = old_end_key;
+    range_record_ = std::make_unique<RangeRecord>(range_info_.get(), nullptr);
 
     assert(data_sync_vec_.empty());
     assert(archive_vec_.empty());
@@ -3251,13 +3249,10 @@ void SplitFlushRangeOp::Reset(
     clean_log_op_.Reset();
     clean_log_op_.ResetHandlerTxm(txm);
 
-    old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
-                                                       : old_start_key;
-
     read_cluster_result_.Reset();
     read_cluster_result_.ResetTxm(txm);
     cluster_conf_rec_.Reset();
-    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.table_name_ =
         TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
@@ -3267,13 +3262,14 @@ void SplitFlushRangeOp::Reset(
     prepare_acquire_all_write_op_.cc_op_ = CcOperation::Write;
     prepare_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
     prepare_acquire_all_write_op_.keys_.clear();
-    prepare_acquire_all_write_op_.keys_.push_back(old_start_key_);
+    prepare_acquire_all_write_op_.keys_.emplace_back(
+        old_start_key_.GetShallowCopy());
 
     install_new_range_op_.table_name_ = &range_table_name_;
     install_new_range_op_.write_type_ = PostWriteType::PrepareCommit;
     install_new_range_op_.op_type_ = OperationType::Update;
     install_new_range_op_.keys_.clear();
-    install_new_range_op_.keys_.push_back(old_start_key_);
+    install_new_range_op_.keys_.emplace_back(old_start_key_.GetShallowCopy());
     install_new_range_op_.recs_.clear();
     install_new_range_op_.recs_.push_back(range_record_.get());
 
@@ -3289,7 +3285,8 @@ void SplitFlushRangeOp::Reset(
     commit_acquire_all_write_op_.cc_op_ = CcOperation::Write;
     commit_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
     commit_acquire_all_write_op_.keys_.clear();
-    commit_acquire_all_write_op_.keys_.push_back(old_start_key_);
+    commit_acquire_all_write_op_.keys_.emplace_back(
+        old_start_key_.GetShallowCopy());
 
     kickout_old_range_data_op_.table_name_ = &table_name_;
     kickout_old_range_data_op_.node_group_ = txm->TxCcNodeId();
@@ -3298,7 +3295,7 @@ void SplitFlushRangeOp::Reset(
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
     post_all_lock_op_.op_type_ = OperationType::Update;
     post_all_lock_op_.keys_.clear();
-    post_all_lock_op_.keys_.push_back(old_start_key_);
+    post_all_lock_op_.keys_.emplace_back(old_start_key_.GetShallowCopy());
     post_all_lock_op_.recs_.clear();
     post_all_lock_op_.recs_.push_back(range_record_.get());
 
@@ -3341,7 +3338,7 @@ void SplitFlushRangeOp::ClearDataSyncVec()
 void SplitFlushRangeOp::ClearInfos()
 {
     // release TxKey ownership to reduce memory usage
-    range_info_.Clear();
+    range_info_ = nullptr;
     new_range_info_.clear();
 
     new_range_info_.shrink_to_fit();
@@ -3405,14 +3402,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             // calculate commit ts for tx.
             LOG(INFO)
                 << "Split Flush transaction prepare acquire all, range id "
-                << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
             ForwardToSubOperation(txm, &prepare_acquire_all_write_op_);
         }
         else
         {
             assert(!commit_log_op_.hd_result_.IsFinished());
             LOG(INFO) << "Split Flush transaction commit acqurie all, range id "
-                      << range_info_.PartitionId()
+                      << range_info_->PartitionId()
                       << ", txn: " << txm->TxNumber();
             // Upgrade to write lock again for commit phase.
             ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
@@ -3454,7 +3451,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         // Write prepare log in next subop.
         FillPrepareLogRequest(txm);
         LOG(INFO) << "Split Flush transaction write prepare log, range id "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &prepare_log_op_);
     }
     else if (op_ == &prepare_log_op_)
@@ -3507,19 +3504,15 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         }
 
         // Fill in new range info to old range record.
-        range_info_.dirty_ts_ = txm->commit_ts_;
-        for (auto &range_info : new_range_info_)
-        {
-            range_info_.new_partition_id_.push_back(range_info.second);
-            range_info_.new_key_.push_back(range_info.first->Clone());
-        }
+        range_info_->dirty_ts_ = txm->commit_ts_;
+        range_info_->SetNewRanges(new_range_info_);
 
         // Install dirty range info on all node groups and downgrade to
         // write intent lock in next subop.
-        range_record_->SetRangeInfo(&range_info_);
+        range_record_->SetRangeInfo(range_info_.get());
 
         LOG(INFO) << "Split Flush transaction install dirty range, range id "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &install_new_range_op_);
     }
     else if (op_ == &install_new_range_op_)
@@ -3531,7 +3524,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 LOG(ERROR) << "Split Flush transaction failed to install dirty "
                               "range, tx number "
                            << txm->TxNumber();
-                range_record_->SetRangeInfo(&range_info_);
+                range_record_->SetRangeInfo(range_info_.get());
                 RetrySubOperation(txm, &install_new_range_op_);
             }
             else
@@ -3554,7 +3547,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         }
 
         LOG(INFO) << "Split Flush transaction unlock cluster config, range id "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &unlock_cluster_config_op_);
     }
     else if (op_ == &unlock_cluster_config_op_)
@@ -3578,8 +3571,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             // Delete stale data from old partition
             ds_clean_old_range_op_.op_func_ =
-                [partition_id = range_info_.partition_id_,
-                 start_key = new_range_info_.front().first.get(),
+                [partition_id = range_info_->partition_id_,
+                 &start_key = new_range_info_.front().first,
                  &table_name = table_name_,
                  table_schema = table_schema_,
                  &hd_res = ds_clean_old_range_op_.hd_result_]
@@ -3593,14 +3586,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 #endif
                 tx_worker_pool->SubmitWork(
                     [partition_id,
-                     start_key,
+                     &start_key,
                      table_name,
                      table_schema,
                      &hd_res,
                      store_hd]
                     {
                         bool succ = store_hd->DeleteOutOfRangeData(
-                            table_name, partition_id, start_key, table_schema);
+                            table_name, partition_id, &start_key, table_schema);
                         if (succ)
                         {
                             hd_res.SetFinished();
@@ -3613,7 +3606,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             };
             LOG(INFO) << "Split Flush transaction clean old range data in kv "
                          "store, range id "
-                      << range_info_.PartitionId()
+                      << range_info_->PartitionId()
                       << ", txn: " << txm->TxNumber();
             ForwardToSubOperation(txm, &ds_clean_old_range_op_);
         }
@@ -3627,8 +3620,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                  &table_name = table_name_,
                  txn = txm->TxNumber(),
                  table_schema = table_schema_,
-                 start_key = old_start_key_,
-                 end_key = old_end_key_,
+                 &start_key = old_start_key_,
+                 &end_key = old_end_key_,
                  previous_data_sync_vec = &previous_data_sync_vec_,
                  previous_archive_vec = &previous_archive_vec_,
                  previous_mv_base_vec = &previous_mv_base_vec_,
@@ -3655,8 +3648,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     [this,
                      table_name,
                      table_schema,
-                     start_key,
-                     end_key,
+                     &start_key,
+                     &end_key,
                      txn,
                      previous_data_sync_vec,
                      previous_archive_vec,
@@ -3677,8 +3670,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                             std::vector<std::vector<FlushRecord>>
                                 data_sync_vecs;
                             std::vector<std::vector<FlushRecord>> archive_vecs;
-                            std::vector<std::vector<const TxKey *>>
-                                mv_base_vecs;
+                            std::vector<std::vector<TxKey>> mv_base_vecs;
 
                             for (size_t i = 0;
                                  i <
@@ -3712,14 +3704,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                         // Like bigtable, We don't need copy
                                         // data to new range. we just scan new
                                         // data which need to be flushed.
-                                        req_start_key = start_key;
-                                        req_end_key = end_key;
+                                        req_start_key = &start_key;
+                                        req_end_key = &end_key;
                                     }
                                     else
                                     {
-                                        req_start_key = start_key;
-                                        req_end_key = new_range_info_.begin()
-                                                          ->first.get();
+                                        req_start_key = &start_key;
+                                        req_end_key =
+                                            &new_range_info_.begin()->first;
                                     }
 
                                     // We don't need to pin slices that
@@ -3734,8 +3726,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     // We only need to pin slices that falls
                                     // into new range after range split.
                                     req_start_key =
-                                        new_range_info_.begin()->first.get();
-                                    req_end_key = end_key;
+                                        &new_range_info_.begin()->first;
+                                    req_end_key = &end_key;
                                     export_base_table_rec_if_need = true;
                                 }
 
@@ -3804,7 +3796,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                     scan_cc.DataSyncVec(i)[j];
                                                 // Clone key
                                                 data_sync_vecs[i].emplace_back(
-                                                    rec.Key()->Clone(),
+                                                    rec.Key().Clone(),
                                                     rec.GetPayload(),
                                                     rec.payload_status_,
                                                     rec.commit_ts_,
@@ -3834,12 +3826,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                 size_t key_idx =
                                                     scan_cc.MoveBaseIdxVec(
                                                         i)[j];
-                                                const TxKey *key_raw_ptr =
+                                                TxKey key_raw =
                                                     data_sync_vecs[i][key_idx +
                                                                       offset]
                                                         .Key();
-                                                mv_base_vecs[i].push_back(
-                                                    key_raw_ptr);
+                                                mv_base_vecs[i].emplace_back(
+                                                    std::move(key_raw));
                                             }
 
                                             // if the data is drained
@@ -3860,13 +3852,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                             }
 
                             // Sort output vectors in key sorting order.
-                            auto key_greater = [](const TxKey *r1,
-                                                  const TxKey *r2) -> bool
-                            { return *r2 < *r1; };
+                            auto key_greater = [](const TxKey &r1,
+                                                  const TxKey &r2) -> bool
+                            { return r2 < r1; };
 
                             auto rec_greater = [](const FlushRecord &r1,
                                                   const FlushRecord &r2) -> bool
-                            { return *r2.Key() < *r1.Key(); };
+                            { return r2.Key() < r1.Key(); };
 
                             // It's possible to have flush records with the same
                             // TxKey but different commit_ts. One from previous
@@ -3918,24 +3910,24 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                         auto lower_bound_cmp =
                             [](const FlushRecord &rec, const TxKey &key)
-                        { return *rec.Key() < key; };
+                        { return rec.Key() < key; };
                         auto batch_it = data_sync_vec->begin();
                         size_t slice_start_idx = 0;
                         size_t slice_end_idx = 0;
 
                         while (batch_it != data_sync_vec->end())
                         {
-                            const TxKey &slice_start_key = *batch_it->Key();
+                            TxKey slice_start_key = batch_it->Key();
                             StoreSlice *curr_slice =
                                 store_range_->FindSlice(slice_start_key);
+                            TxKey slice_end_tx_key = curr_slice->EndTxKey();
 
                             auto slice_end_it =
-                                curr_slice->EndKey() ==
-                                        store_range_->RangeEndKey()
+                                slice_end_tx_key == old_end_key_
                                     ? data_sync_vec->end()
                                     : std::lower_bound(batch_it,
                                                        data_sync_vec->end(),
-                                                       *curr_slice->EndKey(),
+                                                       slice_end_tx_key,
                                                        lower_bound_cmp);
 
                             slice_end_idx = std::distance(
@@ -4035,7 +4027,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     });
             };
             LOG(INFO) << "Split Flush transaction data sync scan, range id "
-                      << range_info_.PartitionId()
+                      << range_info_->PartitionId()
                       << ", txn: " << txm->TxNumber();
             ForwardToSubOperation(txm, &data_sync_scan_op_);
         }
@@ -4076,7 +4068,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         flush_op_.tx_term_ = txm->tx_term_;
 
         LOG(INFO) << "Split Flush transaction flush data, range id "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &flush_op_);
     }
     else if (op_ == &flush_op_)
@@ -4104,7 +4096,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         });
 
         LOG(INFO) << "Split Flush transaction lock cluster config, range id"
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         // Upgrade to write lock again for commit phase.
         ForwardToSubOperation(txm, &lock_cluster_config_op_);
     }
@@ -4146,8 +4138,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
              &hd_result = update_ckpt_ts_op_.hd_result_,
              &new_range_info = new_range_info_,
              node_group = txm->TxCcNodeId(),
-             old_start_key = old_start_key_,
-             old_end_key = old_end_key_,
+             &old_start_key = old_start_key_,
+             &old_end_key = old_end_key_,
              &worker = update_ckpt_ts_op_.worker_thread_]
         {
 
@@ -4161,22 +4153,22 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                  &hd_result,
                  &new_range_info,
                  node_group,
-                 old_start_key,
-                 old_end_key]
+                 &old_start_key,
+                 &old_end_key]
                 {
                     auto lower_bound_cmp =
                         [](const FlushRecord &rec, const TxKey &key)
-                    { return *rec.Key() < key; };
+                    { return rec.Key() < key; };
 
                     LocalCcShards *local_shards =
                         Sharder::Instance().GetLocalCcShards();
 
                     assert(!new_range_info.empty());
-                    assert(old_start_key != nullptr);
-                    assert(old_end_key != nullptr);
+                    assert(old_start_key.KeyPtr() != nullptr);
+                    assert(old_end_key.KeyPtr() != nullptr);
 
-                    const TxKey *start_key = old_start_key;
-                    const TxKey *end_key = new_range_info.begin()->first.get();
+                    const TxKey *start_key = &old_start_key;
+                    const TxKey *end_key = &new_range_info.begin()->first;
 
                     auto start_it = data_sync_vec->begin();
                     auto end_it = std::lower_bound(start_it,
@@ -4210,16 +4202,16 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                         if (new_owner == node_group)
                         {
-                            start_key = iter->first.get();
+                            start_key = &iter->first;
                             assert(start_key != nullptr);
 
                             if (std::next(iter) == new_range_info.cend())
                             {
-                                end_key = old_end_key;
+                                end_key = &old_end_key;
                             }
                             else
                             {
-                                end_key = std::next(iter)->first.get();
+                                end_key = &std::next(iter)->first;
                             }
 
                             start_it = std::lower_bound(end_it,
@@ -4228,7 +4220,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                         lower_bound_cmp);
 
                             end_it =
-                                end_key == old_end_key
+                                *end_key == old_end_key
                                     ? data_sync_vec->end()
                                     : std::lower_bound(start_it,
                                                        data_sync_vec->end(),
@@ -4272,7 +4264,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         ACTION_FAULT_INJECTOR("range_split_commit_acquire_all");
 
         LOG(INFO) << "Split Flush transaction update ckpt ts, range id "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &update_ckpt_ts_op_);
     }
     else if (op_ == &update_ckpt_ts_op_)
@@ -4285,7 +4277,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         FillCommitLogRequest(txm);
         LOG(INFO) << "Split Flush transaction write commit log, range id "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &commit_log_op_);
     }
     else if (op_ == &commit_log_op_)
@@ -4308,39 +4300,37 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
         // Split the range slices based on the range split keys.
-        std::vector<
-            std::tuple<const TxKey *, int32_t, std::vector<StoreSlice *>>>
-            splitted_range_info;
-        auto &slices = store_range_->Slices();
+        std::vector<SplitRangeInfo> splitted_range_info;
+        std::vector<const StoreSlice *> slices = store_range_->Slices();
         auto slice_it = slices.begin();
-        const TxKey *start_key = store_range_->RangeStartKey();
+        TxKey start_key = old_start_key_.GetShallowCopy();
         int32_t range_id = store_range_->PartitionId();
-        std::vector<StoreSlice *> subrange_slices;
+        std::vector<const StoreSlice *> subrange_slices;
         // First slice is always left in the old range. Put it into vector
         // first to avoid dealing with null start key.
-        subrange_slices.push_back(slice_it->get());
+        subrange_slices.push_back(*slice_it);
         slice_it++;
         for (auto &info : new_range_info_)
         {
             while (slice_it != slices.end() &&
-                   *(*slice_it)->StartKey() < *info.first)
+                   (*slice_it)->StartTxKey() < info.first)
             {
-                subrange_slices.push_back(slice_it->get());
+                subrange_slices.push_back(*slice_it);
                 slice_it++;
             }
             splitted_range_info.emplace_back(
-                start_key, range_id, std::move(subrange_slices));
+                std::move(start_key), range_id, std::move(subrange_slices));
             subrange_slices.clear();
-            start_key = info.first.get();
+            start_key = info.first.GetShallowCopy();
             range_id = info.second;
         }
         // The rest of the slices belong the last new range.
         for (; slice_it != slices.end(); slice_it++)
         {
-            subrange_slices.push_back(slice_it->get());
+            subrange_slices.push_back(*slice_it);
         }
         splitted_range_info.emplace_back(
-            start_key, range_id, std::move(subrange_slices));
+            std::move(start_key), range_id, std::move(subrange_slices));
 
         // Insert new ranges into data store range table. Update
         // range slice size of the old range.
@@ -4378,7 +4368,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         };
 
         LOG(INFO) << "Split Flush transaction upsert new range spec, range id "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &ds_upsert_range_op_);
     }
     else if (op_ == &ds_upsert_range_op_)
@@ -4420,15 +4410,16 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 // we still need to clean the cc entry from native ccmap since
                 // failover and native ccmaps are separated.
                 kickout_old_range_data_op_.start_key_ =
-                    kickout_data_it_->first.get();
+                    kickout_data_it_->first.GetShallowCopy();
                 if (std::next(kickout_data_it_) == new_range_info_.cend())
                 {
-                    kickout_old_range_data_op_.end_key_ = old_end_key_;
+                    kickout_old_range_data_op_.end_key_ =
+                        old_end_key_.GetShallowCopy();
                 }
                 else
                 {
                     kickout_old_range_data_op_.end_key_ =
-                        std::next(kickout_data_it_)->first.get();
+                        std::next(kickout_data_it_)->first.GetShallowCopy();
                 }
                 kickout_old_range_data_op_.clean_type_ =
                     CleanType::CleanRangeData;
@@ -4436,7 +4427,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 LOG(INFO)
                     << "Split Flush transaction kickout old data in range "
                     << kickout_data_it_->second << ", original range id "
-                    << range_info_.PartitionId()
+                    << range_info_->PartitionId()
                     << ", txn: " << txm->TxNumber();
                 break;
             }
@@ -4445,13 +4436,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (kickout_data_it_ == new_range_info_.cend())
         {
             LOG(INFO) << "Split Flush transaction post all lock, range id "
-                      << range_info_.PartitionId()
+                      << range_info_->PartitionId()
                       << ", txn: " << txm->TxNumber();
 
             // All of the new ranges falls on the same node, proceed to post
             // write all. Now broadcast slice info to all nodes through
             // PostWriteAll. New ranges might land on other nodes.
-            range_record_->SetRangeInfo(&range_info_);
+            range_record_->SetRangeInfo(range_info_.get());
 
             assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
             ForwardToSubOperation(txm, &post_all_lock_op_);
@@ -4491,21 +4482,22 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             if (new_owner != txm->TxCcNodeId())
             {
                 kickout_old_range_data_op_.start_key_ =
-                    kickout_data_it_->first.get();
+                    kickout_data_it_->first.GetShallowCopy();
                 if (std::next(kickout_data_it_) == new_range_info_.cend())
                 {
-                    kickout_old_range_data_op_.end_key_ = old_end_key_;
+                    kickout_old_range_data_op_.end_key_ =
+                        old_end_key_.GetShallowCopy();
                 }
                 else
                 {
                     kickout_old_range_data_op_.end_key_ =
-                        std::next(kickout_data_it_)->first.get();
+                        std::next(kickout_data_it_)->first.GetShallowCopy();
                 }
 
                 LOG(INFO)
                     << "Split Flush transaction kickout old data in range "
                     << kickout_data_it_->second << ", original range id "
-                    << range_info_.PartitionId()
+                    << range_info_->PartitionId()
                     << ", txn: " << txm->TxNumber();
                 break;
             }
@@ -4514,12 +4506,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (kickout_data_it_ == new_range_info_.cend())
         {
             LOG(INFO) << "Split Flush transaction post all lock, range id "
-                      << range_info_.PartitionId()
+                      << range_info_->PartitionId()
                       << ", txn: " << txm->TxNumber();
 
             // Now broadcast slice info to all nodes through PostWriteAll. New
             // ranges might land on other nodes.
-            range_record_->SetRangeInfo(&range_info_);
+            range_record_->SetRangeInfo(range_info_.get());
 
             assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
             ForwardToSubOperation(txm, &post_all_lock_op_);
@@ -4547,7 +4539,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                            << ", msg "
                            << post_all_lock_op_.hd_result_.ErrorMsg();
 
-                range_record_->SetRangeInfo(&range_info_);
+                range_record_->SetRangeInfo(range_info_.get());
                 RetrySubOperation(txm, &post_all_lock_op_);
             }
             return;
@@ -4578,7 +4570,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         }
 
         LOG(INFO) << "Split Flush transaction unlock cluster config, range id "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &unlock_cluster_config_op_);
     }
     else if (op_ == &ds_clean_old_range_op_)
@@ -4603,7 +4595,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         FillCleanLogRequest(txm);
         LOG(INFO) << "Split Flush transaction write clean log, range id "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
+                  << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &clean_log_op_);
     }
     else if (op_ == &clean_log_op_)
@@ -4662,7 +4654,7 @@ void SplitFlushRangeOp::MergeFlushRecord(
     size_t additional_data_vec_idx = vecs.size() - 1;
 
     auto greater = [](const FlushRecord &r1, const FlushRecord &r2) -> bool
-    { return *r2.Key() < *r1.Key(); };
+    { return r2.Key() < r1.Key(); };
 
     // We need to build a priority queue with pair elements. Each element
     // will contain which subvec the element comes from and the actual value T.
@@ -4774,23 +4766,22 @@ void SplitFlushRangeOp::FillPrepareLogRequest(TransactionExecution *txm)
     prepare_split_msg->set_stage(
         ::txlog::SplitRangeOpMessage_Stage_PrepareSplit);
     // Set range info for splitting range
-    prepare_split_msg->set_partition_id(range_info_.partition_id_);
+    prepare_split_msg->set_partition_id(range_info_->PartitionId());
     prepare_split_msg->set_range_key_neg_inf(false);
-    switch (old_start_key_->Type())
+    switch (old_start_key_.Type())
     {
     case KeyType::NegativeInf:
         prepare_split_msg->set_range_key_neg_inf(true);
         break;
     default:
-        old_start_key_->Serialize(
-            *prepare_split_msg->mutable_range_key_value());
+        old_start_key_.Serialize(*prepare_split_msg->mutable_range_key_value());
         break;
     }
     for (auto &new_range : new_range_info_)
     {
         prepare_split_msg->add_new_partition_id(new_range.second);
         std::string new_range_key;
-        new_range.first->Serialize(new_range_key);
+        new_range.first.Serialize(new_range_key);
         prepare_split_msg->add_new_range_key(new_range_key);
     }
 }
@@ -4810,14 +4801,14 @@ void SplitFlushRangeOp::FillCommitLogRequest(TransactionExecution *txm)
     commit_split_msg->set_stage(::txlog::SplitRangeOpMessage_Stage_CommitSplit);
 
     // Fill the slice info
-    auto &slices = store_range_->Slices();
+    std::vector<const StoreSlice *> slices = store_range_->Slices();
     auto slice_it = slices.begin();
     commit_split_msg->add_slice_sizes((*slice_it)->Size());
     slice_it++;
     for (; slice_it != slices.end(); slice_it++)
     {
         std::string slice_key;
-        (*slice_it)->StartKey()->Serialize(slice_key);
+        (*slice_it)->StartTxKey().Serialize(slice_key);
         commit_split_msg->add_slice_keys(slice_key);
         commit_split_msg->add_slice_sizes((*slice_it)->Size());
     }
@@ -5193,7 +5184,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
     {
 #ifdef RANGE_PARTITION_ENABLED
         assert(lock_range_result_->IsFinished());
-        const std::vector<const TxKey *> *vct_key = tx_req_->VctKey();
+        const std::vector<TxKey> *vct_key = tx_req_->VctKey();
         if (lock_range_result_->IsError())
         {
             txm->PostProcess(*this);
@@ -5214,21 +5205,11 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             // keys belonging to this range.
             const RangeRecord *range_rec =
                 static_cast<RangeRecord *>(lock_range_result_->Value().rec_);
-            const TxKey *range_end_key = range_rec->GetRangeInfo()->EndKey();
+            TxKey range_end_key = range_rec->GetRangeInfo()->EndTxKey();
             uint32_t key_shard = range_rec->GetRangeOwnerNg()->BucketOwner();
 
-            auto cmp = [](const TxKey *start_key, const TxKey *end_key)
-            {
-                if (end_key == nullptr ||
-                    end_key->Type() == KeyType::PositiveInf)
-                {
-                    return true;
-                }
-                else
-                {
-                    return *start_key < *end_key;
-                }
-            };
+            auto cmp = [](const TxKey &start_key, const TxKey &end_key)
+            { return start_key < end_key; };
 
             for (; range_lock_cur_ < vct_key->size() &&
                    cmp(vct_key->at(range_lock_cur_), range_end_key);
@@ -5319,14 +5300,14 @@ ClusterScaleOp::ClusterScaleOp(
       status_(remote::ClusterScaleStatus::IN_PROGRESS)
 {
     acquire_cluster_config_write_op_.table_name_ = &cluster_config_ccm_name;
-    acquire_cluster_config_write_op_.keys_.push_back(
-        NegativeInfinity<VoidKey>::Instance());
+    acquire_cluster_config_write_op_.keys_.emplace_back(
+        TxKey(VoidKey::NegativeInfinity()));
     acquire_cluster_config_write_op_.cc_op_ = CcOperation::Write;
     acquire_cluster_config_write_op_.protocol_ = CcProtocol::Locking;
 
     install_cluster_config_op_.table_name_ = &cluster_config_ccm_name;
-    install_cluster_config_op_.keys_.push_back(
-        NegativeInfinity<VoidKey>::Instance());
+    install_cluster_config_op_.keys_.emplace_back(
+        TxKey(VoidKey::NegativeInfinity()));
     install_cluster_config_op_.recs_.push_back(&cluster_config_rec_);
     install_cluster_config_op_.op_type_ = OperationType::Update;
     // cluster update is a 1pc. There is no dirty state.
@@ -5375,15 +5356,15 @@ void ClusterScaleOp::Reset(
 
     acquire_cluster_config_write_op_.table_name_ = &cluster_config_ccm_name;
     acquire_cluster_config_write_op_.keys_.clear();
-    acquire_cluster_config_write_op_.keys_.push_back(
-        NegativeInfinity<VoidKey>::Instance());
+    acquire_cluster_config_write_op_.keys_.emplace_back(
+        TxKey(VoidKey::NegativeInfinity()));
     acquire_cluster_config_write_op_.cc_op_ = CcOperation::Write;
     acquire_cluster_config_write_op_.protocol_ = CcProtocol::Locking;
 
     install_cluster_config_op_.table_name_ = &cluster_config_ccm_name;
     install_cluster_config_op_.keys_.clear();
-    install_cluster_config_op_.keys_.push_back(
-        NegativeInfinity<VoidKey>::Instance());
+    install_cluster_config_op_.keys_.emplace_back(
+        TxKey(VoidKey::NegativeInfinity()));
     install_cluster_config_op_.recs_.clear();
     install_cluster_config_op_.recs_.push_back(&cluster_config_rec_);
     install_cluster_config_op_.op_type_ = OperationType::Update;
@@ -6332,10 +6313,6 @@ void DataMigrationOp::Reset(TransactionExecution *txm,
     prepare_bucket_lock_op_.protocol_ = CcProtocol::Locking;
 
     acquire_bucket_lock_op_.table_name_ = &range_bucket_ccm_name;
-    acquire_bucket_lock_op_.cc_op_ = CcOperation::Write;
-    acquire_bucket_lock_op_.protocol_ = CcProtocol::Locking;
-
-    install_dirty_bucket_op_.table_name_ = &range_bucket_ccm_name;
     install_dirty_bucket_op_.write_type_ = PostWriteType::PrepareCommit;
     install_dirty_bucket_op_.op_type_ = OperationType::Update;
 
@@ -6374,15 +6351,15 @@ void DataMigrationOp::PrepareNextRoundBuckets()
         bucket_records_[i].SetBucketInfo(&bucket_info_[i]);
 
         // initialize bucket keys and records in the ops for this round.
-        prepare_bucket_lock_op_.keys_.push_back(&bucket_keys_[i]);
+        prepare_bucket_lock_op_.keys_.emplace_back(&bucket_keys_[i]);
 
-        acquire_bucket_lock_op_.keys_.push_back(&bucket_keys_[i]);
+        acquire_bucket_lock_op_.keys_.emplace_back(&bucket_keys_[i]);
 
-        install_dirty_bucket_op_.keys_.push_back(&bucket_keys_[i]);
-        install_dirty_bucket_op_.recs_.push_back(&bucket_records_[i]);
+        install_dirty_bucket_op_.keys_.emplace_back(&bucket_keys_[i]);
+        install_dirty_bucket_op_.recs_.emplace_back(&bucket_records_[i]);
 
-        post_all_bucket_lock_op_.keys_.push_back(&bucket_keys_[i]);
-        post_all_bucket_lock_op_.recs_.push_back(&bucket_records_[i]);
+        post_all_bucket_lock_op_.keys_.emplace_back(&bucket_keys_[i]);
+        post_all_bucket_lock_op_.recs_.emplace_back(&bucket_records_[i]);
     }
 }
 
@@ -6918,8 +6895,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                     kickout_data_op_.node_group_,
                     *kickout_range_it_);
             assert(range != nullptr);
-            kickout_data_op_.start_key_ = range->GetRangeInfo()->StartKey();
-            kickout_data_op_.end_key_ = range->GetRangeInfo()->EndKey();
+            kickout_data_op_.start_key_ = range->GetRangeInfo()->StartTxKey();
+            kickout_data_op_.end_key_ = range->GetRangeInfo()->EndTxKey();
             // All data in this range is clean target.
             kickout_data_op_.clean_type_ = CleanType::CleanRangeData;
             LOG(INFO) << "Data migration: kickout bucket data"
@@ -6953,8 +6930,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
         kickout_data_op_.node_group_ = txm->TxCcNodeId();
         kickout_data_op_.table_name_ = &kickout_tbl_it_->first;
-        kickout_data_op_.start_key_ = nullptr;
-        kickout_data_op_.end_key_ = nullptr;
+        kickout_data_op_.start_key_ = TxKey();
+        kickout_data_op_.end_key_ = TxKey();
         kickout_data_op_.bucket_ids_ =
             &status_->bucket_ids_[migrate_bucket_idx_];
         // Check if the key is hashed to this bucket
@@ -7020,8 +6997,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 kickout_data_op_.node_group_,
                 *kickout_range_it_);
         assert(range != nullptr);
-        kickout_data_op_.start_key_ = range->GetRangeInfo()->StartKey();
-        kickout_data_op_.end_key_ = range->GetRangeInfo()->EndKey();
+        kickout_data_op_.start_key_ = range->GetRangeInfo()->StartTxKey();
+        kickout_data_op_.end_key_ = range->GetRangeInfo()->EndTxKey();
 #else
         if (++kickout_tbl_it_ == table_snapshot_.cend())
         {
@@ -7338,21 +7315,11 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
             // keys belonging to this range.
             const RangeRecord *range_rec =
                 static_cast<RangeRecord *>(lock_range_result_->Value().rec_);
-            const TxKey *range_end_key = range_rec->GetRangeInfo()->EndKey();
+            TxKey range_end_key = range_rec->GetRangeInfo()->EndTxKey();
             NodeGroupId range_ng = range_rec->GetRangeOwnerNg()->BucketOwner();
 
-            auto cmp = [](const ScanBatchTuple &tuple, const TxKey *end_key)
-            {
-                if (end_key == nullptr ||
-                    end_key->Type() == KeyType::PositiveInf)
-                {
-                    return true;
-                }
-                else
-                {
-                    return *tuple.key_ < *end_key;
-                }
-            };
+            auto cmp = [](const ScanBatchTuple &tuple, const TxKey &end_key)
+            { return tuple.key_ < end_key; };
 
             for (;
                  lock_it_ != read_batch.end() && cmp(*lock_it_, range_end_key);

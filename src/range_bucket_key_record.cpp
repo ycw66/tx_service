@@ -68,15 +68,14 @@ void RangeBucketKey::Deserialize(const char *buf,
     offset += sizeof(uint16_t);
 }
 
-TxKey::Uptr RangeBucketKey::Clone() const
+TxKey RangeBucketKey::CloneTxKey() const
 {
-    return std::make_unique<RangeBucketKey>(*this);
+    return TxKey(std::make_unique<RangeBucketKey>(*this));
 }
 
-void RangeBucketKey::Copy(const TxKey &rhs)
+void RangeBucketKey::Copy(const RangeBucketKey &rhs)
 {
-    const RangeBucketKey &typed_rhs = static_cast<const RangeBucketKey &>(rhs);
-    bucket_id_ = typed_rhs.bucket_id_;
+    bucket_id_ = rhs.bucket_id_;
 }
 
 std::string RangeBucketKey::ToString() const

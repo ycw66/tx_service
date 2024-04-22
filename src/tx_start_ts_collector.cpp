@@ -6,6 +6,9 @@
 
 #include <chrono>
 
+#include "brpc/channel.h"
+#include "butil/logging.h"
+#include "cc/local_cc_shards.h"
 #include "sharder.h"
 
 namespace txservice

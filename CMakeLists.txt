@@ -143,6 +143,7 @@ if ( CMAKE_COMPILER_IS_GNUCC )
 endif()
 
 SET(TxService_SOURCES
+    ${TX_SERVICE_SOURCE_DIR}/src/tx_key.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_execution.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_operation.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/checkpointer.cpp

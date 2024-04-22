@@ -239,11 +239,11 @@ public:
         uint32_t &total_pk_items_count,
         uint32_t &dispatched_task_count,
         CcErrorCode &task_res,
-        std::function<void(const TxKey *batch_range_start_key,
-                           const TxKey *batch_range_end_key,
+        std::function<void(TxKey batch_range_start_key,
+                           TxKey batch_range_end_key,
                            const std::string *batch_range_start_key_str,
                            const std::string *batch_range_end_key_str,
-                           const TxKey *&last_scanned_end_key,
+                           TxKey &last_scanned_end_key,
                            bool &is_last_scanned_key_str,
                            size_t batch_range_cnt,
                            uint32_t &actual_task_cnt)> &dispatch_func)
@@ -313,8 +313,8 @@ public:
                         --unfinished_task_cnt_;
                     }
 
-                    const TxKey *range_start_key = nullptr;
-                    const TxKey *range_end_key = nullptr;
+                    TxKey range_start_key{};
+                    TxKey range_end_key{};
                     const std::string *range_start_key_str =
                         &(request_.start_key());
                     const std::string *range_end_key_str =
@@ -339,13 +339,14 @@ public:
                                             ->PositiveInfKey();
                         range_end_key_str = nullptr;
                     }
-                    const TxKey *last_scanned_end_key = range_start_key;
+                    TxKey last_scanned_end_key =
+                        range_start_key.GetShallowCopy();
                     bool dispatch_next_range = true;
                     uint32_t actual_task_cnt = 0;
                     do
                     {
-                        dispatch_func_(range_start_key,
-                                       range_end_key,
+                        dispatch_func_(range_start_key.GetShallowCopy(),
+                                       range_end_key.GetShallowCopy(),
                                        range_start_key_str,
                                        range_end_key_str,
                                        last_scanned_end_key,
@@ -365,14 +366,14 @@ public:
                         if (request_.end_key().size() == 0)
                         {
                             dispatch_next_range =
-                                *last_scanned_end_key < *range_end_key;
+                                last_scanned_end_key < range_end_key;
                         }
                         else
                         {
-                            assert(last_scanned_end_key->Type() ==
+                            assert(last_scanned_end_key.Type() ==
                                    KeyType::Normal);
                             std::string serialized_key;
-                            last_scanned_end_key->Serialize(serialized_key);
+                            last_scanned_end_key.Serialize(serialized_key);
                             dispatch_next_range =
                                 serialized_key.length() !=
                                     request_.end_key().length() ||
@@ -504,11 +505,11 @@ private:
     uint32_t &total_pk_items_count_;
     uint32_t &dispatched_task_count_;
     CcErrorCode &task_res_;
-    std::function<void(const TxKey *batch_range_start_key,
-                       const TxKey *batch_range_end_key,
+    std::function<void(TxKey batch_range_start_key,
+                       TxKey batch_range_end_key,
                        const std::string *batch_range_start_key_str,
                        const std::string *batch_range_end_key_str,
-                       const TxKey *&last_scanned_end_key,
+                       TxKey &last_scanned_end_key,
                        bool &is_last_scanned_key_str,
                        size_t batch_range_cnt,
                        uint32_t &actual_task_cnt)> &dispatch_func_;

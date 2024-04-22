@@ -10,6 +10,7 @@
 #include <utility>  // std::move
 #include <vector>
 
+#include "boost/stacktrace.hpp"
 #include "cc_req_base.h"
 #include "non_blocking_lock.h"
 #include "tx_id.h"
@@ -39,42 +40,44 @@ struct CcPage;
 
 struct FlushRecord
 {
-    union KeyPtr
+private:
+    std::shared_ptr<TxRecord> payload_{nullptr};
+
+    enum class FlushKeyType : uint8_t
     {
-        const TxKey *ptr_;
-        std::unique_ptr<TxKey> uptr_;
-        // key_idx records where the TxKey raw ptr should be obtained.
-        size_t key_idx_;
-        ~KeyPtr()
-        {
-        }
+        TxKey = 0,
+        KeyIndex
     };
 
-private:
-    KeyPtr key_{nullptr};
-    bool is_key_owner_{false};
-
-    std::shared_ptr<TxRecord> payload_{nullptr};
+    union
+    {
+        TxKey tx_key_;
+        size_t key_idx_;
+    };
+    FlushKeyType key_type_;
 
 public:
     RecordStatus payload_status_{RecordStatus::Unknown};
-    uint64_t commit_ts_{1U};
-    // todo: remove cce_
-    LruEntry *cce_;
     int32_t delta_size_{INT32_MAX};
 
-    FlushRecord()
+    uint64_t commit_ts_{1U};
+    // todo: remove cce_
+    LruEntry *cce_{nullptr};
+
+    FlushRecord() : tx_key_(), key_type_(FlushKeyType::TxKey)
     {
     }
 
-    FlushRecord(std::unique_ptr<TxKey> uptr,
+    FlushRecord(TxKey key,
                 std::shared_ptr<TxRecord> payload,
                 RecordStatus payload_status,
                 uint64_t commit_ts,
                 LruEntry *cce,
                 int32_t delta_size)
     {
-        SetKey(std::move(uptr));
+        tx_key_.Release();
+        tx_key_ = std::move(key);
+        key_type_ = FlushKeyType::TxKey;
         payload_ = payload;
         payload_status_ = payload_status;
         commit_ts_ = commit_ts;
@@ -84,9 +87,9 @@ public:
 
     ~FlushRecord()
     {
-        if (is_key_owner_)
+        if (key_type_ == FlushKeyType::TxKey)
         {
-            key_.uptr_.reset();
+            tx_key_.~TxKey();
         }
     }
 
@@ -97,14 +100,21 @@ public:
             return *this;
         }
 
-        if (rhs.is_key_owner_)
+        switch (rhs.key_type_)
         {
-            SetKey(std::move(rhs.key_.uptr_));
-            rhs.is_key_owner_ = false;
-        }
-        else
-        {
-            SetKey(rhs.key_.ptr_);
+        case FlushKeyType::TxKey:
+            SetKey(std::move(rhs.tx_key_));
+            break;
+        case FlushKeyType::KeyIndex:
+            if (key_type_ == FlushKeyType::TxKey)
+            {
+                tx_key_.~TxKey();
+            }
+            key_idx_ = rhs.key_idx_;
+            key_type_ = FlushKeyType::KeyIndex;
+            break;
+        default:
+            break;
         }
 
         payload_ = std::move(rhs.payload_);
@@ -117,14 +127,19 @@ public:
 
     FlushRecord(FlushRecord &&rhs) noexcept
     {
-        if (rhs.is_key_owner_)
+        switch (rhs.key_type_)
         {
-            SetKey(std::move(rhs.key_.uptr_));
-            rhs.is_key_owner_ = false;
-        }
-        else
-        {
-            SetKey(rhs.key_.ptr_);
+        case FlushKeyType::TxKey:
+            tx_key_.Release();
+            tx_key_ = std::move(rhs.tx_key_);
+            key_type_ = FlushKeyType::TxKey;
+            break;
+        case FlushKeyType::KeyIndex:
+            key_idx_ = rhs.key_idx_;
+            key_type_ = FlushKeyType::KeyIndex;
+            break;
+        default:
+            break;
         }
 
         payload_ = std::move(rhs.payload_);
@@ -134,63 +149,50 @@ public:
         cce_ = rhs.cce_;
     }
 
+    FlushRecord(const FlushRecord &) = delete;
+
     void CloneOrCopyKey(const TxKey &key)
     {
-        if (is_key_owner_)
+        if (key_type_ == FlushKeyType::TxKey && tx_key_.IsOwner())
         {
-            assert(key_.uptr_ != nullptr);
-            key_.uptr_->Copy(key);
+            tx_key_.Copy(key);
         }
         else
         {
-            (void) key_.uptr_.release();
-            key_.uptr_ = key.Clone();
-            is_key_owner_ = true;
+            tx_key_.Release();
+            tx_key_ = key.Clone();
+            key_type_ = FlushKeyType::TxKey;
         }
     }
 
     void SetKeyIndex(size_t offset)
     {
-        if (is_key_owner_)
+        if (key_type_ == FlushKeyType::TxKey)
         {
-            key_.uptr_.reset();
+            tx_key_.~TxKey();
         }
-        key_.key_idx_ = offset;
-        is_key_owner_ = false;
+
+        key_idx_ = offset;
+        key_type_ = FlushKeyType::KeyIndex;
     }
 
     size_t GetKeyIndex() const
     {
-        assert(!is_key_owner_);
-        return key_.key_idx_;
+        assert(key_type_ == FlushKeyType::KeyIndex);
+        return key_idx_;
     }
 
-    void SetKey(const TxKey *ptr)
+    void SetKey(TxKey key)
     {
-        if (is_key_owner_)
+        if (key_type_ != FlushKeyType::TxKey)
         {
-            key_.uptr_.reset();
+            // Ensures that if "this" union is not of type TxKey, the ownership
+            // bit of tx_key_ is 0 and the following move assignment does not
+            // trigger de-allocation accidentally.
+            tx_key_.Release();
         }
-        key_.ptr_ = ptr;
-        is_key_owner_ = false;
-    }
-
-    void SetKey(std::unique_ptr<TxKey> uptr)
-    {
-        if (is_key_owner_)
-        {
-            // The move op will de-allocate the old record and obtain the
-            // ownership of the input record.
-            key_.uptr_ = std::move(uptr);
-        }
-        else
-        {
-            // key_ is treated as a unique_ptr, first release ownership,
-            // otherwise ptr_ will be deleted
-            (void) key_.uptr_.release();
-            key_.uptr_ = std::move(uptr);
-        }
-        is_key_owner_ = true;
+        tx_key_ = std::move(key);
+        key_type_ = FlushKeyType::TxKey;
     }
 
 #ifndef ON_KEY_OBJECT
@@ -226,7 +228,7 @@ public:
         return Payload() == nullptr ? 0 : Payload()->Size();
     }
 
-    const TxKey *Key() const;
+    TxKey Key() const;
 
     /**
      * @brief Size of the FlushRecord. 0 if the record is in Deleted status.
@@ -241,7 +243,7 @@ public:
         }
         else
         {
-            return Key()->Size() + PayloadSize();
+            return Key().Size() + PayloadSize();
         }
     }
 };
@@ -931,7 +933,7 @@ public:
                 assert(commit_ts != 1);
                 assert(exported_count == 0);
                 FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
-                ref.CloneOrCopyKey(key);
+                ref.CloneOrCopyKey(TxKey(&key));
 
                 // This record was load from storage. We can't safely
                 // point to CcEntry of CcMap. Because the entry will be
@@ -969,7 +971,7 @@ public:
         if (from_ts < commit_ts && commit_ts <= to_ts)
         {
             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
-            ref.CloneOrCopyKey(key);
+            ref.CloneOrCopyKey(TxKey(&key));
             ref.cce_ =
                 const_cast<LruEntry *>(static_cast<const LruEntry *>(this));
 
@@ -1071,7 +1073,7 @@ public:
                             if (export_base_table_record_if_need)
                             {
                                 FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
-                                ref.CloneOrCopyKey(key);
+                                ref.CloneOrCopyKey(TxKey(&key));
 
                                 // This record was load from storage. We
                                 // can't safely point to CcEntry of CcMap.
@@ -1111,7 +1113,7 @@ public:
                         if (exported_count == 0)
                         {
                             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
-                            ref.CloneOrCopyKey(key);
+                            ref.CloneOrCopyKey(TxKey(&key));
                             ref.cce_ = const_cast<LruEntry *>(
                                 static_cast<const LruEntry *>(this));
                             if (it->payload_status_ == RecordStatus::Normal)
@@ -1190,7 +1192,7 @@ public:
                         if (it->commit_ts_ != 1 && it->commit_ts_ == ckpt_ts)
                         {
                             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
-                            ref.CloneOrCopyKey(key);
+                            ref.CloneOrCopyKey(TxKey(&key));
 
                             // This record was load from storage. We
                             // can't safely point to CcEntry of CcMap.
@@ -1595,11 +1597,11 @@ struct CcPage : public LruPage
     {
         if (IsNegInf())
         {
-            return *NegativeInfinity<KeyT>::Instance();
+            return *KeyT::NegativeInfinity();
         }
         if (IsPosInf())
         {
-            return *PositiveInfinity<KeyT>::Instance();
+            return *KeyT::PositiveInfinity();
         }
         assert(!keys_.empty());
         return keys_.front();
@@ -1609,11 +1611,11 @@ struct CcPage : public LruPage
     {
         if (IsNegInf())
         {
-            return *NegativeInfinity<KeyT>::Instance();
+            return *KeyT::NegativeInfinity();
         }
         if (IsPosInf())
         {
-            return *PositiveInfinity<KeyT>::Instance();
+            return *KeyT::PositiveInfinity();
         }
         assert(!keys_.empty());
         return keys_.back();
@@ -1623,11 +1625,11 @@ struct CcPage : public LruPage
     {
         if (IsNegInf())
         {
-            return NegativeInfinity<KeyT>::Instance();
+            return KeyT::NegativeInfinity();
         }
         if (IsPosInf())
         {
-            return PositiveInfinity<KeyT>::Instance();
+            return KeyT::PositiveInfinity();
         }
         size_t idx_in_page = FindEntry(cce);
         assert(idx_in_page < keys_.size());

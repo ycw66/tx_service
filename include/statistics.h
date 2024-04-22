@@ -89,7 +89,7 @@ public:
                             bool *updated_since_sync) const = 0;
 
     virtual std::unordered_map<TableName,
-                               std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+                               std::pair<uint64_t, std::vector<TxKey>>>
     MakeStoreStatistics(bool *updated_since_sync) const = 0;
 
     virtual void SetUpdatedSinceSync() = 0;

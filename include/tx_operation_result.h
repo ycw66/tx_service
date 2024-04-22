@@ -7,7 +7,6 @@
 
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
-#include "sharder.h"
 #include "tx_command.h"
 #include "type.h"
 
@@ -227,7 +226,7 @@ struct RemoteScanSliceCache
 struct RangeScanSliceResult
 {
     RangeScanSliceResult()
-        : last_key_(nullptr),
+        : last_key_(),
           slice_position_(SlicePosition::FirstSlice),
           cc_ng_id_(0),
           ccm_scanner_(nullptr),
@@ -236,7 +235,7 @@ struct RangeScanSliceResult
     {
     }
 
-    RangeScanSliceResult(TxKey::Uptr last_key, SlicePosition status)
+    RangeScanSliceResult(TxKey last_key, SlicePosition status)
         : last_key_(std::move(last_key)),
           slice_position_(status),
           cc_ng_id_(0),
@@ -293,11 +292,11 @@ struct RangeScanSliceResult
     void Reset()
     {
         std::unique_lock<std::mutex> lk(last_key_mux_);
-        last_key_ = nullptr;
         last_key_set_ = false;
+        last_key_ = TxKey();
     }
 
-    const TxKey *SetLastKey(std::unique_ptr<TxKey> key)
+    const TxKey *SetLastKey(TxKey key)
     {
         std::unique_lock<std::mutex> lk(last_key_mux_);
         if (!last_key_set_)
@@ -306,23 +305,38 @@ struct RangeScanSliceResult
             last_key_set_ = true;
         }
 
-        return last_key_.get();
+        return &last_key_;
     }
 
-    std::pair<TxKey *, bool> UpdateLastKey(const TxKey *key,
-                                           SlicePosition slice_pos)
+    template <typename KeyT>
+    std::pair<const KeyT *, bool> UpdateLastKey(const KeyT *key,
+                                                SlicePosition slice_pos)
     {
         bool success = false;
         std::unique_lock<std::mutex> lk(last_key_mux_);
         if (!last_key_set_)
         {
-            last_key_ = key != nullptr ? key->Clone() : nullptr;
+            // If the slice position is the last or the first, this is the last
+            // scan batch, which must end with positive/negative infinity or the
+            // request's end key. In both cases, the input key is a valid
+            // reference throughout the lifetime of RangeScanSliceResult. So,
+            // the tx key does not own a new copy of the input key.
+            if (slice_pos == SlicePosition::FirstSlice ||
+                slice_pos == SlicePosition::LastSlice)
+            {
+                last_key_ = TxKey(key);
+            }
+            else
+            {
+                last_key_ = key->CloneTxKey();
+            }
+
             last_key_set_ = true;
             slice_position_ = slice_pos;
             success = true;
         }
 
-        return {last_key_.get(), success};
+        return {last_key_.GetKey<KeyT>(), success};
     }
 
     std::pair<const TxKey *, bool> PeekLastKey() const
@@ -330,7 +344,7 @@ struct RangeScanSliceResult
         std::unique_lock<std::mutex> lk(last_key_mux_);
         if (last_key_set_)
         {
-            return {last_key_.get(), true};
+            return {&last_key_, true};
         }
         else
         {
@@ -338,7 +352,7 @@ struct RangeScanSliceResult
         }
     }
 
-    std::unique_ptr<TxKey> LastKey()
+    TxKey MoveLastKey()
     {
         std::unique_lock<std::mutex> lk(last_key_mux_);
         last_key_set_ = false;
@@ -353,7 +367,7 @@ struct RangeScanSliceResult
      * exclusive start key of the next scan batch.
      *
      */
-    TxKey::Uptr last_key_;
+    TxKey last_key_;
     SlicePosition slice_position_;
     NodeGroupId cc_ng_id_{0};
 
@@ -381,34 +395,6 @@ struct InitTxResult
     uint64_t start_ts_;
     // The term of the cc node group to which the tx is bound.
     int64_t term_;
-};
-
-struct RangeMedianKeyResult
-{
-    RangeMedianKeyResult()
-    {
-    }
-
-    RangeMedianKeyResult(const RangeMedianKeyResult &other)
-    {
-        median_key_ = other.median_key_->Clone();
-        new_partition_id_ = other.new_partition_id_;
-    }
-
-    RangeMedianKeyResult &operator=(const RangeMedianKeyResult &rhs)
-    {
-        if (this == &rhs)
-        {
-            return *this;
-        }
-        median_key_ = rhs.median_key_->Clone();
-        new_partition_id_ = rhs.new_partition_id_;
-
-        return *this;
-    }
-
-    std::unique_ptr<TxKey> median_key_{nullptr};
-    int32_t new_partition_id_{-1};
 };
 
 struct PostProcessResult

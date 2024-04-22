@@ -638,12 +638,29 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                 << lock_holding_txn
                 << ", txn is initiated by this machine, no need to recover.";
 
+            std::unordered_map<std::string_view, std::unordered_set<LockType>>
+                tbl_set;
             for (const auto &lru : lk_info.cce_list_)
             {
                 CcMap *ccm = lru->GetCcMap();
                 if (ccm != nullptr)
                 {
-                    LOG(INFO) << "table: " << ccm->table_name_.Trace();
+                    NonBlockingLock *lk = lru->GetKeyLock();
+                    assert(lk != nullptr);
+                    LockType lk_type = lk->SearchLock(lock_holding_txn);
+                    auto [it, is_insert] =
+                        tbl_set.try_emplace(ccm->table_name_.StringView());
+                    it->second.emplace(lk_type);
+                }
+            }
+
+            for (const auto &tbl_lk : tbl_set)
+            {
+                for (LockType lk_type : tbl_lk.second)
+                {
+                    LOG(INFO)
+                        << "Txn #" << lock_holding_txn << " locks "
+                        << tbl_lk.first << ", lock type: " << (int) lk_type;
                 }
             }
             // no need to check and recover local txn, it must be ongoing
@@ -825,9 +842,8 @@ void CcShard::InitTableRanges(const TableName &range_table_name,
         range_table_name, init_ranges, ng_id, fully_cached);
 }
 
-std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
-    *CcShard::GetTableRangesForATable(const TableName &range_table_name,
-                                      const NodeGroupId ng_id)
+std::map<TxKey, TableRangeEntry::uptr> *CcShard::GetTableRangesForATable(
+    const TableName &range_table_name, const NodeGroupId ng_id)
 {
     return local_shards_.GetTableRangesForATable(range_table_name, ng_id);
 }
@@ -917,34 +933,6 @@ void CcShard::FetchTableRanges(const TableName &table_name,
     }
 }
 
-const TableRangeEntry *CcShard::UploadNewRangeInfo(
-    const TableName &table_name,
-    const NodeGroupId ng_id,
-    const TxKey *key,
-    const std::vector<std::unique_ptr<TxKey>> &new_key,
-    const std::vector<int32_t> &new_partition_id,
-    uint64_t commit_ts)
-{
-    return local_shards_.UploadNewRangeInfo(
-        table_name, ng_id, key, new_key, new_partition_id, commit_ts);
-}
-
-const TableRangeEntry *CcShard::CreateTableRange(
-    const TableName &table_name,
-    const NodeGroupId ng_id,
-    int32_t partition_id,
-    TxKey::Uptr start_key,
-    uint64_t version,
-    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>> *slice_keys)
-{
-    return local_shards_.CreateTableRange(table_name,
-                                          ng_id,
-                                          partition_id,
-                                          std::move(start_key),
-                                          version,
-                                          slice_keys);
-}
-
 void CcShard::CleanTableRange(const TableName &table_name,
                               const NodeGroupId ng_id)
 {
@@ -953,7 +941,7 @@ void CcShard::CleanTableRange(const TableName &table_name,
 
 TableRangeEntry *CcShard::GetTableRangeEntry(const TableName &table_name,
                                              const NodeGroupId ng_id,
-                                             const TxKey *key)
+                                             const TxKey &key)
 {
     return local_shards_.GetTableRangeEntry(table_name, ng_id, key);
 }
@@ -966,7 +954,7 @@ const TableRangeEntry *CcShard::GetTableRangeEntry(const TableName &table_name,
 }
 
 const TableRangeEntry *CcShard::GetTableRangeEntryNoLocking(
-    const TableName &table_name, const NodeGroupId ng_id, const TxKey *key)
+    const TableName &table_name, const NodeGroupId ng_id, const TxKey &key)
 {
     return local_shards_.GetTableRangeEntryNoLocking(table_name, ng_id, key);
 }
@@ -1002,7 +990,7 @@ std::pair<std::shared_ptr<Statistics>, bool> CcShard::InitTableStatistics(
     TableSchema *table_schema,
     TableSchema *dirty_table_schema,
     NodeGroupId ng_id,
-    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
         sample_pool_map)
 {
     return local_shards_.InitTableStatistics(table_schema,
@@ -1608,78 +1596,6 @@ uint64_t CcShard::Now() const
 void CcShard::UpdateTsBase(uint64_t ts)
 {
     local_shards_.UpdateTsBase(ts);
-}
-
-RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
-                                    NodeGroupId cc_ng_id,
-                                    int64_t cc_ng_term,
-                                    const Schema *key_schema,
-                                    const Schema *rec_schema,
-                                    uint64_t schema_ts,
-                                    const KVCatalogInfo *kv_info,
-                                    const TxKey &key,
-                                    bool inclusive,
-                                    CcRequestBase *cc_request,
-                                    RangeSliceOpStatus &pin_status,
-                                    bool force_load,
-                                    uint8_t prefetch_size)
-{
-    return local_shards_.PinRangeSlice(table_name,
-                                       cc_ng_id,
-                                       cc_ng_term,
-                                       key_schema,
-                                       rec_schema,
-                                       schema_ts,
-                                       kv_info,
-                                       key,
-                                       inclusive,
-                                       cc_request,
-                                       this,
-                                       pin_status,
-                                       force_load,
-                                       prefetch_size);
-}
-
-RangeSliceId CcShard::PinRangeSlices(const TableName &table_name,
-                                     NodeGroupId cc_ng_id,
-                                     int64_t cc_ng_term,
-                                     const Schema *key_schema,
-                                     const Schema *rec_schema,
-                                     uint64_t schema_ts,
-                                     const KVCatalogInfo *kv_info,
-                                     uint32_t range_id,
-                                     const TxKey &start_key,
-                                     bool start_inclusive,
-                                     const TxKey *end_key,
-                                     bool end_inclusive,
-                                     CcRequestBase *cc_request,
-                                     bool force_load,
-                                     uint8_t prefetch_size,
-                                     uint8_t max_pin_cnt,
-                                     bool forward_pin,
-                                     RangeSliceOpStatus &pin_status,
-                                     const StoreSlice *&last_pinned_slice)
-{
-    return local_shards_.PinRangeSlices(table_name,
-                                        cc_ng_id,
-                                        cc_ng_term,
-                                        key_schema,
-                                        rec_schema,
-                                        schema_ts,
-                                        kv_info,
-                                        range_id,
-                                        start_key,
-                                        start_inclusive,
-                                        end_key,
-                                        end_inclusive,
-                                        cc_request,
-                                        this,
-                                        force_load,
-                                        prefetch_size,
-                                        max_pin_cnt,
-                                        forward_pin,
-                                        pin_status,
-                                        last_pinned_slice);
 }
 
 void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)
