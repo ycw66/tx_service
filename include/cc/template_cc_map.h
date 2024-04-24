@@ -243,7 +243,7 @@ public:
                     req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
                     return true;
 #else
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    shard_->EnqueueWaitList(&req);
                     return false;
 #endif
                 }
@@ -792,11 +792,11 @@ public:
                 {
                     // The acquire request needs a new cc entry but the cc map
                     // has reached the maximal capacity. Blocks the request by
-                    // putting it back to the cc request queue.
+                    // putting it into the wait list.
 #ifdef RANGE_PARTITION_ENABLED
                     return hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
 #else
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    shard_->EnqueueWaitList(&req);
                     return false;
 #endif
                 }
@@ -998,7 +998,7 @@ public:
             req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
             return true;
 #else
-            shard_->Enqueue(shard_->LocalCoreId(), &req);
+            shard_->EnqueueWaitList(&req);
             return false;
 #endif
         }
@@ -1536,7 +1536,7 @@ public:
                 // the cc map is full and cannot allocates a new entry.
                 if (cce == nullptr)
                 {
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    shard_->EnqueueWaitList(&req);
                     return false;
                 }
 
@@ -4947,6 +4947,8 @@ public:
 
                     if (need_export)
                     {
+                        mi_heap_t *scan_heap = this->shard_->GetShardDataSyncScanHeap();
+                        mi_heap_t *prev_heap = mi_heap_set_default(scan_heap);
                         cce->ExportForCkpt(
                             *key,
                             req.DataSyncVec(shard_->core_id_),
@@ -4960,11 +4962,14 @@ public:
                             req.accumulated_scan_cnt_[shard_->core_id_],
                             false,
                             false);
+                        mi_heap_set_default(prev_heap);
                     }
                 }
             }
             else
             {
+                mi_heap_t *scan_heap = this->shard_->GetShardDataSyncScanHeap();
+                mi_heap_t *prev_heap = mi_heap_set_default(scan_heap);
                 cce->ExportForCkpt(*key,
                                    req.DataSyncVec(shard_->core_id_),
                                    req.ArchiveVec(shard_->core_id_),
@@ -4977,6 +4982,7 @@ public:
                                    req.accumulated_scan_cnt_[shard_->core_id_],
                                    true,
                                    req.skip_archived_key_);
+                mi_heap_set_default(prev_heap);
             }
 
             // Forward iterator
@@ -5301,6 +5307,8 @@ public:
 
             if (req.filter_lambda_(key->Hash()) && cce->NeedCkpt())
             {
+                mi_heap_t *scan_heap = this->shard_->GetShardDataSyncScanHeap();
+                mi_heap_t *prev_heap = mi_heap_set_default(scan_heap);
                 cce->ExportForCkpt(*key,
                                    req.DataSyncVec(vec_idx),
                                    req.ArchiveVec(vec_idx),
@@ -5313,6 +5321,7 @@ public:
                                    req.accumulated_scan_cnt_[vec_idx],
                                    false,
                                    false);
+                mi_heap_set_default(prev_heap);
             }
 
             // Forward iterator
@@ -5786,7 +5795,7 @@ public:
                 // Since we're not holding any range lock that would
                 // block data sync during replay, just keep retrying
                 // until we have free space in cc map.
-                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                shard_->EnqueueWaitList(&req);
                 return false;
             }
 

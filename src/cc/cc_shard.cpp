@@ -281,6 +281,26 @@ void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
 #endif
 }
 
+void CcShard::EnqueueWaitList(CcRequestBase *req)
+{
+    cc_wait_list_.push_back(req);
+}
+
+void CcShard::DequeueWaitList()
+{
+    if (cc_wait_list_.size() == 0)
+    {
+        return;
+    }
+
+    for (auto req : cc_wait_list_)
+    {
+        this->Enqueue(req);
+    }
+
+    cc_wait_list_.clear();
+}
+
 void CcShard::Enqueue(CcRequestBase *req)
 {
     cc_queue_size_.fetch_add(1, std::memory_order_relaxed);
@@ -1079,8 +1099,8 @@ const BucketInfo *CcShard::GetRangeOwner(int32_t range_id,
     return local_shards_.GetRangeOwner(range_id, ng_id);
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-    *CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     return local_shards_.GetAllBucketInfos(ng_id);
 }

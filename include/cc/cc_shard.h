@@ -121,6 +121,51 @@ public:
      */
     CcMap *GetCcm(const TableName &table_name, uint32_t node_group);
 
+    /**
+     * @count the memory utilization of each block size in the heap.
+     * comment out for now, since it's heavy
+     */
+    //typedef struct
+    //{
+        //size_t allocated;
+        //size_t comitted;
+        //size_t wasted;
+    //} MemUtilized_t;
+
+    //typedef struct
+    //{
+        //std::unordered_map<size_t, MemUtilized_t> mem_utilized;
+        //float ratio;
+    //} MemUtilized_by_block_t;
+
+    //static bool heap_count_wasted_blocks(const mi_heap_t *heap,
+                                         //const mi_heap_area_t *area,
+                                         //void *block,
+                                         //size_t block_size,
+                                         //void *arg)
+    //{
+        //assert(area->used < (1u << 31));
+
+        //MemUtilized_by_block_t *sum =
+            //static_cast<MemUtilized_by_block_t *>(arg);
+        //float ratio = sum->ratio;
+
+        //MemUtilized_t &block_mem_utilized =
+            //sum->mem_utilized.try_emplace(block_size, MemUtilized_t{0, 0, 0})
+                //.first->second;
+
+        //// mimalloc mistakenly exports used in blocks instead of bytes.
+        //size_t used = block_size * area->used;
+        //block_mem_utilized.allocated += used;
+        //block_mem_utilized.comitted += area->committed;
+
+        //if (used < area->committed * ratio)
+        //{
+            //block_mem_utilized.wasted += (area->committed - used);
+        //}
+        //return true;  // continue iteration
+    //}
+
     bool Full() const
     {
         if (shard_heap_ != nullptr)
@@ -168,6 +213,30 @@ public:
                     last_failed_collect_ts_ = Now();
                 }
 
+                //MemUtilized_by_block_t mem_utilized = {.mem_utilized = {},
+                                                       //.ratio = 0.8};
+
+                //mi_heap_visit_blocks(shard_heap_,
+                                     //false [> visit all blocks<],
+                                     //heap_count_wasted_blocks,
+                                     //&mem_utilized);
+
+                // print out the memory utilization of each block size
+
+                //LOG(WARNING)
+                    //<< "[memory] Ccsard " << core_id_ << " heap collect "
+                    //<< (succ ? "succeed" : "failed");
+                //for (auto &it : mem_utilized.mem_utilized)
+                //{
+                    //LOG(WARNING)
+                        //<< "block size: " << it.first
+                        //<< ", allocated: " << it.second.allocated
+                        //<< ", committed: " << it.second.comitted
+                        //<< ", wasted: " << it.second.wasted
+                        //<< ", fragmentation(%): "
+                        //<< it.second.wasted * 100.0 / it.second.comitted;
+                //}
+
                 return succ;
             }
             else
@@ -189,6 +258,11 @@ public:
             shard_heap_ = mi_heap_new();
             mi_heap_set_default(shard_heap_);
         }
+
+        if (!shard_data_sync_scan_heap_)
+        {
+            shard_data_sync_scan_heap_ = mi_heap_new();
+        }
     }
 
     mi_threadid_t GetShardHeapThreadId()
@@ -199,6 +273,11 @@ public:
     mi_heap_t *GetShardHeap()
     {
         return shard_heap_;
+    }
+
+    mi_heap_t *GetShardDataSyncScanHeap()
+    {
+        return shard_data_sync_scan_heap_;
     }
 
     /**
@@ -213,6 +292,15 @@ public:
      * request.
      */
     void Enqueue(uint32_t thd_id, CcRequestBase *req);
+
+    /**
+     * @brief Puts a cc request into the shard's request wait list until memory is avaliable.
+     */
+    void EnqueueWaitList(CcRequestBase *req);
+    /**
+     * @brief Dequeue cc requests from the shard's request wait list to process.
+     */
+    void DequeueWaitList();
 
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
@@ -562,8 +650,8 @@ public:
     const BucketInfo *GetBucketInfo(uint16_t bucket_id,
                                     NodeGroupId ng_id) const;
 
-    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-        *GetAllBucketInfos(NodeGroupId ng_id) const;
+    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+    GetAllBucketInfos(NodeGroupId ng_id) const;
 
     const BucketInfo *GetRangeOwner(int32_t range_id, NodeGroupId ng_id) const;
 
@@ -698,8 +786,8 @@ public:
     // Search lock_holding_txs_, find the entrys with waited transactions and
     // save them into CheckDeadLockResult.
     void CollectLockWaitingInfo(CheckDeadLockResult &dlr);
-    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>>
-        &GetLockHoldingTxs()
+    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>> &
+    GetLockHoldingTxs()
     {
         return lock_holding_txs_;
     }
@@ -748,6 +836,8 @@ private:
     mi_threadid_t shard_heap_thread_id_{0};
     size_t last_failed_collect_ts_{0};
 
+    mi_heap_t *shard_data_sync_scan_heap_{nullptr};
+
     // all the lock acquire/release on this ccshard. It used to reduce the cost
     // of allocation/dellocation of memory.
     std::vector<KeyGapLockAndExtraData::uptr> lock_vec_;
@@ -780,6 +870,7 @@ private:
     std::atomic<uint32_t> cc_queue_size_{0};
     CcRequestBase *req_buf_[100];
     std::vector<moodycamel::ProducerToken> thd_token_;
+    std::vector<CcRequestBase *> cc_wait_list_;
 
     // all the transactions started on this ccshard. Some txs are Ongoing while
     // others are Available, new transaction request has to traverse the array

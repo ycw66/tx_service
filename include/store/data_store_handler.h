@@ -107,6 +107,25 @@ public:
                         const txservice::TableSchema *table_schema,
                         uint32_t node_group) = 0;
 
+    /**
+     * @brief indicate end of flush entries in a single ckpt for \@param batch
+     * to base table or skindex table in data store, stop and return false if
+     * node_group is not longer leader.
+     * @param batch
+     * @param table_name base table name or sk index name
+     * @param table_schema
+     * @param node_group
+     * @param version
+     * @return whether all entries are written to data store successfully
+     */
+    virtual bool CkptEnd(const txservice::TableName &table_name,
+                           const txservice::TableSchema *table_schema,
+                           uint32_t node_group,
+                           uint64_t version)
+    {
+        return true;
+    }
+
     virtual void UpsertTable(
         const TableSchema *table_schema,
         OperationType op_type,

@@ -4222,6 +4222,7 @@ public:
         ccs.ResetCleanStart();
         {
             std::unique_lock<std::mutex> lk(mux_);
+            ccs.DequeueWaitList();
             if (--pending_shard_ == 0)
             {
                 cv_.notify_one();

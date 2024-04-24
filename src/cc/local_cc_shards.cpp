@@ -65,11 +65,12 @@ LocalCcShards::LocalCcShards(
       data_sync_worker_ctx_(core_cnt),
 #endif
       slice_update_worker_ctx_(core_cnt),
-      flush_data_worker_ctx_(core_cnt >= 2 ? std::min(core_cnt / 2, 10) : 1),
+      flush_data_worker_ctx_(
+              core_cnt >= 2 ? std::min(core_cnt / 2, 10) : 1),
 #else
       data_sync_worker_ctx_(core_cnt),
       slice_update_worker_ctx_(core_cnt * 2),
-      flush_data_worker_ctx_(std::min((int) core_cnt, 10)),
+      flush_data_worker_ctx_(std::min(static_cast<int>(core_cnt), 10)),
 #endif
       statistics_worker_ctx_(1),
       defragment_worker_ctx_(1),
@@ -840,9 +841,9 @@ void LocalCcShards::PublishMessage(const std::string &chan,
     }
 }
 
-std::map<TxKey, TableRangeEntry::uptr>
-    *LocalCcShards::GetTableRangesForATableInternal(
-        const TableName &range_table_name, const NodeGroupId ng_id)
+std::map<TxKey, TableRangeEntry::uptr> *
+LocalCcShards::GetTableRangesForATableInternal(
+    const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_ranges_.find(range_table_name);
     if (table_it == table_ranges_.end())
@@ -863,9 +864,9 @@ std::map<TxKey, TableRangeEntry::uptr> *LocalCcShards::GetTableRangesForATable(
     return GetTableRangesForATableInternal(range_table_name, ng_id);
 }
 
-std::unordered_map<uint32_t, TableRangeEntry *>
-    *LocalCcShards::GetTableRangeIdsForATableInternal(
-        const TableName &range_table_name, const NodeGroupId ng_id)
+std::unordered_map<uint32_t, TableRangeEntry *> *
+LocalCcShards::GetTableRangeIdsForATableInternal(
+    const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_range_ids_.find(range_table_name);
     if (table_it == table_range_ids_.end())
@@ -1452,8 +1453,8 @@ BucketInfo *LocalCcShards::GetRangeOwnerInternal(const int32_t range_id,
                                  ng_id);
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-    *LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     auto ng_bucket_it = bucket_infos_.find(ng_id);
@@ -2821,8 +2822,22 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
     {
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
-            task->SetFinish();
+            LOG(INFO) << "DataSync stop processing task: "
+                      << task->table_name_.StringView()
+                      << " on node group: " << task->node_group_id_;
+            // Commit the data sync txm
+            txservice::CommitTx(data_sync_txm);
             PopPendingTask(task->node_group_id_, task->table_name_, worker_idx);
+
+            bool res = store_hd_->CkptEnd(task->table_name_,
+                                          catalog_entry->schema_.get(),
+                                          task->node_group_id_,
+                                          task->node_group_term_);
+            if (!res)
+            {
+                task->SetError(CcErrorCode::DATA_STORE_ERR);
+                return;
+            }
 
             if (catalog_entry)
             {
@@ -2830,8 +2845,7 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                                                     worker_idx);
             }
 
-            // Commit the data sync txm
-            txservice::CommitTx(data_sync_txm);
+            task->SetFinish();
         }
         else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
         {
@@ -2885,6 +2899,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     uint32_t ng_id = data_sync_task->node_group_id_;
     int64_t expected_ng_term = data_sync_task->node_group_term_;
     bool is_dirty = data_sync_task->is_dirty_;
+
+    LOG(INFO) << "DataSync start processing task: " << table_name.StringView()
+              << " on node group: " << ng_id;
 
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     uint64_t last_sync_ts = 0;
@@ -3121,14 +3138,31 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
     while (!scan_data_drained)
     {
-        EnqueueToCcShard(worker_idx, &scan_cc);
+        DLOG(INFO) << "scan start, table: " << table_name.String()
+                   << ", last_sync_ts: " << last_sync_ts
+                   << ", core_id: " << worker_idx;
 
+        uint64_t begin_ts =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+
+        EnqueueToCcShard(worker_idx, &scan_cc);
         scan_cc.Wait();
+        uint64_t end_ts =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        DLOG(INFO) << "scan end, table:" << table_name.String()
+                   << ", last_sync_ts: " << last_sync_ts
+                   << ", core_id: " << worker_idx
+                   << ", used time(ms):" << (end_ts - begin_ts);
 
         if (scan_cc.IsError())
         {
-            LOG(INFO) << "DataSync scan failed on table "
-                      << table_name.StringView();
+            LOG(ERROR) << "DataSync scan failed on table "
+                       << table_name.StringView() << " with error code: "
+                       << static_cast<int>(scan_cc.ErrorCode());
 
             PostProcessDataSyncTask(std::move(data_sync_task),
                                     data_sync_txm,
@@ -3571,9 +3605,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     uint64_t data_sync_ts = cur_work.data_sync_ts_;
 #endif
 
-#ifndef RANGE_PARTITION_ENABLED
     size_t scan_task_worker_idx = cur_work.scan_task_worker_idx_;
-#endif
 
     bool is_delay_update_ckpt_ts = cur_work.delay_update_ckpt_ts_;
     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_owner,
@@ -3699,12 +3731,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                         ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
 #endif
                     }
-                    ResetCleanStartPageCc reset_cc(cc_shards_.size());
-                    for (auto &ccs : cc_shards_)
-                    {
-                        ccs->Enqueue(&reset_cc);
-                    }
-                    reset_cc.Wait();
                 }
 
                 if (data_sync_vec->size())
@@ -3754,6 +3780,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             }
         } /* End of PutAll */
 
+        // reset scan start page info for the flushed ccshard
+        ResetCleanStartPageCc reset_cc(1);
+        EnqueueToCcShard(scan_task_worker_idx, &reset_cc);
+        reset_cc.Wait();
     } /* End of leader */
 
     if (data_sync_task != nullptr)
@@ -3859,8 +3889,12 @@ void LocalCcShards::FlushDataWorker()
 
         if (pending_flush_work_.empty())
         {
+            LOG(INFO) << "FlushDataWorker pending_flush_work_ queue is empty.";
             continue;
         }
+
+        LOG(INFO) << "FlushDataWorker pending_flush_work_ queue size: "
+                  << pending_flush_work_.size() - 1;
 
         FlushData(flush_worker_lk);
     }

@@ -273,6 +273,7 @@ void Checkpointer::Run()
         lk.unlock();
         Ckpt();
         lk.lock();
+
         request_ckpt_ = false;
     }
 

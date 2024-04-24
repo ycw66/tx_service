@@ -209,8 +209,8 @@ public:
             {
                 // The apply request needs a new cc entry but the cc map has
                 // reached the maximal capacity. Blocks the request by putting
-                // it back to the cc request queue.
-                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                // it into wait list until capacity is avaliable.
+                shard_->EnqueueWaitList(&req);
                 return false;
             }
 
@@ -858,10 +858,12 @@ public:
 
             if (cce == nullptr)
             {
-                // Renqueue cc req, wait for checkpoint and kickout flushed cce.
+                // The cc map has
+                // reached the maximal capacity. Blocks the request by putting
+                // it into wait list until capacity is avaliable.
                 req.SetOffset(prev_offset);
                 req.SetNextCore(next_core);
-                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                shard_->EnqueueWaitList(&req);
                 return false;
             }
 
