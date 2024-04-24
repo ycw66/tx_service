@@ -380,7 +380,7 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
 
 bool TransactionExecution::CommitTx(CommitTxRequest &commit_req)
 {
-    if (rw_set_.WriteSetSize() == 0 && rw_set_.ObjectCommandSize() == 0 &&
+    if (rw_set_.WriteSetSize() == 0 && rw_set_.ObjectCntWithWriteLock() == 0 &&
         rw_set_.ReadSetSize() == 0)
     {
         commit_tx_req_->Reset();
@@ -3081,7 +3081,7 @@ void TransactionExecution::Abort()
 #endif
 
 #ifdef ON_KEY_OBJECT
-        acquire_write_cnt += rw_set_.ObjectCommandSize();
+        acquire_write_cnt += rw_set_.ObjectCntWithWriteLock();
 #endif
         post_process_.Reset(acquire_write_cnt,
                             rw_set_.ReadSetSize(),
@@ -3418,7 +3418,7 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
         else
         {
             bool needs_write_log =
-                !txservice_skip_wal && rw_set_.NeedsWriteLog();
+                !txservice_skip_wal && rw_set_.ObjectModified();
             if (txlog_ != nullptr && needs_write_log)
             {
 #ifdef ON_KEY_OBJECT
@@ -3447,7 +3447,7 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
                     uint32_t acquire_write_cnt =
                         rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
 #ifdef ON_KEY_OBJECT
-                    acquire_write_cnt += rw_set_.ObjectCommandSize();
+                    acquire_write_cnt += rw_set_.ObjectCntWithWriteLock();
 #endif
                     post_process_.Reset(
                         acquire_write_cnt, 0, rw_set_.CatalogRangeSetSize());
@@ -3600,7 +3600,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     }
     else
     {
-        bool needs_write_log = !txservice_skip_wal && rw_set_.NeedsWriteLog();
+        bool needs_write_log = !txservice_skip_wal && rw_set_.ObjectModified();
         if (txlog_ != nullptr && needs_write_log)
         {
 #ifdef ON_KEY_OBJECT
@@ -3616,8 +3616,12 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
             bool is_recovering = TxStatus() == TxnStatus::Recovering;
             tx_status_.store(TxnStatus::Committed, std::memory_order_relaxed);
 
-            // This is a read-only tx. Notifies early before post-processing.
-            if (bool_resp_ != nullptr)
+            // This is either a read-only tx or a tx that acquires write lock on
+            // an object but does not modify it(i.e. ExecuteOn returns false),
+            // there is no need to wait PostWrite in this case because PostWrite
+            // is only used for releasing lock. Notifies early before
+            // post-processing.
+            if (bool_resp_ != nullptr && !rw_set_.ObjectModified())
             {
                 bool_resp_->Finish(true);
                 bool_resp_ = nullptr;
@@ -3634,7 +3638,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
                 // for recovering tx.
                 post_process_.Reset(rw_set_.WriteSetSize() +
                                         rw_set_.ForwardWriteCnt() +
-                                        rw_set_.ObjectCommandSize(),
+                                        rw_set_.ObjectCntWithWriteLock(),
                                     0,
                                     rw_set_.CatalogRangeSetSize());
                 PushOperation(&post_process_);
@@ -4177,15 +4181,17 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         // The tx is committed. The tx must have finished validation.
         // Post-processing includes both primary keys that have locks and
         // secondary keys without locks.
-        post_process_.Reset(acquire_write_cnt + rw_set_.ObjectCommandSize(),
-                            0,
-                            rw_set_.CatalogRangeSetSize());
+        post_process_.Reset(
+            acquire_write_cnt + rw_set_.ObjectCntWithWriteLock(),
+            0,
+            rw_set_.CatalogRangeSetSize());
     }
     else if (status == TxnStatus::Aborted)
     {
-        post_process_.Reset(acquire_write_cnt + rw_set_.ObjectCommandSize(),
-                            rw_set_.ReadSetSize(),
-                            rw_set_.CatalogRangeSetSize());
+        post_process_.Reset(
+            acquire_write_cnt + rw_set_.ObjectCntWithWriteLock(),
+            rw_set_.ReadSetSize(),
+            rw_set_.CatalogRangeSetSize());
     }
     else if (status == TxnStatus::Unknown)
     {
@@ -5444,7 +5450,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const ObjectCommandResult &cmd_result = hd_result.Value();
         RecordStatus obj_status = cmd_result.rec_status_;
         LockType lock_acquired = cmd_result.lock_acquired_;
-        bool need_write_log = cmd_result.need_write_log_;
+        bool object_modified = cmd_result.object_modified_;
         const TxCommand *cmd = obj_cmd_op.command_;
         const TableName *table_name = obj_cmd_op.table_name_;
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
@@ -5462,7 +5468,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                 cce_addr,
                 commit_ts,
                 obj_cmd_op.key_,
-                need_write_log ? obj_cmd_op.command_ : nullptr);
+                object_modified ? obj_cmd_op.command_ : nullptr);
 
             uint64_t read_version = rw_set_.DedupRead(cce_addr);
             if (read_version > 0 && read_version != cmd_result.commit_ts_)
@@ -5666,7 +5672,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         cmd_res.cce_addr_,
                         cmd_res.commit_ts_,
                         &vct_key->at(i),
-                        cmd_res.need_write_log_ ? vct_cmd->at(i) : nullptr);
+                        cmd_res.object_modified_ ? vct_cmd->at(i) : nullptr);
 
                     uint64_t read_version =
                         rw_set_.DedupRead(cmd_res.cce_addr_);

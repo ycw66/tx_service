@@ -455,7 +455,7 @@ struct ObjectCommandResult
         cce_addr_ = CcEntryAddr{};
         rec_status_ = RecordStatus::Unknown;
         lock_acquired_ = LockType::NoLock;
-        need_write_log_ = false;
+        object_modified_ = false;
         is_local_ = true;
         cmd_result_ = nullptr;
     }
@@ -473,7 +473,7 @@ struct ObjectCommandResult
     // for writing log.
     // False: The command failed to exec or is readonly, does not need to write
     // log.
-    bool need_write_log_{};
+    bool object_modified_{};
 
     // Whether the command operation executting on local node.
     bool is_local_{true};

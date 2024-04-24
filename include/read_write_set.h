@@ -48,7 +48,7 @@ public:
 
 #ifdef ON_KEY_OBJECT
         cmd_set_.clear();
-        cce_cnt_ = 0;
+        cce_with_writelock_size_ = 0;
 #endif
     }
 
@@ -574,7 +574,7 @@ public:
             std::tie(cce_it, inserted) = table_cmd_set.try_emplace(
                 cce_addr, cce_version, std::move(key_str));
             assert(inserted);
-            cce_cnt_++;
+            cce_with_writelock_size_++;
         }
 
         CmdSetEntry &entry = cce_it->second;
@@ -617,16 +617,17 @@ public:
 #endif
     }
 
-    uint32_t ObjectCommandSize() const
+    // The number of objects(cce) that already acquired write lock.
+    uint32_t ObjectCntWithWriteLock() const
     {
 #ifdef ON_KEY_OBJECT
-        return cce_cnt_;
+        return cce_with_writelock_size_;
 #else
         return 0;
 #endif
     }
 
-    bool NeedsWriteLog() const
+    bool ObjectModified() const
     {
 #ifdef ON_KEY_OBJECT
         for (const auto &[table_name, obj_cmd_set] : cmd_set_)
@@ -667,8 +668,9 @@ private:
     std::unordered_map<TableName, std::unordered_map<CcEntryAddr, CmdSetEntry>>
         cmd_set_;
 
-    // the count of different cc entries the command set contains
-    uint32_t cce_cnt_{};
+    // the count of different cc entries the command set contains that acquires
+    // writelock
+    uint32_t cce_with_writelock_size_{};
 #endif
 };
 }  // namespace txservice

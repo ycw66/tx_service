@@ -820,7 +820,7 @@ message ApplyResponse {
     uint64 last_vali_ts = 5;
     CceAddr_msg cce_addr = 6;
     CcLockType lock_type = 7;
-    bool need_write_log = 8;
+    bool object_modified = 8;
     // The response is an acknowledgement or the result
     bool is_ack = 9;
 }

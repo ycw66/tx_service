@@ -94,7 +94,7 @@ public:
         ObjectCommandResult &obj_result = hd_res->Value();
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
         // TODO(lzx): replace "cmd_success" with TxCommand::IsPassed()
-        bool &need_write_log = obj_result.need_write_log_;
+        bool &object_modified = obj_result.object_modified_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
         CcPage<KeyT, ValueT> *ccp = nullptr;
         const KeyT *look_key = nullptr;
@@ -569,8 +569,8 @@ public:
             // Temporary object exists, execute and commit the command on
             // the temporary object.
             ValueT &dirty_object = *dirty_payload;
-            need_write_log = cmd->ExecuteOn(dirty_object);
-            if (need_write_log)
+            object_modified = cmd->ExecuteOn(dirty_object);
+            if (object_modified)
             {
                 CommitCommandOnDirtyPayload(
                     dirty_payload, dirty_payload_status, *cmd);
@@ -585,9 +585,9 @@ public:
             // in PostWriteCc if the txn commits.
             assert(cce->IsNullPendingCmd());
             ValueT &object = *cce->payload_;
-            need_write_log = cmd->ExecuteOn(object);
+            object_modified = cmd->ExecuteOn(object);
 
-            if (need_write_log && !req.apply_and_commit_)
+            if (object_modified && !req.apply_and_commit_)
             {
                 // Copy the command to be committed in PostWriteCc or when
                 // executing subsequent commands of the same txn.
@@ -626,7 +626,7 @@ public:
             }
         }
 
-        if (need_write_log && req.apply_and_commit_)
+        if (object_modified && req.apply_and_commit_)
         {
             // Skipping writing log, do the PostWrite and release the lock.
             assert(acquired_lock == LockType::WriteLock);

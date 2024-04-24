@@ -1755,7 +1755,7 @@ txservice::remote::RemoteApplyCc::RemoteApplyCc()
                 ToRemoteType::ConvertRecordStatus(apply_result.rec_status_));
             resp->set_lock_type(
                 ToRemoteType::ConvertLockType(apply_result.lock_acquired_));
-            resp->set_need_write_log(apply_result.need_write_log_);
+            resp->set_object_modified(apply_result.object_modified_);
 
             assert(!is_local_);
             std::string *cmd_res_str = resp->mutable_cmd_result();
