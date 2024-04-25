@@ -742,12 +742,14 @@ struct ObjectCommandTxRequest
 
     template <typename KeyT>
     ObjectCommandTxRequest(const TableName *table_name,
+                           const ObjectTableOption *table_option,
                            const KeyT *key,
                            TxCommand *command,
                            bool auto_commit = true,
                            TransactionExecution *txm = nullptr)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
+          table_option_(table_option),
           key_(key),
           command_(command),
           auto_commit_(auto_commit),
@@ -757,12 +759,14 @@ struct ObjectCommandTxRequest
 
     template <typename KeyT>
     ObjectCommandTxRequest(const TableName *table_name,
+                           const ObjectTableOption *table_option,
                            const KeyT *key,
                            std::unique_ptr<TxCommand> command,
                            bool auto_commit = true,
                            TransactionExecution *txm = nullptr)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
+          table_option_(table_option),
           key_(key),
           command_uptr_(std::move(command)),
           auto_commit_(auto_commit),
@@ -772,12 +776,14 @@ struct ObjectCommandTxRequest
 
     template <typename KeyT>
     ObjectCommandTxRequest(const TableName *table_name,
+                           const ObjectTableOption *table_option,
                            std::unique_ptr<KeyT> key,
                            std::unique_ptr<TxCommand> command,
                            bool auto_commit = true,
                            TransactionExecution *txm = nullptr)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
+          table_option_(table_option),
           key_(std::move(key)),
           command_uptr_(std::move(command)),
           auto_commit_(auto_commit),
@@ -788,6 +794,7 @@ struct ObjectCommandTxRequest
     ObjectCommandTxRequest(ObjectCommandTxRequest &&rhs)
         : TemplateTxRequest(nullptr, nullptr, rhs.txm_),
           table_name_(rhs.table_name_),
+          table_option_(rhs.table_option_),
           key_(std::move(rhs.key_)),
           auto_commit_(rhs.auto_commit_),
           is_cmd_owner_(rhs.is_cmd_owner_)
@@ -821,6 +828,7 @@ struct ObjectCommandTxRequest
     }
 
     const TableName *table_name_;
+    const ObjectTableOption *table_option_;
     TxKey key_;
     union
     {
@@ -849,11 +857,13 @@ struct MultiObjectCommandTxRequest
     }
 
     MultiObjectCommandTxRequest(const TableName *table_name,
+                                const ObjectTableOption *table_option,
                                 MultiObjectTxCommand *cmd,
                                 bool auto_commit = true,
                                 TransactionExecution *txm = nullptr)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
+          table_option_(table_option),
           auto_commit_(auto_commit),
           multi_obj_cmd_(cmd),
           is_cmd_owner_(false)
@@ -861,11 +871,13 @@ struct MultiObjectCommandTxRequest
     }
 
     MultiObjectCommandTxRequest(const TableName *table_name,
+                                const ObjectTableOption *table_option,
                                 std::unique_ptr<MultiObjectTxCommand> cmd_uptr,
                                 bool auto_commit = true,
                                 TransactionExecution *txm = nullptr)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
+          table_option_(table_option),
           auto_commit_(auto_commit),
           multi_obj_cmd_uptr_(std::move(cmd_uptr)),
           is_cmd_owner_(true)
@@ -874,9 +886,11 @@ struct MultiObjectCommandTxRequest
 
     MultiObjectCommandTxRequest(const MultiObjectCommandTxRequest &rhs) =
         delete;
+
     MultiObjectCommandTxRequest(MultiObjectCommandTxRequest &&rhs)
         : TemplateTxRequest(nullptr, nullptr, rhs.txm_),
           table_name_(rhs.table_name_),
+          table_option_(rhs.table_option_),
           auto_commit_(rhs.auto_commit_)
     {
         if (is_cmd_owner_)
@@ -956,6 +970,7 @@ struct MultiObjectCommandTxRequest
     }
 
     const TableName *table_name_;
+    const ObjectTableOption *table_option_;
     bool auto_commit_{};
     union
     {

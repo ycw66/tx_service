@@ -4978,11 +4978,13 @@ ObjectCommandOp::ObjectCommandOp(
 }
 
 void ObjectCommandOp::Reset(const TableName *table_name,
+                            const ObjectTableOption *table_option,
                             const TxKey *key,
                             TxCommand *command,
                             bool auto_commit)
 {
     table_name_ = table_name;
+    table_option_ = table_option;
     key_ = key;
     command_ = command;
     hd_result_.Reset();

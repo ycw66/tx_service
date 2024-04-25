@@ -411,6 +411,12 @@ private:
     TableType type_;
 };
 
+struct ObjectTableOption
+{
+    bool enable_data_store_{false};
+    bool enable_wal_{false};
+};
+
 enum struct ReadType
 {
     /**

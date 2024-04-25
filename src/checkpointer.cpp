@@ -131,7 +131,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             const TableName &table_name = it->first;
             bool is_dirty = it->second;
             // This should correspond to CcShard::ActiveTxMinTs.
-            if (!table_name.IsMeta())
+            if (!table_name.IsMeta() &&
+                !local_shards_.PrebuiltTable(table_name))
             {
                 if (!is_dirty)
                 {

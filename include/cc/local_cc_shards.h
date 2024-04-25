@@ -1209,6 +1209,13 @@ private:
                                  size_t worker_idx);
 #endif
 
+    // If one table is a prebuilt table, it means that its enable_data_store
+    // option is disabled.
+    bool PrebuiltTable(const TableName &table_name) const
+    {
+        return prebuilt_tables_.find(table_name) != prebuilt_tables_.end();
+    }
+
     const uint32_t node_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
@@ -1275,6 +1282,10 @@ private:
     // Protects meta data (table_ranges_ and table_catalogs_)
     mutable std::shared_mutex meta_data_mux_;
 
+    // If enable_data_store is disabled for one table, its catalog needs to be
+    // created at launch or on_leader_start. enable_data_store option comes from
+    // configuration instead of table schema, hence we need a separate place to
+    // store this information.
     std::unordered_map<TableName, std::string> prebuilt_tables_;
 
     // Memory used by range slices

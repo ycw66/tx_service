@@ -815,7 +815,8 @@ void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
     rec_resp_ = &req.tx_result_;
     TxCommand *command = req.Command();
     const TxKey *key = req.Key();
-    obj_cmd_.Reset(req.table_name_, key, command, req.auto_commit_);
+    obj_cmd_.Reset(
+        req.table_name_, req.table_option_, key, command, req.auto_commit_);
 
     PushOperation(&obj_cmd_);
     Process(obj_cmd_);
@@ -5402,7 +5403,8 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     // Directly commit the new value to the object if autocommit and skip_wal
     // are both set, on contrary to acquiring lock and committing the command in
     // postprocess.
-    bool commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
+    bool commit =
+        obj_cmd_op.auto_commit_ && !obj_cmd_op.table_option_->enable_wal_;
     cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
                                *obj_cmd_op.key_,
                                key_shard_code,
@@ -5450,9 +5452,11 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const ObjectCommandResult &cmd_result = hd_result.Value();
         RecordStatus obj_status = cmd_result.rec_status_;
         LockType lock_acquired = cmd_result.lock_acquired_;
-        bool object_modified = cmd_result.object_modified_;
         const TxCommand *cmd = obj_cmd_op.command_;
         const TableName *table_name = obj_cmd_op.table_name_;
+        const ObjectTableOption *table_option = obj_cmd_op.table_option_;
+        bool need_write_log =
+            cmd_result.object_modified_ && table_option->enable_wal_;
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
         uint64_t commit_ts = cmd_result.commit_ts_;
 
@@ -5468,7 +5472,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                 cce_addr,
                 commit_ts,
                 obj_cmd_op.key_,
-                object_modified ? obj_cmd_op.command_ : nullptr);
+                need_write_log ? obj_cmd_op.command_ : nullptr);
 
             uint64_t read_version = rw_set_.DedupRead(cce_addr);
             if (read_version > 0 && read_version != cmd_result.commit_ts_)
@@ -5519,7 +5523,8 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // For autocommit read-modify-write commands, the ObjectCommandTxRequest
         // sender will be notified after auto commit succeeds, i.e. after
         // PostProcess or WriteLog.
-        bool already_committed = obj_cmd_op.auto_commit_ && txservice_skip_wal;
+        bool already_committed =
+            obj_cmd_op.auto_commit_ && !obj_cmd_op.table_option_->enable_wal_;
 
         // Whether we should notify the request sender.
         if (!obj_cmd_op.auto_commit_ || already_committed || cmd->IsReadOnly())
@@ -5667,12 +5672,14 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     // The command modifies the object. Put it into the command
                     // set for writing log and post-processing. If the command
                     // fails, only to release the write lock.
+                    bool need_write_log = cmd_res.object_modified_ &&
+                                          req->table_option_->enable_wal_;
                     rw_set_.AddObjectCommand(
                         *req->table_name_,
                         cmd_res.cce_addr_,
                         cmd_res.commit_ts_,
                         &vct_key->at(i),
-                        cmd_res.object_modified_ ? vct_cmd->at(i) : nullptr);
+                        need_write_log ? vct_cmd->at(i) : nullptr);
 
                     uint64_t read_version =
                         rw_set_.DedupRead(cmd_res.cce_addr_);
