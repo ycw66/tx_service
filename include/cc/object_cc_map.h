@@ -626,41 +626,49 @@ public:
             }
         }
 
-        if (object_modified && req.apply_and_commit_)
+        if (req.apply_and_commit_)
         {
-            // Skipping writing log, do the PostWrite and release the lock.
-            assert(acquired_lock == LockType::WriteLock);
-            RecordStatus status = cce->PayloadStatus();
-            if (dirty_payload_status == RecordStatus::Normal ||
-                dirty_payload_status == RecordStatus::Deleted)
+            if (object_modified)
             {
-                // Dirty payload exists. Use it to replace payload.
-                cce->payload_ = cce->DirtyPayload();
-                status = dirty_payload_status;
+                // Skipping writing log, do the PostWrite and release the lock.
+                assert(acquired_lock == LockType::WriteLock);
+                RecordStatus status = cce->PayloadStatus();
+                if (dirty_payload_status == RecordStatus::Normal ||
+                    dirty_payload_status == RecordStatus::Deleted)
+                {
+                    // Dirty payload exists. Use it to replace payload.
+                    cce->payload_ = cce->DirtyPayload();
+                    status = dirty_payload_status;
+                }
+                else
+                {
+                    CommitCommandOnPayload(cce->payload_, status, *cmd);
+                }
+
+                // Reset the dirty status.
+                cce->SetDirtyPayload(nullptr);
+                cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
+                cce->SetPendingCmd(nullptr);
+
+                // Set commit ts based on the TxTs since there is no PostWriteCc
+                // if apply_and_commit_.
+                const uint64_t commit_ts =
+                    std::max({cce->CommitTs() + 1, req.TxTs(), shard_->Now()});
+                cce->SetCommitTsPayloadStatus(commit_ts, status);
+
+                if (last_dirty_commit_ts_ < commit_ts)
+                {
+                    last_dirty_commit_ts_ = commit_ts;
+                }
+                if (commit_ts > ccp->last_dirty_commit_ts_)
+                {
+                    ccp->last_dirty_commit_ts_ = commit_ts;
+                }
             }
             else
             {
-                CommitCommandOnPayload(cce->payload_, status, *cmd);
-            }
-
-            // Reset the dirty status.
-            cce->SetDirtyPayload(nullptr);
-            cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
-            cce->SetPendingCmd(nullptr);
-
-            // Set commit ts based on the TxTs since there is no PostWriteCc if
-            // apply_and_commit_.
-            const uint64_t commit_ts =
-                std::max({cce->CommitTs() + 1, req.TxTs(), shard_->Now()});
-            cce->SetCommitTsPayloadStatus(commit_ts, status);
-
-            if (last_dirty_commit_ts_ < commit_ts)
-            {
-                last_dirty_commit_ts_ = commit_ts;
-            }
-            if (commit_ts > ccp->last_dirty_commit_ts_)
-            {
-                ccp->last_dirty_commit_ts_ = commit_ts;
+                cce->SetDirtyPayload(nullptr);
+                cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
             }
 
             // Release and try to recycle the lock.

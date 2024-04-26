@@ -5153,6 +5153,11 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
             hr.Reset();
             hr.post_lambda_ = [this](CcHandlerResult<ObjectCommandResult> *res)
             {
+                if (res->Value().is_local_)
+                {
+                    atm_local_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                }
+
                 CcErrorCode err = res->ErrorCode();
                 if (err == CcErrorCode::NO_ERROR)
                 {
@@ -5169,6 +5174,7 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
         }
     }
 
+    atm_local_cnt_.store(0, std::memory_order_relaxed);
     atm_cnt_.store(len, std::memory_order_relaxed);
     atm_err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
 
@@ -5233,14 +5239,20 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
         return;
     }
 
-    if (atm_err_code_.load(std::memory_order_acquire) !=
-            CcErrorCode::NO_ERROR ||
-        atm_cnt_.load(std::memory_order_acquire) == 0)
+    if (atm_cnt_.load(std::memory_order_acquire) == 0)
     {
         txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut())
     {
+        if (atm_err_code_.load(std::memory_order_acquire) !=
+                CcErrorCode::NO_ERROR &&
+            atm_local_cnt_.load(std::memory_order_relaxed) == 0)
+        {
+            txm->PostProcess(*this);
+            return;
+        }
+
         for (auto &hd_result : vct_hd_result_)
         {
             if (hd_result.IsFinished())

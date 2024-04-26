@@ -4947,7 +4947,8 @@ public:
 
                     if (need_export)
                     {
-                        mi_heap_t *scan_heap = this->shard_->GetShardDataSyncScanHeap();
+                        mi_heap_t *scan_heap =
+                            this->shard_->GetShardDataSyncScanHeap();
                         mi_heap_t *prev_heap = mi_heap_set_default(scan_heap);
                         cce->ExportForCkpt(
                             *key,

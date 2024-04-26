@@ -119,9 +119,9 @@ public:
      * @return whether all entries are written to data store successfully
      */
     virtual bool CkptEnd(const txservice::TableName &table_name,
-                           const txservice::TableSchema *table_schema,
-                           uint32_t node_group,
-                           uint64_t version)
+                         const txservice::TableSchema *table_schema,
+                         uint32_t node_group,
+                         uint64_t version)
     {
         return true;
     }

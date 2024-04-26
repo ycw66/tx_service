@@ -5460,6 +5460,11 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
         uint64_t commit_ts = cmd_result.commit_ts_;
 
+        if (obj_cmd_op.auto_commit_ && txservice_skip_wal)
+        {
+            assert(lock_acquired == LockType::NoLock);
+        }
+
         assert(obj_status != RecordStatus::Unknown);
         bool version_changed = false;
         if (lock_acquired == LockType::WriteLock)
@@ -5573,6 +5578,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
     uint64_t current_ts =
         dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
     // bool commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
+    uint32_t local_cnt = 0;  // Count the commands executed on local node
 
     for (size_t i = 0; i < vct_key->size(); i++)
     {
@@ -5601,11 +5607,15 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
                                    iso_level_,
                                    protocol_,
                                    false);
+        if (hd_res.Value().is_local_)
+        {
+            local_cnt++;
+        }
     }
 
+    obj_cmd_op.atm_local_cnt_.fetch_add(local_cnt, std::memory_order_relaxed);
     StartTiming();
 }
-
 void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -5640,6 +5650,28 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
     CcErrorCode err = obj_cmd_op.atm_err_code_.load(std::memory_order_relaxed);
     if (err != CcErrorCode::NO_ERROR)
     {
+        for (size_t i = 0; i < obj_cmd_op.vct_hd_result_.size(); i++)
+        {
+            const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
+
+            // Add the locked objects into read write set for future unlock.
+            if (cmd_res.lock_acquired_ == LockType::WriteLock)
+            {
+                rw_set_.AddObjectCommand(*req->table_name_,
+                                         cmd_res.cce_addr_,
+                                         cmd_res.commit_ts_,
+                                         &vct_key->at(i),
+                                         nullptr);
+            }
+            else if (cmd_res.lock_acquired_ != LockType::NoLock &&
+                     !rw_set_.FindObjectCommand(*req->table_name_,
+                                                cmd_res.cce_addr_))
+            {
+                rw_set_.AddRead(
+                    cmd_res.cce_addr_, cmd_res.commit_ts_, req->table_name_);
+            }
+        }
+
         vct_rec_resp_->FinishError(ConvertCcError(err));
         vct_rec_resp_ = nullptr;
         if (req->auto_commit_)
@@ -5649,7 +5681,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
     }
     else
     {
-        bool readonly = vct_cmd->at(0)->IsReadOnly();
+        bool readonly = true;
         std::vector<RecordStatus> vct_rec;
 
         {
@@ -5699,6 +5731,8 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
                         version_changed = true;
                     }
+
+                    readonly = false;
                 }
                 else if (cmd_res.lock_acquired_ != LockType::NoLock &&
                          !rw_set_.FindObjectCommand(*req->table_name_,

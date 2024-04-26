@@ -65,8 +65,7 @@ LocalCcShards::LocalCcShards(
       data_sync_worker_ctx_(core_cnt),
 #endif
       slice_update_worker_ctx_(core_cnt),
-      flush_data_worker_ctx_(
-              core_cnt >= 2 ? std::min(core_cnt / 2, 10) : 1),
+      flush_data_worker_ctx_(core_cnt >= 2 ? std::min(core_cnt / 2, 10) : 1),
 #else
       data_sync_worker_ctx_(core_cnt),
       slice_update_worker_ctx_(core_cnt * 2),
@@ -841,9 +840,9 @@ void LocalCcShards::PublishMessage(const std::string &chan,
     }
 }
 
-std::map<TxKey, TableRangeEntry::uptr> *
-LocalCcShards::GetTableRangesForATableInternal(
-    const TableName &range_table_name, const NodeGroupId ng_id)
+std::map<TxKey, TableRangeEntry::uptr>
+    *LocalCcShards::GetTableRangesForATableInternal(
+        const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_ranges_.find(range_table_name);
     if (table_it == table_ranges_.end())
@@ -864,9 +863,9 @@ std::map<TxKey, TableRangeEntry::uptr> *LocalCcShards::GetTableRangesForATable(
     return GetTableRangesForATableInternal(range_table_name, ng_id);
 }
 
-std::unordered_map<uint32_t, TableRangeEntry *> *
-LocalCcShards::GetTableRangeIdsForATableInternal(
-    const TableName &range_table_name, const NodeGroupId ng_id)
+std::unordered_map<uint32_t, TableRangeEntry *>
+    *LocalCcShards::GetTableRangeIdsForATableInternal(
+        const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_range_ids_.find(range_table_name);
     if (table_it == table_range_ids_.end())
@@ -1453,8 +1452,8 @@ BucketInfo *LocalCcShards::GetRangeOwnerInternal(const int32_t range_id,
                                  ng_id);
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
-LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+    *LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     auto ng_bucket_it = bucket_infos_.find(ng_id);
