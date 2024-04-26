@@ -979,6 +979,15 @@ const TableRangeEntry *CcShard::GetTableRangeEntryNoLocking(
     return local_shards_.GetTableRangeEntryNoLocking(table_name, ng_id, key);
 }
 
+bool CcShard::CheckRangeVersion(const TableName &table_name,
+                                const NodeGroupId ng_id,
+                                int32_t range_id,
+                                uint64_t range_version)
+{
+    return local_shards_.CheckRangeVersion(
+        table_name, ng_id, range_id, range_version);
+}
+
 uint64_t CcShard::CountRanges(const TableName &table_name,
                               const NodeGroupId ng_id,
                               const NodeGroupId key_ng_id)

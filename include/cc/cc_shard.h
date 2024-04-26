@@ -611,6 +611,11 @@ public:
     const TableRangeEntry *GetTableRangeEntryNoLocking(
         const TableName &table_name, const NodeGroupId ng_id, const TxKey &key);
 
+    bool CheckRangeVersion(const TableName &table_name,
+                           const NodeGroupId ng_id,
+                           int32_t range_id,
+                           uint64_t range_version);
+
     uint64_t CountRanges(const TableName &table_name,
                          const NodeGroupId ng_id,
                          const NodeGroupId key_ng_id);

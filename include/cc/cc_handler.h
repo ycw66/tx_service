@@ -537,7 +537,9 @@ public:
                              std::vector<uint16_t> *bucket_ids = nullptr,
                              const TxKey *start_key = nullptr,
                              const TxKey *end_key = nullptr,
-                             uint64_t clean_ts = 0) = 0;
+                             uint64_t clean_ts = 0,
+                             int32_t range_id = INT32_MAX,
+                             uint64_t range_version = UINT64_MAX) = 0;
 
     virtual void VerifyOrphanLock(TxNumber txn) = 0;
 };

@@ -4032,10 +4032,14 @@ public:
                      const TxKey *start_key = nullptr,
                      const TxKey *end_key = nullptr,
                      std::vector<uint16_t> *bucket_ids = nullptr,
-                     uint64_t clean_ts = 0)
+                     uint64_t clean_ts = 0,
+                     int32_t range_id = INT32_MAX,
+                     uint64_t range_version = UINT64_MAX)
         : clean_type_(clean_type),
           bucket_ids_(bucket_ids),
           clean_ts_(clean_ts),
+          range_id_(range_id),
+          range_version_(range_version),
           start_key_(start_key),
           end_key_(end_key),
           unfinished_cnt_(core_cnt)
@@ -4060,7 +4064,9 @@ public:
                const TxKey *start_key = nullptr,
                const TxKey *end_key = nullptr,
                std::vector<uint16_t> *bucket_ids = nullptr,
-               uint64_t clean_ts = 0)
+               uint64_t clean_ts = 0,
+               int32_t range_id = INT32_MAX,
+               uint64_t range_version = UINT64_MAX)
     {
         // Reset struct members with passed in args
         table_name_ = &table_name;
@@ -4070,6 +4076,8 @@ public:
         bucket_ids_ = bucket_ids;
         clean_type_ = clean_type;
         clean_ts_ = clean_ts;
+        range_id_ = range_id;
+        range_version_ = range_version;
         resume_key_.clear();
         start_key_ = start_key;
         end_key_ = end_key;
@@ -4078,10 +4086,35 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
+        int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (ng_term < 0)
+        {
+            Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
+        }
+
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
 
         if (ccm != nullptr)
         {
+            // DataMigration adds a bucket write lock, so we can ensure that
+            // range splits will not occur. There is no read lock on the
+            // catalog, and there is a situation where a table is deleted and
+            // then created. So the key range may be changed.
+            if (clean_type_ == CleanType::CleanRangeDataForMigration)
+            {
+                // The version of the range has changed, which means that the
+                // key range of the range has changed. `start_key_` and
+                // `end_key_` no longer represent the correct key range.
+                if (!ccs.CheckRangeVersion(*table_name_,
+                                           node_group_id_,
+                                           range_id_,
+                                           range_version_))
+                {
+                    return SetFinish();
+                }
+            }
+
             return ccm->Execute(*this);
         }
         else
@@ -4132,6 +4165,7 @@ public:
         switch (clean_type_)
         {
         case CleanType::CleanRangeData:
+        case CleanType::CleanRangeDataForMigration:
         {
             const KeyT *start =
                 start_key_ != nullptr ? start_key_->GetKey<KeyT>() : nullptr;
@@ -4181,6 +4215,7 @@ public:
         switch (clean_type_)
         {
         case CleanType::CleanRangeData:
+        case CleanType::CleanRangeDataForMigration:
         case CleanType::CleanBucketData:
             // All data in the target range/bucket can be cleaned.
             return true;
@@ -4204,6 +4239,10 @@ private:
     // kickout all cce with commit ts <= clean_ts_ if clean type is
     // CleanForAlterTable.
     uint64_t clean_ts_{0};
+    // Only used by migration
+    int32_t range_id_{INT32_MAX};
+    uint64_t range_version_{UINT64_MAX};
+
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
     std::vector<TxKey> resume_key_;

@@ -68,6 +68,13 @@ enum struct CleanType
      */
     CleanRangeData = 0,
     /**
+     * This used to kickout the ccentries that donot belong to this node anymore
+     * during data migration. In this case, the range read lock hasn't been
+     * acquried. So checking the range version to ensure the key range is
+     * correct.
+     */
+    CleanRangeDataForMigration,
+    /**
      * This is used to kickout the ccentries that no longer belong to this node
      * group anymore during bucket migration. All data in the specified bucket
      * should be cleaned regardless of its persistance status and lock status.

@@ -31,6 +31,7 @@
 #include "range_slice.h"
 #include "store/data_store_handler.h"
 #include "system_handler.h"
+#include "tx_key.h"
 #include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
@@ -644,6 +645,14 @@ public:
     TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
                                         const NodeGroupId ng_id,
                                         const TxKey &key);
+
+    std::optional<std::tuple<uint64_t, TxKey, TxKey>> GetTableRangeKeys(
+        const TableName &table_name, const NodeGroupId ng_id, int32_t range_id);
+
+    bool CheckRangeVersion(const TableName &table_name,
+                           const NodeGroupId ng_id,
+                           int32_t range_id,
+                           uint64_t range_version);
 
     const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
                                               const NodeGroupId ng_id,

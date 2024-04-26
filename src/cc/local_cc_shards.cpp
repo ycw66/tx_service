@@ -10,6 +10,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 
 #include "catalog_key_record.h"
@@ -1006,6 +1007,49 @@ TableRangeEntry *LocalCcShards::GetTableRangeEntry(const TableName &table_name,
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition);
     return GetTableRangeEntryInternal(range_table_name, ng_id, key);
+}
+
+std::optional<std::tuple<uint64_t, TxKey, TxKey>>
+LocalCcShards::GetTableRangeKeys(const TableName &table_name,
+                                 const NodeGroupId ng_id,
+                                 int32_t range_id)
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    TableRangeEntry *range_entry =
+        GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
+
+    if (range_entry == nullptr)
+    {
+        return std::nullopt;
+    }
+
+    uint64_t version_ts = range_entry->Version();
+    auto start_key = range_entry->GetRangeInfo()->StartTxKey().Clone();
+    auto end_key = range_entry->GetRangeInfo()->EndTxKey().Clone();
+
+    return std::make_tuple(
+        version_ts, std::move(start_key), std::move(end_key));
+}
+
+bool LocalCcShards::CheckRangeVersion(const TableName &table_name,
+                                      const NodeGroupId ng_id,
+                                      int32_t range_id,
+                                      uint64_t range_version)
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    TableRangeEntry *range_entry =
+        GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
+
+    if (range_entry == nullptr)
+    {
+        return false;
+    }
+
+    return range_entry->Version() == range_version;
 }
 
 const TableRangeEntry *LocalCcShards::GetTableRangeEntry(

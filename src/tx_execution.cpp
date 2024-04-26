@@ -5291,6 +5291,7 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
     kickout_data_op.is_running_ = true;
     kickout_data_op.hd_result_.Reset();
     cc_handler_->KickoutData(*kickout_data_op.table_name_,
@@ -5303,7 +5304,9 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
                              kickout_data_op.bucket_ids_,
                              &kickout_data_op.start_key_,
                              &kickout_data_op.end_key_,
-                             kickout_data_op.clean_ts_);
+                             kickout_data_op.clean_ts_,
+                             kickout_data_op.range_id_,
+                             kickout_data_op.range_version_);
 }
 
 void TransactionExecution::PostProcess(KickoutDataOp &kickout_data_all_op)

@@ -1,5 +1,6 @@
 #include "local_cc_handler.h"
 
+#include <cstdint>
 #include <string>
 
 #include "cc_protocol.h"
@@ -1776,7 +1777,9 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                                             std::vector<uint16_t> *bucket_id,
                                             const TxKey *start_key,
                                             const TxKey *end_key,
-                                            uint64_t clean_ts)
+                                            uint64_t clean_ts,
+                                            int32_t range_id,
+                                            uint64_t range_version)
 {
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
@@ -1798,7 +1801,9 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                    start_key,
                    end_key,
                    bucket_id,
-                   clean_ts);
+                   clean_ts,
+                   range_id,
+                   range_version);
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);

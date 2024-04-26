@@ -6068,7 +6068,8 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                 }
 
 #else
-                // Each worker processes all buckets that is on a specific core.
+                // Each worker processes all buckets that are on a specific
+                // core.
                 int worker_tx_cnt =
                     Sharder::Instance().GetLocalCcShards()->Count();
                 // Put all buckets on the same core to the same task.
@@ -6725,15 +6726,6 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 #ifdef RANGE_PARTITION_ENABLED
         // Test drop table t1 concurrently. See monograph_test repo. table
         // name need to keep consistent
-        CODE_FAULT_INJECTOR("wait_table_t1_be_droped_continue", {
-            for (const auto &ranges : ranges_in_bucket_snapshot_)
-            {
-                if (ranges.first.String() == "./test/t1")
-                {
-                    return;
-                }
-            }
-        });
 
         data_sync_op_.op_func_ = [this, txm]
         {
@@ -6876,10 +6868,21 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             }
         }
 
+        // Test drop table t1 concurrently. See monograph_test repo. table
+        // name need to keep consistent
+        CODE_FAULT_INJECTOR("add_dropped_table_for_test", {
+            std::string t1_table_name = "./test/t1";
+            TableName t1_tbl(t1_table_name, TableType::Primary);
+            assert(ranges_in_bucket_snapshot_.find(t1_tbl) ==
+                   ranges_in_bucket_snapshot_.end());
+            auto tbl_it = ranges_in_bucket_snapshot_.try_emplace(t1_tbl);
+            tbl_it.first->second.insert(3793);
+
+            LOG(INFO) << "Add new dropped table for test";
+        });
+
         if (ranges_in_bucket_snapshot_.size())
         {
-            // Set commit ts as UINT64_MAX so that all cc entries in this range
-            // are deleted.
             kickout_data_op_.node_group_ = txm->TxCcNodeId();
             kickout_tbl_it_ = ranges_in_bucket_snapshot_.cbegin();
             kickout_range_it_ = kickout_tbl_it_->second.cbegin();
@@ -6903,16 +6906,68 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             kickout_table_ =
                 TableName{kickout_tbl_it_->first.StringView(), type};
             kickout_data_op_.table_name_ = &kickout_table_;
-            const TableRangeEntry *range =
-                Sharder::Instance().GetLocalCcShards()->GetTableRangeEntry(
-                    *kickout_data_op_.table_name_,
-                    kickout_data_op_.node_group_,
-                    *kickout_range_it_);
-            assert(range != nullptr);
-            kickout_data_op_.start_key_ = range->GetRangeInfo()->StartTxKey();
-            kickout_data_op_.end_key_ = range->GetRangeInfo()->EndTxKey();
             // All data in this range is clean target.
-            kickout_data_op_.clean_type_ = CleanType::CleanRangeData;
+            kickout_data_op_.clean_type_ =
+                CleanType::CleanRangeDataForMigration;
+
+            bool table_exist = false;
+
+            while (!table_exist)
+            {
+                auto range_keys =
+                    Sharder::Instance().GetLocalCcShards()->GetTableRangeKeys(
+                        *kickout_data_op_.table_name_,
+                        kickout_data_op_.node_group_,
+                        *kickout_range_it_);
+
+                table_exist = range_keys.has_value();
+
+                // Table has been dropped.
+                if (!table_exist)
+                {
+                    // Move to next table
+                    if (++kickout_tbl_it_ == ranges_in_bucket_snapshot_.cend())
+                    {
+                        LOG(INFO) << "Data migration: post write all"
+                                  << ", txn: " << txm->TxNumber();
+                        post_all_bucket_lock_op_.write_type_ =
+                            PostWriteType::PostCommit;
+                        ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+                        return;
+                    }
+
+                    TableType type;
+                    if (TableName::IsBase(kickout_tbl_it_->first.StringView()))
+                    {
+                        type = TableType::Primary;
+                    }
+                    else if (TableName::IsUniqueSecondary(
+                                 kickout_tbl_it_->first.StringView()))
+                    {
+                        type = TableType::UniqueSecondary;
+                    }
+                    else
+                    {
+                        type = TableType::Secondary;
+                    }
+                    kickout_table_ =
+                        TableName{kickout_tbl_it_->first.StringView(), type};
+                    kickout_data_op_.table_name_ = &kickout_table_;
+                    kickout_range_it_ = kickout_tbl_it_->second.cbegin();
+                }
+                else
+                {
+                    assert(range_keys.has_value());
+                    kickout_data_op_.range_id_ = *kickout_range_it_;
+                    kickout_data_op_.range_version_ =
+                        std::get<0>(range_keys.value());
+                    kickout_data_op_.start_key_ =
+                        std::move(std::get<1>(range_keys.value()));
+                    kickout_data_op_.end_key_ =
+                        std::move(std::get<2>(range_keys.value()));
+                }
+            }
+
             LOG(INFO) << "Data migration: kickout bucket data"
                       << ", txn: " << txm->TxNumber();
             ForwardToSubOperation(txm, &kickout_data_op_);
@@ -7005,14 +7060,65 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             kickout_data_op_.table_name_ = &kickout_table_;
             kickout_range_it_ = kickout_tbl_it_->second.cbegin();
         }
-        const TableRangeEntry *range =
-            Sharder::Instance().GetLocalCcShards()->GetTableRangeEntry(
-                *kickout_data_op_.table_name_,
-                kickout_data_op_.node_group_,
-                *kickout_range_it_);
-        assert(range != nullptr);
-        kickout_data_op_.start_key_ = range->GetRangeInfo()->StartTxKey();
-        kickout_data_op_.end_key_ = range->GetRangeInfo()->EndTxKey();
+
+        bool table_exist = false;
+
+        while (!table_exist)
+        {
+            auto range_keys =
+                Sharder::Instance().GetLocalCcShards()->GetTableRangeKeys(
+                    *kickout_data_op_.table_name_,
+                    kickout_data_op_.node_group_,
+                    *kickout_range_it_);
+
+            table_exist = range_keys.has_value();
+
+            // Table has been dropped. So we don't need to kickout data on this
+            // table
+            if (!table_exist)
+            {
+                // Move to next table
+                if (++kickout_tbl_it_ == ranges_in_bucket_snapshot_.cend())
+                {
+                    LOG(INFO) << "Data migration: post write all"
+                              << ", txn: " << txm->TxNumber();
+                    post_all_bucket_lock_op_.write_type_ =
+                        PostWriteType::PostCommit;
+                    ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+                    return;
+                }
+                TableType type;
+                if (TableName::IsBase(kickout_tbl_it_->first.StringView()))
+                {
+                    type = TableType::Primary;
+                }
+                else if (TableName::IsUniqueSecondary(
+                             kickout_tbl_it_->first.StringView()))
+                {
+                    type = TableType::UniqueSecondary;
+                }
+                else
+                {
+                    type = TableType::Secondary;
+                }
+                kickout_table_ =
+                    TableName{kickout_tbl_it_->first.StringView(), type};
+                kickout_data_op_.table_name_ = &kickout_table_;
+                kickout_range_it_ = kickout_tbl_it_->second.cbegin();
+            }
+            else
+            {
+                assert(range_keys.has_value());
+                kickout_data_op_.range_id_ = *kickout_range_it_;
+                kickout_data_op_.range_version_ =
+                    std::get<0>(range_keys.value());
+                kickout_data_op_.start_key_ =
+                    std::move(std::get<1>(range_keys.value()));
+                kickout_data_op_.end_key_ =
+                    std::move(std::get<2>(range_keys.value()));
+            }
+        }
+
 #else
         if (++kickout_tbl_it_ == table_snapshot_.cend())
         {

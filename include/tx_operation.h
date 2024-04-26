@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -752,6 +753,9 @@ struct KickoutDataOp : public TransactionOperation
     NodeGroupId node_group_;
     TxKey start_key_;
     TxKey end_key_;
+
+    int32_t range_id_{INT32_MAX};
+    uint64_t range_version_{UINT64_MAX};
     CleanType clean_type_{CleanType::CleanRangeData};
     // Clean ts for the kickout cc. Only valid if clean type is
     // CleanForAlterTable.

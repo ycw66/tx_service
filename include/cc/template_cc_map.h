@@ -6185,13 +6185,6 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
-
         // Iterate the cc map using the original page list.
         const TxKey *start_tx_key = req.StartKey();
         const KeyT *start_key =
@@ -8479,6 +8472,7 @@ protected:
                     is_clean_target && kickout_cc->CanBeCleaned(cce);
                 CleanType type = kickout_cc->GetCleanType();
                 if (type == CleanType::CleanRangeData ||
+                    type == CleanType::CleanRangeDataForMigration ||
                     type == CleanType::CleanBucketData)
                 {
                     // If the ccentry that expect to clean still has lock on it,
