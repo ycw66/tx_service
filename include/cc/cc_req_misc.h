@@ -622,6 +622,7 @@ public:
     FetchRecordCc() = delete;
     FetchRecordCc(const TableName *tbl_name,
                   const TableSchema *tbl_schema,
+                  TxKey tx_key,
                   LruEntry *cce,
                   CcMap *ccm,
                   CcShard &ccs,
@@ -635,6 +636,7 @@ public:
 
     const TableName *table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
+    TxKey tx_key_;
     LruEntry *cce_{nullptr};
     CcMap *ccm_;
     uint64_t rec_ts_{0};

@@ -1126,21 +1126,28 @@ void CcShard::RemoveFetchRequest(const TableName &table_name)
 
 void CcShard::FetchRecord(const TableName &table_name,
                           const TableSchema *tbl_schema,
-                          const TxKey *key,
+                          TxKey key,
                           LruEntry *cce,
                           CcMap *ccm,
                           NodeGroupId cc_ng_id,
                           int64_t cc_ng_term,
                           CcRequestBase *requester)
 {
-    auto tab_it = fetch_record_reqs_.try_emplace(
-        cce, &table_name, tbl_schema, cce, ccm, *this, cc_ng_id, cc_ng_term);
+    auto tab_it = fetch_record_reqs_.try_emplace(cce,
+                                                 &table_name,
+                                                 tbl_schema,
+                                                 std::move(key),
+                                                 cce,
+                                                 ccm,
+                                                 *this,
+                                                 cc_ng_id,
+                                                 cc_ng_term);
     FetchRecordCc *fetch_req = &(tab_it.first->second);
 
     fetch_req->AddRequester(requester);
     if (fetch_req->RequesterCount() == 1)
     {
-        local_shards_.store_hd_->FetchRecord(table_name, key, fetch_req);
+        local_shards_.store_hd_->FetchRecord(fetch_req);
     }
 }
 

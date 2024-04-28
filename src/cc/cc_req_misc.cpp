@@ -583,6 +583,7 @@ bool GetPostCkptSlice::Execute(CcShard &ccs)
 
 FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              const TableSchema *tbl_schema,
+                             TxKey tx_key,
                              LruEntry *cce,
                              CcMap *ccm,
                              CcShard &ccs,
@@ -591,6 +592,7 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(tbl_name),
       table_schema_(tbl_schema),
+      tx_key_(std::move(tx_key)),
       cce_(cce),
       ccm_(ccm)
 {

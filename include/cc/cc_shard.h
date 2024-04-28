@@ -691,7 +691,7 @@ public:
 
     void FetchRecord(const TableName &table_name,
                      const TableSchema *tbl_schema,
-                     const TxKey *key,
+                     TxKey key,
                      LruEntry *cce,
                      CcMap *ccm,
                      NodeGroupId cc_ng_id,

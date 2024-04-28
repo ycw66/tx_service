@@ -305,10 +305,9 @@ public:
                 }
                 else
                 {
-                    TxKey look_tx_key(look_key);
                     shard_->FetchRecord(table_name_,
                                         table_schema_,
-                                        &look_tx_key,
+                                        TxKey(look_key),
                                         cce,
                                         this,
                                         cc_ng_id_,
@@ -904,10 +903,9 @@ public:
                 // load payload asynchronously, pass in null as requester cc
                 // since we will buffer the cmd in replay cmd list so there's no
                 // need to put this req back in queue after record is fetched.
-                TxKey tx_key(&key);
                 shard_->FetchRecord(table_name_,
                                     table_schema_,
-                                    &tx_key,
+                                    TxKey(&key),
                                     cce,
                                     this,
                                     cc_ng_id_,
