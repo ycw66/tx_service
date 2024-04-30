@@ -176,8 +176,7 @@ public:
             int64_t allocated, committed;
             mi_thread_stats(&allocated, &committed);
 
-            return allocated >= (int64_t) memory_limit_ ||
-                   committed > (memory_limit_ * 1.1);
+            return allocated >= (int64_t) memory_limit_;
         }
         else
         {
@@ -202,8 +201,7 @@ public:
             {
                 mi_heap_collect(shard_heap_, true);
                 mi_thread_stats(&allocated, &committed);
-                bool succ = allocated < (int64_t) memory_limit_ &&
-                            committed < memory_limit_ * 1.1;
+                bool succ = allocated < (int64_t) memory_limit_;
                 if (!succ)
                 {
                     // If heap collect failed this time, that means there's a
