@@ -166,7 +166,7 @@ public:
     // return true;  // continue iteration
     //}
 
-    bool Full() const
+    bool Full()
     {
         if (shard_heap_ != nullptr)
         {
@@ -175,6 +175,11 @@ public:
             //
             int64_t allocated, committed;
             mi_thread_stats(&allocated, &committed);
+            if (allocated >= (int64_t) memory_limit_ ||
+                committed > (memory_limit_ * 1.1))
+            {
+                TryHeapCollect();
+            }
 
             return allocated >= (int64_t) memory_limit_;
         }
