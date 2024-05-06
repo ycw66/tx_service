@@ -3929,12 +3929,8 @@ void LocalCcShards::FlushDataWorker()
 
         if (pending_flush_work_.empty())
         {
-            LOG(INFO) << "FlushDataWorker pending_flush_work_ queue is empty.";
             continue;
         }
-
-        LOG(INFO) << "FlushDataWorker pending_flush_work_ queue size: "
-                  << pending_flush_work_.size() - 1;
 
         FlushData(flush_worker_lk);
     }
