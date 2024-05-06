@@ -2940,9 +2940,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     int64_t expected_ng_term = data_sync_task->node_group_term_;
     bool is_dirty = data_sync_task->is_dirty_;
 
-    LOG(INFO) << "DataSync start processing task: " << table_name.StringView()
-              << " on node group: " << ng_id;
-
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     uint64_t last_sync_ts = 0;
     bool need_process = false;
