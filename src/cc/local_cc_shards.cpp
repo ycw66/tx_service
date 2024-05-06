@@ -2865,9 +2865,6 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
     {
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
-            LOG(INFO) << "DataSync stop processing task: "
-                      << task->table_name_.StringView()
-                      << " on node group: " << task->node_group_id_;
             // Commit the data sync txm
             txservice::CommitTx(data_sync_txm);
             PopPendingTask(task->node_group_id_, task->table_name_, worker_idx);
