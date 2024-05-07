@@ -264,6 +264,17 @@ void ReplayService::UpdateLogGroupLeader(
               << " leader to node_id:" << node_id;
 }
 
+void ReplayService::NotifyCheckpointer(
+    ::google::protobuf::RpcController *controller,
+    const ::txlog::NotifyCheckpointerRequest *request,
+    ::txlog::NotifyCheckpointerResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    Sharder::Instance().NotifyCheckPointer();
+    LOG(INFO) << "Notified checkpointer.";
+}
+
 void ReplayService::ReplayLog(uint32_t cc_ng_id,
                               int64_t cc_ng_term,
                               int log_group,

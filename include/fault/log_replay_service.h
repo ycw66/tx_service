@@ -107,6 +107,11 @@ public:
                               ::txlog::LogLeaderUpdateResponse *response,
                               ::google::protobuf::Closure *done) override;
 
+    void NotifyCheckpointer(::google::protobuf::RpcController *controller,
+                            const ::txlog::NotifyCheckpointerRequest *request,
+                            ::txlog::NotifyCheckpointerResponse *response,
+                            ::google::protobuf::Closure *done) override;
+
     /**
      * @brief Send ReplayLogRequest to log groups. If log_group is negative,
      * send to all log groups, else just the specified log group.
