@@ -612,7 +612,7 @@ void CcStreamSender::ResendMessageToNode()
                            eagain_resend_long_message_cnt_ != 0;
                 });
 
-            assert(resend_thread_status_ = ResendThreadStatus::Running);
+            assert(resend_thread_status_ == ResendThreadStatus::Running);
         }
         else
         {
