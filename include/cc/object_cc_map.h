@@ -205,7 +205,7 @@ public:
             cce = it->second;
             ccp = it.GetPage();
 
-            if (cce == nullptr)
+            if (cce == nullptr || cce->HasReplayCommandList())
             {
                 // The apply request needs a new cc entry but the cc map has
                 // reached the maximal capacity. Blocks the request by putting
