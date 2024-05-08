@@ -233,8 +233,8 @@ public:
         }
         if (is_ext_proc)
         {
-            mi_heap_t *shard_heap =
-                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap();
+            CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
+            CcShardHeap *shard_heap = shard->GetShardHeap();
             if (shard_heap == nullptr)
             {
                 shard_status.store(TxShardStatus::Free,
@@ -242,9 +242,8 @@ public:
                 return;
             }
 
-            mi_override_thread(
-                local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
-            coordi_->ext_tx_proc_heap_ = mi_heap_set_default(shard_heap);
+            shard->OverrideHeapThread();
+            coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
         }
         one_round_cnt_.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -643,12 +642,11 @@ public:
             }
             else
             {
-                mi_heap_t *shard_heap =
-                    local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap();
+                CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
+                CcShardHeap *shard_heap = shard->GetShardHeap();
                 assert(shard_heap);
-                mi_override_thread(local_cc_shards_.GetCcShard(thd_id_)
-                                       ->GetShardHeapThreadId());
-                coordi_->ext_tx_proc_heap_ = mi_heap_set_default(shard_heap);
+                shard->OverrideHeapThread();
+                coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
             }
             return false;
         };
@@ -691,10 +689,10 @@ public:
             return false;
         }
         // Override default heap since we're accessing txm in cc shard.
-        mi_override_thread(
-            local_cc_shards_.GetCcShard(thd_id_)->GetShardHeapThreadId());
-        coordi_->ext_tx_proc_heap_ = mi_heap_set_default(
-            local_cc_shards_.GetCcShard(thd_id_)->GetShardHeap());
+        CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
+        CcShardHeap *shard_heap = shard->GetShardHeap();
+        shard->OverrideHeapThread();
+        coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
 
         TxmStatus txm_status = txm->Forward();
         if (txm_status == TxmStatus::Finished)

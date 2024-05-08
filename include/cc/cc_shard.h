@@ -4,6 +4,7 @@
 #include <butil/time.h>
 #include <mimalloc-2.1/mimalloc.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -92,6 +93,29 @@ struct TxLockInfo
     TableType table_type_;
 };
 
+class CcShardHeap
+{
+public:
+    explicit CcShardHeap(CcShard *cc_shard, size_t limit);
+    ~CcShardHeap();
+
+    // Set this heap_ as the default heap for the current thread.
+    // return the previous default heap.
+    mi_heap_t *SetAsDefaultHeap();
+
+    // Check if this heap is full
+    bool Full() const;
+
+    // Try to return memory not used back to system. This will decrease
+    // committed size if success.
+    bool TryHeapCollect();
+
+    CcShard *cc_shard_;
+    mi_heap_t *heap_;
+    size_t memory_limit_;
+    size_t last_failed_collect_ts_{0};
+};
+
 class CcShard
 {
 public:
@@ -121,151 +145,29 @@ public:
      */
     CcMap *GetCcm(const TableName &table_name, uint32_t node_group);
 
-    /**
-     * @count the memory utilization of each block size in the heap.
-     * comment out for now, since it's heavy
-     */
-    // typedef struct
-    //{
-    // size_t allocated;
-    // size_t comitted;
-    // size_t wasted;
-    //} MemUtilized_t;
-
-    // typedef struct
-    //{
-    // std::unordered_map<size_t, MemUtilized_t> mem_utilized;
-    // float ratio;
-    //} MemUtilized_by_block_t;
-
-    // static bool heap_count_wasted_blocks(const mi_heap_t *heap,
-    // const mi_heap_area_t *area,
-    // void *block,
-    // size_t block_size,
-    // void *arg)
-    //{
-    // assert(area->used < (1u << 31));
-
-    // MemUtilized_by_block_t *sum =
-    // static_cast<MemUtilized_by_block_t *>(arg);
-    // float ratio = sum->ratio;
-
-    // MemUtilized_t &block_mem_utilized =
-    // sum->mem_utilized.try_emplace(block_size, MemUtilized_t{0, 0, 0})
-    //.first->second;
-
-    //// mimalloc mistakenly exports used in blocks instead of bytes.
-    // size_t used = block_size * area->used;
-    // block_mem_utilized.allocated += used;
-    // block_mem_utilized.comitted += area->committed;
-
-    // if (used < area->committed * ratio)
-    //{
-    // block_mem_utilized.wasted += (area->committed - used);
-    //}
-    // return true;  // continue iteration
-    //}
-
-    bool Full()
-    {
-        if (shard_heap_ != nullptr)
-        {
-            // TODO{liunyl}: fix allocated might be < 0 bug and change it to
-            // size_t type.
-            //
-            int64_t allocated, committed;
-            mi_thread_stats(&allocated, &committed);
-            if (allocated >= (int64_t) memory_limit_ ||
-                committed > (memory_limit_ * 1.1))
-            {
-                TryHeapCollect();
-            }
-
-            return allocated >= (int64_t) memory_limit_;
-        }
-        else
-        {
-            return false;
-        }
-    }
-
-    // Try to return memory not used back to system. This will decrease
-    // committed size if success.
-    bool TryHeapCollect()
-    {
-        if (shard_heap_)
-        {
-            int64_t allocated, committed;
-            mi_thread_stats(&allocated, &committed);
-            // If there's actually memory freed by us but not returned to this
-            // system, process with collect. Otherwise do not even try since
-            // collect is pretty expensive (at least ms level).
-            if (Now() > last_failed_collect_ts_ + 1000000 &&
-                allocated < committed * 0.8 &&
-                allocated < (int64_t) memory_limit_)
-            {
-                mi_heap_collect(shard_heap_, true);
-                mi_thread_stats(&allocated, &committed);
-                bool succ = allocated < (int64_t) memory_limit_;
-                if (!succ)
-                {
-                    // If heap collect failed this time, that means there's a
-                    // lot of memory fragementation and the memory blocks cannot
-                    // be returned to system. In this case do not spam collect,
-                    // wait for some time before retrying.
-                    last_failed_collect_ts_ = Now();
-                }
-
-                // MemUtilized_by_block_t mem_utilized = {.mem_utilized = {},
-                //.ratio = 0.8};
-
-                // mi_heap_visit_blocks(shard_heap_,
-                // false [> visit all blocks<],
-                // heap_count_wasted_blocks,
-                //&mem_utilized);
-
-                // print out the memory utilization of each block size
-
-                // LOG(WARNING)
-                //<< "[memory] Ccsard " << core_id_ << " heap collect "
-                //<< (succ ? "succeed" : "failed");
-                // for (auto &it : mem_utilized.mem_utilized)
-                //{
-                // LOG(WARNING)
-                //<< "block size: " << it.first
-                //<< ", allocated: " << it.second.allocated
-                //<< ", committed: " << it.second.comitted
-                //<< ", wasted: " << it.second.wasted
-                //<< ", fragmentation(%): "
-                //<< it.second.wasted * 100.0 / it.second.comitted;
-                //}
-
-                return succ;
-            }
-            else
-            {
-                return false;
-            }
-        }
-        else
-        {
-            return false;
-        }
-    }
-
     void InitializeShardHeap()
     {
-        if (!shard_heap_)
+        if (shard_heap_thread_id_ == 0)
         {
             shard_heap_thread_id_ = mi_thread_id();
-            shard_heap_ = mi_heap_new();
-            mi_heap_set_default(shard_heap_);
+        }
+
+        if (!shard_heap_)
+        {
+            shard_heap_ =
+                std::make_unique<CcShardHeap>(this, memory_limit_ * 0.9);
         }
 
         if (!shard_data_sync_scan_heap_)
         {
-            shard_data_sync_scan_heap_ = mi_heap_new();
+            shard_data_sync_scan_heap_ =
+                std::make_unique<CcShardHeap>(this, memory_limit_ * 0.1);
         }
+    }
+
+    void OverrideHeapThread()
+    {
+        mi_override_thread(shard_heap_thread_id_);
     }
 
     mi_threadid_t GetShardHeapThreadId()
@@ -273,14 +175,14 @@ public:
         return shard_heap_thread_id_;
     }
 
-    mi_heap_t *GetShardHeap()
+    CcShardHeap *GetShardHeap()
     {
-        return shard_heap_;
+        return shard_heap_.get();
     }
 
-    mi_heap_t *GetShardDataSyncScanHeap()
+    CcShardHeap *GetShardDataSyncScanHeap()
     {
-        return shard_data_sync_scan_heap_;
+        return shard_data_sync_scan_heap_.get();
     }
 
     /**
@@ -840,11 +742,12 @@ private:
 
     size_t memory_usage_round_ = 1;
 
-    mi_heap_t *shard_heap_{nullptr};
+    // heap for cc_map memory allocation
+    std::unique_ptr<CcShardHeap> shard_heap_{nullptr};
+    // heap only for data sync scan
+    std::unique_ptr<CcShardHeap> shard_data_sync_scan_heap_{nullptr};
     mi_threadid_t shard_heap_thread_id_{0};
     size_t last_failed_collect_ts_{0};
-
-    mi_heap_t *shard_data_sync_scan_heap_{nullptr};
 
     // all the lock acquire/release on this ccshard. It used to reduce the cost
     // of allocation/dellocation of memory.

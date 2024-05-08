@@ -4584,6 +4584,57 @@ public:
         }
     }
 
+    /**
+     * @brief Wrapper function for export cce by adding the heap full checking.
+     * @return size_t: the number of records exported.
+     *         bool: is the heap full.
+     *
+     */
+    inline std::pair<size_t, bool> ExportForCkpt(
+        CcEntry<KeyT, ValueT> *cce,
+        const KeyT &key,
+        std::vector<FlushRecord> &ckpt_vec,
+        std::vector<FlushRecord> &akv_vec,
+        std::vector<size_t> &mv_base_vec,
+        uint64_t from_ts,
+        uint64_t to_ts,
+        uint64_t oldest_active_tx_ts,
+        TableType tbl_type,
+        bool mvcc_enabled,
+        size_t &ckpt_vec_size,
+        bool export_base_table_record_if_need,
+        bool skip_archived_key) const
+    {
+        // This override heap thread call is not necessary, since the thread is
+        // alreay be overrided before cc_request execution
+        // shard_->OverrideHeapThread();
+        CcShardHeap *scan_heap = shard_->GetShardDataSyncScanHeap();
+        mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+
+        // If the heap is full, we should stop exporting.
+        std::pair<size_t, bool> export_size = {0, true};
+        if (!scan_heap->Full())
+        {
+            export_size.first =
+                cce->ExportForCkpt(key,
+                                   ckpt_vec,
+                                   akv_vec,
+                                   mv_base_vec,
+                                   from_ts,
+                                   to_ts,
+                                   oldest_active_tx_ts,
+                                   tbl_type,
+                                   mvcc_enabled,
+                                   ckpt_vec_size,
+                                   export_base_table_record_if_need,
+                                   skip_archived_key);
+            export_size.second = false;
+        }
+
+        mi_heap_set_default(prev_heap);
+        return export_size;
+    }
+
 #ifdef RANGE_PARTITION_ENABLED
     bool Execute(DataSyncScanCc &req) override
     {
@@ -4831,6 +4882,9 @@ public:
         // DataSyncScanCc is running on TxProcessor thread. To avoid
         // blocking other transaction for a long time, we only process
         // CkptScanBatch number of pages in each round.
+        //
+        // indicate if export cce failed due to oom
+        bool is_scan_mem_full = false;
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_.at(shard_->core_id_) <
@@ -4947,10 +5001,8 @@ public:
 
                     if (need_export)
                     {
-                        mi_heap_t *scan_heap =
-                            this->shard_->GetShardDataSyncScanHeap();
-                        mi_heap_t *prev_heap = mi_heap_set_default(scan_heap);
-                        cce->ExportForCkpt(
+                        auto export_result = ExportForCkpt(
+                            cce,
                             *key,
                             req.DataSyncVec(shard_->core_id_),
                             req.ArchiveVec(shard_->core_id_),
@@ -4963,27 +5015,35 @@ public:
                             req.accumulated_scan_cnt_[shard_->core_id_],
                             false,
                             false);
-                        mi_heap_set_default(prev_heap);
+                        if (export_result.second)
+                        {
+                            is_scan_mem_full = true;
+                            break;
+                        }
                     }
                 }
             }
             else
             {
-                mi_heap_t *scan_heap = this->shard_->GetShardDataSyncScanHeap();
-                mi_heap_t *prev_heap = mi_heap_set_default(scan_heap);
-                cce->ExportForCkpt(*key,
-                                   req.DataSyncVec(shard_->core_id_),
-                                   req.ArchiveVec(shard_->core_id_),
-                                   req.MoveBaseIdxVec(shard_->core_id_),
-                                   req.previous_scan_ts_,
-                                   req.data_sync_ts_,
-                                   recycle_ts,
-                                   Type(),
-                                   shard_->EnableMvcc(),
-                                   req.accumulated_scan_cnt_[shard_->core_id_],
-                                   true,
-                                   req.skip_archived_key_);
-                mi_heap_set_default(prev_heap);
+                auto export_result =
+                    ExportForCkpt(cce,
+                                  *key,
+                                  req.DataSyncVec(shard_->core_id_),
+                                  req.ArchiveVec(shard_->core_id_),
+                                  req.MoveBaseIdxVec(shard_->core_id_),
+                                  req.previous_scan_ts_,
+                                  req.data_sync_ts_,
+                                  recycle_ts,
+                                  Type(),
+                                  shard_->EnableMvcc(),
+                                  req.accumulated_scan_cnt_[shard_->core_id_],
+                                  true,
+                                  req.skip_archived_key_);
+                if (export_result.second)
+                {
+                    is_scan_mem_full = true;
+                    break;
+                }
             }
 
             // Forward iterator
@@ -5121,11 +5181,26 @@ public:
         }
         else
         {
-            pause_key_and_is_drained.first = std::move(next_pause_key);
             // set the pause_pos_ to mark resume position and put the
             // DataSyncScanCc request into CcQueue again.
-            if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
-                req.scan_batch_size_)
+            pause_key_and_is_drained.first = std::move(next_pause_key);
+            // if scan memory is full, we need to wait until the memory is free
+            if (is_scan_mem_full)
+            {
+                if (req.accumulated_scan_cnt_[shard_->core_id_] == 0)
+                {
+                    shard_->EnqueueWaitList(&req);
+                }
+                else
+                {
+                    // scan memory is full and there are
+                    // data for flush
+                    req.SetFinish(shard_->core_id_);
+                    return false;
+                }
+            }
+            else if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
+                     req.scan_batch_size_)
             {
                 shard_->Enqueue(&req);
             }
@@ -5273,6 +5348,9 @@ public:
         // DataSyncScanCc is running on TxProcessor thread. To avoid
         // blocking other transaction for a long time, we only process
         // CkptScanBatch number of pages in each round.
+        //
+        // indicate if export cce failed due to oom
+        bool is_scan_mem_full = false;
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_ &&
@@ -5308,21 +5386,26 @@ public:
 
             if (req.filter_lambda_(key->Hash()) && cce->NeedCkpt())
             {
-                mi_heap_t *scan_heap = this->shard_->GetShardDataSyncScanHeap();
-                mi_heap_t *prev_heap = mi_heap_set_default(scan_heap);
-                cce->ExportForCkpt(*key,
-                                   req.DataSyncVec(vec_idx),
-                                   req.ArchiveVec(vec_idx),
-                                   req.MoveBaseIdxVec(vec_idx),
-                                   req.previous_scan_ts_,
-                                   req.data_sync_ts_,
-                                   recycle_ts,
-                                   Type(),
-                                   shard_->EnableMvcc(),
-                                   req.accumulated_scan_cnt_[vec_idx],
-                                   false,
-                                   false);
-                mi_heap_set_default(prev_heap);
+                auto export_result =
+                    ExportForCkpt(cce,
+                                  *key,
+                                  req.DataSyncVec(vec_idx),
+                                  req.ArchiveVec(vec_idx),
+                                  req.MoveBaseIdxVec(vec_idx),
+                                  req.previous_scan_ts_,
+                                  req.data_sync_ts_,
+                                  recycle_ts,
+                                  Type(),
+                                  shard_->EnableMvcc(),
+                                  req.accumulated_scan_cnt_[vec_idx],
+                                  false,
+                                  false);
+
+                if (export_result.second)
+                {
+                    is_scan_mem_full = true;
+                    break;
+                }
             }
 
             // Forward iterator
@@ -5342,6 +5425,7 @@ public:
         }
         else
         {
+            // set the pause_key_ to mark resume position
             assert(pause_pos_and_is_drained.second == false);
             pause_pos_and_is_drained.first = it->second;
             bool add_intent =
@@ -5355,10 +5439,24 @@ public:
                                         false,
                                         cc_ng_id_,
                                         table_name_.Type());
-            // set the pause_key_ to mark resume position and put the
-            // DataSyncScanCc request into CcQueue again.
-            if (req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_)
+            if (is_scan_mem_full)
             {
+                // wait for free memory if scan result is empty
+                if (req.accumulated_scan_cnt_[vec_idx] == 0)
+                {
+                    shard_->EnqueueWaitList(&req);
+                }
+                else
+                {
+                    // scan memory is full and there are
+                    // data for flush
+                    req.SetFinish(vec_idx);
+                    return false;
+                }
+            }
+            else if (req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_)
+            {
+                // Put DataSyncScanCc request into CcQueue again.
                 shard_->Enqueue(&req);
             }
             else
@@ -5947,18 +6045,19 @@ public:
                     std::vector<size_t> tmp_mv_base_idx_vec;
                     std::vector<TxKey> tmp_mv_base_key_vec;
 
-                    cce->ExportForCkpt(*cce_key,
-                                       tmp_ckpt_vec,
-                                       tmp_akv_vec,
-                                       tmp_mv_base_idx_vec,
-                                       0,
-                                       cce->CommitTs(),
-                                       1U,
-                                       Type(),
-                                       shard_->EnableMvcc(),
-                                       tmp_ckpt_vec_size,
-                                       false,
-                                       false);
+                    ExportForCkpt(cce,
+                                  *cce_key,
+                                  tmp_ckpt_vec,
+                                  tmp_akv_vec,
+                                  tmp_mv_base_idx_vec,
+                                  0,
+                                  cce->CommitTs(),
+                                  1U,
+                                  Type(),
+                                  shard_->EnableMvcc(),
+                                  tmp_ckpt_vec_size,
+                                  false,
+                                  false);
 
                     assert(tmp_ckpt_vec_size <= 1);
                     size_t offset = 0;
@@ -7231,13 +7330,15 @@ protected:
 
         // catalog and range ccmap bypass shard memory limit. since
         // checkpointer may emplace ccentry into ccmap.
-        if (shard_->Full())
+        CcShardHeap *shard_heap = shard_->GetShardHeap();
+        if (shard_heap != nullptr && shard_heap->Full())
         {
             // The shard has reached the maximal capacity. Tries to
             // clean cc entries that have been checkpointed but are not
             // being accessed by active tx's.
             shard_->Clean();
-            if (shard_->Full() && !table_name_.IsMeta() && !force_emplace)
+            if (shard_heap->Full() && !shard_heap->TryHeapCollect() &&
+                !table_name_.IsMeta() && !force_emplace)
             {
                 return false;
             }
@@ -7574,13 +7675,15 @@ protected:
 
         // catalog and range ccmap bypass shard memory limit. since
         // checkpointer may emplace ccentry into ccmap.
-        if (shard_->Full())
+        CcShardHeap *shard_heap = shard_->GetShardHeap();
+        if (shard_heap != nullptr && shard_heap->Full())
         {
             // The shard has reached the maximal capacity. Tries to
             // clean cc entries that have been checkpointed but are not
             // being accessed by active tx's.
             shard_->Clean();
-            if (shard_->Full() && !table_name_.IsMeta() && !force_emplace)
+            if (shard_heap->Full() && !shard_heap->TryHeapCollect() &&
+                !table_name_.IsMeta() && !force_emplace)
             {
                 if (read_only_req)
                 {

@@ -25,6 +25,7 @@
 namespace txservice
 {
 class CcMap;
+class CcShardHeap;
 class CcShard;
 
 template <typename KeyT, typename ValueT>
@@ -895,6 +896,7 @@ public:
      * archive data. This is used for scan during add index txm.
      * @return the number of exported version records.
      */
+
     size_t ExportForCkpt(const KeyT &key,
                          std::vector<FlushRecord> &ckpt_vec,
                          std::vector<FlushRecord> &akv_vec,

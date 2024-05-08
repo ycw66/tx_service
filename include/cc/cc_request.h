@@ -4653,6 +4653,8 @@ struct CollectMemStatsCc : public CcRequestBase
 
     bool Execute(CcShard &ccs) override
     {
+        // this cc will only execute in context of shard heap, so the stats
+        // collected are shard heap stats
         mi_thread_stats(&stats_->allocated_, &stats_->committed_);
         std::lock_guard<std::mutex> lk(mux_);
         finished_ = true;
