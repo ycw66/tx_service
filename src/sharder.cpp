@@ -305,11 +305,34 @@ int Sharder::Init(
             std::exit(0);
         }
 #endif
-        if (hm_channel_.Init(hm_ip_.c_str(), hm_port_, nullptr) != 0)
+        int max_retries = 50;
+        int retries = 0;
+        int delay_ms = 100;
+        bool connected = false;
+        while (retries < max_retries && !connected)
         {
-            LOG(FATAL) << "Fail to connect to host manager.";
+            if (0 == hm_channel_.Init(hm_ip_.c_str(), hm_port_, nullptr))
+            {
+                connected = true;
+            }
+            else
+            {
+                LOG(WARNING)
+                    << "Failed to connect to host manager. Retrying in "
+                    << delay_ms << " milliseconds... (Attempt " << (retries + 1)
+                    << " of " << max_retries << ")";
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(delay_ms));
+                retries++;
+            }
+        }
+        if (!connected)
+        {
+            LOG(FATAL) << "Failed to connect to host manager after "
+                       << max_retries << " attempts.";
             return -1;
         }
+
         remote::HostMangerService_Stub stub(&hm_channel_);
         brpc::Controller cntl;
         cntl.set_timeout_ms(1000);
