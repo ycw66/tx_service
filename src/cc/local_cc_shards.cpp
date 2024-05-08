@@ -3175,25 +3175,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
     while (!scan_data_drained)
     {
-        DLOG(INFO) << "scan start, table: " << table_name.String()
-                   << ", last_sync_ts: " << last_sync_ts
-                   << ", core_id: " << worker_idx;
-
-        uint64_t begin_ts =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count();
-
         EnqueueToCcShard(worker_idx, &scan_cc);
         scan_cc.Wait();
-        uint64_t end_ts =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count();
-        DLOG(INFO) << "scan end, table:" << table_name.String()
-                   << ", last_sync_ts: " << last_sync_ts
-                   << ", core_id: " << worker_idx
-                   << ", used time(ms):" << (end_ts - begin_ts);
 
         if (scan_cc.IsError())
         {
