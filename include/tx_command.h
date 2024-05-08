@@ -253,6 +253,10 @@ void TryCommitReplayCommands(std::unique_ptr<T> &payload,
         DLOG(INFO) << "destruct replay_cmd_list_ on object: ";
         replay_cmd_list = nullptr;
     }
+    else
+    {
+        DLOG(INFO) << "replay not finished: ";
+    }
 }
 
 /**
@@ -277,13 +281,6 @@ void EmplaceAndCommitReplayTxnCommand(
     {
         replay_cmd_list = std::make_unique<ReplayTxnCmdList>();
         replay_cmd_list->cur_version_ = cur_ver;
-    }
-
-    if (txn_cmd.obj_version_ < cur_ver)
-    {
-        // discard the obsolete txn command
-        DLOG(INFO) << "discard TxnCmd with a version smaller than cur_ver";
-        return;
     }
 
     replay_cmd_list->EmplaceTxnCmd(txn_cmd);

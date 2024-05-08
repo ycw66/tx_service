@@ -4272,15 +4272,16 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         {
             for (const auto &[cce_addr, cmd_set_entry] : cce_set)
             {
-                cc_handler_->PostWrite(tx_number,
-                                       tx_term_,
-                                       command_id,
-                                       commit_ts_,
-                                       cce_addr,
-                                       nullptr,
-                                       OperationType::CommitCommands,
-                                       0,
-                                       post_process.hd_result_);
+                cc_handler_->PostWrite(
+                    tx_number,
+                    tx_term_,
+                    command_id,
+                    cmd_set_entry.HasSuccessfulCommand() ? commit_ts_ : 0,
+                    cce_addr,
+                    nullptr,
+                    OperationType::CommitCommands,
+                    0,
+                    post_process.hd_result_);
                 ++idx;
             }
         }

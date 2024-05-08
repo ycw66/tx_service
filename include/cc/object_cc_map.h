@@ -771,6 +771,10 @@ public:
                     CommitCommandOnPayload(
                         cce->payload_, payload_status, *pending_cmd);
                 }
+                else
+                {
+                    assert(false);
+                }
             }
 
             cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
@@ -944,14 +948,23 @@ public:
                 cce->ReplayCommandList();
 
             // Emplace txn_cmd and try to commit all pending commands.
-            uint64_t commit_version = cce->CommitTs();
+            uint64_t current_version = cce->CommitTs();
             RecordStatus payload_status = cce->PayloadStatus();
-            EmplaceAndCommitReplayTxnCommand(cce->payload_,
-                                             replay_cmd_list,
-                                             txn_cmd,
-                                             commit_version,
-                                             payload_status);
-            cce->SetCommitTsPayloadStatus(commit_version, payload_status);
+
+            if (txn_cmd.obj_version_ >= current_version)
+            {
+                EmplaceAndCommitReplayTxnCommand(cce->payload_,
+                                                 replay_cmd_list,
+                                                 txn_cmd,
+                                                 current_version,
+                                                 payload_status);
+                cce->SetCommitTsPayloadStatus(current_version, payload_status);
+            }
+            else
+            {
+                DLOG(INFO)
+                    << "discard TxnCmd with a version smaller than cur_ver";
+            }
 
             if (replay_cmd_list == nullptr)
             {
@@ -1008,13 +1021,11 @@ public:
         {
             req.ResetCcm();
             MoveRequest(&req, next_core);
-
             return false;
         }
         else
         {
             req.SetFinish();
-
             return true;
         }
     }

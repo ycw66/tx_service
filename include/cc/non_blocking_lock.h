@@ -424,7 +424,15 @@ public:
 
     bool HasReplayCommandList()
     {
-        return replay_cmd_list_ != nullptr;
+        if (replay_cmd_list_ != nullptr)
+        {
+            assert(!replay_cmd_list_->txn_cmd_list_.empty());
+            return true;
+        }
+        else
+        {
+            return false;
+        }
     }
 
 #endif
