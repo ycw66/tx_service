@@ -137,6 +137,12 @@ public:
             log_group_id, cntl, &request, &response, &done);
     }
 
+    ::txlog::CheckClusterScaleStatusResponse::Status CheckClusterScaleStatus(
+        uint32_t log_group_id, const std::string &id) override
+    {
+        return log_agent_.CheckClusterScaleStatus(log_group_id, id);
+    }
+
 private:
     ::txlog::LogAgent log_agent_;
 };

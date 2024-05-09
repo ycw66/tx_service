@@ -503,6 +503,7 @@ private:
 
     std::unique_ptr<UpsertTableIndexOp> index_op_;
 
+    std::unique_ptr<ClusterScaleOp> cluster_scale_op_;
     std::unique_ptr<DataMigrationOp> migration_op_;
 
     std::unordered_map<

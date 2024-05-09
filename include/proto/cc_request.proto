@@ -58,11 +58,13 @@ message GetMinTxStartTsResponse {
 message ClusterAddNodeRequest {
     repeated string host_list = 1;
     repeated int32 port_list = 2;
+    string id = 3;
 }
 
 message ClusterRemoveNodeRequest
 {
     int32 remove_node_count = 1;
+    string id = 2;
 }
 
 enum ClusterScaleWriteLogResult
@@ -84,21 +86,30 @@ message ClusterRemoveNodeResponse{
 
 enum ClusterScaleStatus
 {
-    IN_PROGRESS = 0;
-    CLUSTER_CONFIG_UPDATE = 1;
-    FINISHED = 2;
-    INVALID_TXN = 3;
-    UNKNOWN = 4;
+    UNKNOWN = 0;
+    NOT_STARTED = 1;
+    IN_PROGRESS = 2;
+    FINISHED = 3;
 }
 
 message ClusterScaleStatusRequest
 {
-    uint64 tx_number = 1;
+    string id = 1;
 }
 
 message ClusterScaleStatusResponse
 {
     ClusterScaleStatus status = 1;
+}
+
+message CheckClusterConfigIsUpdatedRequest
+{
+    uint64 cluster_size = 1;
+}
+
+message CheckClusterConfigIsUpdatedResponse
+{
+    bool finished = 1;
 }
 
 message GetClusterNodesRequest{
@@ -178,6 +189,7 @@ service CcRpcService {
     rpc ClusterAddNode(ClusterAddNodeRequest) returns (ClusterAddNodeResponse);
     rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterRemoveNodeResponse);
     rpc CheckClusterScaleStatus(ClusterScaleStatusRequest) returns (ClusterScaleStatusResponse);
+    rpc CheckClusterConfigIsUpdated(CheckClusterConfigIsUpdatedRequest) returns (CheckClusterConfigIsUpdatedResponse);
     rpc GetClusterNodes(GetClusterNodesRequest) returns (GetClusterNodesResponse);
     rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
     rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);

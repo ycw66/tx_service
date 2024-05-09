@@ -300,7 +300,7 @@ public:
                 // started on any node group, we should replay from cluster
                 // config update log.
                 if (scale_op_msg.stage() ==
-                        ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate &&
+                        ::txlog::ClusterScaleStage::ConfigUpdate &&
                     !dm_started)
                 {
                     locked = true;
@@ -313,7 +313,7 @@ public:
                 // migration. If we see config update log, that means we've
                 // already acquired write lock on cluster config cc map.
                 if (scale_op_msg.stage() ==
-                    ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate)
+                    ::txlog::ClusterScaleStage::ConfigUpdate)
                 {
                     locked = true;
                 }
@@ -327,15 +327,14 @@ public:
                 ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNode)
             {
                 if (scale_op_msg.stage() ==
-                    ::txlog::ClusterScaleOpMessage_Stage_PrepareScale)
+                    ::txlog::ClusterScaleStage::PrepareScale)
                 {
                     // For add node if we only see prepare log, then recover to
                     // the state of before writing cluster config update log.
                     locked = true;
                 }
                 else if (scale_op_msg.stage() ==
-                             ::txlog::
-                                 ClusterScaleOpMessage_Stage_ConfigUpdate &&
+                             ::txlog::ClusterScaleStage::ConfigUpdate &&
                          !dm_started)
                 {
                     update_local_config = true;
@@ -345,7 +344,7 @@ public:
                      ::txlog::ClusterScaleOpMessage_ScaleOpType_RemoveNode)
             {
                 if (scale_op_msg.stage() ==
-                        ::txlog::ClusterScaleOpMessage_Stage_PrepareScale &&
+                        ::txlog::ClusterScaleStage::PrepareScale &&
                     dm_finished)
                 {
                     // For remove node, cluster config update is done after data
@@ -354,7 +353,7 @@ public:
                     locked = true;
                 }
                 else if (scale_op_msg.stage() ==
-                         ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate)
+                         ::txlog::ClusterScaleStage::ConfigUpdate)
                 {
                     update_local_config = true;
                 }

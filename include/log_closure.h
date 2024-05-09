@@ -56,6 +56,11 @@ public:
             hd_result_->SetError(CcErrorCode::DUPLICATE_MIGRATION_TX_ERR);
         }
         else if (response_.response_status() ==
+                 ::txlog::LogResponse_ResponseStatus_DuplicateClusterScaleTx)
+        {
+            hd_result_->SetError(CcErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERR);
+        }
+        else if (response_.response_status() ==
                  ::txlog::LogResponse_ResponseStatus_Success)
         {
             hd_result_->SetFinished();

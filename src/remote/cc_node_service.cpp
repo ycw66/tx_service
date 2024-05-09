@@ -199,7 +199,7 @@ void CcNodeService::ClusterAddNode(
     }
 
     ClusterScaleTxRequest scale_req(
-        ClusterScaleOpType::AddNode, &delta_nodes, nullptr);
+        request->id(), ClusterScaleOpType::AddNode, &delta_nodes, nullptr);
     txm->Execute(&scale_req);
     scale_req.Wait();
 
@@ -211,18 +211,25 @@ void CcNodeService::ClusterAddNode(
             response->set_result(
                 ::txservice::remote::ClusterScaleWriteLogResult::UNKOWN);
         }
+        else if (scale_req.ErrorCode() ==
+                 TxErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERROR)
+        {
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
+            response->set_tx_number(scale_req.Result());
+        }
         else
         {
-            LOG(ERROR) << "Failed to start cluster scale event, txn: "
-                       << txm->TxNumber();
             response->set_result(
                 ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
         }
+
         return;
     }
+
     response->set_result(
         ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
-    response->set_tx_number(txm->TxNumber());
+    response->set_tx_number(scale_req.Result());
 }
 
 void CcNodeService::ClusterRemoveNode(
@@ -272,8 +279,10 @@ void CcNodeService::ClusterRemoveNode(
     }
 
     uint16_t remove_node_count = request->remove_node_count();
-    ClusterScaleTxRequest scale_req(
-        ClusterScaleOpType::RemoveNode, nullptr, &remove_node_count);
+    ClusterScaleTxRequest scale_req(request->id(),
+                                    ClusterScaleOpType::RemoveNode,
+                                    nullptr,
+                                    &remove_node_count);
     txm->Execute(&scale_req);
     scale_req.Wait();
 
@@ -285,18 +294,24 @@ void CcNodeService::ClusterRemoveNode(
             response->set_result(
                 ::txservice::remote::ClusterScaleWriteLogResult::UNKOWN);
         }
+        else if (scale_req.ErrorCode() ==
+                 TxErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERROR)
+        {
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
+            response->set_tx_number(scale_req.Result());
+        }
         else
         {
-            LOG(ERROR) << "Failed to start cluster scale event, txn: "
-                       << txm->TxNumber();
             response->set_result(
                 ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
         }
         return;
     }
+
     response->set_result(
         ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
-    response->set_tx_number(txm->TxNumber());
+    response->set_tx_number(scale_req.Result());
 }
 
 /**
@@ -591,47 +606,68 @@ void CcNodeService::CheckClusterScaleStatus(
     ::txservice::remote::ClusterScaleStatusResponse *response,
     ::google::protobuf::Closure *done)
 {
-    brpc::ClosureGuard done_gaurd(done);
-    auto shards = Sharder::Instance().GetLocalCcShards();
-    TxNumber txn = request->tx_number();
-    NodeGroupId tx_ng_id = (txn >> 32L) >> 10;
-    int64_t term = Sharder::Instance().LeaderTerm(tx_ng_id);
-    if (term >= 0)
-    {
-        std::unique_lock<std::mutex> lk(shards->cluster_scale_op_mux_);
-        auto scale_op = shards->cluster_scale_op_.get();
-        auto status = scale_op->GetStatus(txn);
-        // Once term changes, status will be set to invalid. So make sure
-        // the term hasn't changed when we're reading the status.
-        if (term == Sharder::Instance().LeaderTerm(tx_ng_id))
-        {
-            response->set_status(status);
-        }
-        else
-        {
-            response->set_status(remote::ClusterScaleStatus::UNKNOWN);
-        }
-    }
-    else
-    {
-        // Redirect rpc to leader node of tx ng.
-        int32_t node_id = Sharder::Instance().LeaderNodeId(tx_ng_id);
-        auto channel = Sharder::Instance().GetCcNodeServiceChannel(node_id);
-        if (channel == nullptr)
-        {
-            response->set_status(remote::ClusterScaleStatus::UNKNOWN);
-            return;
-        }
+    brpc::ClosureGuard done_guard(done);
+    auto *txlog = Sharder::Instance().GetLogAgent();
+    auto status = txlog->CheckClusterScaleStatus(0, request->id());
 
-        remote::CcRpcService_Stub stub(channel.get());
-        brpc::Controller cntl;
-        stub.CheckClusterScaleStatus(&cntl, request, response, nullptr);
-        if (cntl.Failed())
-        {
-            response->set_status(remote::ClusterScaleStatus::UNKNOWN);
-            Sharder::Instance().UpdateCcNodeServiceChannel(node_id, channel);
-        }
+    switch (status)
+    {
+    case ::txlog::CheckClusterScaleStatusResponse::Status::
+        CheckClusterScaleStatusResponse_Status_UNKNOWN:
+    {
+        response->set_status(ClusterScaleStatus::UNKNOWN);
+        break;
     }
+    case ::txlog::CheckClusterScaleStatusResponse::Status::
+        CheckClusterScaleStatusResponse_Status_NO_STARTED:
+    {
+        response->set_status(ClusterScaleStatus::NOT_STARTED);
+        break;
+    }
+    case ::txlog::CheckClusterScaleStatusResponse::Status::
+        CheckClusterScaleStatusResponse_Status_STARTED:
+    {
+        response->set_status(ClusterScaleStatus::IN_PROGRESS);
+        break;
+    }
+    case ::txlog::CheckClusterScaleStatusResponse::Status::
+        CheckClusterScaleStatusResponse_Status_FINISHED:
+    {
+        response->set_status(ClusterScaleStatus::FINISHED);
+        break;
+    }
+    default:
+        assert(false && "Dead branch");
+    }
+}
+
+void CcNodeService::CheckClusterConfigIsUpdated(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::CheckClusterConfigIsUpdatedRequest *request,
+    ::txservice::remote::CheckClusterConfigIsUpdatedResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto *store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
+    uint64_t version;
+    int32_t seed;
+    bool uninitialized = false;
+    if (!store_hd->ReadClusterConfig(ng_configs, version, seed, uninitialized))
+    {
+        assert(uninitialized == false);
+        // cannot read cluster config. just set `finished` to false. cp will
+        // retry.
+        response->set_finished(false);
+
+        LOG(ERROR)
+            << "RPC#CheckClusterConfigIsUpdated cannot read cluster "
+               "config. Please check whether the storage engine is working";
+        return;
+    }
+
+    bool updated = ng_configs.size() == request->cluster_size();
+    response->set_finished(updated);
 }
 
 void CcNodeService::GetClusterNodes(

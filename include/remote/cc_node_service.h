@@ -70,7 +70,13 @@ public:
         ::google::protobuf::RpcController *controller,
         const ::txservice::remote::ClusterScaleStatusRequest *request,
         ::txservice::remote::ClusterScaleStatusResponse *response,
-        ::google::protobuf::Closure *done);
+        ::google::protobuf::Closure *done) override;
+
+    void CheckClusterConfigIsUpdated(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::CheckClusterConfigIsUpdatedRequest *request,
+        ::txservice::remote::CheckClusterConfigIsUpdatedResponse *response,
+        ::google::protobuf::Closure *done) override;
 
     void FlushDataAll(::google::protobuf::RpcController *controller,
                       const FlushDataAllRequest *request,

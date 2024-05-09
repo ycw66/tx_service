@@ -1036,7 +1036,7 @@ void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
                 .append(std::to_string(this->tx_term_));
         });
 
-    void_resp_ = &req.tx_result_;
+    uint64_resp_ = &req.tx_result_;
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     std::unordered_map<NodeGroupId, std::vector<NodeConfig>> new_ng_config;
     if (req.scale_type_ == ClusterScaleOpType::AddNode)
@@ -1052,20 +1052,24 @@ void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
     {
         assert(false);
     }
+
     std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
-    if (local_shards->cluster_scale_op_)
+    if (local_shards->cluster_scale_op_pool_.empty())
     {
-        local_shards->cluster_scale_op_->Reset(
-            req.scale_type_, std::move(new_ng_config), this);
+        cluster_scale_op_ = std::make_unique<ClusterScaleOp>(
+            req.id_, req.scale_type_, std::move(new_ng_config), this);
     }
     else
     {
-        local_shards->cluster_scale_op_ = std::make_unique<ClusterScaleOp>(
-            req.scale_type_, std::move(new_ng_config), this);
+        cluster_scale_op_ =
+            std::move(local_shards->cluster_scale_op_pool_.back());
+        local_shards->cluster_scale_op_pool_.pop_back();
+        cluster_scale_op_->Reset(
+            req.id_, req.scale_type_, std::move(new_ng_config), this);
     }
     lk.unlock();
 
-    PushOperation(local_shards->cluster_scale_op_.get());
+    PushOperation(cluster_scale_op_.get());
 }
 
 void TransactionExecution::ProcessTxRequest(
@@ -6280,34 +6284,38 @@ void TransactionExecution::RecoverClusterScale(
         new_ng_configs.try_emplace(ng_id, std::move(ng_nodes));
     }
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+
     std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
     ClusterScaleOpType op_type =
         scale_op_msg.event_type() ==
                 ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNode
             ? ClusterScaleOpType::AddNode
             : ClusterScaleOpType::RemoveNode;
-    if (local_shards->cluster_scale_op_)
+    if (local_shards->cluster_scale_op_pool_.empty())
     {
-        local_shards->cluster_scale_op_->Reset(
-            op_type, std::move(new_ng_configs), this);
+        cluster_scale_op_ = std::make_unique<ClusterScaleOp>(
+            scale_op_msg.id(), op_type, std::move(new_ng_configs), this);
     }
     else
     {
-        local_shards->cluster_scale_op_ = std::make_unique<ClusterScaleOp>(
-            op_type, std::move(new_ng_configs), this);
+        cluster_scale_op_ =
+            std::move(local_shards->cluster_scale_op_pool_.back());
+        local_shards->cluster_scale_op_pool_.pop_back();
+        cluster_scale_op_->Reset(
+            scale_op_msg.id(), op_type, std::move(new_ng_configs), this);
     }
-    ClusterScaleOp *op = local_shards->cluster_scale_op_.get();
+
+    ClusterScaleOp *op = cluster_scale_op_.get();
 
     if (op_type == ClusterScaleOpType::AddNode)
     {
-        if (scale_op_msg.stage() ==
-            ::txlog::ClusterScaleOpMessage_Stage_PrepareScale)
+        if (scale_op_msg.stage() == ::txlog::ClusterScaleStage::PrepareScale)
         {
             op->op_ = &op->prepare_log_op_;
             op->prepare_log_op_.hd_result_.SetFinished();
         }
         else if (scale_op_msg.stage() ==
-                 ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate)
+                 ::txlog::ClusterScaleStage::ConfigUpdate)
         {
             if (dm_finished)
             {
@@ -6316,9 +6324,6 @@ void TransactionExecution::RecoverClusterScale(
                     true;
                 op->check_migration_is_finished_op_.rpc_is_finished_.store(
                     true);
-                op->SetStatus(
-                    TxNumber(),
-                    remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE);
             }
             else if (dm_started)
             {
@@ -6328,9 +6333,6 @@ void TransactionExecution::RecoverClusterScale(
                     TxKey(VoidKey::NegativeInfinity()));
                 op->install_cluster_config_op_.Reset(1);
                 op->install_cluster_config_op_.hd_result_.SetFinished();
-                op->SetStatus(
-                    TxNumber(),
-                    remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE);
             }
             else
             {
@@ -6345,8 +6347,7 @@ void TransactionExecution::RecoverClusterScale(
     }
     else
     {
-        if (scale_op_msg.stage() ==
-            ::txlog::ClusterScaleOpMessage_Stage_PrepareScale)
+        if (scale_op_msg.stage() == ::txlog::ClusterScaleStage::PrepareScale)
         {
             if (dm_finished)
             {
@@ -6363,7 +6364,7 @@ void TransactionExecution::RecoverClusterScale(
             }
         }
         else if (scale_op_msg.stage() ==
-                 ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate)
+                 ::txlog::ClusterScaleStage::ConfigUpdate)
         {
             op->op_ = &op->update_cluster_config_log_op_;
             op->update_cluster_config_log_op_.hd_result_.SetFinished();

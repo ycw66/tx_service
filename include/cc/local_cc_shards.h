@@ -1122,7 +1122,8 @@ public:
     // Since there's only 1 cluster scale event at a time across the cluster,
     // we don't need a pool for it. We just need to make sure that the op is not
     // invalidated in case late remote cc response comes in.
-    std::unique_ptr<ClusterScaleOp> cluster_scale_op_{nullptr};
+
+    std::vector<std::unique_ptr<ClusterScaleOp>> cluster_scale_op_pool_;
     std::mutex cluster_scale_op_mux_;
 
     std::mutex data_migration_op_pool_mux_;

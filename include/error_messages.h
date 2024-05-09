@@ -56,6 +56,7 @@ enum struct TxErrorCode
 
     //-- NotifyStartMigrationOp
     DUPLICATE_MIGRATION_TX_ERROR,
+    DUPLICATE_CLUSTER_SCALE_TX_ERROR,
 
     DATA_NOT_ON_LOCAL_NODE,
 
@@ -162,6 +163,7 @@ enum struct CcErrorCode : uint8_t
     LOG_CLOSURE_RESULT_UNKNOWN_ERR,
     WRITE_LOG_FAILED,
     DUPLICATE_MIGRATION_TX_ERR,
+    DUPLICATE_CLUSTER_SCALE_TX_ERR,
 
     // Detect dead lock and abort the transaction
     DEAD_LOCK_ABORT,

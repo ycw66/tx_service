@@ -5295,6 +5295,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
 }
 
 ClusterScaleOp::ClusterScaleOp(
+    const std::string &id,
     ClusterScaleOpType event_type,
     std::unordered_map<NodeGroupId, std::vector<NodeConfig>> &&new_ng_config,
     TransactionExecution *txm)
@@ -5307,11 +5308,11 @@ ClusterScaleOp::ClusterScaleOp(
       notify_migration_op_(txm),
       check_migration_is_finished_op_(txm),
       clean_log_op_(txm),
+      id_(id),
       event_type_(event_type),
       new_ng_config_(std::move(new_ng_config)),
       mux_(),
-      txn_(txm->TxNumber()),
-      status_(remote::ClusterScaleStatus::IN_PROGRESS)
+      txn_(txm->TxNumber())
 {
     acquire_cluster_config_write_op_.table_name_ = &cluster_config_ccm_name;
     acquire_cluster_config_write_op_.keys_.emplace_back(
@@ -5329,19 +5330,17 @@ ClusterScaleOp::ClusterScaleOp(
 }
 
 void ClusterScaleOp::Reset(
+    const std::string &id,
     ClusterScaleOpType event_type,
     std::unordered_map<NodeGroupId, std::vector<NodeConfig>> &&new_ng_config,
     TransactionExecution *txm)
 {
     op_ = nullptr;
+    id_ = id;
     event_type_ = event_type;
     new_ng_config_ = std::move(new_ng_config);
 
-    {
-        std::lock_guard<std::mutex> lock(mux_);
-        txn_ = txm->TxNumber();
-        status_ = remote::ClusterScaleStatus::IN_PROGRESS;
-    }
+    txn_ = txm->TxNumber();
 
     prepare_log_op_.Reset();
     prepare_log_op_.ResetHandlerTxm(txm);
@@ -5409,7 +5408,8 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         {
             // Failed before write log succeed due to leader transfer.
             // Notify caller.
-            txm->void_resp_->FinishError(
+
+            txm->uint64_resp_->FinishError(
                 TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
             ForceToFinish(txm);
             return;
@@ -5445,15 +5445,28 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                     // whether prepare log succeeds and continue the rest if
                     // it does. Caller need to query new leader of node
                     // group to know if write log has succeeded.
-                    txm->void_resp_->FinishError(
+                    txm->uint64_resp_->FinishError(
                         TxErrorCode::LOG_SERVICE_UNREACHABLE);
                     ForceToFinish(txm);
                 }
             }
+            else if (prepare_log_op_.hd_result_.ErrorCode() ==
+                     CcErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERR)
+            {
+                txm->uint64_resp_->Value() =
+                    prepare_log_op_.log_closure_.LogResponse()
+                        .write_log_response()
+                        .newest_cluster_scale_txn();
+                txm->uint64_resp_->FinishError(
+                    TxErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERROR);
+                ForceToFinish(txm);
+            }
             else
             {
+                LOG(ERROR) << "Failed to write cluster scale prepare log, txn: "
+                           << txm->TxNumber();
                 // Notify called that the operation has failed
-                txm->void_resp_->FinishError(TxErrorCode::WRITE_LOG_FAIL);
+                txm->uint64_resp_->FinishError(TxErrorCode::WRITE_LOG_FAIL);
                 ForceToFinish(txm);
             }
             return;
@@ -5462,7 +5475,9 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         // Notify caller that log has been written.
         if (txm->TxStatus() != TxnStatus::Recovering)
         {
-            txm->void_resp_->Finish(void_);
+            txm->uint64_resp_->Finish(prepare_log_op_.log_closure_.LogResponse()
+                                          .write_log_response()
+                                          .newest_cluster_scale_txn());
         }
 
         if (event_type_ == ClusterScaleOpType::AddNode)
@@ -5592,12 +5607,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         {
             RetrySubOperation(txm, &flush_new_cluster_config_op_);
             return;
-        }
-
-        {
-            // set the status so that control plane can start new nodes.
-            std::lock_guard<std::mutex> lk(mux_);
-            status_ = remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE;
         }
 
         //  Broadcast the new cluster config to all nodes through post write
@@ -5742,26 +5751,24 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         ClearContainer();
         txm->state_stack_.pop_back();
 
+        {
+            auto shards = Sharder::Instance().GetLocalCcShards();
+            std::lock_guard<std::mutex> lk(shards->cluster_scale_op_mux_);
+            shards->cluster_scale_op_pool_.push_back(
+                std::move(txm->cluster_scale_op_));
+        }
+
         if (txm->CommitTs() != tx_op_failed_ts_)
         {
             LOG(INFO) << "Cluster scale transaction succeeded, txn: "
                       << txm->TxNumber() << ", tx_term: " << txm->TxTerm()
                       << ", tx_ng_id: " << txm->TxCcNodeId();
-            {
-                std::lock_guard<std::mutex> lk(mux_);
-                status_ = remote::ClusterScaleStatus::FINISHED;
-            }
             // There is no one waiting on the tx request anymore, commit
             // and recycle the tx machine on our own.
             txm->Commit();
         }
         else
         {
-            {
-                // The cluster scale event failed.
-                std::lock_guard<std::mutex> lk(mux_);
-                status_ = remote::ClusterScaleStatus::INVALID_TXN;
-            }
             txm->Abort();
         }
     }
@@ -5811,8 +5818,10 @@ void ClusterScaleOp::FillPrepareLogRequest(TransactionExecution *txm)
     default:
         assert(false);
     }
-    cluster_scale_msg->set_stage(
-        ::txlog::ClusterScaleOpMessage_Stage_PrepareScale);
+
+    cluster_scale_msg->set_id(id_);
+
+    cluster_scale_msg->set_stage(::txlog::ClusterScaleStage::PrepareScale);
     for (auto conf_pair : new_ng_config_)
     {
         ::txlog::NodegroupConfig *ng_conf =
@@ -5882,8 +5891,7 @@ void ClusterScaleOp::FillUpdateClusterConfigLogRequest(
     log_rec->set_commit_timestamp(txm->commit_ts_);
     ::txlog::ClusterScaleOpMessage *cluster_scale_msg =
         log_rec->mutable_log_content()->mutable_cluster_scale_log();
-    cluster_scale_msg->set_stage(
-        ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate);
+    cluster_scale_msg->set_stage(::txlog::ClusterScaleStage::ConfigUpdate);
     log_rec->mutable_node_terms()->clear();
 }
 
@@ -5899,8 +5907,7 @@ void ClusterScaleOp::FillCleanLogRequest(TransactionExecution *txm)
     log_rec->set_commit_timestamp(txm->commit_ts_);
     ::txlog::ClusterScaleOpMessage *cluster_scale_msg =
         log_rec->mutable_log_content()->mutable_cluster_scale_log();
-    cluster_scale_msg->set_stage(::txlog::ClusterScaleOpMessage_Stage::
-                                     ClusterScaleOpMessage_Stage_CleanScale);
+    cluster_scale_msg->set_stage(::txlog::ClusterScaleStage::CleanScale);
     log_rec->mutable_node_terms()->clear();
 }
 

@@ -46,6 +46,9 @@ public:
         ::txlog::CheckMigrationIsFinishedResponse &response,
         google::protobuf::Closure &done) = 0;
 
+    virtual ::txlog::CheckClusterScaleStatusResponse::Status
+    CheckClusterScaleStatus(uint32_t log_group_id, const std::string &id) = 0;
+
     // Invoked by a cc node group's leader to update its checkpoint
     // timestamp in all log groups (so that the transaction logs before
     // checkpoint timestamp can be ignored and truncated).

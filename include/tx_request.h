@@ -1008,18 +1008,22 @@ struct PublishTxRequest : public TemplateTxRequest<PublishTxRequest, Void>
 };
 
 struct ClusterScaleTxRequest
-    : public TemplateTxRequest<ClusterScaleTxRequest, Void>
+    : public TemplateTxRequest<ClusterScaleTxRequest, uint64_t>
 {
     ClusterScaleTxRequest(
+        const std::string &id,
         ClusterScaleOpType scale_type,
         std::vector<std::pair<std::string, uint16_t>> *new_nodes,
         uint16_t *remove_node_count)
         : TemplateTxRequest(nullptr, nullptr),
+          id_(id),
           scale_type_(scale_type),
           new_nodes_(new_nodes),
           remove_node_count_(remove_node_count)
     {
     }
+
+    std::string id_;
 
     ClusterScaleOpType scale_type_;
     // Used when adding node, to indicate added node info

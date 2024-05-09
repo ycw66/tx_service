@@ -1140,36 +1140,17 @@ struct ClusterScaleOp : public CompositeTransactionOperation
 {
 public:
     ClusterScaleOp() = delete;
-    ClusterScaleOp(ClusterScaleOpType event_type,
+    ClusterScaleOp(const std::string &id,
+                   ClusterScaleOpType event_type,
                    std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
                        &&new_ng_config,
                    TransactionExecution *txm);
-    void Reset(ClusterScaleOpType event_type,
+    void Reset(const std::string &id,
+               ClusterScaleOpType event_type,
                std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
                    &&new_ng_config,
                TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
-
-    remote::ClusterScaleStatus GetStatus(TxNumber txn)
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        if (txn != txn_)
-        {
-            return remote::ClusterScaleStatus::INVALID_TXN;
-        }
-        return status_;
-    }
-
-    bool SetStatus(TxNumber txn, remote::ClusterScaleStatus status)
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        if (txn != txn_)
-        {
-            return false;
-        }
-        status_ = status;
-        return true;
-    }
 
     std::unordered_map<NodeGroupId, BucketMigrateInfo> bucket_migrate_infos_;
     /**
@@ -1259,13 +1240,13 @@ private:
 
     ClusterConfigRecord cluster_config_rec_;
 
+    std::string id_;
     ClusterScaleOpType event_type_;
     std::unordered_map<NodeGroupId, std::vector<NodeConfig>> new_ng_config_;
     // mutex protects txn_ and finished_, which are used when control plane
     // queries for current cluster scale event status for a specific txn.
     std::mutex mux_;
     TxNumber txn_;
-    remote::ClusterScaleStatus status_;
 };
 
 struct DataMigrationOp : public CompositeTransactionOperation
