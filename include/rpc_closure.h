@@ -135,13 +135,13 @@ public:
             {
                 self_guard.release();
                 // Retry if timeout.
+                DLOG(INFO) << "Retry UploadBatch service of ng#"
+                           << request_.node_group_id();
                 cntl_.Reset();
                 response_.Clear();
                 remote::CcRpcService_Stub stub(channel_.get());
                 cntl_.set_timeout_ms(upload_timeout_);
                 stub.UploadBatch(&cntl_, &request_, &response_, this);
-                DLOG(INFO) << "Retry UploadBatch service of ng#"
-                           << request_.node_group_id();
                 return;
             }
             Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
