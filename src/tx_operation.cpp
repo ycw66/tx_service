@@ -3682,57 +3682,23 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                 mv_base_vecs.emplace_back();
                             }
 
-                            size_t data_sync_scan_cnt = 2;
-                            bool need_copy_range = store_hd->NeedCopyRange();
-                            if (!need_copy_range)
+                            auto scan_func =
+                                [table_name,
+                                 txn,
+                                 &data_sync_vecs,
+                                 &archive_vecs,
+                                 &mv_base_vecs,
+                                 node_group,
+                                 tx_term,
+                                 previous_scan_ts,
+                                 ckpt_ts,
+                                 &local_cc_shards,
+                                 &hd_res](
+                                    const TxKey *req_start_key,
+                                    const TxKey *req_end_key,
+                                    bool export_base_table_rec_if_need) mutable
                             {
-                                data_sync_scan_cnt = 1;
-                            }
-
-                            for (size_t scan_idx = 0;
-                                 scan_idx < data_sync_scan_cnt;
-                                 ++scan_idx)
-                            {
-                                const TxKey *req_start_key = nullptr;
-                                const TxKey *req_end_key = nullptr;
-                                bool export_base_table_rec_if_need = false;
-
-                                if (scan_idx == 0)
-                                {
-                                    if (!need_copy_range)
-                                    {
-                                        // Like bigtable, We don't need copy
-                                        // data to new range. we just scan new
-                                        // data which need to be flushed.
-                                        req_start_key = &start_key;
-                                        req_end_key = &end_key;
-                                    }
-                                    else
-                                    {
-                                        req_start_key = &start_key;
-                                        req_end_key =
-                                            &new_range_info_.begin()->first;
-                                    }
-
-                                    // We don't need to pin slices that
-                                    // falls into the old range after range
-                                    // split.
-                                    export_base_table_rec_if_need = false;
-                                }
-                                else
-                                {
-                                    assert(need_copy_range);
-
-                                    // We only need to pin slices that falls
-                                    // into new range after range split.
-                                    req_start_key =
-                                        &new_range_info_.begin()->first;
-                                    req_end_key = &end_key;
-                                    export_base_table_rec_if_need = true;
-                                }
-
                                 bool scan_data_drained = false;
-
                                 // Note: `DataSyncScanCc` needs to ensure that
                                 // no two ckpt_rec with the same TxKey can be
                                 // generated. Our subsequent algorithms are
@@ -3849,6 +3815,26 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                         scan_cc.Reset();
                                     }
                                 }
+                            };
+
+                            bool need_copy_range = store_hd->NeedCopyRange();
+                            if (!need_copy_range)
+                            {
+                                // Bigtable, We don't need copy
+                                // data to new range. we just scan new
+                                // data which need to be flushed.
+
+                                scan_func(&start_key, &end_key, false);
+                            }
+                            else
+                            {
+                                scan_func(&start_key,
+                                          &new_range_info_.begin()->first,
+                                          false);
+
+                                scan_func(&new_range_info_.begin()->first,
+                                          &end_key,
+                                          true);
                             }
 
                             // Sort output vectors in key sorting order.
