@@ -3740,23 +3740,51 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             {
                 if (!is_delay_update_ckpt_ts)
                 {
-                    for (size_t i = 0; i < data_sync_vec->size(); i++)
+#ifdef RANGE_PARTITION_ENABLED
+                    std::vector<std::vector<FlushRecord *>>
+                        flush_records_per_core(Count());
+                    // In the real world, the amount of data on all cores is not
+                    // exactly equal. So we reserve 512 extra spaces to avoid
+                    // resize
+                    size_t reserve_size =
+                        (data_sync_vec->size() / Count()) + 512;
+                    for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
+                    {
+                        flush_records_per_core[core_idx].reserve(reserve_size);
+                    }
+
+                    for (size_t i = 0; i < data_sync_vec->size(); ++i)
                     {
                         auto &ref = data_sync_vec->at(i);
-
                         assert(ref.cce_ != nullptr);
-                        // todo: remove cce_
-                        ref.cce_->SetCkptTs(ref.commit_ts_);
-#ifdef RANGE_PARTITION_ENABLED
-                        ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
-#endif
+
+                        size_t key_core_idx =
+                            (ref.Key().Hash() & 0x3FF) % Count();
+                        flush_records_per_core[key_core_idx].emplace_back(&ref);
                     }
+
+                    UpdateCceCkptTsCc update_cce_ckpt_cc(
+                        std::move(flush_records_per_core),
+                        Count(),
+                        node_group,
+                        leader_term);
+                    for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
+                    {
+                        EnqueueToCcShard(core_idx, &update_cce_ckpt_cc);
+                    }
+                    update_cce_ckpt_cc.Wait();
+#else
+                    UpdateCceCkptTsCc update_cce_ckpt_cc(
+                        data_sync_vec, 1, node_group, leader_term);
+                    EnqueueToCcShard(scan_task_worker_idx, &update_cce_ckpt_cc);
+                    update_cce_ckpt_cc.Wait();
+#endif
                 }
 
                 if (data_sync_vec->size())
                 {
 #ifdef RANGE_PARTITION_ENABLED
-                    // Update the slice size in data store.
+                    // Update the slice size in data store.l
                     while (!UpdateStoreSlice(table_name,
                                              schema->Version(),
                                              node_group,
@@ -3800,10 +3828,20 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             }
         } /* End of PutAll */
 
+#ifdef RANGE_PARTITION_ENABLED
         // reset scan start page info for the flushed ccshard
+        ResetCleanStartPageCc reset_cc(Count());
+        for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
+        {
+            EnqueueToCcShard(core_idx, &reset_cc);
+        }
+
+        reset_cc.Wait();
+#else
         ResetCleanStartPageCc reset_cc(1);
         EnqueueToCcShard(scan_task_worker_idx, &reset_cc);
         reset_cc.Wait();
+#endif
     } /* End of leader */
 
     if (data_sync_task != nullptr)

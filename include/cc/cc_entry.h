@@ -311,9 +311,9 @@ public:
 
     /**
      * @brief Updates the checkpoint timestamp such that it is no smaller than
-     * the input timestamp. The method is called by the checkpoint thread, after
-     * flushing the key-value pair to the data store, or the tx processor thread
-     * which back fills the cache-miss record into memory.
+     * the input timestamp. The method is called by the tx processor thread,
+     * after flushing the key-value pair to the data store, or the tx processor
+     * thread which back fills the cache-miss record into memory.
      *
      * @param ts
      */
@@ -338,14 +338,11 @@ private:
      * represents whether or not the latest version has been flushed.
      *
      */
-    std::atomic<uint64_t> commit_ts_and_status_{0};
+    uint64_t commit_ts_and_status_{0};
 
 #ifndef ON_KEY_OBJECT
-    // The commit timestamp of the latest checkpoint version record. Unlike
-    // other fields that are read/modified via a single thread, this field is
-    // updated by a separate checkpointing thread, after it flushes changes to
-    // the data store.
-    std::atomic<uint64_t> ckpt_ts_{0};
+    // The commit timestamp of the latest checkpoint version record.
+    uint64_t ckpt_ts_{0};
 
 public:
     /**

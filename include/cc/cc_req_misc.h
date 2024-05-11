@@ -708,4 +708,81 @@ private:
     std::condition_variable cv_;
 };
 
+struct UpdateCceCkptTsCc : public CcRequestBase
+{
+public:
+#ifdef RANGE_PARTITION_ENABLED
+    static constexpr size_t SCAN_BATCH_SIZE = 1024;
+#else
+    static constexpr size_t SCAN_BATCH_SIZE = 64;
+#endif
+
+#ifdef RANGE_PARTITION_ENABLED
+    UpdateCceCkptTsCc(
+        std::vector<std::vector<FlushRecord *>> &&flush_records_per_core,
+        size_t core_cnt,
+        NodeGroupId node_group,
+        int64_t term)
+        : flush_records_per_core_(std::move(flush_records_per_core)),
+          unfinished_core_cnt_(core_cnt),
+          node_group_(node_group),
+          term_(term)
+    {
+        idxs_.resize(core_cnt, 0);
+    }
+#else
+    UpdateCceCkptTsCc(std::vector<FlushRecord> *flush_records,
+                      size_t core_cnt,
+                      NodeGroupId node_group,
+                      int64_t term)
+        : flush_records_(flush_records),
+          idx_(0),
+          unfinished_core_cnt_(core_cnt),
+          node_group_(node_group),
+          term_(term)
+    {
+    }
+
+#endif
+
+    bool Execute(CcShard &ccs) override;
+
+    void SetFinished(CcErrorCode error_code)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        unfinished_core_cnt_--;
+        if (unfinished_core_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
+    }
+
+    bool IsError()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return error_code_ != CcErrorCode::NO_ERROR;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [&]() { return unfinished_core_cnt_ == 0; });
+    }
+
+private:
+#ifdef RANGE_PARTITION_ENABLED
+    std::vector<std::vector<FlushRecord *>> flush_records_per_core_;
+    std::vector<size_t> idxs_;
+#else
+    std::vector<FlushRecord> *flush_records_{nullptr};
+    size_t idx_{0};
+#endif
+    size_t unfinished_core_cnt_;
+    NodeGroupId node_group_;
+    int64_t term_;
+    std::mutex mux_;
+    std::condition_variable cv_;
+    CcErrorCode error_code_{CcErrorCode::NO_ERROR};
+};
+
 }  // namespace txservice

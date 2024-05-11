@@ -650,4 +650,46 @@ void FetchRecordCc::SetFinish(int err)
     ccs_.Enqueue(this);
 }
 
+bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
+{
+    if (!Sharder::Instance().CheckLeaderTerm(node_group_, term_))
+    {
+        SetFinished(CcErrorCode::NG_TERM_CHANGED);
+        return false;
+    }
+
+#ifdef RANGE_PARTITION_ENABLED
+    auto &records = flush_records_per_core_[ccs.core_id_];
+    auto &index = idxs_[ccs.core_id_];
+#else
+    auto &records = *flush_records_;
+    auto &index = idx_;
+#endif
+
+    size_t last_index = std::min(index + SCAN_BATCH_SIZE, records.size());
+
+    for (; index < last_index; ++index)
+    {
+#ifdef RANGE_PARTITION_ENABLED
+        FlushRecord *ref = records[index];
+        ref->cce_->SetCkptTs(ref->commit_ts_);
+        ref->cce_->data_store_size_.fetch_add(ref->delta_size_);
+#else
+        FlushRecord *ref = &records[index];
+        ref->cce_->SetCkptTs(ref->commit_ts_);
+#endif
+    }
+
+    if (index == records.size())
+    {
+        SetFinished(CcErrorCode::NO_ERROR);
+    }
+    else
+    {
+        ccs.Enqueue(ccs.core_id_, this);
+    }
+
+    return false;
+}
+
 }  // namespace txservice

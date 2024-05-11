@@ -255,8 +255,12 @@ public:
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
-        res_->SetError(err_code);
-        Free();
+        bool finished = res_->SetError(err_code);
+
+        if (finished)
+        {
+            Free();
+        }
     }
 
 protected:
@@ -4276,16 +4280,15 @@ private:
 struct ResetCleanStartPageCc : public CcRequestBase
 {
 public:
-    explicit ResetCleanStartPageCc(size_t core_cnt)
-        : mux_(), cv_(), pending_shard_(core_cnt)
+    explicit ResetCleanStartPageCc(size_t core_cnt) : pending_shard_(core_cnt)
     {
     }
     bool Execute(CcShard &ccs) override
     {
         ccs.ResetCleanStart();
+        ccs.DequeueWaitList();
         {
-            std::unique_lock<std::mutex> lk(mux_);
-            ccs.DequeueWaitList();
+            std::lock_guard<std::mutex> lk(mux_);
             if (--pending_shard_ == 0)
             {
                 cv_.notify_one();
@@ -4295,6 +4298,7 @@ public:
                 ccs.SetWaitingCkpt(false);
             }
         }
+
         return false;
     }
 

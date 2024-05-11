@@ -4120,10 +4120,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         }
 
         update_ckpt_ts_op_.op_func_ =
-            [data_sync_vec = &data_sync_vec_,
+            [this,
+             data_sync_vec = &data_sync_vec_,
              &hd_result = update_ckpt_ts_op_.hd_result_,
              &new_range_info = new_range_info_,
              node_group = txm->TxCcNodeId(),
+             tx_term = txm->TxTerm(),
              &old_start_key = old_start_key_,
              &old_end_key = old_end_key_,
              &worker = update_ckpt_ts_op_.worker_thread_]
@@ -4135,10 +4137,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 #endif
 
             worker = std::thread(
-                [data_sync_vec,
+                [this,
+                 data_sync_vec,
                  &hd_result,
                  &new_range_info,
                  node_group,
+                 tx_term,
                  &old_start_key,
                  &old_end_key]
                 {
@@ -4148,6 +4152,21 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                     LocalCcShards *local_shards =
                         Sharder::Instance().GetLocalCcShards();
+
+                    std::vector<std::vector<FlushRecord *>>
+                        flush_records_per_core(local_shards->Count());
+
+                    // In the real world, the amount of data on all cores is not
+                    // exactly equal. So we reserve 512 extra spaces to avoid
+                    // resize
+                    size_t reserve_size =
+                        (data_sync_vec->size() / local_shards->Count()) + 512;
+
+                    for (size_t core_idx = 0; core_idx < local_shards->Count();
+                         ++core_idx)
+                    {
+                        flush_records_per_core[core_idx].reserve(reserve_size);
+                    }
 
                     assert(!new_range_info.empty());
                     assert(old_start_key.KeyPtr() != nullptr);
@@ -4173,8 +4192,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                             continue;
                         }
 
-                        ref.cce_->SetCkptTs(ref.commit_ts_);
-                        ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
+                        // Uses the lower 10 bits to shard the key across CPU
+                        // cores in a node.
+                        size_t key_core_idx =
+                            (ref.Key().Hash() & 0x3FF) % local_shards->Count();
+                        flush_records_per_core[key_core_idx].emplace_back(&ref);
                     }
 
                     for (auto iter = new_range_info.cbegin();
@@ -4225,9 +4247,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     continue;
                                 }
 
-                                ref.cce_->SetCkptTs(ref.commit_ts_);
-                                ref.cce_->data_store_size_.fetch_add(
-                                    ref.delta_size_);
+                                // Uses the lower 10 bits to shard the key
+                                // across CPU
+                                // cores in a node.
+                                size_t key_core_idx =
+                                    (ref.Key().Hash() & 0x3FF) %
+                                    local_shards->Count();
+                                flush_records_per_core[key_core_idx]
+                                    .emplace_back(&ref);
                             }
                         }
                         else
@@ -4236,12 +4263,38 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         }
                     }
 
+                    UpdateCceCkptTsCc update_cce_ckpt_ts(
+                        std::move(flush_records_per_core),
+                        local_shards->Count(),
+                        node_group,
+                        tx_term);
+
+                    for (size_t idx = 0; idx < local_shards->Count(); ++idx)
+                    {
+                        local_shards->EnqueueCcRequest(idx,
+                                                       &update_cce_ckpt_ts);
+                    }
+
+                    update_cce_ckpt_ts.Wait();
+
+                    if (update_cce_ckpt_ts.IsError())
+                    {
+                        // Clear and release ckpt vec to reduce memory usage.
+                        ClearDataSyncVec();
+                        hd_result.SetError(CcErrorCode::NG_TERM_CHANGED);
+                        return;
+                    }
+
                     ResetCleanStartPageCc reset_cc(local_shards->Count());
                     for (size_t idx = 0; idx < local_shards->Count(); ++idx)
                     {
                         local_shards->EnqueueCcRequest(idx, &reset_cc);
                     }
+
                     reset_cc.Wait();
+
+                    // Clear and release ckpt vec to reduce memory usage.
+                    ClearDataSyncVec();
 
                     hd_result.SetFinished();
                 });
@@ -4255,11 +4308,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &update_ckpt_ts_op_)
     {
-        // Should never fail.
-        assert(!update_ckpt_ts_op_.hd_result_.IsError());
-
-        // Clear and release ckpt vec to reduce memory usage.
-        ClearDataSyncVec();
+        if (update_ckpt_ts_op_.hd_result_.IsError())
+        {
+            // ng term changed.
+            assert(update_ckpt_ts_op_.hd_result_.ErrorCode() ==
+                   CcErrorCode::NG_TERM_CHANGED);
+            ForceToFinish(txm);
+            return;
+        }
 
         FillCommitLogRequest(txm);
         LOG(INFO) << "Split Flush transaction write commit log, range id "
