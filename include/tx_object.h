@@ -17,5 +17,11 @@ public:
     {
         return *this;
     }
+
+    virtual TxRecord::Uptr DeserializeObject(const char *buf,
+                                             size_t &offset) const
+    {
+        return nullptr;
+    }
 };
 }  // namespace txservice

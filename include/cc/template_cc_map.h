@@ -5362,7 +5362,8 @@ public:
             CcPage<KeyT, ValueT> *ccp = it.GetPage();
             assert(ccp);
 
-            if (ccp->last_dirty_commit_ts_ <= from_ts)
+            if (ccp->last_dirty_commit_ts_ <= from_ts &&
+                !req.include_persisted_data_)
             {
                 // Skip the pages that have no updates since last data
                 // sync.
@@ -5384,7 +5385,8 @@ public:
             }
 #endif
 
-            if (req.filter_lambda_(key->Hash()) && cce->NeedCkpt())
+            if (req.filter_lambda_(key->Hash()) &&
+                (cce->NeedCkpt() || req.include_persisted_data_))
             {
                 auto export_result =
                     ExportForCkpt(cce,
@@ -5398,7 +5400,7 @@ public:
                                   Type(),
                                   shard_->EnableMvcc(),
                                   req.accumulated_scan_cnt_[vec_idx],
-                                  false,
+                                  req.include_persisted_data_,
                                   false);
 
                 if (export_result.second)
@@ -6388,12 +6390,14 @@ public:
         const ValueT *commit_val = nullptr;
         ValueT decoded_rec;
         uint64_t commit_ts = 0;
+        RecordStatus rec_status = RecordStatus::Normal;
 
         auto &resume_pos = req.GetPausedPosition(shard_->core_id_);
         size_t key_pos = std::get<0>(resume_pos);
         size_t key_offset = std::get<1>(resume_pos);
         size_t rec_offset = std::get<2>(resume_pos);
         size_t ts_offset = std::get<3>(resume_pos);
+        size_t status_offset = std::get<4>(resume_pos);
         size_t hash = 0;
 #ifdef RANGE_PARTITION_ENABLED
         RangeSliceId current_slice_id;
@@ -6407,6 +6411,7 @@ public:
         size_t next_key_offset = 0;
         size_t next_rec_offset = 0;
         size_t next_ts_offset = 0;
+        size_t next_status_offset = 0;
         for (size_t cnt = 0;
              key_pos < batch_size && cnt < UploadBatchCc::UploadBatchBatchSize;
              ++key_pos, ++cnt)
@@ -6414,6 +6419,7 @@ public:
             next_key_offset = key_offset;
             next_rec_offset = rec_offset;
             next_ts_offset = ts_offset;
+            next_status_offset = status_offset;
             if (entry_vec != nullptr)
             {
                 key_idx = start_key_index + key_pos;
@@ -6421,20 +6427,41 @@ public:
                 key = entry_vec->at(key_idx)->key_.GetKey<KeyT>();
                 // get record
                 req_rec = entry_vec->at(key_idx)->rec_.get();
-                commit_val = static_cast<const ValueT *>(req_rec);
+                if (req_rec)
+                {
+                    rec_status = RecordStatus::Normal;
+                    commit_val = static_cast<const ValueT *>(req_rec);
+                }
+                else
+                {
+                    rec_status = RecordStatus::Deleted;
+                    commit_val = nullptr;
+                }
                 // get commit ts
                 commit_ts = entry_vec->at(key_idx)->commit_ts_;
             }
             else
             {
-                auto [key_str, rec_str, ts_str] = *entry_tuples;
+                auto [key_str, rec_str, ts_str, status_str] = *entry_tuples;
                 // deserialize key
                 decoded_key.Deserialize(
                     key_str.data(), next_key_offset, KeySchema());
                 key = &decoded_key;
-                // deserialize rec
-                decoded_rec.Deserialize(rec_str.data(), next_rec_offset);
-                commit_val = &decoded_rec;
+                // deserialize record status
+                rec_status = *(
+                    (RecordStatus *) (status_str.data() + next_status_offset));
+                next_status_offset += sizeof(RecordStatus);
+                if (rec_status == RecordStatus::Normal)
+                {
+                    // deserialize rec
+                    decoded_rec.Deserialize(rec_str.data(), next_rec_offset);
+                    commit_val = &decoded_rec;
+                }
+                else
+                {
+                    commit_val = nullptr;
+                }
+
                 // deserialize commit ts
                 commit_ts = *((uint64_t *) (ts_str.data() + next_ts_offset));
                 next_ts_offset += sizeof(uint64_t);
@@ -6449,6 +6476,7 @@ public:
                 key_offset = next_key_offset;
                 rec_offset = next_rec_offset;
                 ts_offset = next_ts_offset;
+                status_offset = next_status_offset;
                 continue;
             }
 
@@ -6492,7 +6520,8 @@ public:
                                           key_pos,
                                           key_offset,
                                           rec_offset,
-                                          ts_offset);
+                                          ts_offset,
+                                          status_offset);
                     return false;
                 }
                 else if (pin_status == RangeSliceOpStatus::Retry)
@@ -6502,7 +6531,8 @@ public:
                                           key_pos,
                                           key_offset,
                                           rec_offset,
-                                          ts_offset);
+                                          ts_offset,
+                                          status_offset);
                     shard_->Enqueue(shard_->LocalCoreId(), &req);
                     return false;
                 }
@@ -6519,7 +6549,8 @@ public:
                                               key_pos,
                                               key_offset,
                                               rec_offset,
-                                              ts_offset);
+                                              ts_offset,
+                                              status_offset);
                         shard_->Enqueue(shard_->LocalCoreId(), &req);
                         return false;
                     }
@@ -6577,6 +6608,7 @@ public:
                 key_offset = next_key_offset;
                 rec_offset = next_rec_offset;
                 ts_offset = next_ts_offset;
+                status_offset = next_status_offset;
                 continue;
             }
 #endif
@@ -6594,6 +6626,7 @@ public:
                 key_offset = next_key_offset;
                 rec_offset = next_rec_offset;
                 ts_offset = next_ts_offset;
+                status_offset = next_status_offset;
                 continue;
             }
 
@@ -6604,24 +6637,33 @@ public:
             // null.
             if (Type() != TableType::Secondary || cce->payload_ == nullptr)
             {
-#ifndef ON_KEY_OBJECT
-                if (cce->payload_.use_count() == 1)
+                if (rec_status == RecordStatus::Normal)
                 {
-                    *(cce->payload_) = *commit_val;
+#ifndef ON_KEY_OBJECT
+                    if (cce->payload_.use_count() == 1)
+                    {
+                        *(cce->payload_) = *commit_val;
+                    }
+                    else
+                    {
+                        cce->payload_ = std::make_shared<ValueT>(*commit_val);
+                    }
+#else
+                    cce->payload_ = std::make_unique<ValueT>(*commit_val);
+                    assert(false);
+#endif
                 }
                 else
                 {
-                    cce->payload_ = std::make_shared<ValueT>(*commit_val);
+                    cce->payload_ = nullptr;
                 }
-#else
-                assert(false);
-                cce->payload_ = std::make_unique<ValueT>(*commit_val);
-#endif
             }
 
-            // Currently, this request is only used during add index
-            // which will upload non-deleted records.
-            cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Normal);
+            cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
+            if (req.IsPersisted())
+            {
+                cce->SetCkptTs(commit_ts);
+            }
             DLOG_IF(INFO, TRACE_OCC_ERR)
                 << "UploadBatchCc, txn:" << req.Txn() << " ,cce: " << cce
                 << " ,commit_ts: " << commit_ts;
@@ -6645,14 +6687,19 @@ public:
             key_offset = next_key_offset;
             rec_offset = next_rec_offset;
             ts_offset = next_ts_offset;
+            status_offset = next_status_offset;
         }
         if (key_pos < batch_size)
         {
             // Only insert UploadBatchBatchSize keys in one round.  set the
             // paused key to mark resume position and put the request into cc
             // queue again.
-            req.SetPausedPosition(
-                shard_->core_id_, key_pos, key_offset, rec_offset, ts_offset);
+            req.SetPausedPosition(shard_->core_id_,
+                                  key_pos,
+                                  key_offset,
+                                  rec_offset,
+                                  ts_offset,
+                                  status_offset);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
             return false;
         }
@@ -8622,6 +8669,16 @@ protected:
                     }
                 }
                 else
+#else
+                // TODO(liunyl): enable this after cluster scale bool is
+                // added if (shard_->DuringClusterScale())
+                {
+                    // This will disallow this bucket from accepting upload
+                    // batch request during cluster scale since we might already
+                    // have kicked out newer version from cc map.
+                    shard_->local_shards_.KickoutKeyInBucket(
+                        table_name_, cc_ng_id_, *key_it);
+                }
 #endif
                 {
                     // free entries will be erased

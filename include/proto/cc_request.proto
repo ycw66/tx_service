@@ -152,6 +152,8 @@ message UploadBatchRequest
     bytes keys = 6;
     bytes records = 7;
     bytes commit_ts = 8;
+    bytes rec_status = 9;
+    bool is_persisted = 10;
 }
 
 message UploadBatchResponse

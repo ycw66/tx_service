@@ -337,7 +337,7 @@ struct BlobTxRecord : public TxRecord
     }
     void Serialize(std::string &str) const override
     {
-        assert(false);
+        str.append(value_);
     }
     void Deserialize(const char *buf, size_t &offset) override
     {

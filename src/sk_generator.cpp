@@ -1,7 +1,9 @@
 #include "sk_generator.h"
 
+#include <mutex>
 #include <optional>
 
+#include "error_messages.h"
 #include "tx_request.h"
 #include "tx_service.h"
 
@@ -334,7 +336,8 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                             scan_batch_size_,
                             tx_number,
                             start_key,
-                            end_key
+                            end_key,
+                            false
 #ifdef RANGE_PARTITION_ENABLED
                             ,
                             true,
@@ -817,7 +820,8 @@ void SkGenerator::UploadBatch(
                        req_mux,
                        req_cv,
                        finished_req_cnt,
-                       res_code);
+                       res_code,
+                       false);
 
         for (size_t core = 0; core < core_cnt; ++core)
         {
@@ -844,13 +848,47 @@ void SkGenerator::UploadBatch(
 
         remote::CcRpcService_Stub stub(channel.get());
 
-        UploadBatchClosure *upload_batch_closure =
-            new UploadBatchClosure(req_mux,
-                                   req_cv,
-                                   finished_req_cnt,
-                                   res_code,
-                                   ng_term,
-                                   SkGenerator::UploadTimeout);
+        UploadBatchClosure *upload_batch_closure = new UploadBatchClosure(
+            [dest_ng_id,
+             &res_code,
+             &finished_req_cnt,
+             &req_mux,
+             &req_cv,
+             &ng_term](CcErrorCode res, int32_t dest_term)
+            {
+                std::unique_lock<bthread::Mutex> req_lk(req_mux);
+                res_code = res;
+                if (res == CcErrorCode::NO_ERROR)
+                {
+                    if (ng_term == INIT_TERM)
+                    {
+                        ng_term = dest_term;
+                    }
+                    else if (ng_term != dest_term)
+                    {
+                        LOG(ERROR)
+                            << "Response for upload batch failed of ng#"
+                            << dest_ng_id
+                            << " of term mismatch, with expected term: "
+                            << ng_term << " and actual term: " << dest_term;
+                        res_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+                    }
+                    else
+                    {
+                        assert(ng_term == dest_term);
+                    }
+                }
+                else
+                {
+                    LOG(ERROR)
+                        << "Response for upload batch failed of ng#"
+                        << dest_ng_id << ", with error: " << (uint32_t) res;
+                }
+                ++finished_req_cnt;
+                req_cv.notify_one();
+            },
+            SkGenerator::UploadTimeout,
+            true);
         upload_batch_closure->SetChannel(dest_node_id, channel);
 
         remote::UploadBatchRequest *req_ptr =
@@ -861,6 +899,7 @@ void SkGenerator::UploadBatch(
         req_ptr->set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
         size_t end_key_idx = start_key_idx + batch_size;
+        req_ptr->set_is_persisted(false);
         req_ptr->set_batch_size(batch_size);
         // keys
         req_ptr->clear_keys();
@@ -873,6 +912,11 @@ void SkGenerator::UploadBatch(
         std::string *commit_ts_str = req_ptr->mutable_commit_ts();
         size_t len_sizeof = sizeof(uint64_t);
         const char *val_ptr = nullptr;
+        // rec_status
+        req_ptr->clear_rec_status();
+        std::string *rec_status_str = req_ptr->mutable_rec_status();
+        // All generated sk should be normal status.
+        const RecordStatus rec_status = RecordStatus::Normal;
         for (size_t idx = start_key_idx; idx < end_key_idx; ++idx)
         {
             write_entry_vec.at(idx)->key_.Serialize(*keys_str);
@@ -880,6 +924,8 @@ void SkGenerator::UploadBatch(
             val_ptr = reinterpret_cast<const char *>(
                 &(write_entry_vec.at(idx)->commit_ts_));
             commit_ts_str->append(val_ptr, len_sizeof);
+            rec_status_str->append(reinterpret_cast<const char *>(&rec_status),
+                                   sizeof(rec_status));
         }
 
         brpc::Controller *cntl_ptr = upload_batch_closure->Controller();

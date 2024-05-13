@@ -950,8 +950,11 @@ void CcNodeService::UploadBatch(
     size_t core_cnt = cc_shards->Count();
     uint32_t batch_size = request->batch_size();
 
-    auto write_entry_tuple = UploadBatchCc::WriteEntryTuple(
-        request->keys(), request->records(), request->commit_ts());
+    auto write_entry_tuple =
+        UploadBatchCc::WriteEntryTuple(request->keys(),
+                                       request->records(),
+                                       request->commit_ts(),
+                                       request->rec_status());
 
     size_t finished_req = 0;
     bthread::Mutex req_mux;
@@ -967,7 +970,8 @@ void CcNodeService::UploadBatch(
               write_entry_tuple,
               req_mux,
               req_cv,
-              finished_req);
+              finished_req,
+              request->is_persisted());
     for (size_t core = 0; core < core_cnt; ++core)
     {
         cc_shards->EnqueueToCcShard(core, &req);

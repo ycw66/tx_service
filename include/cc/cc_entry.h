@@ -62,7 +62,8 @@ public:
     int32_t delta_size_{INT32_MAX};
 
     uint64_t commit_ts_{1U};
-    // todo: remove cce_
+    // cce is nullptr means this cce is already persisted on kv and we
+    // do not need to flush / update its ckpt ts.
     LruEntry *cce_{nullptr};
 
     FlushRecord() : tx_key_(), key_type_(FlushKeyType::TxKey)
@@ -886,9 +887,9 @@ public:
      * @param from_ts - Previous round scan timestamp. We scan the data between
      * (from_ts, to_ts].
      * @param to_ts - Current round checkpoint timestamp.
-     * @param export_base_table_record_if_need - True means If no larger version
-     * exists, we need to export the data which commit_ts same as ckpt_ts. Note:
-     * This flag only used for RangePartition.
+     * @param export_persisted_record_to_ckpt_vec - True means If no larger
+     * version exists, we need to export the data which commit_ts same as
+     * ckpt_ts to ckpt_vec. Note: This flag only used for RangePartition.
      * @param skip_archived_key - True means there is no need to scan the
      * archive data. This is used for scan during add index txm.
      * @return the number of exported version records.
@@ -904,7 +905,7 @@ public:
                          TableType tbl_type,
                          bool mvcc_enabled,
                          size_t &ckpt_vec_size,
-                         bool export_base_table_record_if_need,
+                         bool export_persisted_record_to_ckpt_vec,
                          bool skip_archived_key) const
     {
         // `export_store_record_if_need` - True means If no larger version needs
@@ -924,7 +925,7 @@ public:
             // But we need to migrate data to new range on
             // base table. So we need to export this record
             // for range migration
-            if (export_base_table_record_if_need && commit_ts != 1 &&
+            if ((export_persisted_record_to_ckpt_vec) && commit_ts != 1 &&
                 commit_ts <= to_ts &&
                 (rec_status == RecordStatus::Normal ||
                  rec_status == RecordStatus::Deleted))
@@ -937,7 +938,7 @@ public:
                 // This record was load from storage. We can't safely
                 // point to CcEntry of CcMap. Because the entry will be
                 // kickout after UnpinSlice. the pointer will become
-                // invalidation.
+                // invalid.
                 ref.cce_ = nullptr;
 
                 ref.payload_status_ = rec_status;
@@ -1071,7 +1072,7 @@ public:
                             // flushed(exported_count == 0).
                             // We need to export this record in order to
                             // flush it to new range.
-                            if (export_base_table_record_if_need)
+                            if (export_persisted_record_to_ckpt_vec)
                             {
                                 FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
                                 ref.CloneOrCopyKey(TxKey(&key));
@@ -1180,7 +1181,8 @@ public:
                 }
                 else if (from_ts >= it->commit_ts_)
                 {
-                    if (export_base_table_record_if_need && exported_count == 0)
+                    if (export_persisted_record_to_ckpt_vec &&
+                        exported_count == 0)
                     {
                         // 1.it->commit_ts > ckpt_ts: The previous scan has
                         // exported this record(it->commits_ts <= from_ts).

@@ -971,8 +971,33 @@ public:
         }
         else
         {
-            return entry->KickoutKeyInSlice(key);
+            bool res = entry->KickoutKeyInSlice(key);
+            if (res
+                // TODO(liunyl): enable this after cluser scale is added.
+                // && DuringClusterScale()
+            )
+            {
+                // If the key is kicked out, we need to update the bucket info
+                // to disallow upload batch cc since we might already
+                // have kicked out newer version from cc map.
+                BucketInfo *bucket_info = GetBucketInfoInternal(
+                    Sharder::Instance().MapRangeIdToBucketId(
+                        entry->GetRangeInfo()->PartitionId()),
+                    ng_id);
+                bucket_info->SetAcceptsUploadBatch(false);
+            }
+            return res;
         }
+    }
+
+    template <typename KeyT>
+    void KickoutKeyInBucket(const TableName &tbl_name,
+                            const NodeGroupId ng_id,
+                            const KeyT &key)
+    {
+        uint16_t bucket_id = key.Hash() & 0x3FFF;
+        std::shared_lock<std::shared_mutex> s_lk(meta_data_mux_);
+        GetBucketInfoInternal(bucket_id, ng_id)->SetAcceptsUploadBatch(false);
     }
 
     /**
@@ -1052,6 +1077,7 @@ public:
             &ranges_in_bucket_snapshot,
 #else
         const std::vector<uint16_t> &bucket_id,
+        bool send_cache_for_migration,
 #endif
         uint32_t ng_id,
         int64_t ng_term,
@@ -1189,7 +1215,8 @@ private:
         bool can_be_skipped = false,
         std::shared_ptr<DataSyncStatus> status = nullptr,
         CcHandlerResult<Void> *hres = nullptr,
-        std::function<bool(size_t)> filter_lambda = [](size_t)
+        bool send_cache_for_migration = false,
+        std::function<bool(size_t)> filter_lambda = [](size_t) -> bool
         { return true; });
 #endif
 

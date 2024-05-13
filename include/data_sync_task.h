@@ -1,6 +1,9 @@
 #pragma once
 
+#include <bthread/condition_variable.h>
+
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 
 #include "cc_handler_result.h"
@@ -47,7 +50,8 @@ public:
                  CcHandlerResult<Void> *hres
 #ifndef RANGE_PARTITION_ENABLED
                  ,
-                 std::function<bool(size_t)> filter_lambda
+                 std::function<bool(size_t)> filter_lambda,
+                 bool forward_cache
 #endif
                  )
         : table_name_(table_name),
@@ -58,7 +62,8 @@ public:
           data_sync_ts_(data_sync_ts)
 #ifndef RANGE_PARTITION_ENABLED
           ,
-          filter_lambda_(filter_lambda)
+          filter_lambda_(filter_lambda),
+          forward_cache_(forward_cache)
 #endif
           ,
           status_(status),
@@ -187,12 +192,13 @@ public:
         FLUSH_ERROR,
     };
 
-    std::mutex flight_task_mux_;
-    std::condition_variable flight_task_cv_;
+    bthread::Mutex flight_task_mux_;
+    bthread::ConditionVariable flight_task_cv_;
     // Flush data task cnt + 1 (Data sync task)
     int64_t flight_task_cnt_{0};
     CkptErrorCode ckpt_err_{CkptErrorCode::NO_ERROR};
     std::function<bool(size_t)> filter_lambda_;
+    bool forward_cache_{false};
 #endif
 
     std::shared_ptr<DataSyncStatus> status_{nullptr};

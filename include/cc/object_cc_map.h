@@ -802,6 +802,211 @@ public:
         return true;
     }
 
+    bool Execute(UploadBatchCc &req) override
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"term\":")
+                    .append(std::to_string(req.CcNgTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
+        // TODO(liunyl)
+        // if (!shard_->DuringClusterScale())
+        // {
+        //     req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        // }
+        auto entry_tuples = req.EntryTuple();
+        size_t batch_size = req.BatchSize();
+
+        const KeyT *key = nullptr;
+        KeyT decoded_key;
+        ValueT decoded_rec;
+        TxRecord::Uptr object_uptr = nullptr;
+        uint64_t commit_ts = 0;
+        RecordStatus rec_status = RecordStatus::Normal;
+
+        // object cc map only handles remote upload batch cc reqeust for now.
+        auto &resume_pos = req.GetPausedPosition(shard_->core_id_);
+        size_t key_pos = std::get<0>(resume_pos);
+        size_t key_offset = std::get<1>(resume_pos);
+        size_t rec_offset = std::get<2>(resume_pos);
+        size_t ts_offset = std::get<3>(resume_pos);
+        size_t status_offset = std::get<4>(resume_pos);
+        size_t hash = 0;
+
+        CcEntry<KeyT, ValueT> *cce;
+        CcPage<KeyT, ValueT> *cc_page = nullptr;
+        size_t next_key_offset = 0;
+        size_t next_rec_offset = 0;
+        size_t next_ts_offset = 0;
+        size_t next_status_offset = 0;
+        for (size_t cnt = 0;
+             key_pos < batch_size && cnt < UploadBatchCc::UploadBatchBatchSize;
+             ++key_pos, ++cnt)
+        {
+            next_key_offset = key_offset;
+            next_rec_offset = rec_offset;
+            next_ts_offset = ts_offset;
+            next_status_offset = status_offset;
+
+            auto [key_str, rec_str, ts_str, status_str] = *entry_tuples;
+            // deserialize key
+            decoded_key.Deserialize(
+                key_str.data(), next_key_offset, KeySchema());
+            key = &decoded_key;
+            // deserialize record status
+            rec_status =
+                *((RecordStatus *) (status_str.data() + next_status_offset));
+            next_status_offset += sizeof(RecordStatus);
+            if (rec_status == RecordStatus::Normal)
+            {
+                // deserialize rec
+                object_uptr = decoded_rec.DeserializeObject(rec_str.data(),
+                                                            next_rec_offset);
+            }
+
+            // deserialize commit ts
+            commit_ts = *((uint64_t *) (ts_str.data() + next_ts_offset));
+            next_ts_offset += sizeof(uint64_t);
+
+            hash = key->Hash();
+            uint16_t bucket_id = hash & 0x3FFF;
+            size_t core_idx = (hash & 0x3FF) % shard_->core_cnt_;
+            if (!(core_idx == shard_->core_id_) || commit_ts <= 1 ||
+                !shard_->GetBucketInfo(bucket_id, cc_ng_id_)
+                     ->AcceptsUploadBatch())
+            {
+                // Skip the key if
+                // 1) key does not land on this core
+                // 2) commit ts is invalid
+                // 3) bucket stops accepting upload batch reqeust
+                // Move to next key.
+                key_offset = next_key_offset;
+                rec_offset = next_rec_offset;
+                ts_offset = next_ts_offset;
+                status_offset = next_status_offset;
+                continue;
+            }
+
+            auto it = FindEmplace(*key);
+            cce = it->second;
+            cc_page = it.GetPage();
+            if (cce == nullptr)
+            {
+                DLOG(WARNING) << "!!!WARNING!!! UploadBatchCc OOM on core: "
+                              << shard_->core_id_ << ". Txn: " << req.Txn()
+                              << ", table name: " << this->table_name_.Trace();
+                // This cc shard has reached max memory limit. Currently upload
+                // batch for object cc map is only used for sending cache to new
+                // data owner during migration. This is a best effort try and
+                // does not need to be successful. Just return immediately.
+                return req.SetError(CcErrorCode::OUT_OF_MEMORY);
+            }
+
+            assert(commit_ts > 1);
+            if (cce->CommitTs() >= commit_ts)
+            {
+                // Concurrent upsert_tx has write the latest value, so discard
+                // the old value directly. For example, during add index
+                // transaction, we will write the packed sk data that generate
+                // from old pk records into the new sk ccmap, and before this
+                // post write request, we do not acquire the write lock on this
+                // TxKey, so this value has been updated by a concurrent
+                // transaction.
+                key_offset = next_key_offset;
+                rec_offset = next_rec_offset;
+                ts_offset = next_ts_offset;
+                status_offset = next_status_offset;
+                continue;
+            }
+
+            if (rec_status == RecordStatus::Normal)
+            {
+                cce->payload_.reset(
+                    static_cast<ValueT *>(object_uptr.release()));
+                object_uptr = nullptr;
+            }
+            else
+            {
+                cce->payload_ = nullptr;
+            }
+
+            cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
+            if (req.IsPersisted())
+            {
+                cce->SetCkptTs(commit_ts);
+            }
+
+            if (cce->HasReplayCommandList())
+            {
+                std::unique_ptr<ReplayTxnCmdList> replay_cmd_list =
+                    cce->ReplayCommandList();
+                // Clear cmds with smaller version than uploaded version.
+                for (auto it = replay_cmd_list->txn_cmd_list_.begin();
+                     it != replay_cmd_list->txn_cmd_list_.end();)
+                {
+                    if (it->obj_version_ >= commit_ts)
+                    {
+                        break;
+                    }
+                    it = replay_cmd_list->txn_cmd_list_.erase(it);
+                }
+
+                replay_cmd_list->cur_version_ = commit_ts;
+                TryCommitReplayCommands(
+                    cce->payload_, replay_cmd_list, commit_ts);
+            }
+
+            if (cce->payload_)
+            {
+                cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Normal);
+            }
+            else
+            {
+                cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Deleted);
+            }
+            DLOG_IF(INFO, TRACE_OCC_ERR)
+                << "UploadBatchCc, txn:" << req.Txn() << " ,cce: " << cce
+                << " ,commit_ts: " << commit_ts;
+
+            if (commit_ts > last_dirty_commit_ts_)
+            {
+                last_dirty_commit_ts_ = commit_ts;
+            }
+            if (commit_ts > cc_page->last_dirty_commit_ts_)
+            {
+                cc_page->last_dirty_commit_ts_ = commit_ts;
+            }
+
+            // update the key offset
+            key_offset = next_key_offset;
+            rec_offset = next_rec_offset;
+            ts_offset = next_ts_offset;
+            status_offset = next_status_offset;
+        }
+        if (key_pos < batch_size)
+        {
+            // Only insert UploadBatchBatchSize keys in one round.  set the
+            // paused key to mark resume position and put the request into cc
+            // queue again.
+            req.SetPausedPosition(shard_->core_id_,
+                                  key_pos,
+                                  key_offset,
+                                  rec_offset,
+                                  ts_offset,
+                                  status_offset);
+            shard_->Enqueue(shard_->LocalCoreId(), &req);
+            return false;
+        }
+
+        return req.SetFinish();
+    }
+
     bool Execute(ReplayLogCc &req)
     {
         TX_TRACE_ACTION_WITH_CONTEXT(

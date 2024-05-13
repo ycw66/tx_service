@@ -3715,6 +3715,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     txn,
                                     req_start_key,
                                     req_end_key,
+                                    export_base_table_rec_if_need,
                                     export_base_table_rec_if_need);
 
                                 while (!scan_data_drained)
@@ -6791,6 +6792,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             LocalCcShards *shard = Sharder::Instance().GetLocalCcShards();
             shard->EnqueueDataSyncTaskForBucket(
                 status_->bucket_ids_[migrate_bucket_idx_],
+                true,
                 txm->TxCcNodeId(),
                 txm->TxTerm(),
                 txm->CommitTs(),

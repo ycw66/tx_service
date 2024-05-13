@@ -2684,13 +2684,12 @@ public:
                    size_t scan_batch_size,
                    uint64_t txn,
                    const TxKey *target_start_key,
-                   const TxKey *target_end_key
+                   const TxKey *target_end_key,
+                   bool include_persisted_data,
 #ifdef RANGE_PARTITION_ENABLED
-                   ,
                    bool export_base_table_rec_if_need = false,
                    bool skip_archived_key = false
 #else
-                   ,
                    bool only_one_core,
                    std::function<bool(size_t hash_code)> filter
 #endif
@@ -2708,7 +2707,8 @@ public:
           err_(CcErrorCode::NO_ERROR),
           unfinished_cnt_(core_cnt_),
           mux_(),
-          cv_()
+          cv_(),
+          include_persisted_data_(include_persisted_data)
 #ifdef RANGE_PARTITION_ENABLED
           ,
           export_base_table_rec_if_need_(export_base_table_rec_if_need),
@@ -2996,10 +2996,13 @@ private:
     uint32_t unfinished_cnt_;
     std::mutex mux_;
     std::condition_variable cv_;
+    // True means If no larger version exists, we need to export the data which
+    // commit_ts same as ckpt_ts.
+    bool include_persisted_data_{false};
 
 #ifdef RANGE_PARTITION_ENABLED
-    // True means If no larger version exists, we need to export the data which
-    // commit_ts same as ckpt_ts. Note: This flag only used for RangePartition.
+    // True means we need to export the data in memory and in kv to ckpt vec.
+    // Note: This is only used in range partition.
     bool export_base_table_rec_if_need_{false};
     std::vector<RangeSliceId> slice_ids_;
 
@@ -4828,8 +4831,10 @@ private:
 
 struct UploadBatchCc : public CcRequestBase
 {
-    using WriteEntryTuple = std::
-        tuple<const std::string &, const std::string &, const std::string &>;
+    using WriteEntryTuple = std::tuple<const std::string &,
+                                       const std::string &,
+                                       const std::string &,
+                                       const std::string &>;
 
     static constexpr size_t UploadBatchBatchSize = 128;
 
@@ -4850,7 +4855,8 @@ public:
                bthread::Mutex &req_mux,
                bthread::ConditionVariable &req_cv,
                size_t &finished_req_cnt,
-               CcErrorCode &req_result)
+               CcErrorCode &req_result,
+               bool is_persisted)
     {
         table_name_ = &table_name;
         node_group_id_ = ng_id;
@@ -4865,7 +4871,8 @@ public:
         req_result_ = &req_result;
         unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
         err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
-        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0));
+        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0, 0));
+        is_persisted_ = is_persisted;
     }
 
     void Reset(const TableName &table_name,
@@ -4876,7 +4883,8 @@ public:
                const WriteEntryTuple &entry_tuple,
                bthread::Mutex &req_mux,
                bthread::ConditionVariable &req_cv,
-               size_t &finished_req_cnt)
+               size_t &finished_req_cnt,
+               bool is_persisted)
 
     {
         table_name_ = &table_name;
@@ -4892,7 +4900,8 @@ public:
         req_result_ = nullptr;
         unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
         err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
-        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0));
+        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0, 0));
+        is_persisted_ = is_persisted;
     }
 
     bool ValidTermCheck()
@@ -5035,16 +5044,18 @@ public:
                            size_t key_index,
                            size_t key_off,
                            size_t rec_off,
-                           size_t ts_off)
+                           size_t ts_off,
+                           size_t status_off)
     {
         auto &key_pos = paused_pos_.at(core_id);
         std::get<0>(key_pos) = key_index;
         std::get<1>(key_pos) = key_off;
         std::get<2>(key_pos) = rec_off;
         std::get<3>(key_pos) = ts_off;
+        std::get<4>(key_pos) = status_off;
     }
 
-    const std::tuple<size_t, size_t, size_t, size_t> &GetPausedPosition(
+    const std::tuple<size_t, size_t, size_t, size_t, size_t> &GetPausedPosition(
         uint16_t core_id) const
     {
         return paused_pos_.at(core_id);
@@ -5053,6 +5064,11 @@ public:
     size_t StartKeyIndex() const
     {
         return start_key_idx_;
+    }
+
+    bool IsPersisted() const
+    {
+        return is_persisted_;
     }
 
 private:
@@ -5077,8 +5093,9 @@ private:
     // This two variables may be accessed by multi-cores.
     std::atomic<size_t> unfinished_cnt_{0};
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
-    // key index, key offset, record offset, ts offset
-    std::vector<std::tuple<size_t, size_t, size_t, size_t>> paused_pos_;
+    // key index, key offset, record offset, ts offset, record status offset
+    std::vector<std::tuple<size_t, size_t, size_t, size_t, size_t>> paused_pos_;
+    bool is_persisted_{false};
 };
 
 }  // namespace txservice

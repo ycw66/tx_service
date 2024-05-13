@@ -14,11 +14,14 @@
 #include <unordered_map>
 
 #include "catalog_key_record.h"
+#include "cc_node_service.h"
 #include "cc_request.h"
+#include "cc_request.pb.h"
 #include "error_messages.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "remote_type.h"
+#include "rpc_closure.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
@@ -1579,6 +1582,12 @@ const BucketInfo *LocalCcShards::UploadNewBucketInfo(NodeGroupId ng_id,
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     BucketInfo *bucket_info = GetBucketInfoInternal(bucket_id, ng_id);
     bucket_info->SetDirty(dirty_ng, dirty_version);
+    if (dirty_ng == ng_id)
+    {
+        // Allow this bucket to accept upload batch request from original
+        // bucket owner to warm up cache.
+        bucket_info->SetAcceptsUploadBatch(true);
+    }
     return bucket_info;
 }
 
@@ -1876,6 +1885,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
     bool can_be_skipped,
     std::shared_ptr<DataSyncStatus> status,
     CcHandlerResult<Void> *hres,
+    bool send_cache_for_migration,
     std::function<bool(size_t)> filter_lambda)
 {
     auto task_limiter_key = TaskLimiterKey(
@@ -1907,7 +1917,8 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                    is_dirty,
                                                    can_be_skipped,
                                                    hres,
-                                                   filter_lambda);
+                                                   filter_lambda,
+                                                   send_cache_for_migration);
 
         // Push task to worker task queue.
         {
@@ -1939,7 +1950,8 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                    is_dirty,
                                                    can_be_skipped,
                                                    hres,
-                                                   filter_lambda));
+                                                   filter_lambda,
+                                                   send_cache_for_migration));
                 enqueued_task = true;
             }
             else
@@ -1968,7 +1980,8 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                is_dirty,
                                                can_be_skipped,
                                                hres,
-                                               filter_lambda));
+                                               filter_lambda,
+                                               send_cache_for_migration));
             enqueued_task = true;
         }
     }
@@ -2106,6 +2119,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
         &ranges_in_bucket_snapshot,
 #else
     const std::vector<uint16_t> &bucket_ids,
+    bool send_cache_for_migration,
 #endif
     uint32_t ng_id,
     int64_t ng_term,
@@ -2191,7 +2205,8 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
                 false,
                 status,
                 hres,
-                [&bucket_ids](size_t key_hash)
+                send_cache_for_migration,
+                [&bucket_ids](size_t key_hash) -> bool
                 {
                     uint16_t bucket_id = key_hash & 0x3FFF;
                     for (uint16_t target_id : bucket_ids)
@@ -2596,7 +2611,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                            DATA_SYNC_SCAN_BATCH_SIZE,
                            data_sync_txm->TxNumber(),
                            &start_tx_key,
-                           &end_tx_key);
+                           &end_tx_key,
+                           false);
 
     while (!scan_data_drained)
     {
@@ -2842,7 +2858,7 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                                             DataSyncTask::CkptErrorCode err,
                                             size_t worker_idx)
 {
-    std::unique_lock<std::mutex> flight_task_lk(task->flight_task_mux_);
+    std::unique_lock<bthread::Mutex> flight_task_lk(task->flight_task_mux_);
     int64_t flight_task_cnt = --task->flight_task_cnt_;
 
     if (task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
@@ -3160,13 +3176,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                            data_sync_txm->TxNumber(),
                            nullptr,
                            nullptr,
+                           data_sync_task->forward_cache_,
                            true,
                            data_sync_task->filter_lambda_);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
         // flight task count
-        std::lock_guard<std::mutex> flight_task_lk(
+        std::lock_guard<bthread::Mutex> flight_task_lk(
             data_sync_task->flight_task_mux_);
         data_sync_task->flight_task_cnt_ += 1;
     }
@@ -3196,6 +3213,174 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         {
             scan_data_drained = true;
 
+            // Send cache to target node group if needed.
+            if (data_sync_task->forward_cache_)
+            {
+                std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+                const auto bucket_infos = GetAllBucketInfos(ng_id);
+                if (bucket_infos == nullptr)
+                {
+                    // no longer node group owner, abort the task
+                    LOG(ERROR) << "DataSync: Failed to get bucket infos for "
+                                  "ng#"
+                               << ng_id;
+                    PostProcessDataSyncTask(
+                        std::move(data_sync_task),
+                        data_sync_txm,
+                        catalog_entry,
+                        DataSyncTask::CkptErrorCode::SCAN_ERROR,
+                        worker_idx);
+                    return;
+                }
+
+                std::unordered_map<NodeGroupId, UploadBatchClosure *>
+                    send_cache_closures;
+                for (size_t idx = 0; idx < scan_cc.accumulated_scan_cnt_[0];
+                     idx++)
+                {
+                    FlushRecord &ref = scan_cc.DataSyncVec(0)[idx];
+                    uint16_t bucket_id = ref.Key().Hash() & 0x3FFF;
+                    NodeGroupId dest_ng =
+                        bucket_infos->at(bucket_id)->DirtyBucketOwner();
+                    assert(dest_ng != UINT32_MAX);
+
+                    // Put the record into the request for this node group.
+                    auto ins_res = send_cache_closures.try_emplace(dest_ng);
+                    remote::UploadBatchRequest *req_ptr = nullptr;
+                    if (ins_res.second)
+                    {
+                        uint32_t node_id =
+                            Sharder::Instance().LeaderNodeId(dest_ng);
+                        std::shared_ptr<brpc::Channel> channel =
+                            Sharder::Instance().GetCcNodeServiceChannel(
+                                node_id);
+                        if (channel == nullptr)
+                        {
+                            // Fail to establish the channel to the tx node.
+                            // Just skip the cache sending since it is a best
+                            // effort try to performance improvement.
+                            LOG(ERROR) << "UploadBatch: Failed to init the "
+                                          "channel of ng#"
+                                       << dest_ng;
+                            send_cache_closures.erase(ins_res.first);
+                        }
+                        else
+                        {
+                            // Create a closure for the first time.
+                            UploadBatchClosure *upload_batch_closure =
+                                new UploadBatchClosure(
+                                    [this,
+                                     ng_term,
+                                     ng_id,
+                                     data_sync_task,
+                                     data_sync_txm,
+                                     catalog_entry,
+                                     worker_idx](CcErrorCode res_code,
+                                                 int32_t dest_ng_term)
+                                    {
+                                        bool term_match =
+                                            Sharder::Instance().CheckLeaderTerm(
+                                                ng_id, ng_term);
+                                        // We don't care if
+                                        // the cache send
+                                        // was succeed or
+                                        // not since it's a
+                                        // best effort
+                                        // move. Just pass in no error
+                                        // so that it won't cause data sync
+                                        // failure.
+                                        PostProcessDataSyncTask(
+                                            std::move(data_sync_task),
+                                            data_sync_txm,
+                                            // catalog entry ptr is only valid
+                                            // if the term hasn't changed
+                                            term_match ? catalog_entry
+                                                       : nullptr,
+                                            DataSyncTask::CkptErrorCode::
+                                                NO_ERROR,
+                                            worker_idx);
+                                    },
+                                    10000,
+                                    false);
+
+                            upload_batch_closure->SetChannel(node_id, channel);
+
+                            ins_res.first->second = upload_batch_closure;
+                            req_ptr =
+                                upload_batch_closure->UploadBatchRequest();
+                            req_ptr->set_node_group_id(dest_ng);
+                            req_ptr->set_node_group_term(-1);
+                            req_ptr->set_table_name_str(table_name.String());
+                            req_ptr->set_table_type(
+                                remote::ToRemoteType::ConvertTableType(
+                                    table_name.Type()));
+                            req_ptr->set_is_persisted(true);
+                            req_ptr->set_batch_size(0);
+                            // keys
+                            req_ptr->clear_keys();
+                            // records
+                            req_ptr->clear_records();
+                            // commit_ts
+                            req_ptr->clear_commit_ts();
+                            // rec_status
+                            req_ptr->clear_rec_status();
+                        }
+                    }
+                    else
+                    {
+                        req_ptr = ins_res.first->second->UploadBatchRequest();
+                    }
+
+                    if (req_ptr)
+                    {
+                        std::string *keys_str = req_ptr->mutable_keys();
+                        std::string *rec_status_str =
+                            req_ptr->mutable_rec_status();
+                        std::string *commit_ts_str =
+                            req_ptr->mutable_commit_ts();
+                        size_t len_sizeof = sizeof(uint64_t);
+                        const char *val_ptr = nullptr;
+                        ref.Key().Serialize(*keys_str);
+                        if (ref.payload_status_ == RecordStatus::Normal)
+                        {
+                            std::string *recs_str = req_ptr->mutable_records();
+                            ref.Payload()->Serialize(*recs_str);
+                        }
+                        const char *status_ptr = reinterpret_cast<const char *>(
+                            &(ref.payload_status_));
+                        rec_status_str->append(status_ptr,
+                                               sizeof(RecordStatus));
+                        val_ptr =
+                            reinterpret_cast<const char *>(&(ref.commit_ts_));
+                        commit_ts_str->append(val_ptr, len_sizeof);
+                        req_ptr->set_batch_size(req_ptr->batch_size() + 1);
+                    }
+                }
+                meta_lk.unlock();
+
+                {
+                    std::unique_lock<bthread::Mutex> flight_lk(
+                        data_sync_task->flight_task_mux_);
+                    data_sync_task->flight_task_cnt_ +=
+                        send_cache_closures.size();
+                }
+                // Send cache to target node groups.
+                for (auto &[ng, upload_batch_closure] : send_cache_closures)
+                {
+                    remote::CcRpcService_Stub stub(
+                        upload_batch_closure->Channel());
+                    brpc::Controller *cntl_ptr =
+                        upload_batch_closure->Controller();
+                    cntl_ptr->set_timeout_ms(10000);
+                    // Asynchronous mode
+                    stub.UploadBatch(
+                        upload_batch_closure->Controller(),
+                        upload_batch_closure->UploadBatchRequest(),
+                        upload_batch_closure->UploadBatchResponse(),
+                        upload_batch_closure);
+                }
+            }
+
             size_t offset = data_sync_vec->size();
 
             for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_[0]; ++j)
@@ -3203,12 +3388,17 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 auto &rec = scan_cc.DataSyncVec(0)[j];
                 // Note. Clone key instead of move key. The memory of
                 // rec.Key() will be reused to avoid memory allocation.
-                data_sync_vec->emplace_back(rec.Key().Clone(),
-                                            rec.GetPayload(),
-                                            rec.payload_status_,
-                                            rec.commit_ts_,
-                                            rec.cce_,
-                                            rec.delta_size_);
+                if (rec.cce_)
+                {
+                    // cce_ is null means the key is already persisted on kv, so
+                    // we don't need to put it into the flush vec.
+                    data_sync_vec->emplace_back(rec.Key().Clone(),
+                                                rec.GetPayload(),
+                                                rec.payload_status_,
+                                                rec.commit_ts_,
+                                                rec.cce_,
+                                                rec.delta_size_);
+                }
             }
 
             for (size_t j = 0; j < scan_cc.ArchiveVec(0).size(); ++j)
@@ -3237,7 +3427,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 rec_size_limit)
             {
                 {
-                    std::unique_lock<std::mutex> flight_task_lk(
+                    std::unique_lock<bthread::Mutex> flight_task_lk(
                         data_sync_task->flight_task_mux_);
                     if (data_sync_task->ckpt_err_ ==
                         DataSyncTask::CkptErrorCode::FLUSH_ERROR)
@@ -3251,14 +3441,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                     while (data_sync_task->flight_task_cnt_ >
                            flush_data_worker_ctx_.worker_num_ * 3)
                     {
-                        data_sync_task->flight_task_cv_.wait(
-                            flight_task_lk,
-                            [data_sync_task,
-                             max_flush_concurrency =
-                                 flush_data_worker_ctx_.worker_num_ * 3] {
-                                return data_sync_task->flight_task_cnt_ <
-                                       max_flush_concurrency;
-                            });
+                        data_sync_task->flight_task_cv_.wait(flight_task_lk);
                     }
                     // Flush worker will call PostProcessDataSyncTask() to
                     // decrement flight task count.
@@ -3294,7 +3477,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     if (data_sync_vec->size() > 0 || archive_vec->size() > 0 ||
         mv_base_vec->size() > 0)
     {
-        std::unique_lock<std::mutex> flight_task_lk(
+        std::unique_lock<bthread::Mutex> flight_task_lk(
             data_sync_task->flight_task_mux_);
         if (data_sync_task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
         {

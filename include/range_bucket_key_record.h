@@ -1,8 +1,7 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
-#include <map>
-#include <unordered_set>
 
 #include "tx_key.h"
 #include "tx_record.h"
@@ -19,7 +18,10 @@ public:
     {
     }
 
-    BucketInfo(const BucketInfo &other) = default;
+    BucketInfo(const BucketInfo &other) : BucketInfo()
+    {
+        *this = other;
+    }
 
     BucketInfo &operator=(const BucketInfo &rhs)
     {
@@ -31,6 +33,9 @@ public:
         version_ = rhs.version_;
         dirty_bucket_owner_ = rhs.dirty_bucket_owner_;
         dirty_version_ = rhs.dirty_version_;
+        accepts_upload_batch_.store(
+            rhs.accepts_upload_batch_.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         return *this;
     }
 
@@ -95,6 +100,17 @@ public:
         }
     }
 
+    void SetAcceptsUploadBatch(bool accepts_upload_batch)
+    {
+        accepts_upload_batch_.store(accepts_upload_batch,
+                                    std::memory_order_release);
+    }
+
+    bool AcceptsUploadBatch() const
+    {
+        return accepts_upload_batch_.load(std::memory_order_acquire);
+    }
+
     void CommitDirty()
     {
         if (dirty_version_ > version_)
@@ -102,6 +118,7 @@ public:
             version_ = dirty_version_;
             bucket_owner_ = dirty_bucket_owner_;
         }
+        accepts_upload_batch_.store(false, std::memory_order_release);
         dirty_bucket_owner_ = UINT32_MAX;
         dirty_version_ = 0;
     }
@@ -112,6 +129,16 @@ private:
 
     NodeGroupId dirty_bucket_owner_{UINT32_MAX};
     uint64_t dirty_version_{0};
+    // If this bucket accepts records sent from other node groups with
+    // UploadBatchCc. This is set to true during bucket migration if this
+    // node group is the new owner of the bucket. It will be set back to false
+    // when 1) the migration is done or 2) the data in this buckets has been
+    // kicked out from cc map, in which case we're running short of memory so we
+    // don't want to accept more records. Also it is not safe to accept upload
+    // batch since we might have newer version in kv store.
+    // We use atomic here since it might be updated by any tx processor without
+    // bucket write lock.
+    std::atomic_bool accepts_upload_batch_{false};
     friend struct RangeBucketRecord;
     friend class RangeBucketCcMap;
 };

@@ -5,6 +5,8 @@
 #include <condition_variable>
 
 #include "cc/cc_handler_result.h"
+#include "cc_request.h"
+#include "data_sync_task.h"
 #include "error_messages.h"
 #include "local_cc_shards.h"
 #include "proto/cc_request.pb.h"
@@ -100,18 +102,12 @@ private:
 class UploadBatchClosure : public ::google::protobuf::Closure
 {
 public:
-    UploadBatchClosure(bthread::Mutex &req_mux,
-                       bthread::ConditionVariable &req_cv,
-                       size_t &finished_req_cnt,
-                       CcErrorCode &res_code,
-                       int64_t &ng_term,
-                       uint16_t upload_timeout)
-        : req_mux_(req_mux),
-          req_cv_(req_cv),
-          finished_req_cnt_(finished_req_cnt),
-          res_code_(res_code),
-          ng_term_(ng_term),
-          upload_timeout_(upload_timeout)
+    UploadBatchClosure(std::function<void(CcErrorCode, int32_t)> post_lambda,
+                       uint16_t upload_timeout,
+                       bool retry_on_timeout)
+        : post_lambda_(post_lambda),
+          upload_timeout_(upload_timeout),
+          retry_on_timeout_(retry_on_timeout)
     {
     }
     ~UploadBatchClosure() = default;
@@ -131,7 +127,7 @@ public:
                        << request_.node_group_id()
                        << ", with Error code: " << cntl_.ErrorCode()
                        << ". Error Msg: " << cntl_.ErrorText();
-            if (cntl_.ErrorCode() == brpc::ERPCTIMEDOUT)
+            if (cntl_.ErrorCode() == brpc::ERPCTIMEDOUT && retry_on_timeout_)
             {
                 self_guard.release();
                 // Retry if timeout.
@@ -145,49 +141,13 @@ public:
                 return;
             }
             Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
-            std::unique_lock<bthread::Mutex> req_lk(req_mux_);
-            res_code_ = CcErrorCode::REQUEST_LOST;
-            ++finished_req_cnt_;
-            req_cv_.notify_one();
+            post_lambda_(CcErrorCode::REQUEST_LOST, 0);
         }
         else
         {
             CcErrorCode err_code =
                 remote::ToLocalType::ConvertCcErrorCode(response_.error_code());
-            std::unique_lock<bthread::Mutex> req_lk(req_mux_);
-            ++finished_req_cnt_;
-            if (err_code != CcErrorCode::NO_ERROR)
-            {
-                LOG(ERROR) << "Response for upload batch failed of ng#"
-                           << request_.node_group_id()
-                           << ", with error: " << (uint32_t) err_code;
-                res_code_ =
-                    res_code_ == CcErrorCode::NO_ERROR ? err_code : res_code_;
-            }
-            else
-            {
-                DLOG(INFO) << "Response for upload batch succeed of ng#"
-                           << request_.node_group_id();
-                int64_t dest_term = response_.ng_term();
-                if (ng_term_ == INIT_TERM)
-                {
-                    ng_term_ = dest_term;
-                }
-                else if (ng_term_ != dest_term)
-                {
-                    LOG(ERROR)
-                        << "Response for upload batch failed of ng#"
-                        << request_.node_group_id()
-                        << " of term mismatch, with expected term: " << ng_term_
-                        << " and actual term: " << dest_term;
-                    res_code_ = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
-                }
-                else
-                {
-                    assert(ng_term_ == dest_term);
-                }
-            }
-            req_cv_.notify_one();
+            post_lambda_(err_code, response_.ng_term());
         }
         channel_ = nullptr;
     }
@@ -213,18 +173,20 @@ public:
         channel_ = channel;
     }
 
+    brpc::Channel *Channel()
+    {
+        return channel_.get();
+    }
+
 private:
     brpc::Controller cntl_;
     remote::UploadBatchRequest request_;
     remote::UploadBatchResponse response_;
-    bthread::Mutex &req_mux_;
-    bthread::ConditionVariable &req_cv_;
-    size_t &finished_req_cnt_;
-    CcErrorCode &res_code_;
-    int64_t &ng_term_;
+    std::function<void(CcErrorCode, int32_t)> post_lambda_;
     uint16_t upload_timeout_{0};
     std::shared_ptr<brpc::Channel> channel_;
     uint32_t node_id_;
+    bool retry_on_timeout_{false};
 };
 
 class GenerateSkFromPkClosure : public ::google::protobuf::Closure
