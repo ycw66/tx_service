@@ -226,6 +226,9 @@ void txservice::remote::RemoteAcquireAll::Reset(
 
 void txservice::remote::RemoteAcquireAll::Acknowledge(int64_t term)
 {
+    // All cores will try to Acknowledge, so we need mutex protection here.
+    std::lock_guard<std::mutex> lk(mux_);
+
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
     output_msg_.set_tx_term(input_msg_->tx_term());

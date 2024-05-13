@@ -549,6 +549,10 @@ public:
         res_->Value().last_vali_ts_ = std::max(res_->Value().last_vali_ts_, ts);
     }
 
+protected:
+    // protects acquire all res in concurrent update from different cores.
+    std::mutex mux_;
+
 private:
     const void *key_ptr_{nullptr};
     const std::string *key_str_{nullptr};
@@ -563,8 +567,6 @@ private:
     // of the cc entry.
     std::vector<LruEntry *> cce_ptr_;
     bool is_local_{true};
-    // protects acquire all res in concurrent update from different cores.
-    std::mutex mux_;
 };
 
 struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, PostProcessResult>
