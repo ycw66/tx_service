@@ -4613,7 +4613,7 @@ public:
 
         // If the heap is full, we should stop exporting.
         std::pair<size_t, bool> export_size = {0, true};
-        // Do not try to call mi_heap_collect, since it is cost, flush data will
+        // Do not try to call mi_heap_collect, since it is expensive, flush data will
         // return the memory anyway when it done
         if (!scan_heap->Full())
         {
