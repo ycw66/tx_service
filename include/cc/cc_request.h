@@ -4447,11 +4447,21 @@ public:
         // Release the data sync vec inside cc request, so memory freed can be
         // directly refelct to the mi stats allocated and committed, otherwise
         // the the stats updates will delayed to next allocation
-        CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
-        mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
-        data_sync_vec_.reset(nullptr);
-        archive_vec_.reset(nullptr);
-        mi_heap_set_default(prev_heap);
+        if (data_sync_vec_ != nullptr || archive_vec_ != nullptr)
+        {
+            CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
+            mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+            if (data_sync_vec_ != nullptr)
+            {
+                data_sync_vec_.reset(nullptr);
+            }
+            if (archive_vec_ != nullptr)
+            {
+                archive_vec_.reset(nullptr);
+            }
+            mi_heap_set_default(prev_heap);
+        }
+
         {
             std::lock_guard<std::mutex> lk(mux_);
             if (--pending_shard_ == 0)
