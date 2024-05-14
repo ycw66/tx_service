@@ -4432,8 +4432,8 @@ struct ResetCleanStartPageCc : public CcRequestBase
 public:
     explicit ResetCleanStartPageCc(
         size_t core_cnt,
-        std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
-        std::unique_ptr<std::vector<FlushRecord>> archive_vec)
+        std::unique_ptr<std::vector<FlushRecord>> data_sync_vec = nullptr,
+        std::unique_ptr<std::vector<FlushRecord>> archive_vec = nullptr)
         : pending_shard_(core_cnt),
           data_sync_vec_(std::move(data_sync_vec)),
           archive_vec_(std::move(archive_vec))

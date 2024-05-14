@@ -4020,7 +4020,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         }
 
         reset_cc.Wait();
-        ckpt_vec_size
 #else
         ResetCleanStartPageCc reset_cc(
             1, std::move(data_sync_vec_owner), std::move(archive_vec_owner));
