@@ -4430,13 +4430,28 @@ private:
 struct ResetCleanStartPageCc : public CcRequestBase
 {
 public:
-    explicit ResetCleanStartPageCc(size_t core_cnt) : pending_shard_(core_cnt)
+    explicit ResetCleanStartPageCc(
+        size_t core_cnt,
+        std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
+        std::unique_ptr<std::vector<FlushRecord>> archive_vec)
+        : pending_shard_(core_cnt),
+          data_sync_vec_(std::move(data_sync_vec)),
+          archive_vec_(std::move(archive_vec))
     {
     }
+
     bool Execute(CcShard &ccs) override
     {
         ccs.ResetCleanStart();
         ccs.DequeueWaitList();
+        // Release the data sync vec inside cc request, so memory freed can be
+        // directly refelct to the mi stats allocated and committed, otherwise
+        // the the stats updates will delayed to next allocation
+        CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
+        mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+        data_sync_vec_.reset(nullptr);
+        archive_vec_.reset(nullptr);
+        mi_heap_set_default(prev_heap);
         {
             std::lock_guard<std::mutex> lk(mux_);
             if (--pending_shard_ == 0)
@@ -4461,6 +4476,8 @@ public:
     std::mutex mux_;
     std::condition_variable cv_;
     size_t pending_shard_;
+    std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_;
+    std::unique_ptr<std::vector<FlushRecord>> archive_vec_;
 };
 
 struct GetTableLastCommitTsCc : public CcRequestBase
