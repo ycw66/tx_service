@@ -168,8 +168,9 @@ int Sharder::Init(
         if (log_replay_server_.AddService(log_replay_service_.get(),
                                           brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
         {
-            LOG(FATAL) << "Fail to start add the log replay service to the log "
-                          "replay server.";
+            LOG(FATAL)
+                << "Failed to start add the log replay service to the log "
+                   "replay server.";
             return -1;
         }
 
@@ -207,7 +208,7 @@ int Sharder::Init(
                                      brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
         LOG(FATAL)
-            << "Fail to add the cc stream service to the cc stream server.";
+            << "Failed to add the cc stream service to the cc stream server.";
         return -1;
     }
 
@@ -218,7 +219,7 @@ int Sharder::Init(
     if (cc_node_server_.AddService(cc_node_service_.get(),
                                    brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
-        LOG(FATAL) << "Fail to add the cc node service to the server.";
+        LOG(FATAL) << "Failed to add the cc node service to the server.";
         return -1;
     }
 
@@ -234,7 +235,7 @@ int Sharder::Init(
                 cluster_config_.ng_configs_.at(node_id_).front().port_),
             &server_options) != 0)
     {
-        LOG(FATAL) << "Fail to start the cc node server.";
+        LOG(FATAL) << "Failed to start the cc node server.";
         return -1;
     }
 #else
@@ -243,7 +244,7 @@ int Sharder::Init(
                 cluster_config_.ng_configs_.at(node_id_).front().port_),
             NULL) != 0)
     {
-        LOG(FATAL) << "Fail to start the cc node server.";
+        LOG(FATAL) << "Failed to start the cc node server.";
         return -1;
     }
 #endif
@@ -257,7 +258,7 @@ int Sharder::Init(
                 cluster_config_.ng_configs_.at(node_id_).front().port_),
             &server_options) != 0)
     {
-        LOG(FATAL) << "Fail to start the log replay server.";
+        LOG(FATAL) << "Failed to start the log replay server.";
         return -1;
     }
 #else
@@ -266,7 +267,7 @@ int Sharder::Init(
                 cluster_config_.ng_configs_.at(node_id_).front().port_),
             nullptr) != 0)
     {
-        LOG(FATAL) << "Fail to start the log replay server.";
+        LOG(FATAL) << "Failed to start the log replay server.";
         return -1;
     }
 #endif
@@ -278,11 +279,13 @@ int Sharder::Init(
         hm_port_ = *hm_port;
 #ifdef FORK_HM_PROCESS
         // Fork host manager process.
+
+        hm_ip_ = "0.0.0.0";
         assert(hm_bin_path != nullptr);
         int pid = fork();
         if (pid == -1)
         {
-            LOG(FATAL) << "Fail to fork host manager process";
+            LOG(FATAL) << "Failed to fork host manager process";
             return -1;
         }
         if (pid == 0)
@@ -305,9 +308,9 @@ int Sharder::Init(
             std::exit(0);
         }
 #endif
-        int max_retries = 50;
+        int max_retries = 300;
         int retries = 0;
-        int delay_ms = 100;
+        int delay_ms = 200;
         bool connected = false;
         while (retries < max_retries && !connected)
         {
@@ -318,17 +321,17 @@ int Sharder::Init(
             else
             {
                 LOG(WARNING)
-                    << "Failed to connect to host manager. Retrying in "
-                    << delay_ms << " milliseconds... (Attempt " << (retries + 1)
-                    << " of " << max_retries << ")";
+                    << "Failed to init channel to host manager. Retrying in "
+                    << delay_ms << " ms... (Attempt " << (retries + 1) << " of "
+                    << max_retries << ")";
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(delay_ms));
-                retries++;
+                ++retries;
             }
         }
         if (!connected)
         {
-            LOG(FATAL) << "Failed to connect to host manager after "
+            LOG(FATAL) << "Failed to init channel to host manager after "
                        << max_retries << " attempts.";
             return -1;
         }
@@ -373,24 +376,26 @@ int Sharder::Init(
                 ng_buf->add_member_nodes(member.node_id_);
             }
         }
+        cntl.set_timeout_ms(500);
         stub.StartNode(&cntl, &req, &response, nullptr);
-        for (int retry = 10; retry > 0 && cntl.Failed(); retry--)
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        for (int retry = 120; retry > 0 && cntl.Failed(); --retry)
         {
-            cntl.Reset();
-            cntl.set_timeout_ms(1000);
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            cntl.Reset();
+            cntl.set_timeout_ms(500);
             stub.StartNode(&cntl, &req, &response, nullptr);
         }
         if (cntl.Failed())
         {
-            LOG(ERROR) << "Fail to notify host manager on node start"
+            LOG(ERROR) << "Failed to notify host manager on node start"
                        << ". Error code: " << cntl.ErrorCode()
                        << ". Msg: " << cntl.ErrorText();
             return -1;
         }
         if (response.error())
         {
-            LOG(ERROR) << "Fail to notify host manager on node start.";
+            LOG(ERROR) << "Failed to notify host manager on node start.";
             return -1;
         }
     }
@@ -433,7 +438,7 @@ std::shared_ptr<brpc::Channel> Sharder::GetCcNodeServiceChannel(
             auto channel = std::make_shared<brpc::Channel>();
             if (channel->Init(ip.c_str(), GET_CCNODE_RPC_PORT(port), NULL) != 0)
             {
-                LOG(ERROR) << "Fail to init the cc node service channel.";
+                LOG(ERROR) << "Failed to init the cc node service channel.";
                 return nullptr;
             }
             if (channel_it == cc_node_service_channels_.end())
@@ -467,7 +472,7 @@ std::shared_ptr<brpc::Channel> Sharder::UpdateCcNodeServiceChannel(
         auto channel = std::make_shared<brpc::Channel>();
         if (channel->Init(ip.c_str(), GET_CCNODE_RPC_PORT(port), NULL) != 0)
         {
-            LOG(ERROR) << "Fail to init the cc node service channel.";
+            LOG(ERROR) << "Failed to init the cc node service channel.";
             return nullptr;
         }
         if (channel_it == cc_node_service_channels_.end())
@@ -488,7 +493,7 @@ std::shared_ptr<brpc::Channel> Sharder::UpdateCcNodeServiceChannel(
         auto channel = std::make_shared<brpc::Channel>();
         if (channel->Init(ip.c_str(), GET_CCNODE_RPC_PORT(port), NULL) != 0)
         {
-            LOG(ERROR) << "Fail to update the cc node service channel.";
+            LOG(ERROR) << "Failed to update the cc node service channel.";
             return nullptr;
         }
         channel_it->second = channel;
@@ -1075,13 +1080,13 @@ void Sharder::StartCcStreamReceiver()
             cluster_config_.ng_configs_.at(node_id_).front().port_,
             &server_options) != 0)
     {
-        LOG(FATAL) << "Fail to start the cc stream server.";
+        LOG(FATAL) << "Failed to start the cc stream server.";
     }
 #else
     if (cc_stream_server_.Start(
             cluster_config_.ng_configs_.at(node_id_).front().port_, NULL) != 0)
     {
-        LOG(FATAL) << "Fail to start the cc stream server.";
+        LOG(FATAL) << "Failed to start the cc stream server.";
     }
 #endif
 }
