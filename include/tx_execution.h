@@ -153,7 +153,7 @@ public:
     std::unique_ptr<CommitTxRequest> commit_tx_req_;
     size_t OpenTxScan(ScanOpenTxRequest &scan_open_tx_req);
     void CloseTxScan(uint64_t alias,
-                     const TableName *table_name,
+                     const TableName &table_name,
                      std::vector<UnlockTuple> &unlock_vec);
 
     TxErrorCode Insert(const TableName &table_name,
@@ -388,7 +388,7 @@ private:
     static TxErrorCode ConvertCcError(CcErrorCode error);
 
     ScanCloseTxRequest *NextScanCloseTxReq(size_t alias,
-                                           const TableName *table_name);
+                                           const TableName &table_name);
 
     void Process(BatchReadOperation &batch_read_op);
     void PostProcess(BatchReadOperation &batch_read_op);

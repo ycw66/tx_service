@@ -415,7 +415,7 @@ size_t TransactionExecution::OpenTxScan(ScanOpenTxRequest &scan_open_tx_req)
 }
 
 void TransactionExecution::CloseTxScan(uint64_t alias,
-                                       const TableName *table_name,
+                                       const TableName &table_name,
                                        std::vector<UnlockTuple> &unlock_vec)
 {
     ScanCloseTxRequest *scan_close_req = NextScanCloseTxReq(alias, table_name);
@@ -638,7 +638,7 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
     void_resp_ = nullptr;
     ScanClose(scan_close_req.unlock_batch_,
               scan_close_req.alias_,
-              *scan_close_req.table_name_);
+              scan_close_req.table_name_);
 
     scan_close_req.unlock_batch_.clear();
     scan_close_req.in_use_.store(false, std::memory_order_relaxed);
@@ -5330,7 +5330,7 @@ void TransactionExecution::PostProcess(KickoutDataOp &kickout_data_all_op)
 }
 
 ScanCloseTxRequest *TransactionExecution::NextScanCloseTxReq(
-    uint64_t alias, const TableName *table_name)
+    uint64_t alias, const TableName &table_name)
 {
     size_t pool_size = scan_close_req_pool_->Size();
     for (size_t idx = 0; idx < pool_size; ++idx)

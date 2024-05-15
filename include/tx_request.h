@@ -552,13 +552,15 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
     ScanCloseTxRequest() = delete;
 
     ScanCloseTxRequest(uint64_t alias,
-                       const TableName *table_name,
+                       const TableName &table_name,
                        const std::function<void()> *yield_fptr = nullptr,
                        const std::function<void()> *resume_fptr = nullptr,
                        TransactionExecution *txm = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           alias_(alias),
-          table_name_(table_name),
+          table_name_(table_name.StringView().data(),
+                      table_name.StringView().size(),
+                      table_name.Type()),
           in_use_(true)
     {
     }
@@ -566,13 +568,15 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
     ScanCloseTxRequest(const std::vector<ScanBatchTuple> &scan_batch,
                        size_t scan_batch_idx,
                        uint64_t alias,
-                       const TableName *table_name,
+                       const TableName &table_name,
                        const std::function<void()> *yield_fptr = nullptr,
                        const std::function<void()> *resume_fptr = nullptr,
                        TransactionExecution *txm = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           alias_(alias),
-          table_name_(table_name),
+          table_name_(table_name.StringView().data(),
+                      table_name.StringView().size(),
+                      table_name.Type()),
           in_use_(true)
     {
         for (size_t idx = scan_batch_idx; idx < scan_batch.size(); ++idx)
@@ -583,19 +587,23 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
         }
     }
 
-    void Reset(uint64_t alias, const TableName *table_name)
+    void Reset(uint64_t alias, const TableName &table_name)
     {
         assert(!in_use_.load(std::memory_order_relaxed));
 
         tx_result_.Reset();
         alias_ = alias;
-        table_name_ = table_name;
+
+        table_name_ = TableName(table_name.StringView().data(),
+                                table_name.StringView().size(),
+                                table_name.Type());
         in_use_.store(true, std::memory_order_relaxed);
     }
 
     std::vector<UnlockTuple> unlock_batch_;
     uint64_t alias_{UINT64_MAX};
-    const TableName *table_name_{nullptr};
+    // TableName owner
+    TableName table_name_;
     std::atomic<bool> in_use_{false};
 };
 
