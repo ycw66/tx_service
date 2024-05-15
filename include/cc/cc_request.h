@@ -4898,7 +4898,8 @@ public:
         req_result_ = &req_result;
         unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
         err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
-        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0, 0));
+        paused_pos_.clear();
+        paused_pos_.resize(core_cnt, {});
         is_persisted_ = is_persisted;
     }
 
@@ -4927,7 +4928,8 @@ public:
         req_result_ = nullptr;
         unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
         err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
-        paused_pos_.resize(core_cnt, std::make_tuple(0, 0, 0, 0, 0));
+        paused_pos_.clear();
+        paused_pos_.resize(core_cnt, {});
         is_persisted_ = is_persisted;
     }
 
