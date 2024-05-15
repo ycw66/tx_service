@@ -6007,7 +6007,9 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
                           TxNumber(),
                           tx_term_,
                           CommandId(),
-                          read_ts,
+                          read_batch[idx].version_ts_ > 0
+                              ? read_batch[idx].version_ts_
+                              : read_ts,
                           batch_read_op.hd_result_vec_[idx],
                           iso_level,
                           protocol_,
