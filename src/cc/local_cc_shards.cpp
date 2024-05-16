@@ -3816,6 +3816,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     std::vector<FlushRecord> *data_sync_vec, *archive_vec;
     std::unique_ptr<std::vector<TxKey>> mv_base_owner;
     std::vector<TxKey> *mv_base_vec;
+    bool vec_owner = cur_work.vec_owner_;
     if (cur_work.vec_owner_)
     {
         data_sync_vec_owner = std::move(cur_work.data_sync_vec_);
@@ -4013,7 +4014,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
 #ifdef RANGE_PARTITION_ENABLED
         // other wise, split flush operation will do the work
-        if (cur_work.vec_owner_)
+        if (vec_owner)
         {
             // reset scan start page info for the flushed ccshard
             std::vector<std::unique_ptr<std::vector<FlushRecord>>>
