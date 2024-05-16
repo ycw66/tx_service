@@ -4306,10 +4306,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         data_sync_vec_per_core[record_core_id]->emplace_back(
                             std::move(flush_record));
                     }
-                    PostFlushDataCc reset_cc(
-                        local_shards->Count(),
-                        std::move(data_sync_vec_per_core),
-                        std::move(archive_vec_per_core));
+                    PostFlushDataCc reset_cc(local_shards->Count(),
+                                             std::move(data_sync_vec_per_core),
+                                             std::move(archive_vec_per_core));
                     for (size_t idx = 0; idx < local_shards->Count(); ++idx)
                     {
                         local_shards->EnqueueCcRequest(idx, &reset_cc);
