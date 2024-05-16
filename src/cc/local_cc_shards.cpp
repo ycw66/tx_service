@@ -3806,9 +3806,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     const TableSchema *schema = cur_work.schema_;
 #ifdef RANGE_PARTITION_ENABLED
     uint64_t data_sync_ts = cur_work.data_sync_ts_;
-#endif
-
+#else
     size_t scan_task_worker_idx = cur_work.scan_task_worker_idx_;
+#endif
 
     bool is_delay_update_ckpt_ts = cur_work.delay_update_ckpt_ts_;
     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_owner,
@@ -4012,17 +4012,73 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         } /* End of PutAll */
 
 #ifdef RANGE_PARTITION_ENABLED
-        // reset scan start page info for the flushed ccshard
-        ResetCleanStartPageCc reset_cc(Count());
-        for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
+        // other wise, split flush operation will do the work
+        if (cur_work.vec_owner_)
         {
-            EnqueueToCcShard(core_idx, &reset_cc);
-        }
+            // reset scan start page info for the flushed ccshard
+            std::vector<std::unique_ptr<std::vector<FlushRecord>>>
+                data_sync_vec_per_core(Count()), archive_vec_per_core(Count());
 
-        reset_cc.Wait();
+            if (data_sync_vec_owner != nullptr)
+            {
+                size_t reserve_size =
+                    (data_sync_vec_owner->size() / Count()) + 512;
+                for (size_t core_idx = 0; core_idx < Count(); core_idx++)
+                {
+                    data_sync_vec_per_core[core_idx] =
+                        std::make_unique<std::vector<FlushRecord>>();
+                    data_sync_vec_per_core[core_idx]->reserve(reserve_size);
+                }
+
+                for (size_t i = 0; i < data_sync_vec_owner->size(); i++)
+                {
+                    auto flush_record = std::move(data_sync_vec_owner->at(i));
+                    size_t record_core_id =
+                        (flush_record.Key().Hash() & 0x3FF) % Count();
+                    data_sync_vec_per_core[record_core_id]->emplace_back(
+                        std::move(flush_record));
+                }
+            }
+
+            if (archive_vec_owner != nullptr)
+            {
+                size_t reserve_size =
+                    (archive_vec_owner->size() / Count()) + 512;
+                for (size_t core_idx = 0; core_idx < Count(); core_idx++)
+                {
+                    archive_vec_per_core[core_idx] =
+                        std::make_unique<std::vector<FlushRecord>>();
+                    archive_vec_per_core[core_idx]->reserve(reserve_size);
+                }
+
+                for (size_t i = 0; i < archive_vec_owner->size(); i++)
+                {
+                    auto flush_record = std::move(archive_vec_owner->at(i));
+                    size_t record_core_id =
+                        (flush_record.Key().Hash() & 0x3FF) % Count();
+                    archive_vec_per_core[record_core_id]->emplace_back(
+                        std::move(flush_record));
+                }
+            }
+
+            PostFlushDataCc reset_cc(Count(),
+                                     std::move(data_sync_vec_per_core),
+                                     std::move(archive_vec_per_core));
+            for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
+            {
+                EnqueueToCcShard(core_idx, &reset_cc);
+            }
+
+            reset_cc.Wait();
+        }
 #else
-        ResetCleanStartPageCc reset_cc(
-            1, std::move(data_sync_vec_owner), std::move(archive_vec_owner));
+        std::vector<std::unique_ptr<std::vector<FlushRecord>>>
+            data_sync_vec_per_core(1), archive_vec_per_core(1);
+        data_sync_vec_per_core[0] = std::move(data_sync_vec_owner);
+        archive_vec_per_core[0] = std::move(archive_vec_owner);
+        PostFlushDataCc reset_cc(1,
+                                 std::move(data_sync_vec_per_core),
+                                 std::move(archive_vec_per_core));
         EnqueueToCcShard(scan_task_worker_idx, &reset_cc);
         reset_cc.Wait();
 #endif

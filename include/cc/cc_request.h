@@ -4427,40 +4427,99 @@ private:
     std::atomic_uint16_t unfinished_cnt_{0};
 };
 
-struct ResetCleanStartPageCc : public CcRequestBase
+struct PostFlushDataCc : public CcRequestBase
 {
 public:
-    explicit ResetCleanStartPageCc(
+    static const size_t VEC_ERASE_BATCH_SIZE = 1000;
+
+    explicit PostFlushDataCc(
         size_t core_cnt,
-        std::unique_ptr<std::vector<FlushRecord>> data_sync_vec = nullptr,
-        std::unique_ptr<std::vector<FlushRecord>> archive_vec = nullptr)
+        std::vector<std::unique_ptr<std::vector<FlushRecord>>>
+            data_sync_vec_per_core,
+        std::vector<std::unique_ptr<std::vector<FlushRecord>>>
+            archive_vec_per_core)
         : pending_shard_(core_cnt),
-          data_sync_vec_(std::move(data_sync_vec)),
-          archive_vec_(std::move(archive_vec))
+          data_sync_vec_per_core_(std::move(data_sync_vec_per_core)),
+          archive_vec_per_core_(std::move(archive_vec_per_core))
     {
     }
 
     bool Execute(CcShard &ccs) override
     {
+        // Release the data sync vec in same thread that allocated it, the
+        // memory freed can be directly refelct to the mi stats allocated and
+        // committed, otherwise the the stats updates will delayed to next
+        // allocation
+        if (data_sync_vec_per_core_.size() != 0)
+        {
+#ifdef RANGE_PARTITION_ENABLED
+            auto &data_sync_vec = data_sync_vec_per_core_[ccs.core_id_];
+#else
+            auto &data_sync_vec = data_sync_vec_per_core_[0];
+#endif
+            if (data_sync_vec != nullptr)
+            {
+                // to avoid large jitter when releasing big memory chunck,
+                // we release memory incremently in batch
+                size_t vec_size = data_sync_vec->size();
+                if (vec_size != 0)
+                {
+                    CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
+                    mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+                    if (vec_size > VEC_ERASE_BATCH_SIZE)
+                    {
+                        data_sync_vec->resize(vec_size - VEC_ERASE_BATCH_SIZE);
+                    }
+                    else
+                    {
+                        data_sync_vec->resize(0);
+                    }
+                    mi_heap_set_default(prev_heap);
+
+                    if (data_sync_vec->size() != 0)
+                    {
+                        ccs.Enqueue(this);
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if (archive_vec_per_core_.size() != 0)
+        {
+#ifdef RANGE_PARTITION_ENABLED
+            auto &archive_vec = archive_vec_per_core_[ccs.core_id_];
+#else
+            auto &archive_vec = archive_vec_per_core_[0];
+#endif
+            if (archive_vec != nullptr)
+            {
+                size_t vec_size = archive_vec->size();
+                if (vec_size != 0)
+                {
+                    CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
+                    mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+                    if (vec_size > VEC_ERASE_BATCH_SIZE)
+                    {
+                        archive_vec->resize(vec_size - VEC_ERASE_BATCH_SIZE);
+                    }
+                    else
+                    {
+                        archive_vec->resize(0);
+                    }
+                    mi_heap_set_default(prev_heap);
+
+                    if (archive_vec->size() != 0)
+                    {
+                        ccs.Enqueue(this);
+                        return false;
+                    }
+                }
+            }
+        }
+
         ccs.ResetCleanStart();
         ccs.DequeueWaitList();
-        // Release the data sync vec inside cc request, so memory freed can be
-        // directly refelct to the mi stats allocated and committed, otherwise
-        // the the stats updates will delayed to next allocation
-        if (data_sync_vec_ != nullptr || archive_vec_ != nullptr)
-        {
-            CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
-            mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
-            if (data_sync_vec_ != nullptr)
-            {
-                data_sync_vec_.reset(nullptr);
-            }
-            if (archive_vec_ != nullptr)
-            {
-                archive_vec_.reset(nullptr);
-            }
-            mi_heap_set_default(prev_heap);
-        }
 
         {
             std::lock_guard<std::mutex> lk(mux_);
@@ -4486,8 +4545,10 @@ public:
     std::mutex mux_;
     std::condition_variable cv_;
     size_t pending_shard_;
-    std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_;
-    std::unique_ptr<std::vector<FlushRecord>> archive_vec_;
+    std::vector<std::unique_ptr<std::vector<FlushRecord>>>
+        data_sync_vec_per_core_;
+    std::vector<std::unique_ptr<std::vector<FlushRecord>>>
+        archive_vec_per_core_;
 };
 
 struct GetTableLastCommitTsCc : public CcRequestBase
