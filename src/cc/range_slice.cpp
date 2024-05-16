@@ -663,7 +663,6 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         switch (kv_load_status)
         {
         case store::DataStoreHandler::LoadRangeSliceStatus::Success:
-            slice.last_load_ts_ = LocalCcShards::ClockTs();
             return LoadSliceStatus::Success;
         case store::DataStoreHandler::LoadRangeSliceStatus::Retry:
             // Put the ccrequests back to txprocessor queue except the first
@@ -713,6 +712,14 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
             // fetching request does not, the demanding request is allowed
             // to change the flag if filling into memory has not started.
             slice.fetch_slice_cc_->SetForceLoad(true);
+        }
+        else if (force_load && !slice.fetch_slice_cc_->ForceLoad())
+        {
+            // Retry this request whose force_load flag is true, rather than put
+            // it into ccrequest queue. If OOM, the queued request will be
+            // aborted. Setting force load to true means that requests will
+            // ignore OOM errors, such as DataSyncScanCc.
+            return LoadSliceStatus::Retry;
         }
 
         if (cc_request != nullptr)

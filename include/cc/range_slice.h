@@ -360,6 +360,11 @@ public:
         return sizeof(StoreSlice) + 16;
     }
 
+    void UpdateLastLoadTs(uint64_t load_ts)
+    {
+        last_load_ts_ = load_ts;
+    }
+
 protected:
     bool IsRecentLoad() const;
 

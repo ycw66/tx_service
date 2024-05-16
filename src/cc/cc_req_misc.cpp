@@ -399,6 +399,9 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
     next_idxs_.resize(cc_shards.Count(), 0);
     load_slice_req_.post_lambda_ = [this](LoadRangeSliceRequest *req)
     {
+        // Update the slice's last load ts.
+        uint64_t cur_ts = LocalCcShards::ClockTs();
+        this->range_slice_.UpdateLastLoadTs(cur_ts);
         if (req->IsError())
         {
             TerminateFilling();
