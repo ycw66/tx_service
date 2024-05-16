@@ -3697,6 +3697,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     const TxKey *req_start_key,
                                     const TxKey *req_end_key,
                                     bool export_base_table_rec_if_need) mutable
+                                -> CcErrorCode
                             {
                                 bool scan_data_drained = false;
                                 // Note: `DataSyncScanCc` needs to ensure that
@@ -3738,8 +3739,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                             << " with error: "
                                             << static_cast<uint32_t>(
                                                    scan_cc.ErrorCode());
-                                        hd_res.SetError(scan_cc.ErrorCode());
-                                        return;
+                                        // hd_res.SetError(scan_cc.ErrorCode());
+                                        return scan_cc.ErrorCode();
                                     }
                                     else
                                     {
@@ -3816,6 +3817,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                         scan_cc.Reset();
                                     }
                                 }
+
+                                return CcErrorCode::NO_ERROR;
                             };
 
                             bool need_copy_range = store_hd->NeedCopyRange();
@@ -3825,17 +3828,36 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                 // data to new range. we just scan new
                                 // data which need to be flushed.
 
-                                scan_func(&start_key, &end_key, false);
+                                auto err =
+                                    scan_func(&start_key, &end_key, false);
+                                if (err != CcErrorCode::NO_ERROR)
+                                {
+                                    hd_res.SetError(err);
+                                    return;
+                                }
                             }
                             else
                             {
-                                scan_func(&start_key,
-                                          &new_range_info_.begin()->first,
-                                          false);
+                                auto err =
+                                    scan_func(&start_key,
+                                              &new_range_info_.begin()->first,
+                                              false);
 
-                                scan_func(&new_range_info_.begin()->first,
-                                          &end_key,
-                                          true);
+                                if (err != CcErrorCode::NO_ERROR)
+                                {
+                                    hd_res.SetError(err);
+                                    return;
+                                }
+
+                                err = scan_func(&new_range_info_.begin()->first,
+                                                &end_key,
+                                                true);
+
+                                if (err != CcErrorCode::NO_ERROR)
+                                {
+                                    hd_res.SetError(err);
+                                    return;
+                                }
                             }
 
                             // Sort output vectors in key sorting order.
