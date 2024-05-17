@@ -281,11 +281,6 @@ void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
 #endif
 }
 
-void CcShard::Enqueue(uint32_t thd_id, uint32_t shard_code, CcRequestBase *req)
-{
-    local_shards_.EnqueueCcRequest(thd_id, shard_code, req);
-}
-
 void CcShard::EnqueueWaitList(CcRequestBase *req)
 {
     cc_wait_list_.push_back(req);
