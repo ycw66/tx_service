@@ -2971,9 +2971,19 @@ void CompositeTransactionOperation::ForwardToSubOperation(
 
 template <typename Op>
 void CompositeTransactionOperation::RetrySubOperation(TransactionExecution *txm,
-                                                      Op *last_sub_op)
+                                                      Op *last_sub_op,
+                                                      bool retry_immediately)
 {
-    ForwardToSubOperation(txm, last_sub_op);
+    if (!retry_immediately)
+    {
+        op_ = last_sub_op;
+        txm->PushOperation(last_sub_op, 1);
+        last_sub_op->ReRunOp(txm);
+    }
+    else
+    {
+        ForwardToSubOperation(txm, last_sub_op);
+    }
 }
 
 FlushDataOp::FlushDataOp(TransactionExecution *txm) : hd_result_(txm)
@@ -4063,7 +4073,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     mv_base_vec_.clear();
                 }
 
-                RetrySubOperation(txm, &data_sync_scan_op_);
+                bool retry_imme = !(data_sync_scan_op_.hd_result_.ErrorCode() ==
+                                    CcErrorCode::DATA_STORE_ERR);
+                RetrySubOperation(txm, &data_sync_scan_op_, retry_imme);
             }
             else
             {
@@ -4089,7 +4101,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 LOG(ERROR) << "Split Flush transaction failed to flush data, "
                               "tx number "
                            << txm->TxNumber();
-                RetrySubOperation(txm, &flush_op_);
+                bool retry_imme = !(flush_op_.hd_result_.ErrorCode() ==
+                                    CcErrorCode::DATA_STORE_ERR);
+                RetrySubOperation(txm, &flush_op_, retry_imme);
             }
             else
             {
@@ -4469,7 +4483,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     << "Split Flush transaction failed to update range info "
                        "in data store, tx_number:"
                     << txm->TxNumber();
-                RetrySubOperation(txm, &ds_upsert_range_op_);
+                RetrySubOperation(txm, &ds_upsert_range_op_, false);
             }
             else
             {
@@ -4671,7 +4685,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                               "in old range "
                               "in data store, tx_number:"
                            << txm->TxNumber();
-                RetrySubOperation(txm, &ds_clean_old_range_op_);
+                RetrySubOperation(txm, &ds_clean_old_range_op_, false);
             }
             else
             {

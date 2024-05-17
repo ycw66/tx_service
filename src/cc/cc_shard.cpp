@@ -640,6 +640,11 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
     // nothing and waits for the tx to make further actions.
     if (now_ts - lk_info.last_recover_ts_ >= ts_gap)
     {
+        // Updates the last_recover_ts field, so that following
+        // conflicting tx's will not try recovery immediately,
+        // avoiding a flood of recovery requests.
+        lk_info.last_recover_ts_ = now_ts;
+
         uint32_t txn_node_group = lock_holding_txn >> 42L;
 
         CODE_FAULT_INJECTOR("recover_local_txn", { txn_node_group = 12345; })
@@ -693,11 +698,6 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                                       lk_info.wlock_ts_,
                                       cc_ng_id,
                                       cc_ng_term);
-
-        // Updates the last_recover_ts field, so that following
-        // conflicting tx's will not try recovery immediately,
-        // avoiding a flood of recovery requests.
-        lk_info.last_recover_ts_ = now_ts;
     }
 }
 

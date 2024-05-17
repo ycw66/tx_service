@@ -87,7 +87,9 @@ struct CompositeTransactionOperation : TransactionOperation
     void ForwardToSubOperation(TransactionExecution *txm, Op *next_op);
 
     template <typename Op>
-    void RetrySubOperation(TransactionExecution *txm, Op *next_op);
+    void RetrySubOperation(TransactionExecution *txm,
+                           Op *next_op,
+                           bool retry_immediately = true);
 
     /**
      * @brief The current stage of this multi-stage schema operation
