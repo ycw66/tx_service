@@ -231,19 +231,21 @@ public:
             yield = true;
             return;
         }
+        CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
+        CcShardHeap *shard_heap = shard->GetShardHeap();
+        if (shard_heap == nullptr)
+        {
+            assert(is_ext_proc);
+            shard_status.store(TxShardStatus::Free, std::memory_order_release);
+            return;
+        }
+        mi_heap_t *prev_heap = shard_heap->SetAsDefaultHeap();
         if (is_ext_proc)
         {
-            CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
-            CcShardHeap *shard_heap = shard->GetShardHeap();
-            if (shard_heap == nullptr)
-            {
-                shard_status.store(TxShardStatus::Free,
-                                   std::memory_order_release);
-                return;
-            }
-
+            // Override thread id as well if current thread id is not heap owner
+            // thread id.
             shard->OverrideHeapThread();
-            coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
+            coordi_->ext_tx_proc_heap_ = prev_heap;
         }
         one_round_cnt_.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -405,10 +407,11 @@ public:
             on_fly_txs_.Size() + new_tx_cnt_.load(std::memory_order_relaxed);
 
 #ifdef EXT_TX_PROC_ENABLED
+
+        mi_heap_set_default(prev_heap);
         if (is_ext_proc)
         {
             assert(coordi_->ext_tx_proc_heap_ != nullptr);
-            mi_heap_set_default(coordi_->ext_tx_proc_heap_);
             mi_restore_default_thread_id();
             coordi_->ext_tx_proc_heap_ = nullptr;
         }
