@@ -682,6 +682,15 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         flush_all_old_tuples_sk_op_.op_func_ =
             [this, txm, &hd_res = flush_all_old_tuples_sk_op_.hd_result_]
         {
+            store::DataStoreHandler *const store_hd =
+                Sharder::Instance().GetLocalCcShards()->store_hd_;
+            if (store_hd->ByPassDataStore())
+            {
+                // The table was not created on kv store, so there is no need to
+                // execute flush operation. This is to speed up test case only.
+                hd_res.SetFinished();
+                return;
+            }
             // Send the flush data request to the node groups to which
             // the new packed sk data sharding, so obtain the node group
             // count from the @@expected_ng_terms.

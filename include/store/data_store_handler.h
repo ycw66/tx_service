@@ -333,6 +333,11 @@ public:
 
     virtual bool NeedCopyRange() const = 0;
 
+    virtual bool ByPassDataStore() const
+    {
+        return false;
+    }
+
 protected:
     TxService *tx_service_{nullptr};
 };
