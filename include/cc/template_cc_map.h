@@ -660,11 +660,6 @@ public:
         const KeyT *target_key = nullptr;
         bool will_insert = false;
 
-        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireAllCc", {
-            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireAllCc";
-            return hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        });
-
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
         if (ng_term < 0)
@@ -864,6 +859,13 @@ public:
                     acquire_all_result.commit_ts_ = cc_entry.CommitTs();
                     acquire_all_result.node_term_ = ng_term;
                 }
+
+                CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireAllCc", {
+                    LOG(INFO) << "FaultInject  "
+                                 "term_TemplateCcMap_Execute_AcquireAllCc";
+                    return hd_res->SetError(
+                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                });
 
                 return hd_res->SetFinished();
             }
