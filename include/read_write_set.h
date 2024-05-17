@@ -559,7 +559,9 @@ public:
                           const CcEntryAddr &cce_addr,
                           uint64_t cce_version,
                           const TxKey *key,
-                          const TxCommand *cmd)
+                          const TxCommand *cmd,
+                          bool object_modified,
+                          bool enable_wal)
     {
 #ifdef ON_KEY_OBJECT
         auto [table_it, success] = cmd_set_.try_emplace(table_name);
@@ -580,10 +582,20 @@ public:
         CmdSetEntry &entry = cce_it->second;
         assert(cce_version >= entry.object_version_);
         entry.object_version_ = cce_version;
-        if (cmd != nullptr)
+
+        if (object_modified)
         {
-            entry.AddCommand(cmd);
+            entry.object_modified_ = object_modified;
+
+            if (enable_wal)
+            {
+                // The command modifies the object. Put it into the command
+                // set for writing log and post-processing. If the command
+                // fails, only to release the write lock.
+                entry.AddCommand(cmd);
+            }
         }
+
 #endif
     }
 

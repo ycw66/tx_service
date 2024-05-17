@@ -5463,8 +5463,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const TxCommand *cmd = obj_cmd_op.command_;
         const TableName *table_name = obj_cmd_op.table_name_;
         const ObjectTableOption *table_option = obj_cmd_op.table_option_;
-        bool need_write_log =
-            cmd_result.object_modified_ && table_option->enable_wal_;
+        bool object_modified = cmd_result.object_modified_;
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
         uint64_t commit_ts = cmd_result.commit_ts_;
 
@@ -5480,12 +5479,13 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             // The command modifies the object. Put it into the command set
             // for writing log and post-processing. If the command fails, only
             // to release the write lock.
-            rw_set_.AddObjectCommand(
-                *table_name,
-                cce_addr,
-                commit_ts,
-                obj_cmd_op.key_,
-                need_write_log ? obj_cmd_op.command_ : nullptr);
+            rw_set_.AddObjectCommand(*table_name,
+                                     cce_addr,
+                                     commit_ts,
+                                     obj_cmd_op.key_,
+                                     obj_cmd_op.command_,
+                                     object_modified,
+                                     table_option->enable_wal_);
 
             uint64_t read_version = rw_set_.DedupRead(cce_addr);
             if (read_version > 0 && read_version != cmd_result.commit_ts_)
@@ -5652,6 +5652,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
     }
 #endif
     MultiObjectCommandTxRequest *req = obj_cmd_op.tx_req_;
+    bool enable_wal = req->table_option_->enable_wal_;
     const std::vector<TxKey> *vct_key = req->VctKey();
     const std::vector<TxCommand *> *vct_cmd = req->VctCommand();
 
@@ -5665,11 +5666,14 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
             // Add the locked objects into read write set for future unlock.
             if (cmd_res.lock_acquired_ == LockType::WriteLock)
             {
+                constexpr bool object_modified = false;
                 rw_set_.AddObjectCommand(*req->table_name_,
                                          cmd_res.cce_addr_,
                                          cmd_res.commit_ts_,
                                          &vct_key->at(i),
-                                         nullptr);
+                                         vct_cmd->at(i),
+                                         object_modified,
+                                         enable_wal);
             }
             else if (cmd_res.lock_acquired_ != LockType::NoLock &&
                      !rw_set_.FindObjectCommand(*req->table_name_,
@@ -5712,14 +5716,13 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     // The command modifies the object. Put it into the command
                     // set for writing log and post-processing. If the command
                     // fails, only to release the write lock.
-                    bool need_write_log = cmd_res.object_modified_ &&
-                                          req->table_option_->enable_wal_;
-                    rw_set_.AddObjectCommand(
-                        *req->table_name_,
-                        cmd_res.cce_addr_,
-                        cmd_res.commit_ts_,
-                        &vct_key->at(i),
-                        need_write_log ? vct_cmd->at(i) : nullptr);
+                    rw_set_.AddObjectCommand(*req->table_name_,
+                                             cmd_res.cce_addr_,
+                                             cmd_res.commit_ts_,
+                                             &vct_key->at(i),
+                                             vct_cmd->at(i),
+                                             cmd_res.object_modified_,
+                                             enable_wal);
 
                     uint64_t read_version =
                         rw_set_.DedupRead(cmd_res.cce_addr_);
