@@ -1708,9 +1708,13 @@ bool CcShardHeap::Full() const
     //
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
+    // if (allocated >= (int64_t) memory_limit_ ||
+    //     committed > (memory_limit_ * 1.1))
+    // {
+    //     TryHeapCollect();
+    // }
 
-    return allocated >= (int64_t) memory_limit_ ||
-           committed > (memory_limit_ * 1.1);
+    return allocated >= (int64_t) memory_limit_;
 }
 
 /**

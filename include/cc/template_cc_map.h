@@ -7388,8 +7388,7 @@ protected:
             // clean cc entries that have been checkpointed but are not
             // being accessed by active tx's.
             shard_->Clean();
-            if (shard_heap->Full() && !shard_heap->TryHeapCollect() &&
-                !table_name_.IsMeta() && !force_emplace)
+            if (shard_heap->Full() && !table_name_.IsMeta() && !force_emplace)
             {
                 return false;
             }
@@ -7733,8 +7732,7 @@ protected:
             // clean cc entries that have been checkpointed but are not
             // being accessed by active tx's.
             shard_->Clean();
-            if (shard_heap->Full() && !shard_heap->TryHeapCollect() &&
-                !table_name_.IsMeta() && !force_emplace)
+            if (shard_heap->Full() && !table_name_.IsMeta() && !force_emplace)
             {
                 if (read_only_req)
                 {
