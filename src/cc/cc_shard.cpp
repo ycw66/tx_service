@@ -1104,6 +1104,11 @@ const BucketInfo *CcShard::GetBucketInfo(uint16_t bucket_id,
     return local_shards_.GetBucketInfo(bucket_id, ng_id);
 }
 
+NodeGroupId CcShard::GetBucketOwner(uint16_t bucket_id, NodeGroupId ng_id) const
+{
+    return local_shards_.GetBucketOwner(bucket_id, ng_id);
+}
+
 const BucketInfo *CcShard::GetRangeOwner(int32_t range_id,
                                          NodeGroupId ng_id) const
 {
@@ -1114,6 +1119,16 @@ const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
     *CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     return local_shards_.GetAllBucketInfos(ng_id);
+}
+
+void CcShard::SetBucketMigrating(bool is_migrating)
+{
+    local_shards_.SetBucketMigrating(is_migrating);
+}
+
+bool CcShard::IsBucketsMigrating()
+{
+    return local_shards_.IsBucketsMigrating();
 }
 
 void CcShard::DropBucketInfo(NodeGroupId ng_id)

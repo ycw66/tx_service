@@ -495,6 +495,21 @@ public:
                                 int64_t tx_term,
                                 std::string_view chan,
                                 std::string_view message) = 0;
+    /**
+     * Upload and commit object commands to the cc map on the bucket's new owner
+     * when the bucket is in migration. The commands has applied on the old node
+     * group cc map. (Double write)
+     *
+     */
+    virtual void UploadTxCommands(uint64_t tx_number,
+                                  int64_t tx_term,
+                                  uint16_t command_id,
+                                  const CcEntryAddr &cce_addr,
+                                  uint64_t obj_version,
+                                  uint64_t commit_ts,
+                                  const std::vector<std::string> *cmd_list,
+                                  bool has_overwrite,
+                                  CcHandlerResult<PostProcessResult> &hres) = 0;
 
     virtual void CleanCcEntryForTest(const TableName &table_name,
                                      const TxKey &key,

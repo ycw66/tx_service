@@ -975,6 +975,7 @@ public:
             if (res
                 // TODO(liunyl): enable this after cluser scale is added.
                 // && DuringClusterScale()
+                // TODO(lzx): enable it when add "sending range data feature".
             )
             {
                 // If the key is kicked out, we need to update the bucket info
@@ -1032,8 +1033,29 @@ public:
         const TableSchema *table_schema,
         const remote::NodeGroupSamplePool &sample_pool);
 
+    void SetBucketMigrating(bool is_migrating)
+    {
+#ifdef RANGE_PARTITION_ENABLED
+        assert(false);
+#else
+        buckets_migrating_.store(is_migrating, std::memory_order_release);
+#endif
+    }
+
+    bool IsBucketsMigrating()
+    {
+#ifdef RANGE_PARTITION_ENABLED
+        assert(false);
+#else
+        return buckets_migrating_.load(std::memory_order_relaxed);
+#endif
+    }
+
     const BucketInfo *GetBucketInfo(const uint16_t bucket_id,
                                     const NodeGroupId ng_id) const;
+
+    NodeGroupId GetBucketOwner(const uint16_t bucket_id,
+                               const NodeGroupId ng_id) const;
 
     const BucketInfo *GetRangeOwner(const int32_t range_id,
                                     const NodeGroupId ng_id) const;
@@ -1318,7 +1340,9 @@ private:
 
     // Protects meta data (table_ranges_ and table_catalogs_)
     mutable std::shared_mutex meta_data_mux_;
-
+#ifndef RANGE_PARTITION_ENABLED
+    std::atomic_bool buckets_migrating_{false};
+#endif
     // If enable_data_store is disabled for one table, its catalog needs to be
     // created at launch or on_leader_start. enable_data_store option comes from
     // configuration instead of table schema, hence we need a separate place to

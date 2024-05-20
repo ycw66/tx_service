@@ -296,6 +296,8 @@ private:
     void PostProcess(ScanNextOperation &scan_next);
     void Process(LockWriteRangesOp &lock_write_ranges);
     void PostProcess(LockWriteRangesOp &lock_write_ranges);
+    void Process(LockWriteBucketsOp &lock_write_ranges);
+    void PostProcess(LockWriteBucketsOp &lock_write_ranges);
     void Process(AcquireWriteOperation &acquire_write);
     void PostProcess(AcquireWriteOperation &acquire_write);
     void Process(SetCommitTsOperation &set_ts);
@@ -351,6 +353,9 @@ private:
 
     void Process(MultiObjectCommandOp &obj_cmd_op);
     void PostProcess(MultiObjectCommandOp &obj_cmd_op);
+
+    void Process(CmdForwardAcquireWriteOp &forward_write_op);
+    void PostProcess(CmdForwardAcquireWriteOp &forward_write_op);
 
     void Process(KickoutDataAllOp &kickout_data_all_op);
     void PostProcess(KickoutDataAllOp &kickout_data_all_op);
@@ -443,6 +448,12 @@ private:
     {
         command_id_.fetch_add(1, std::memory_order_relaxed);
     }
+
+#ifndef RANGE_PARTITION_ENABLED
+    const BucketInfo *FastToGetBucket(uint32_t bucket_id);
+
+    void ClearCachedBucketInfos();
+#endif
 
     enum struct TxType
     {
@@ -564,6 +575,20 @@ private:
     ReadLocalOperation lock_range_op_;
     RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> lock_range_result_;
+#else
+    // TODO(lzx): decrease these member fields.
+    ReadLocalOperation lock_bucket_op_;
+    RangeBucketKey bucket_key_;
+    // Used to wrap "bucket_key_" when read bucket through "lock_bucket_op_",
+    // because ReadLocalOperation::key_ is a TxKey pointer.
+    TxKey bucket_tx_key_;
+    RangeBucketRecord bucket_rec_;
+    CcHandlerResult<ReadKeyResult> lock_bucket_result_;
+    // Cache locked bucket infos: {bucket_id->BucketInfo*}
+    std::unordered_map<uint16_t, const BucketInfo *> locked_buckets_;
+    // Fast path to fetch bucket if no bucket is migrating.
+    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+        *all_bucket_infos_{nullptr};
 #endif
     ReadOperation read_;
     ScanOpenOperation scan_open_;
@@ -581,6 +606,9 @@ private:
     // Committing phase.
 #ifdef RANGE_PARTITION_ENABLED
     LockWriteRangesOp lock_write_ranges_;
+#else
+    LockWriteBucketsOp lock_write_buckets_;
+    CmdForwardAcquireWriteOp cmd_forward_write_;
 #endif
     AcquireWriteOperation acquire_write_;
     SetCommitTsOperation set_ts_;
@@ -621,6 +649,7 @@ private:
 #endif
     friend struct ReadOutsideOperation;
     friend struct LockWriteRangesOp;
+    friend struct LockWriteBucketsOp;
     friend struct AcquireWriteOperation;
     friend struct SetCommitTsOperation;
     friend struct WriteToLogOp;
@@ -653,6 +682,7 @@ private:
     friend struct PostReadOperation;
     friend struct ObjectCommandOp;
     friend struct MultiObjectCommandOp;
+    friend struct CmdForwardAcquireWriteOp;
     friend struct KickoutDataAllOp;
     friend struct UpsertTableIndexOp;
     friend struct DataMigrationOp;

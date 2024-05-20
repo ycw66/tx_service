@@ -38,6 +38,7 @@ thread_local CcRequestPool<RemoteKickoutCcEntry> kickout_cc_entry_pool_;
 thread_local CcRequestPool<ProcessRemoteScanRespCc>
     process_remote_scan_resp_pool_;
 thread_local CcRequestPool<RemoteApplyCc> apply_pool_;
+thread_local CcRequestPool<RemoteUploadTxCommandsCc> upload_cmds_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -1673,6 +1674,14 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         local_shards_.PublishMessage(chan, message);
         break;
     }
+    case CcMessage::MessageType::CcMessage_MessageType_UploadTxCommandsRequest:
+    {
+        RemoteUploadTxCommandsCc *cmds_req = upload_cmds_pool_.NextRequest();
+        cmds_req->Reset(std::move(msg));
+        local_shards_.EnqueueCcRequest(cmds_req->CceAddr()->CoreId(), cmds_req);
+        break;
+    }
+
     default:
         break;
     }

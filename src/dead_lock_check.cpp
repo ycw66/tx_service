@@ -223,7 +223,7 @@ void DeadLockCheck::GatherLockDependancy()
 // Every edge is a relation from a transaction that is waiting a ccentry to
 // other transaction that has locked the same ccentry.
 // For the reurn map, the first paramter is the edge itself, the second
-// parameter is to ahow if this edge has been visited in traverse.
+// parameter is to show if this edge has been visited in traverse.
 std::map<TxEdge, int32_t, EdgeLess> DeadLockCheck::GenerateTxWaitGraph()
 {
     std::map<TxEdge, int32_t, EdgeLess> map_edge;
@@ -397,7 +397,16 @@ void DeadLockCheck::RemoveDeadTransaction(
 
         for (TxEdge &edge : dead)
         {
-            uint32_t cnt = txid_ety_count_map_.find(edge.tx_wait_)->second;
+            auto it = txid_ety_count_map_.find(edge.tx_wait_);
+            if (it == txid_ety_count_map_.end())
+            {
+                LOG(ERROR) << "txid_ety_count_map_ not found tx_id:"
+                           << edge.tx_wait_;
+                assert(false);
+                continue;
+            }
+
+            uint32_t cnt = it->second;
             if (cnt < min_ety)
             {
                 min_ety = cnt;

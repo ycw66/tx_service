@@ -154,6 +154,8 @@ public:
         return ng_leader_cache_[cc_ng_id].load(std::memory_order_relaxed);
     }
 
+    // TODO(lzx): delete this function. Because we fetch node group through
+    // bucket instead of calculation based on hash_code.
     uint32_t ShardCode(uint64_t hash_code)
     {
         // Uses the lower 10 bits to shard the key across CPU cores in a node.
@@ -196,6 +198,17 @@ public:
         uint32_t hash_val;
         butil::MurmurHash3_x86_32(&range_id, sizeof(range_id), 9001, &hash_val);
         return hash_val % total_range_buckets;
+    }
+
+    static inline uint16_t MapKeyHashToBucketId(uint64_t hash_code)
+    {
+#ifdef ON_KEY_OBJECT
+        uint16_t slot_id = hash_code & 0x3FFF;
+        uint16_t bucket_id = slot_id % total_range_buckets;
+        return bucket_id;
+#else
+        return (hash_code >> 10) % total_range_buckets;
+#endif
     }
 
     uint32_t NodeGroupCount()

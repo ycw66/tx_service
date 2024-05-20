@@ -291,6 +291,17 @@ public:
                         std::string_view chan,
                         std::string_view message);
 
+    void UploadTxCommands(uint32_t src_node_id,
+                          uint64_t tx_number,
+                          int64_t tx_term,
+                          uint16_t command_id,
+                          const CcEntryAddr &cce_addr,
+                          uint64_t obj_version,
+                          uint64_t commit_ts,
+                          const std::vector<std::string> *cmd_list,
+                          bool has_overwrite,
+                          CcHandlerResult<PostProcessResult> &hres);
+
 private:
     CcStreamSender &stream_sender_;
 };

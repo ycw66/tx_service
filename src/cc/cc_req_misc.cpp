@@ -691,6 +691,31 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
     {
         ccs.Enqueue(ccs.core_id_, this);
     }
+    return false;
+}
+
+bool WaitNoNakedBucketRefCc::Execute(CcShard &ccs)
+{
+    std::unique_lock<bthread::Mutex> lk(mutex_);
+
+    if (ccs.NakedBucketsRefCnt() != 0)
+    {
+        // re-enqueue until NakedBucketsRefCnt() is zero.
+        ccs.Enqueue(this);
+        return false;
+    }
+
+    if (ccs.core_id_ < ccs.core_cnt_ - 1)
+    {
+        // move to next core.
+        ccs.local_shards_.EnqueueCcRequest(
+            ccs.core_id_, ccs.core_id_ + 1, this);
+        return false;
+    }
+
+    // at last core, set finish.
+    finish_ = true;
+    cv_.notify_one();
 
     return false;
 }

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
+
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -783,6 +786,33 @@ private:
     std::mutex mux_;
     std::condition_variable cv_;
     CcErrorCode error_code_{CcErrorCode::NO_ERROR};
+};
+
+struct WaitNoNakedBucketRefCc : public CcRequestBase
+{
+public:
+    WaitNoNakedBucketRefCc() : mutex_(), cv_(), finish_(false)
+    {
+    }
+
+    WaitNoNakedBucketRefCc(const WaitNoNakedBucketRefCc &) = delete;
+    WaitNoNakedBucketRefCc(WaitNoNakedBucketRefCc &&) = delete;
+
+    bool Execute(CcShard &ccs) override;
+
+    void Wait()
+    {
+        std::unique_lock<bthread::Mutex> lk(mutex_);
+        while (!finish_)
+        {
+            cv_.wait(lk);
+        }
+    }
+
+private:
+    bthread::Mutex mutex_;
+    bthread::ConditionVariable cv_;
+    bool finish_{false};
 };
 
 }  // namespace txservice

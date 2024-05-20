@@ -1461,9 +1461,28 @@ void LocalCcShards::BroadcastIndexStatistics(
 const BucketInfo *LocalCcShards::GetBucketInfo(const uint16_t bucket_id,
                                                const NodeGroupId ng_id) const
 {
-    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+#ifndef RANGE_PARTITION_ENABLED
+    if (!buckets_migrating_.load(std::memory_order_relaxed))
+    {
+        return GetBucketInfoInternal(bucket_id, ng_id);
+    }
+    else
+#endif
+    {
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        return GetBucketInfoInternal(bucket_id, ng_id);
+    }
+}
 
-    return GetBucketInfoInternal(bucket_id, ng_id);
+NodeGroupId LocalCcShards::GetBucketOwner(const uint16_t bucket_id,
+                                          const NodeGroupId ng_id) const
+{
+    const BucketInfo *bucket_info = GetBucketInfo(bucket_id, ng_id);
+    if (bucket_info != nullptr)
+    {
+        return bucket_info->BucketOwner();
+    }
+    return UINT32_MAX;
 }
 
 BucketInfo *LocalCcShards::GetBucketInfoInternal(const uint16_t bucket_id,
@@ -1471,7 +1490,7 @@ BucketInfo *LocalCcShards::GetBucketInfoInternal(const uint16_t bucket_id,
 {
     assert(bucket_id < total_range_buckets);
     auto ng_bucket_it = bucket_infos_.find(ng_id);
-    if (ng_bucket_it == bucket_infos_.end())
+    if (ng_bucket_it == bucket_infos_.end() || ng_bucket_it->second.empty())
     {
         return nullptr;
     }
@@ -1514,7 +1533,9 @@ const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
 void LocalCcShards::DropBucketInfo(NodeGroupId ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
-    bucket_infos_.erase(ng_id);
+    // bucket_infos_.erase(ng_id);
+    assert(bucket_infos_.find(ng_id) != bucket_infos_.end());
+    bucket_infos_.at(ng_id).clear();
 }
 
 bool LocalCcShards::IsRangeBucketsInitialized(NodeGroupId ng_id)
@@ -1530,11 +1551,32 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
                                      uint64_t version,
                                      int32_t seed)
 {
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    if (bucket_infos_.size() != ng_cnt)
+    {
+        // Init bucket_info container for all node groups.
+        // Case one node group failover to other machine, we just clear
+        // bucket_info container instead of erase it from bucket_infos_.
+        // Case other node group failover to this machine, we can just fetch
+        // bucket_info container from bucket_infos_ instead of insert into
+        // bucket_infos_ during failover.
+        //
+        // Then, the buckte_infos_ never be modified if there is no cluster
+        // scaling. So, we can safely read buckte_infos_ without locking
+        // meta_data_mux_ when cluster is not migrating.
+        for (uint32_t ng = 0; ng < ng_cnt; ng++)
+        {
+            bucket_infos_.try_emplace(ng);
+        }
+    }
+
     // Construct bucket info map on startup
     // Generate 64 random numbers for each node group as virtual nodes on
     // hashing ring. Each bucket id belongs to the first virtual node that is
     // larger than the bucket id.
-    std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> ng_bucket_infos;
+    std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> &ng_bucket_infos =
+        bucket_infos_.at(ng_id);
+    ng_bucket_infos.clear();
     std::map<uint16_t, NodeGroupId> rand_num_to_ng;
     srand(seed);
     for (uint32_t ng = 0; ng < ng_cnt; ng++)
@@ -1552,7 +1594,7 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
     }
 
     std::unordered_map<NodeGroupId, uint16_t> ng_buckets;
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    // std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     // Insert bucket ids into the map.
     auto it = rand_num_to_ng.begin();
     for (uint16_t bucket_id = 0; bucket_id < total_range_buckets; bucket_id++)
@@ -1571,7 +1613,7 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
         auto res_pair = ng_buckets.try_emplace(ng_id, 0);
         res_pair.first->second++;
     }
-    bucket_infos_.try_emplace(ng_id, std::move(ng_bucket_infos));
+    // bucket_infos_.try_emplace(ng_id, std::move(ng_bucket_infos));
 }
 
 const BucketInfo *LocalCcShards::UploadNewBucketInfo(NodeGroupId ng_id,
@@ -3195,7 +3237,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         EnqueueToCcShard(worker_idx, &scan_cc);
         scan_cc.Wait();
 
-        if (scan_cc.IsError())
+        if (scan_cc.IsError() &&
+            scan_cc.ErrorCode() != CcErrorCode::LOG_NOT_TRUNCATABLE)
         {
             LOG(ERROR) << "DataSync scan failed on table "
                        << table_name.StringView() << " with error code: "
@@ -3211,6 +3254,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         }
         else
         {
+            if (scan_cc.ErrorCode() == CcErrorCode::LOG_NOT_TRUNCATABLE)
+            {
+                data_sync_task->status_->SetNoTruncateLog();
+            }
+
             scan_data_drained = true;
 
             // Send cache to target node group if needed.

@@ -560,10 +560,33 @@ public:
     const BucketInfo *GetBucketInfo(uint16_t bucket_id,
                                     NodeGroupId ng_id) const;
 
+    NodeGroupId GetBucketOwner(const uint16_t bucket_id,
+                               const NodeGroupId ng_id) const;
+
     const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
         *GetAllBucketInfos(NodeGroupId ng_id) const;
 
     const BucketInfo *GetRangeOwner(int32_t range_id, NodeGroupId ng_id) const;
+
+    void SetBucketMigrating(bool is_migrating);
+
+    bool IsBucketsMigrating();
+
+    uint32_t NakedBucketsRefCnt()
+    {
+        return tx_cnt_reading_naked_buckets_;
+    }
+
+    void IncrNakedBucketReader()
+    {
+        tx_cnt_reading_naked_buckets_++;
+    }
+
+    void DecrNakedBucketReader()
+    {
+        assert(tx_cnt_reading_naked_buckets_ > 0);
+        tx_cnt_reading_naked_buckets_--;
+    }
 
     /**
      * @brief Fetches the table's catalog from the data store and
@@ -858,6 +881,10 @@ private:
      *
      */
     uint64_t last_read_ts_{0};
+
+    // The number of active tx reading buckets without adding readlock on
+    // ccentry in RangeBucketCcMap.
+    uint32_t tx_cnt_reading_naked_buckets_{0};
 
     friend class LocalCcHandler;
     friend class LocalCcShards;

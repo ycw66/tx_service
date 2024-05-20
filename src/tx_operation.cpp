@@ -84,12 +84,16 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
     txm->StartTiming();
 }
 
-ReadOperation::ReadOperation(TransactionExecution *txm,
-                             CcHandlerResult<ReadKeyResult> *lock_range_result)
+ReadOperation::ReadOperation(
+    TransactionExecution *txm,
+    CcHandlerResult<ReadKeyResult> *lock_range_bucket_result)
     : hd_result_(txm)
 #ifdef RANGE_PARTITION_ENABLED
       ,
-      lock_range_result_(lock_range_result)
+      lock_range_result_(lock_range_bucket_result)
+#else
+      ,
+      lock_bucket_result_(lock_range_bucket_result)
 #endif
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
@@ -103,8 +107,13 @@ void ReadOperation::Reset()
 #ifdef RANGE_PARTITION_ENABLED
     lock_range_result_->Value().Reset();
     lock_range_result_->Reset();
+#else
+    lock_bucket_result_->Value().Reset();
+    lock_bucket_result_->Reset();
 #endif
     op_start_ = metrics::TimePoint::max();
+
+    is_running_ = false;
 }
 
 void ReadOperation::Forward(TransactionExecution *txm)
@@ -127,6 +136,24 @@ void ReadOperation::Forward(TransactionExecution *txm)
                 return;
             }
         }
+#else
+        if (!read_tx_req_->read_local_)
+        {
+            // Just returned from lock_bucket_op_, check lock_bucket_result_.
+            assert(lock_bucket_result_->IsFinished());
+            if (lock_bucket_result_->IsError())
+            {
+                // There is an error when getting the input key's bucket. The
+                // read operation is set to be errored.
+                hd_result_.SetError(lock_bucket_result_->ErrorCode());
+                hd_result_.ForceError();
+
+                txm->PostProcess(*this);
+                return;
+            }
+        }
+#endif
+
         // Need to make sure current node is still leader since we will visit
         // bucket meta data which is only valid if current node is still ng
         // leader.
@@ -137,7 +164,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
             return;
         }
-#endif
+
         txm->Process(*this);
         return;
     }
@@ -278,7 +305,8 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
             const auto &rset = txm->rw_set_.ReadSet();
             for (const auto &[table, tbl_rset] : rset)
             {
-                if (table.Type() == TableType::RangePartition &&
+                if ((table.Type() == TableType::RangePartition ||
+                     table.Type() == TableType::RangeBucket) &&
                     !tbl_rset.empty())
                 {
                     // Abort tx.
@@ -677,6 +705,91 @@ void LockWriteRangesOp::Advance(TransactionExecution *txm)
 #endif
 }
 #endif
+
+void LockWriteBucketsOp::Forward(TransactionExecution *txm)
+{
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+    else if (lock_bucket_result_->IsFinished())
+    {
+        // Make sure current node is still ng leader since we will visit
+        // bucket info meta data in post process which is only valid when
+        // current node is still ng leader.
+        if (!txm->CheckLeaderTerm())
+        {
+            lock_bucket_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            lock_bucket_result_->ForceError();
+            txm->PostProcess(*this);
+        }
+        else if (lock_bucket_result_->IsError())
+        {
+            assert(lock_bucket_result_->ErrorCode() ==
+                   CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
+            // If acquire bucket read lock blocked by DDL, check if tx has
+            // already acquired other bucket read lock. If so we need to abort
+            // tx since it might cause dead lock with bucket migration. If this
+            // tx has not acquired any buckets read lock, we can safely retry
+            // here.
+            const auto &rset = txm->rw_set_.ReadSet();
+            for (const auto &[table, tbl_rset] : rset)
+            {
+                if (table.Type() == TableType::RangeBucket && !tbl_rset.empty())
+                {
+                    // Abort tx.
+                    txm->PostProcess(*this);
+                    return;
+                }
+            }
+            lock_bucket_result_->Value().Reset();
+            lock_bucket_result_->Reset();
+            is_running_ = false;
+            execute_immediately_ = false;
+            txm->Process(*this);
+            return;
+        }
+        else
+        {
+            txm->PostProcess(*this);
+        }
+    }
+}
+
+// Check if the write key needs to be forward written.
+void LockWriteBucketsOp::Advance(TransactionExecution *txm,
+                                 const BucketInfo *bucket_info)
+{
+    assert(bucket_info != nullptr);
+    NodeGroupId bucket_ng = bucket_info->BucketOwner();
+    NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
+
+    // Updates the sharding codes of this key according to bucket info.
+    const TxKey &write_tx_key = write_key_it_->first;
+    size_t hash = write_tx_key.Hash();
+    WriteSetEntry &write_entry = write_key_it_->second;
+    write_entry.key_shard_code_ = (bucket_ng << 10) | (hash & 0x3FF);
+    // If current bucket is migrating, forward to new range owner.
+    if (new_bucket_ng != UINT32_MAX)
+    {
+        write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
+                                              (hash & 0x3FF));
+    }
+    txm->rw_set_.IncreaseFowardWriteCnt(1);
+    ++write_key_it_;
+
+    if (write_key_it_ == write_key_end_)
+    {
+        // Has acquired bucket locks for all write keys in the current table.
+        // Moves to the next table, if there are any.
+        ++table_it_;
+        if (table_it_ != table_end_)
+        {
+            write_key_it_ = table_it_->second.begin();
+            write_key_end_ = table_it_->second.end();
+        }
+    }
+}
 
 SetCommitTsOperation::SetCommitTsOperation(TransactionExecution *txm)
     : hd_result_(txm)
@@ -4636,7 +4749,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 LOG(ERROR) << "Split Flush transaction failed at post all "
                               "lock, tx_number:"
                            << txm->TxNumber() << ", err code "
-                           << (int) (post_all_lock_op_.hd_result_.ErrorCode())
+                           << static_cast<int>(
+                                  post_all_lock_op_.hd_result_.ErrorCode())
                            << ", msg "
                            << post_all_lock_op_.hd_result_.ErrorMsg();
 
@@ -5068,11 +5182,14 @@ void BroadcastStatisticsOp::Forward(TransactionExecution *txm)
 
 ObjectCommandOp::ObjectCommandOp(
     TransactionExecution *txm,
-    CcHandlerResult<ReadKeyResult> *lock_range_result)
+    CcHandlerResult<ReadKeyResult> *lock_range_bucket_result)
     : hd_result_(txm)
 #ifdef RANGE_PARTITION_ENABLED
       ,
-      lock_range_result_(lock_range_result)
+      lock_range_result_(lock_range_bucket_result)
+#else
+      ,
+      lock_bucket_result_(lock_range_bucket_result)
 #endif
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
@@ -5094,6 +5211,10 @@ void ObjectCommandOp::Reset(const TableName *table_name,
 #ifdef RANGE_PARTITION_ENABLED
     lock_range_result_->Value().Reset();
     lock_range_result_->Reset();
+#else
+    lock_bucket_result_->Value().Reset();
+    lock_bucket_result_->Reset();
+    forward_key_shard_ = UINT32_MAX;
 #endif
 }
 
@@ -5126,6 +5247,32 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
             return;
         }
+#else
+        // Just returned from lock_bucket_op_, check lock_bucket_result_.
+        assert(lock_bucket_result_->IsFinished());
+        if (lock_bucket_result_->IsError())
+        {
+            // There is an error when getting the input key's bucket. The
+            // read operation is set to be errored.
+            hd_result_.SetError(lock_bucket_result_->ErrorCode());
+
+            bool force_error = hd_result_.ForceError();
+            assert(force_error);
+
+            txm->PostProcess(*this);
+            return;
+        }
+        // Need to make sure current node is still leader since we will visit
+        // bucket meta data which is only valid if current node is still ng
+        // leader.
+        if (!txm->CheckLeaderTerm())
+        {
+            hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            hd_result_.ForceError();
+            txm->PostProcess(*this);
+            return;
+        }
+
 #endif
         txm->Process(*this);
     }
@@ -5216,11 +5363,14 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
 
 MultiObjectCommandOp::MultiObjectCommandOp(
     TransactionExecution *txm,
-    CcHandlerResult<ReadKeyResult> *lock_range_result)
+    CcHandlerResult<ReadKeyResult> *lock_range_bucket_result)
     : txm_(txm)
 #ifdef RANGE_PARTITION_ENABLED
       ,
-      lock_range_result_(lock_range_result)
+      lock_range_result_(lock_range_bucket_result)
+#else
+      ,
+      lock_bucket_result_(lock_range_bucket_result)
 #endif
 {
 }
@@ -5284,6 +5434,12 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
     range_lock_cur_ = 0;
     lock_range_result_->Value().Reset();
     lock_range_result_->Reset();
+#else
+    vct_key_shard_code_.clear();
+    vct_key_shard_code_.resize(len);
+    bucket_lock_cur_ = 0;
+    lock_bucket_result_->Reset();
+    lock_bucket_result_->Value().Reset();
 #endif
 }
 
@@ -5335,8 +5491,27 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             txm->Process(*this);
         }
 #else
-        txm->Process(*this);
+        // Just returned from lock_bucket_op_, check lock_bucket_result_.
+        assert(lock_bucket_result_->IsFinished());
+        if (lock_bucket_result_->IsError())
+        {
+            // There is an error when getting the input key's bucket. The
+            // operation is set to be errored.
+            txm->PostProcess(*this);
+            return;
+        }
+        // Need to make sure current node is still leader since we will visit
+        // bucket meta data which is only valid if current node is still ng
+        // leader.
+        if (!txm->CheckLeaderTerm())
+        {
+            atm_err_code_.store(CcErrorCode::TX_NODE_NOT_LEADER,
+                                std::memory_order_relaxed);
+            txm->PostProcess(*this);
+            return;
+        }
 #endif
+        txm->Process(*this);
         return;
     }
 
@@ -5395,6 +5570,127 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
     }
 }
 
+CmdForwardAcquireWriteOp::CmdForwardAcquireWriteOp(TransactionExecution *txm)
+    : hd_result_(txm), txm_(txm)
+{
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void CmdForwardAcquireWriteOp::Reset(size_t acquire_write_cnt)
+{
+    hd_result_.Reset();
+    hd_result_.SetRefCnt(acquire_write_cnt);
+
+    std::vector<AcquireKeyResult> &acquire_key_vec = hd_result_.Value();
+    size_t old_size = acquire_key_vec.size();
+    acquire_key_vec.resize(acquire_write_cnt);
+    for (size_t idx = old_size; idx < acquire_write_cnt; ++idx)
+    {
+        acquire_key_vec[idx].remote_ack_cnt_ = &remote_ack_cnt_;
+    }
+
+    remote_ack_cnt_.store(0, std::memory_order_relaxed);
+    acquire_write_entries_.resize(acquire_write_cnt);
+
+    op_start_ = metrics::TimePoint::max();
+}
+
+void CmdForwardAcquireWriteOp::Reset()
+{
+    std::vector<AcquireKeyResult> &acquire_key_vec = hd_result_.Value();
+    if (acquire_key_vec.capacity() > 16)
+    {
+        acquire_key_vec.resize(16);
+        acquire_key_vec.shrink_to_fit();
+    }
+    op_start_ = metrics::TimePoint::max();
+}
+
+void CmdForwardAcquireWriteOp::AggregateAcquiredKeys(TransactionExecution *txm)
+{
+    std::vector<AcquireKeyResult> &acquire_key_vec = hd_result_.Value();
+    size_t res_idx = 0;
+    for (CmdForwardEntry *forward_entry : acquire_write_entries_)
+    {
+        AcquireKeyResult &acquire_key_res = acquire_key_vec[res_idx++];
+        CcEntryAddr &addr = acquire_key_res.cce_addr_;
+
+        int64_t term = addr.Term();
+        if (term < 0)
+        {
+            forward_entry->cce_addr_.SetCce(0, -1, 0);
+        }
+        else
+        {
+            assert(forward_entry->cce_addr_.Empty());
+            forward_entry->cce_addr_ = addr;
+            txm_->rw_set_.IncreaseObjectCntWithWriteLock();
+        }
+    }
+}
+
+void CmdForwardAcquireWriteOp::Forward(TransactionExecution *txm)
+{
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+        {
+            Sharder::Instance().UpdateLeaders();
+            if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+        AggregateAcquiredKeys(txm);
+        txm->PostProcess(*this);
+    }
+    else
+    {
+        bool timeout = false;
+        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+        {
+            timeout = true;
+        }
+
+        if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 && timeout)
+        {
+            bool success = hd_result_.ForceError();
+            if (success)
+            {
+                AggregateAcquiredKeys(txm);
+                txm->PostProcess(*this);
+            }
+        }
+        else if (timeout)
+        {
+            std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
+            for (size_t i = 0; i < vct_akr.size(); i++)
+            {
+                AcquireKeyResult &akr = vct_akr[i];
+
+                if (akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
+                {
+                    txm->cc_handler_->BlockCcReqCheck(
+                        txm->TxNumber(),
+                        txm->TxTerm(),
+                        txm->CommandId(),
+                        akr.cce_addr_,
+                        &hd_result_,
+                        ResultTemplateType::AcquireKeyResult);
+                }
+            }
+        }
+    }
+}
+
 ClusterScaleOp::ClusterScaleOp(
     const std::string &id,
     ClusterScaleOpType event_type,
@@ -5409,6 +5705,10 @@ ClusterScaleOp::ClusterScaleOp(
       notify_migration_op_(txm),
       check_migration_is_finished_op_(txm),
       clean_log_op_(txm),
+#ifndef RANGE_PARTITION_ENABLED
+      pub_buckets_migrate_begin_op_(txm),
+      pub_buckets_migrate_end_op_(txm),
+#endif
       id_(id),
       event_type_(event_type),
       new_ng_config_(std::move(new_ng_config)),
@@ -5465,6 +5765,13 @@ void ClusterScaleOp::Reset(
 
     clean_log_op_.Reset();
     clean_log_op_.ResetHandlerTxm(txm);
+
+#ifndef RANGE_PARTITION_ENABLED
+    pub_buckets_migrate_begin_op_.Reset();
+    pub_buckets_migrate_begin_op_.ResetHandlerTxm(txm);
+    pub_buckets_migrate_end_op_.Reset();
+    pub_buckets_migrate_end_op_.ResetHandlerTxm(txm);
+#endif
 
     assert(bucket_migrate_infos_.empty());
 
@@ -5581,6 +5888,80 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                                           .newest_cluster_scale_txn());
         }
 
+#ifdef RANGE_PARTITION_ENABLED
+        if (event_type_ == ClusterScaleOpType::AddNode)
+        {
+            // If we're adding new nodes, add new nodes into cluster
+            // before migrating data
+            LOG(INFO) << "Cluster scale transaction acquire write lock on all "
+                         "nodes, txn "
+                      << txm->TxNumber();
+            ForwardToSubOperation(txm, &acquire_cluster_config_write_op_);
+        }
+        else
+        {
+            // For remove nodes, just start migration right away. We will
+            // update cluster config and remove nodes when migration is
+            // done.
+
+            notify_migration_op_.migrate_plans_ = bucket_migrate_infos_;
+
+            LOG(INFO)
+                << "Cluster scale transaction notify data migration, txn: "
+                << txm->TxNumber();
+            ForwardToSubOperation(txm, &notify_migration_op_);
+        }
+#else
+        pub_buckets_migrate_begin_op_.op_func_ =
+            [&hd_res = pub_buckets_migrate_begin_op_.hd_result_,
+             &worker = pub_buckets_migrate_begin_op_.worker_thread_]
+        {
+            worker = std::thread(
+                [&hd_res]
+                {
+                    bool result = true;
+                    bool rpc_fail = false;
+                    ClusterScaleOp::SendBucketsMigratingRpc(
+                        true, result, rpc_fail);
+
+                    if (!rpc_fail && result)
+                    {
+                        hd_res.SetFinished();
+                    }
+                    else
+                    {
+                        // only for retry.
+                        hd_res.SetError(CcErrorCode::UNDEFINED_ERR);
+                    }
+                });
+        };
+
+        LOG(INFO) << "Cluster scale transaction publish "
+                     "bucket_migrating_begin to all node groups ,txn: "
+                  << txm->TxNumber();
+        ForwardToSubOperation(txm, &pub_buckets_migrate_begin_op_);
+#endif
+    }
+#ifndef RANGE_PARTITION_ENABLED
+    else if (op_ == &pub_buckets_migrate_begin_op_)
+    {
+        if (!txm->CheckLeaderTerm())
+        {
+            ForceToFinish(txm);
+            return;
+        }
+
+        if (pub_buckets_migrate_begin_op_.hd_result_.IsError())
+        {
+            LOG(ERROR) << "Cluster scale transaction failed to execute "
+                          "pub_buckets_migrate_begin_op_ , tx_number:"
+                       << txm->TxNumber();
+
+            // Retry until succeed.
+            RetrySubOperation(txm, &pub_buckets_migrate_begin_op_);
+            return;
+        }
+
         if (event_type_ == ClusterScaleOpType::AddNode)
         {
             // If we're adding new nodes, add new nodes into cluster
@@ -5604,6 +5985,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &notify_migration_op_);
         }
     }
+#endif
     else if (op_ == &acquire_cluster_config_write_op_)
     {
         if (!txm->CheckLeaderTerm())
@@ -5764,10 +6146,43 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         {
             LOG(INFO) << "Cluster scale transaction write clean log, txn "
                       << txm->TxNumber();
-            // Now the deleted nodes are removed from cluster. We can not
+            // Now the deleted nodes are removed from cluster. We can
             // write clean log and finish the tx.
+#ifdef RANGE_PARTITION_ENABLED
             FillCleanLogRequest(txm);
             ForwardToSubOperation(txm, &clean_log_op_);
+#else
+            // Before writing clean log, we notify all nodes set
+            // "LocalCcShards::buckets_migrating_" to false.
+            pub_buckets_migrate_end_op_.op_func_ =
+                [&hd_res = pub_buckets_migrate_end_op_.hd_result_,
+                 &worker = pub_buckets_migrate_end_op_.worker_thread_]
+            {
+                worker = std::thread(
+                    [&hd_res]
+                    {
+                        bool result = true;
+                        bool rpc_fail = false;
+                        ClusterScaleOp::SendBucketsMigratingRpc(
+                            false, result, rpc_fail);
+
+                        if (!rpc_fail && result)
+                        {
+                            hd_res.SetFinished();
+                        }
+                        else
+                        {
+                            // only for retry.
+                            hd_res.SetError(CcErrorCode::UNDEFINED_ERR);
+                        }
+                    });
+            };
+
+            LOG(INFO) << "Cluster scale transaction publish "
+                         "bucket_migrating_end to all node groups ,txn: "
+                      << txm->TxNumber();
+            ForwardToSubOperation(txm, &pub_buckets_migrate_end_op_);
+#endif
         }
     }
     else if (op_ == &notify_migration_op_)
@@ -5820,11 +6235,42 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
 
         if (event_type_ == ClusterScaleOpType::AddNode)
         {
+#ifdef RANGE_PARTITION_ENABLED
             LOG(INFO) << "Cluster scale transaction write clean log, txn: "
                       << txm->TxNumber() << ", tx_term: " << txm->TxTerm()
                       << ", tx_ng_id: " << txm->TxCcNodeId();
             FillCleanLogRequest(txm);
             ForwardToSubOperation(txm, &clean_log_op_);
+#else
+            pub_buckets_migrate_end_op_.op_func_ =
+                [&hd_res = pub_buckets_migrate_end_op_.hd_result_,
+                 &worker = pub_buckets_migrate_end_op_.worker_thread_]
+            {
+                worker = std::thread(
+                    [&hd_res]
+                    {
+                        bool result = true;
+                        bool rpc_fail = false;
+                        ClusterScaleOp::SendBucketsMigratingRpc(
+                            false, result, rpc_fail);
+
+                        if (!rpc_fail && result)
+                        {
+                            hd_res.SetFinished();
+                        }
+                        else
+                        {
+                            // only for retry.
+                            hd_res.SetError(CcErrorCode::UNDEFINED_ERR);
+                        }
+                    });
+            };
+
+            LOG(INFO) << "Cluster scale transaction publish "
+                         "bucket_migrating_end to all node groups ,txn: "
+                      << txm->TxNumber();
+            ForwardToSubOperation(txm, &pub_buckets_migrate_end_op_);
+#endif
         }
         else
         {
@@ -5836,6 +6282,30 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &acquire_cluster_config_write_op_);
         }
     }
+#ifndef RANGE_PARTITION_ENABLED
+    else if (op_ == &pub_buckets_migrate_end_op_)
+    {
+        if (!txm->CheckLeaderTerm())
+        {
+            ForceToFinish(txm);
+            return;
+        }
+
+        if (pub_buckets_migrate_end_op_.hd_result_.IsError())
+        {
+            LOG(ERROR) << "Cluster scale transaction failed to execute "
+                          "pub_buckets_migrate_end_op_ , tx_number:"
+                       << txm->TxNumber();
+
+            // Retry until succeed.
+            RetrySubOperation(txm, &pub_buckets_migrate_end_op_);
+            return;
+        }
+
+        FillCleanLogRequest(txm);
+        ForwardToSubOperation(txm, &clean_log_op_);
+    }
+#endif
     else if (op_ == &clean_log_op_)
     {
         if (clean_log_op_.hd_result_.IsError() && txm->CheckLeaderTerm())
@@ -6011,6 +6481,67 @@ void ClusterScaleOp::FillCleanLogRequest(TransactionExecution *txm)
     cluster_scale_msg->set_stage(::txlog::ClusterScaleStage::CleanScale);
     log_rec->mutable_node_terms()->clear();
 }
+
+#ifndef RANGE_PARTITION_ENABLED
+void ClusterScaleOp::SendBucketsMigratingRpc(bool is_migrating,
+                                             bool &result,
+                                             bool &rpc_error)
+{
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    std::vector<remote::PubBucketsMigratingRequest> req_vec;
+    std::vector<remote::PubBucketsMigratingResponse> resp_vec;
+    std::vector<std::unique_ptr<brpc::Controller>> cntl_vec;
+    req_vec.resize(ng_cnt);
+    resp_vec.resize(ng_cnt);
+    cntl_vec.resize(ng_cnt);
+    //  rpc to all nodes
+    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    {
+        uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+
+        std::shared_ptr<brpc::Channel> channel =
+            Sharder::Instance().GetCcNodeServiceChannel(dest_node_id);
+
+        assert(channel != nullptr);
+        remote::CcRpcService_Stub stub(channel.get());
+
+        auto &req = req_vec.at(ng_id);
+        req.set_node_group_id(ng_id);
+        req.set_is_migrating(is_migrating);
+
+        auto &resp = resp_vec.at(ng_id);
+        cntl_vec[ng_id] = std::make_unique<brpc::Controller>();
+        cntl_vec[ng_id]->set_timeout_ms(5000);
+        cntl_vec[ng_id]->set_max_retry(3);
+        stub.PublishBucketsMigrating(
+            cntl_vec[ng_id].get(), &req, &resp, brpc::DoNothing());
+    }
+
+    for (auto &cntl : cntl_vec)
+    {
+        brpc::Join(cntl->call_id());
+    }
+
+    result = true;
+    rpc_error = false;
+    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    {
+        if (cntl_vec.at(ng_id)->Failed())
+        {
+            LOG(INFO) << "SendBucketsMigratingRpc rpc call error, ng#" << ng_id;
+            rpc_error = true;
+        }
+        else if (!resp_vec.at(ng_id).success())
+        {
+            LOG(INFO) << "SendBucketsMigratingRpc failed, ng#" << ng_id;
+            result = false;
+        }
+    }
+    DLOG(INFO) << "SendBucketsMigratingRpc ,ng_cnt:" << ng_cnt
+               << ",res:" << static_cast<int>(result)
+               << ",rpcfailed:" << static_cast<int>(rpc_error);
+}
+#endif
 
 CheckMigrationIsFinishedOp::CheckMigrationIsFinishedOp(
     TransactionExecution *txm)
@@ -6221,8 +6752,8 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                     init_req.protocol_ = CcProtocol::Locking;
                     // Set tx node group id
                     init_req.tx_ng_id_ = old_owner_id;
-                    // Set log node group id to ensure the log will be write to
-                    // special location.
+                    // Set log node group id to ensure the log will be write
+                    // to special location.
                     init_req.log_group_id_ = cluster_scale_tx_log_ng_id;
 
                     init_req.Reset();
@@ -6251,11 +6782,12 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                         std::move(bucket_ids_per_task),
                         std::move(new_owner_ngs_per_task),
                         std::move(txns));
-                // All worker txs has been started, now write the first prepare
-                // log, the first tx will write a prepare log that marks the
-                // node group migration process has been started. The log
-                // contains all of the worker txns, so once this log is written,
-                // the migration of this node gorup is always going to succeed.
+                // All worker txs has been started, now write the first
+                // prepare log, the first tx will write a prepare log that
+                // marks the node group migration process has been started.
+                // The log contains all of the worker txns, so once this log
+                // is written, the migration of this node gorup is always
+                // going to succeed.
                 DataMigrationTxRequest migrate_req(status);
                 txms[0]->Execute(&migrate_req);
                 migrate_req.Wait();
@@ -6267,8 +6799,8 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                               << old_owner_id;
                     for (size_t i = 1; i < txms.size(); i++)
                     {
-                        // If the log is successfully written, start the rest of
-                        // the workers.
+                        // If the log is successfully written, start the
+                        // rest of the workers.
                         DataMigrationTxRequest migrate_req(status);
                         txms[i]->Execute(&migrate_req);
                         migrate_req.Wait();
@@ -6491,13 +7023,14 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
     if (txm->TxStatus() == TxnStatus::Recovering &&
         Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
     {
-        // This is a recovered tx and replay is not done yet. We should wait for
-        // replay finish before forwarding tx machine.
+        // This is a recovered tx and replay is not done yet. We should wait
+        // for replay finish before forwarding tx machine.
         if (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
             txm->TxTerm())
         {
-            // Recovered term is invalid. Do not call ForceToFinish as it will
-            // cause infinite recursive call. Clean up tx state directly.
+            // Recovered term is invalid. Do not call ForceToFinish as it
+            // will cause infinite recursive call. Clean up tx state
+            // directly.
             Clear();
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
@@ -6522,8 +7055,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             if (status_->unfinished_worker_.fetch_sub(
                     1, std::memory_order_release) == 1)
             {
-                // Last worker quit should write last clean log that marks the
-                // node group migration has been finished.
+                // Last worker quit should write last clean log that marks
+                // the node group migration has been finished.
                 LOG(INFO) << "Data migration: write last clean log"
                           << ", tx number: " << txm->TxNumber();
                 FillLastLogRequest(txm);
@@ -6613,9 +7146,10 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             else if (prepare_log_op_err_code ==
                      CcErrorCode::DUPLICATE_MIGRATION_TX_ERR)
             {
-                // This migration transaction is duplicated. There is another
-                // transaction doing the data migration. We need to abort this
-                // migration tx. But we can mark the migration tx as started.
+                // This migration transaction is duplicated. There is
+                // another transaction doing the data migration. We need to
+                // abort this migration tx. But we can mark the migration tx
+                // as started.
                 LOG(WARNING)
                     << "Data migration: duplicate migration tx detected, "
                        "cluster_scale_txn: "
@@ -6673,11 +7207,18 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &write_before_locking_log_op_);
             return;
         }
-
+#ifdef RANGE_PARTITION_ENABLED
         if (migrate_bucket_idx_ == 20)
         {
             ACTION_FAULT_INJECTOR("data_migrate_before_prepare_log");
         }
+#else
+        if (migrate_bucket_idx_ == 0)
+        {
+            ACTION_FAULT_INJECTOR("data_migrate_before_prepare_log");
+        }
+#endif
+
         LOG(INFO) << "Data migration: prepare bucket lock"
                   << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &prepare_bucket_lock_op_);
@@ -6828,6 +7369,10 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &install_dirty_bucket_op_);
             return;
         }
+
+        CODE_FAULT_INJECTOR("data_migration_install_dirty_continue",
+                            { return; });
+
         LOG(INFO) << "Data migration: flush data in bucket"
                   << ", txn: " << txm->TxNumber();
 
@@ -6949,10 +7494,10 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        // Remove all data in this bucket. We need to retake another snapshot of
-        // ranges in bucket here since new data could be inserted into this
-        // bucket since when we took the first snapshot in the first phase of
-        // commit.
+        // Remove all data in this bucket. We need to retake another
+        // snapshot of ranges in bucket here since new data could be
+        // inserted into this bucket since when we took the first snapshot
+        // in the first phase of commit.
         for (size_t i = 0; i < status_->bucket_ids_[migrate_bucket_idx_].size();
              i++)
         {
@@ -7090,8 +7635,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         }
 
 #else
-        //  For hash partition, send kickout cc to each cc map to kickout data
-        //  in this bucket.
+        //  For hash partition, send kickout cc to each cc map to kickout
+        //  data in this bucket.
         table_snapshot_ =
             Sharder::Instance().GetLocalCcShards()->GetCatalogTableNameSnapshot(
                 txm->TxCcNodeId(), txm->CommitTs());
@@ -7182,8 +7727,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
             table_exist = range_keys.has_value();
 
-            // Table has been dropped. So we don't need to kickout data on this
-            // table
+            // Table has been dropped. So we don't need to kickout data on
+            // this table
             if (!table_exist)
             {
                 // Move to next table
@@ -7531,17 +8076,17 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
         else if (!txm->CheckLeaderTerm())
         {
             // If the current node is not the leader of the node group, the
-            // range and bucket info returned by the lock-range request should
-            // not be accessed. Hence, the lock range result is reset to be
-            // errored.
+            // range and bucket info returned by the lock-range request
+            // should not be accessed. Hence, the lock range result is reset
+            // to be errored.
             lock_range_result_->Reset();
             lock_range_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             txm->PostProcess(*this);
         }
         else if (lock_it_ != read_batch.end())
         {
-            // A range has been locked. Assigns the range's node group to all
-            // keys belonging to this range.
+            // A range has been locked. Assigns the range's node group to
+            // all keys belonging to this range.
             const RangeRecord *range_rec =
                 static_cast<RangeRecord *>(lock_range_result_->Value().rec_);
             TxKey range_end_key = range_rec->GetRangeInfo()->EndTxKey();
@@ -7661,9 +8206,10 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
         if (IsFinished())
         {
             // All read requests have finished, after forcing unresponsive
-            // remote requests to finish with errors. Advances the command so
-            // that the tx is forwarded again on the batch read operation, which
-            // determines whether to retry or to finish the operation.
+            // remote requests to finish with errors. Advances the command
+            // so that the tx is forwarded again on the batch read
+            // operation, which determines whether to retry or to finish the
+            // operation.
             txm->AdvanceCommand();
         }
         else

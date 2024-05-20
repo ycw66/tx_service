@@ -420,6 +420,8 @@ public:
             // Object exists and proceeds
             else if (req.Isolation() == IsolationLevel::ReadCommitted)
             {
+                assert(cce->PayloadStatus() == RecordStatus::Normal);
+                assert(cce->payload_ != nullptr);
                 ValueT &object = *cce->payload_;
                 cmd->ExecuteOn(object);
                 obj_result.rec_status_ = cce->PayloadStatus();
@@ -817,11 +819,10 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        // TODO(liunyl)
-        // if (!shard_->DuringClusterScale())
-        // {
-        //     req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        // }
+        if (!shard_->IsBucketsMigrating())
+        {
+            req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        }
         auto entry_tuples = req.EntryTuple();
         size_t batch_size = req.BatchSize();
 
@@ -1009,6 +1010,87 @@ public:
         return req.SetFinish();
     }
 
+    bool Execute(UploadTxCommandsCc &req)
+    {
+        TxNumber txn = req.Txn();
+        uint64_t obj_version = req.ObjectVersion();
+        uint64_t commit_ts = req.CommitTs();
+        bool has_overwrite = req.HasOverWrite();
+        const std::vector<std::string> *cmd_str_list = req.CommandList();
+
+        const CcEntryAddr *cce_addr = req.CceAddr();
+
+        CcEntry<KeyT, ValueT> *cce =
+            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr->CcePtr());
+
+        // check that this txn is lock owner
+        NonBlockingLock *lk = cce->GetKeyLock();
+        if (lk == nullptr || !lk->HasWriteLock() || lk->WriteLockTx() != txn)
+        {
+            assert(false);
+            req.Result()->SetFinished();
+            return true;
+        }
+
+        if (commit_ts > 0)
+        {
+            DLOG(INFO) << "---UploadTxCommandsCc";
+            CcPage<KeyT, ValueT> *ccp =
+                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+
+            std::vector<std::unique_ptr<TxCommand>> cmd_list;
+            cmd_list.reserve(cmd_str_list->size());
+            for (const std::string &cmd_str : *cmd_str_list)
+            {
+                std::unique_ptr<TxCommand> tx_cmd = CreateTxCommand(cmd_str);
+                cmd_list.emplace_back(std::move(tx_cmd));
+            }
+
+            TxnCmd txn_cmd(
+                obj_version, commit_ts, has_overwrite, std::move(cmd_list));
+
+            std::unique_ptr<ReplayTxnCmdList> replay_cmd_list =
+                cce->ReplayCommandList();
+
+            // Emplace txn_cmd and try to commit all pending commands.
+            uint64_t commit_version = cce->CommitTs();
+            RecordStatus payload_status = cce->PayloadStatus();
+            EmplaceAndCommitReplayTxnCommand(cce->payload_,
+                                             replay_cmd_list,
+                                             txn_cmd,
+                                             commit_version,
+                                             payload_status);
+            cce->SetCommitTsPayloadStatus(commit_version, payload_status);
+
+            if (replay_cmd_list != nullptr)
+            {
+                // Passes the replay command list back to the cc entry.
+                cce->SetReplayCommandList(std::move(replay_cmd_list));
+            }
+            // if replay_cmd_list is null, key_lock_extra_data will be recycled
+            // when release lock.
+
+            // Must update dirty_commit_ts. Otherwise, this entry may be
+            // skipped by checkpointer.
+            if (commit_ts > last_dirty_commit_ts_)
+            {
+                last_dirty_commit_ts_ = commit_ts;
+            }
+            if (commit_ts > last_dirty_commit_ts_)
+            {
+                last_dirty_commit_ts_ = commit_ts;
+            }
+            if (commit_ts > ccp->last_dirty_commit_ts_)
+            {
+                ccp->last_dirty_commit_ts_ = commit_ts;
+            }
+        }
+
+        ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
+        req.Result()->SetFinished();
+        return true;
+    }
+
     bool Execute(ReplayLogCc &req)
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1055,7 +1137,18 @@ public:
             const uint32_t cmds_len = *reinterpret_cast<decltype(cmds_len) *>(
                 log_blob.data() + offset);
             offset += sizeof(cmds_len);
-            uint16_t core_id = (key.Hash() & 0x3FF) % shard_->core_cnt_;
+
+            // If key not belongs to current ng, skip it.
+            uint64_t key_hash = key.Hash();
+            uint16_t bucket_id =
+                Sharder::Instance().MapKeyHashToBucketId(key_hash);
+            if (shard_->GetBucketOwner(bucket_id, cc_ng_id_) != cc_ng_id_)
+            {
+                offset += cmds_len;
+                continue;
+            }
+
+            uint16_t core_id = (key_hash & 0x3FF) % shard_->core_cnt_;
             if (core_id != shard_->core_id_)
             {
                 // Skips the key in the log record that is not sharded to this

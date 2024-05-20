@@ -1708,6 +1708,62 @@ void txservice::LocalCcHandler::ObjectCommand(
     }
 }
 
+void txservice::LocalCcHandler::UploadTxCommands(
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    const CcEntryAddr &cce_addr,
+    uint64_t obj_version,
+    uint64_t commit_ts,
+    const std::vector<std::string> *cmd_list,
+    bool has_overwrite,
+    CcHandlerResult<PostProcessResult> &hres)
+{
+    uint32_t ng_id = cce_addr.NodeGroupId();
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
+    if (dest_node_id == cc_shards_.node_id_)
+    {
+        if (!Sharder::Instance().CheckLeaderTerm(ng_id, cce_addr.Term()))
+        {
+            // Term mismatch means this PostWrite is failovered to the current
+            // node, and locks are already lost during failover hence no need to
+            // release the lock again.
+            hres.SetFinished();
+            return;
+        }
+
+        UploadTxCommandsCc *req = cmd_commit_pool.NextRequest();
+        req->Reset(&cce_addr,
+                   tx_number,
+                   tx_term,
+                   obj_version,
+                   commit_ts,
+                   cmd_list,
+                   has_overwrite,
+                   &hres);
+        cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
+    }
+    else
+    {
+        hres.Value().is_local_ = false;
+        hres.IncrementRemoteRef();
+        remote_hd_.UploadTxCommands(cc_shards_.node_id_,
+                                    tx_number,
+                                    tx_term,
+                                    command_id,
+                                    cce_addr,
+                                    obj_version,
+                                    commit_ts,
+                                    cmd_list,
+                                    has_overwrite,
+                                    hres);
+    }
+}
+
 void txservice::LocalCcHandler::PublishMessage(uint64_t ng_id,
                                                int64_t tx_term,
                                                std::string_view chan,

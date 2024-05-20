@@ -156,7 +156,7 @@ struct RangeBucketKey
 {
 public:
     RangeBucketKey() = default;
-    RangeBucketKey(const int16_t bucket_id) : bucket_id_(bucket_id)
+    RangeBucketKey(const uint16_t bucket_id) : bucket_id_(bucket_id)
     {
     }
     RangeBucketKey(RangeBucketKey &&rhs) = default;
@@ -209,6 +209,16 @@ public:
     {
         static const RangeBucketKey pos_inf;
         return &pos_inf;
+    }
+
+    uint16_t BucketId() const
+    {
+        return bucket_id_;
+    }
+
+    void Reset(const uint16_t bucket_id)
+    {
+        bucket_id_ = bucket_id;
     }
 
     friend bool operator==(const RangeBucketKey &lhs,

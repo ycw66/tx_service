@@ -55,7 +55,11 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       lock_range_result_(this),
       read_(this, &lock_range_result_),
 #else
-      read_(this),
+      lock_bucket_op_(),
+      bucket_key_(),
+      bucket_tx_key_(&bucket_key_),
+      lock_bucket_result_(this),
+      read_(this, &lock_bucket_result_),
 #endif
       scan_open_(this),
       scan_next_(this),
@@ -63,11 +67,14 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       obj_cmd_(this, &lock_range_result_),
       multi_obj_cmd_(this, &lock_range_result_),
 #else
-      obj_cmd_(this),
-      multi_obj_cmd_(this),
+      obj_cmd_(this, &lock_bucket_result_),
+      multi_obj_cmd_(this, &lock_bucket_result_),
 #endif
 #ifdef RANGE_PARTITION_ENABLED
       lock_write_ranges_(&lock_range_result_),
+#else
+      lock_write_buckets_(&lock_bucket_result_),
+      cmd_forward_write_(this),
 #endif
       acquire_write_(this),
       set_ts_(this),
@@ -142,6 +149,10 @@ void TransactionExecution::Reset()
         tx_req_queue_.Reset();
         req_queue_lock_.Unlock();
     }
+
+#ifndef RANGE_PARTITION_ENABLED
+    ClearCachedBucketInfos();
+#endif
 }
 
 void TransactionExecution::Restart(CcHandler *handler,
@@ -219,6 +230,48 @@ void TransactionExecution::ExternalForward()
         {
             tx_processor_->EnlistTx(this);
         }
+    }
+}
+#endif
+
+#ifndef RANGE_PARTITION_ENABLED
+const BucketInfo *TransactionExecution::FastToGetBucket(uint32_t bucket_id)
+{
+    auto bucket_it = locked_buckets_.find(bucket_id);
+    if (bucket_it != locked_buckets_.end())
+    {
+        return bucket_it->second;
+    }
+
+    if (all_bucket_infos_ != nullptr)
+    {
+        return all_bucket_infos_->at(bucket_id).get();
+    }
+    else
+    {
+        CcShard &ccs =
+            *tx_processor_->local_cc_shards_.GetCcShard(tx_processor_->thd_id_);
+        if (!ccs.IsBucketsMigrating())
+        {
+            all_bucket_infos_ = ccs.GetAllBucketInfos(TxCcNodeId());
+            assert(all_bucket_infos_ != nullptr);
+            ccs.IncrNakedBucketReader();
+            return all_bucket_infos_->at(bucket_id).get();
+        }
+    }
+
+    return nullptr;
+}
+
+void TransactionExecution::ClearCachedBucketInfos()
+{
+    locked_buckets_.clear();
+    if (all_bucket_infos_ != nullptr)
+    {
+        CcShard &ccs =
+            *tx_processor_->local_cc_shards_.GetCcShard(tx_processor_->thd_id_);
+        ccs.DecrNakedBucketReader();
+        all_bucket_infos_ = nullptr;
     }
 }
 #endif
@@ -1582,7 +1635,60 @@ void TransactionExecution::Process(ReadOperation &read)
                 key_shard_code = range_ng << 10 | residual;
             }
 #else
-            key_shard_code = Sharder::Instance().ShardCode(key.Hash());
+            // Find bucket info from cache for get key node group.
+            uint64_t key_hash = key.Hash();
+            uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
+            const BucketInfo *bucket_info = FastToGetBucket(bucket_id);
+            if (bucket_info != nullptr)
+            {
+                // Uses the lower 10 bits of the key's hash code to shard the
+                // key across CPU cores in a cc node.
+                uint32_t residual = key_hash & 0x3FF;
+                NodeGroupId bucket_ng = bucket_info->BucketOwner();
+                key_shard_code = bucket_ng << 10 | residual;
+            }
+            else if (!lock_bucket_result_.IsFinished())
+            {
+                read.is_running_ = false;
+                // First read and lock the bucket the key located in through
+                // lock_bucket_op_.
+                lock_bucket_result_.Value().Reset();
+                lock_bucket_result_.Reset();
+                bucket_key_.Reset(bucket_id);
+                // "bucket_tx_key_" has been set point to bucket_key_
+                lock_bucket_op_.Reset(TableName(range_bucket_ccm_name_sv.data(),
+                                                range_bucket_ccm_name_sv.size(),
+                                                TableType::RangeBucket),
+                                      &bucket_tx_key_,
+                                      &bucket_rec_,
+                                      &lock_bucket_result_);
+
+                // Control flow jumps to lock_bucket_op_, do not execute further
+                // after `Process(lock_bucket_op_)` returns.
+                PushOperation(&lock_bucket_op_);
+                Process(lock_bucket_op_);
+                return;
+            }
+            else  // lock bucket finished and succeeded
+            {
+                // If there is an error when getting the key's bucket info, the
+                // error would be caught when forwarding the read operation,
+                // which forces the tx state machine moves to post-processing of
+                // the read operation and returns an error to the tx read
+                // request.
+                assert(!lock_bucket_result_.IsError());
+
+                const BucketInfo *bucket_info = bucket_rec_.GetBucketInfo();
+                // Cache the locked bucket info for read directly at next.
+                uint16_t bucket_id = bucket_key_.BucketId();
+                locked_buckets_.emplace(bucket_id, bucket_info);
+
+                // Uses the lower 10 bits of the key's hash code to shard the
+                // key across CPU cores in a cc node.
+                uint32_t residual = key.Hash() & 0x3FF;
+                NodeGroupId bucket_ng = bucket_info->BucketOwner();
+                key_shard_code = bucket_ng << 10 | residual;
+            }
 #endif
 
             // Step 3: do read.
@@ -1722,6 +1828,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
             read.read_type_ == ReadType::OutsideNormal)
         {
             rec_resp_->Finish(read_res.rec_status_);
+            rec_resp_ = nullptr;
             return;
         }
 
@@ -3004,6 +3111,17 @@ void TransactionExecution::Commit()
     {
         tx_status_.store(TxnStatus::Committing, std::memory_order_relaxed);
     }
+
+#ifdef ON_KEY_OBJECT
+    if (rw_set_.ObjectCountToForwardWrite() > 0)
+    {
+        assert(txlog_ != nullptr && !txservice_skip_wal);
+        PushOperation(&cmd_forward_write_);
+        Process(cmd_forward_write_);
+        return;
+    }
+#endif
+
     if (rw_set_.WriteSetSize() > 0)
     {
         assert(!is_recovering);
@@ -3012,8 +3130,12 @@ void TransactionExecution::Commit()
         PushOperation(&lock_write_ranges_);
         Process(lock_write_ranges_);
 #else
-        PushOperation(&acquire_write_);
-        Process(acquire_write_);
+        lock_write_buckets_.Reset();
+        PushOperation(&lock_write_buckets_);
+        Process(lock_write_buckets_);
+
+        // PushOperation(&acquire_write_);
+        // Process(acquire_write_);
 #endif
     }
     else
@@ -3203,6 +3325,138 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
         // when there are many ranges for write-set keys.
         lock_write_ranges.is_running_ = false;
         lock_write_ranges.execute_immediately_ = true;
+        command_id_.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
+}
+
+void TransactionExecution::Process(LockWriteBucketsOp &lock_write_buckets)
+{
+#ifndef RANGE_PARTITION_ENABLED
+    if (!lock_write_buckets.init_)
+    {
+        std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
+        lock_write_buckets.table_it_ = wset.begin();
+        lock_write_buckets.table_end_ = wset.end();
+
+        lock_write_buckets.write_key_it_ =
+            lock_write_buckets.table_it_->second.begin();
+        lock_write_buckets.write_key_end_ =
+            lock_write_buckets.table_it_->second.end();
+
+        lock_write_buckets.init_ = true;
+    }
+
+    assert(lock_write_buckets.table_it_ != lock_write_buckets.table_end_);
+    assert(lock_write_buckets.write_key_it_ !=
+           lock_write_buckets.write_key_end_);
+
+    uint16_t bucket_id = UINT16_MAX;
+
+    // Make sure current node is still ng leader since we may visit
+    //  bucket info meta data here which is only valid when current
+    // node is still ng leader.
+    if (!CheckLeaderTerm())
+    {
+        lock_write_buckets.lock_bucket_result_->SetError(
+            CcErrorCode::TX_NODE_NOT_LEADER);
+        lock_write_buckets.lock_bucket_result_->ForceError();
+        PostProcess(lock_write_buckets);
+        return;
+    }
+    do
+    {
+        // Check whether the bucket of this write key has been locked
+        // before locking bucket. If yes, just use it.
+        const TxKey &write_key = lock_write_buckets.write_key_it_->first;
+        bucket_id = Sharder::MapKeyHashToBucketId(write_key.Hash());
+        const BucketInfo *bucket_info = FastToGetBucket(bucket_id);
+        if (bucket_info != nullptr)
+        {
+            lock_write_buckets.Advance(this, bucket_info);
+        }
+        else
+        {
+            break;
+        }
+    } while (lock_write_buckets.table_it_ != lock_write_buckets.table_end_);
+
+    if (lock_write_buckets.table_it_ == lock_write_buckets.table_end_)
+    {
+        state_stack_.pop_back();
+        assert(state_stack_.empty());
+
+        PushOperation(&acquire_write_);
+        Process(acquire_write_);
+        return;
+    }
+
+    lock_write_buckets.lock_bucket_result_->Value().Reset();
+    lock_write_buckets.lock_bucket_result_->Reset();
+    lock_write_buckets.is_running_ = true;
+    bucket_key_.Reset(bucket_id);
+
+    bool finished =
+        cc_handler_->ReadLocal(range_bucket_ccm_name,
+                               bucket_tx_key_,
+                               bucket_rec_,
+                               ReadType::Inside,
+                               tx_number_.load(std::memory_order_relaxed),
+                               tx_term_,
+                               command_id_.load(std::memory_order_relaxed),
+                               start_ts_,
+                               lock_bucket_result_,
+                               IsolationLevel::RepeatableRead,
+                               CcProtocol::Locking,
+                               false,
+                               false,
+                               lock_write_buckets.execute_immediately_);
+
+    if (finished)
+    {
+        command_id_.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
+}
+
+void TransactionExecution::PostProcess(LockWriteBucketsOp &lock_write_buckets)
+{
+#ifndef RANGE_PARTITION_ENABLED
+    if (lock_write_buckets.lock_bucket_result_->IsError())
+    {
+        DLOG(ERROR) << "LockWriteBucketsOp failed for cc error:"
+                    << lock_write_buckets.lock_bucket_result_->ErrorMsg()
+                    << ", tx " << TxNumber();
+        state_stack_.pop_back();
+        assert(state_stack_.empty());
+        Abort();
+        return;
+    }
+
+    const ReadKeyResult &read_res =
+        lock_write_buckets.lock_bucket_result_->Value();
+    rw_set_.AddRead(read_res.cce_addr_, read_res.ts_, &range_bucket_ccm_name);
+
+    lock_write_buckets.Advance(this, bucket_rec_.GetBucketInfo());
+
+    if (lock_write_buckets.table_it_ == lock_write_buckets.table_end_)
+    {
+        state_stack_.pop_back();
+        assert(state_stack_.empty());
+
+        PushOperation(&acquire_write_);
+        Process(acquire_write_);
+    }
+    else
+    {
+        // There are more ranges to acquire read locks. Returns now and waits
+        // for the next round of execution to acquire read locks on the
+        // remaining ranges. Note that we do not call Forward() here. This is
+        // because doing so leads to recursive calls of Forward(), each
+        // acquiring a read lock on one range. This may result in stack overflow
+        // when there are many ranges for write-set keys.
+        lock_write_buckets.is_running_ = false;
+        lock_write_buckets.execute_immediately_ = true;
         command_id_.fetch_add(1, std::memory_order_relaxed);
     }
 #endif
@@ -3488,7 +3742,8 @@ void TransactionExecution::Process(ValidateOperation &validate)
     for (const auto &[tbl_name, tbl_read_set] : rset)
     {
         if (tbl_name == catalog_ccm_name ||
-            tbl_name.Type() == TableType::RangePartition)
+            tbl_name.Type() == TableType::RangePartition ||
+            tbl_name.Type() == TableType::RangeBucket)
         {
             continue;
         }
@@ -3885,6 +4140,33 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
                 table_cmds.try_emplace(table_name).first->second;
             // insert cce into cmd_set
             obj_cmds_vector.emplace_back(&obj_cmd_entry);
+
+            if (obj_cmd_entry.forward_entry_ != nullptr &&
+                !obj_cmd_entry.forward_entry_->cce_addr_.Empty())
+            {
+                const CcEntryAddr &f_cce_addr =
+                    obj_cmd_entry.forward_entry_->cce_addr_;
+
+                uint32_t f_ng_id = f_cce_addr.NodeGroupId();
+                auto shard_term_it = shard_terms->find(f_ng_id);
+                if (shard_term_it == shard_terms->end())
+                {
+                    (*shard_terms)[f_ng_id] = f_cce_addr.Term();
+                }
+                else if (shard_term_it->second != f_cce_addr.Term())
+                {
+                    // Two keys in the tx's write set refer to the same cc node
+                    // group, but have different terms.
+                    // TODO(zkl): remote data
+                }
+
+                auto &f_table_cmds =
+                    ng_obj_cmds.try_emplace(f_ng_id).first->second;
+                auto &f_obj_cmds_vector =
+                    f_table_cmds.try_emplace(table_name).first->second;
+                // insert cce into cmd_set
+                f_obj_cmds_vector.emplace_back(&obj_cmd_entry);
+            }
         }
     }
 
@@ -4287,6 +4569,24 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                     0,
                     post_process.hd_result_);
                 ++idx;
+
+                if (cmd_set_entry.forward_entry_ != nullptr &&
+                    !cmd_set_entry.forward_entry_->cce_addr_.Empty())
+                {
+                    assert(cmd_set_entry.HasSuccessfulCommand());
+                    // upload commands to the key bucket's new owner.
+                    cc_handler_->UploadTxCommands(
+                        tx_number,
+                        tx_term_,
+                        command_id,
+                        cmd_set_entry.forward_entry_->cce_addr_,
+                        cmd_set_entry.object_version_,
+                        commit_ts_,
+                        &cmd_set_entry.cmd_str_list_,
+                        cmd_set_entry.has_overwrite_,
+                        post_process.hd_result_);
+                    ++idx;
+                }
             }
         }
 #endif
@@ -4376,6 +4676,22 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                            0,
                                            post_process.hd_result_);
                     ++idx;
+
+                    if (cmd_set_entry.forward_entry_ != nullptr &&
+                        !cmd_set_entry.forward_entry_->cce_addr_.Empty())
+                    {
+                        cc_handler_->PostWrite(
+                            tx_number,
+                            tx_term_,
+                            command_id,
+                            0,
+                            cmd_set_entry.forward_entry_->cce_addr_,
+                            nullptr,
+                            OperationType::CommitCommands,
+                            0,
+                            post_process.hd_result_);
+                        ++idx;
+                    }
                 }
             }
 #endif
@@ -4388,7 +4704,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         for (const auto &[tbl_name, data_read_set] : rset)
         {
             if (tbl_name == catalog_ccm_name ||
-                tbl_name.Type() == TableType::RangePartition)
+                tbl_name.Type() == TableType::RangePartition ||
+                tbl_name == range_bucket_ccm_name)
             {
                 continue;
             }
@@ -4656,7 +4973,8 @@ void TransactionExecution::ReleaseCatalogRangeLock(
     for (const auto &[tbl_name, tbl_set] : rset)
     {
         if (tbl_name.Type() != TableType::Catalog &&
-            tbl_name.Type() != TableType::RangePartition)
+            tbl_name.Type() != TableType::RangePartition &&
+            tbl_name.Type() != TableType::RangeBucket)
         {
             continue;
         }
@@ -5359,48 +5677,118 @@ ScanCloseTxRequest *TransactionExecution::NextScanCloseTxReq(
 
 void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
 {
-    obj_cmd_op.is_running_ = true;
     const TxKey &key = *obj_cmd_op.key_;
     uint32_t key_shard_code = 0;
-
+    if (!obj_cmd_op.is_running_)
+    {
 #ifdef RANGE_PARTITION_ENABLED
-    if (lock_range_result_.IsFinished())
-    {
-        // If there is an error when getting the key's range ID, the error would
-        // be caught when forwarding the operation, which forces the tx state
-        // machine to move to post-processing of the operation and returns an
-        // error to the ObjectCommandTxRequest.
-        assert(!lock_range_result_.IsError());
+        if (lock_range_result_.IsFinished())
+        {
+            // If there is an error when getting the key's range ID, the error
+            // would be caught when forwarding the operation, which forces the
+            // tx state machine to move to post-processing of the operation and
+            // returns an error to the ObjectCommandTxRequest.
+            assert(!lock_range_result_.IsError());
 
-        // Uses the lower 10 bits of the key's hash code to shard the
-        // key across CPU cores in a cc node.
-        uint32_t residual = key.Hash() & 0x3FF;
-        NodeGroupId range_ng = range_rec_.GetRangeOwnerNg()->BucketOwner();
-        key_shard_code = range_ng << 10 | residual;
-    }
-    else
-    {
-        obj_cmd_op.is_running_ = false;
-        // First read and lock the range the key located in through
-        // lock_range_op_.
-        lock_range_op_.Reset();
-        lock_range_result_.Reset();
+            // Uses the lower 10 bits of the key's hash code to shard the
+            // key across CPU cores in a cc node.
+            uint32_t residual = key.Hash() & 0x3FF;
+            NodeGroupId range_ng = range_rec_.GetRangeOwnerNg()->BucketOwner();
+            key_shard_code = range_ng << 10 | residual;
+        }
+        else
+        {
+            obj_cmd_op.is_running_ = false;
+            // First read and lock the range the key located in through
+            // lock_range_op_.
+            lock_range_op_.Reset();
+            lock_range_result_.Reset();
 
-        lock_range_op_.key_ = &key;
-        lock_range_op_.table_name_ = TableName(
-            obj_cmd_op.table_name_->StringView(), TableType::RangePartition);
-        lock_range_op_.rec_ = &range_rec_;
-        lock_range_op_.hd_result_ = &lock_range_result_;
+            lock_range_op_.key_ = &key;
+            lock_range_op_.table_name_ =
+                TableName(obj_cmd_op.table_name_->StringView(),
+                          TableType::RangePartition);
+            lock_range_op_.rec_ = &range_rec_;
+            lock_range_op_.hd_result_ = &lock_range_result_;
 
-        // Control flow jumps to lock_range_op_, do not execute further
-        // after `Process(lock_range_op_)` returns.
-        PushOperation(&lock_range_op_);
-        Process(lock_range_op_);
-        return;
-    }
+            // Control flow jumps to lock_range_op_, do not execute further
+            // after `Process(lock_range_op_)` returns.
+            PushOperation(&lock_range_op_);
+            Process(lock_range_op_);
+            return;
+        }
 #else
-    key_shard_code = Sharder::Instance().ShardCode(key.Hash());
+        uint64_t key_hash = key.Hash();
+        uint32_t residual = key.Hash() & 0x3FF;
+        uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
+        const BucketInfo *bucket_info = FastToGetBucket(bucket_id);
+        if (bucket_info != nullptr)
+        {
+            // Uses the lower 10 bits of the key's hash code to shard the
+            // key across CPU cores in a cc node.
+            NodeGroupId bucket_ng = bucket_info->BucketOwner();
+            key_shard_code = bucket_ng << 10 | residual;
+
+            // If current bucket is migrating, forward to new bucket owner.
+            NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
+            if (new_bucket_ng != UINT32_MAX &&
+                !obj_cmd_op.command_->IsReadOnly())
+            {
+                obj_cmd_op.forward_key_shard_ = new_bucket_ng << 10 | residual;
+            }
+        }
+        else if (lock_bucket_result_.IsFinished())
+        {
+            // If there is an error when getting the key's bucket owner, the
+            // error would be caught when forwarding the operation, which forces
+            // the tx state machine to move to post-processing of the operation
+            // and returns an error to the ObjectCommandTxRequest.
+            assert(!lock_bucket_result_.IsError());
+
+            const BucketInfo *bucket_info = bucket_rec_.GetBucketInfo();
+            // Cache the locked bucket info for read directly at next.
+            uint16_t bucket_id = bucket_key_.BucketId();
+            locked_buckets_.emplace(bucket_id, bucket_info);
+
+            // Uses the lower 10 bits of the key's hash code to shard the
+            // key across CPU cores in a cc node.
+            NodeGroupId bucket_ng = bucket_info->BucketOwner();
+            key_shard_code = bucket_ng << 10 | residual;
+
+            // If current bucket is migrating, forward to new bucket owner.
+            NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
+            if (new_bucket_ng != UINT32_MAX &&
+                !obj_cmd_op.command_->IsReadOnly())
+            {
+                obj_cmd_op.forward_key_shard_ = new_bucket_ng << 10 | residual;
+            }
+        }
+        else
+        {
+            obj_cmd_op.is_running_ = false;
+            // First read and lock the bucket the key located in through
+            // lock_bucket_op_.
+            lock_bucket_result_.Reset();
+            lock_bucket_result_.Value().Reset();
+            bucket_key_.Reset(bucket_id);
+
+            lock_bucket_op_.Reset(TableName(range_bucket_ccm_name_sv.data(),
+                                            range_bucket_ccm_name_sv.size(),
+                                            TableType::RangeBucket),
+                                  &bucket_tx_key_,
+                                  &bucket_rec_,
+                                  &lock_bucket_result_);
+
+            // Control flow jumps to lock_bucket_op_, do not execute further
+            // after `Process(lock_bucket_op_)` returns.
+            PushOperation(&lock_bucket_op_);
+            Process(lock_bucket_op_);
+            return;
+        }
 #endif
+    }
+
+    obj_cmd_op.is_running_ = true;
 
     uint64_t current_ts =
         dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
@@ -5408,9 +5796,9 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     CcHandlerResult<ObjectCommandResult> &hd_res = obj_cmd_op.hd_result_;
     hd_res.Reset();
 
-    // Directly commit the new value to the object if autocommit and skip_wal
-    // are both set, on contrary to acquiring lock and committing the command in
-    // postprocess.
+    // Directly commit the new value to the object if autocommit and
+    // skip_wal are both set, on contrary to acquiring lock and committing
+    // the command in postprocess.
     bool commit =
         obj_cmd_op.auto_commit_ && !obj_cmd_op.table_option_->enable_wal_;
     cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
@@ -5485,7 +5873,12 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                                      obj_cmd_op.key_,
                                      obj_cmd_op.command_,
                                      object_modified,
-                                     table_option->enable_wal_);
+                                     table_option->enable_wal_
+#ifndef RANGE_PARTITION_ENABLED
+                                     ,
+                                     obj_cmd_op.forward_key_shard_
+#endif
+            );
 
             uint64_t read_version = rw_set_.DedupRead(cce_addr);
             if (read_version > 0 && read_version != cmd_result.commit_ts_)
@@ -5580,6 +5973,81 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
         Process(lock_range_op_);
         return;
     }
+#else
+    std::vector<std::pair<uint32_t, uint32_t>> &vct_key_shard_code =
+        obj_cmd_op.vct_key_shard_code_;
+    assert(vct_key_shard_code.size() == vct_key->size());
+    if (lock_bucket_result_.IsFinished())
+    {
+        const BucketInfo *bucket_info = bucket_rec_.GetBucketInfo();
+        // Cache the locked bucket info for read directly at next.
+        uint16_t bucket_id = bucket_key_.BucketId();
+        locked_buckets_.emplace(bucket_id, bucket_info);
+
+        const TxKey &key = vct_key->at(obj_cmd_op.bucket_lock_cur_);
+        uint32_t residual = key.Hash() & 0x3FF;
+        NodeGroupId bucket_ng = bucket_info->BucketOwner();
+        vct_key_shard_code[obj_cmd_op.bucket_lock_cur_].first =
+            bucket_ng << 10 | residual;
+
+        // If current bucket is migrating, forward to new bucket owner.
+        NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
+        if (new_bucket_ng != UINT32_MAX &&
+            !vct_cmd->at(obj_cmd_op.bucket_lock_cur_)->IsReadOnly())
+        {
+            // forward key shard code
+            vct_key_shard_code[obj_cmd_op.bucket_lock_cur_].second =
+                new_bucket_ng << 10 | residual;
+        }
+        obj_cmd_op.bucket_lock_cur_++;
+    }
+    while (obj_cmd_op.bucket_lock_cur_ < vct_key->size())
+    {
+        const TxKey &key = vct_key->at(obj_cmd_op.bucket_lock_cur_);
+        uint64_t key_hash = key.Hash();
+        uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
+        const BucketInfo *bucket_info = FastToGetBucket(bucket_id);
+        if (bucket_info != nullptr)
+        {
+            // Uses the lower 10 bits of the key's hash code to shard the
+            // key across CPU cores in a cc node.
+            uint32_t residual = key_hash & 0x3FF;
+            NodeGroupId bucket_ng = bucket_info->BucketOwner();
+            vct_key_shard_code[obj_cmd_op.bucket_lock_cur_].first =
+                bucket_ng << 10 | residual;
+
+            // If current bucket is migrating, forward to new bucket owner.
+            NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
+            if (new_bucket_ng != UINT32_MAX &&
+                !vct_cmd->at(obj_cmd_op.bucket_lock_cur_)->IsReadOnly())
+            {
+                // forward key shard code
+                vct_key_shard_code[obj_cmd_op.bucket_lock_cur_].second =
+                    new_bucket_ng << 10 | residual;
+            }
+            obj_cmd_op.bucket_lock_cur_++;
+        }
+        else
+        {
+            // TODO(lzx): acquire mutli key bucket locks concurrently?
+            lock_bucket_result_.Value().Reset();
+            lock_bucket_result_.Reset();
+            bucket_key_.Reset(bucket_id);
+
+            lock_bucket_op_.Reset(TableName(range_bucket_ccm_name_sv.data(),
+                                            range_bucket_ccm_name_sv.size(),
+                                            TableType::RangeBucket),
+                                  &bucket_tx_key_,
+                                  &bucket_rec_,
+                                  &lock_bucket_result_);
+
+            // Control flow jumps to lock_bucket_op_, do not execute further
+            // after `Process(lock_bucket_op_)` returns.
+            PushOperation(&lock_bucket_op_);
+            Process(lock_bucket_op_);
+            return;
+        }
+    }
 #endif
 
     obj_cmd_op.is_running_ = true;
@@ -5599,7 +6067,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
         uint32_t residual = key.Hash() & 0x3FF;
         key_shard_code = obj_cmd_op.vct_key_shard_code_[i] << 10 | residual;
 #else
-        key_shard_code = Sharder::Instance().ShardCode(key.Hash());
+        key_shard_code = vct_key_shard_code[i].first;
 #endif
         // NOTICE: For MultiObjectCommand, must not commit commands in ApplyCc
         hd_res.Reset();
@@ -5615,6 +6083,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
                                    iso_level_,
                                    protocol_,
                                    false);
+
         if (hd_res.Value().is_local_)
         {
             local_cnt++;
@@ -5647,6 +6116,17 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     << static_cast<int>(lock_range_result_.ErrorCode());
         vct_rec_resp_->FinishError(
             ConvertCcError(lock_range_result_.ErrorCode()));
+        vct_rec_resp_ = nullptr;
+        return;
+    }
+#else
+    if (lock_bucket_result_.IsError())
+    {
+        DLOG(ERROR) << "MultiObjectCommandOp failed when acquire range locks. "
+                       "Error code: "
+                    << static_cast<int>(lock_bucket_result_.ErrorCode());
+        vct_rec_resp_->FinishError(
+            ConvertCcError(lock_bucket_result_.ErrorCode()));
         vct_rec_resp_ = nullptr;
         return;
     }
@@ -5716,13 +6196,19 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     // The command modifies the object. Put it into the command
                     // set for writing log and post-processing. If the command
                     // fails, only to release the write lock.
-                    rw_set_.AddObjectCommand(*req->table_name_,
-                                             cmd_res.cce_addr_,
-                                             cmd_res.commit_ts_,
-                                             &vct_key->at(i),
-                                             vct_cmd->at(i),
-                                             cmd_res.object_modified_,
-                                             enable_wal);
+                    rw_set_.AddObjectCommand(
+                        *req->table_name_,
+                        cmd_res.cce_addr_,
+                        cmd_res.commit_ts_,
+                        &vct_key->at(i),
+                        vct_cmd->at(i),
+                        cmd_res.object_modified_,
+                        enable_wal
+#ifndef RANGE_PARTITION_ENABLED
+                        ,
+                        obj_cmd_op.vct_key_shard_code_[i].second
+#endif
+                    );
 
                     uint64_t read_version =
                         rw_set_.DedupRead(cmd_res.cce_addr_);
@@ -5796,6 +6282,121 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
             {
                 Abort();
             }
+        }
+    }
+}
+
+void TransactionExecution::Process(CmdForwardAcquireWriteOp &forward_acquire)
+{
+    forward_acquire.Reset(rw_set_.ObjectCountToForwardWrite());
+    forward_acquire.is_running_ = true;
+
+    uint64_t current_ts =
+        static_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
+
+    size_t res_idx = 0, entry_idx = 0;
+    const std::unordered_map<TableName,
+                             std::unordered_map<CcEntryAddr, CmdSetEntry>>
+        &tx_cmd_set = *rw_set_.ObjectCommandCce();
+    for (const auto &[table_name, obj_cmd_set] : tx_cmd_set)
+    {
+        for (const auto &[cce_addr, obj_cmd_entry] : obj_cmd_set)
+        {
+            if (obj_cmd_entry.forward_entry_ == nullptr)
+            {
+                continue;
+            }
+            CmdForwardEntry *cmd_forward_entry =
+                obj_cmd_entry.forward_entry_.get();
+            forward_acquire.acquire_write_entries_[entry_idx++] =
+                cmd_forward_entry;
+
+            cc_handler_->AcquireWrite(
+                table_name,
+                cmd_forward_entry->key_,
+                cmd_forward_entry->key_shard_code_,
+                TxNumber(),
+                tx_term_,
+                command_id_.load(std::memory_order_relaxed),
+                current_ts,
+                false,
+                forward_acquire.hd_result_,
+                res_idx++,
+                protocol_,
+                iso_level_);
+        }
+    }
+
+    if (metrics::enable_remote_request_metrics &&
+        forward_acquire.hd_result_.Value().at(0).remote_ack_cnt_->load(
+            std::memory_order_relaxed) > 0)
+    {
+        auto meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
+                       metrics::Value::IncDecValue::Increment,
+                       "cmd_forward_acquire_write");
+        if (is_collecting_duration_round_)
+        {
+            forward_acquire.op_start_ = metrics::Clock::now();
+        }
+    }
+
+    StartTiming();
+}
+
+void TransactionExecution::PostProcess(
+    CmdForwardAcquireWriteOp &forward_acquire)
+{
+    if (metrics::enable_remote_request_metrics &&
+        forward_acquire.op_start_ < metrics::TimePoint::max())
+    {
+        metrics::Meter *meter;
+        meter = tx_processor_->GetMeter();
+        if (is_collecting_duration_round_)
+        {
+            meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
+                                   forward_acquire.op_start_,
+                                   "cmd_forward_acquire_write");
+        }
+        meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
+                       metrics::Value::IncDecValue::Decrement,
+                       "cmd_forward_acquire_write");
+    }
+
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    if (forward_acquire.hd_result_.IsError())
+    {
+        DLOG(ERROR) << "CmdForwardAcquireWriteOp failed for cc error:"
+                    << forward_acquire.hd_result_.ErrorMsg() << "  "
+                    << static_cast<int>(forward_acquire.hd_result_.ErrorCode())
+                    << "; txn: " << TxNumber();
+        assert(rec_resp_ != nullptr);
+        rec_resp_->SetErrorCode(
+            ConvertCcError(forward_acquire.hd_result_.ErrorCode()));
+        Abort();
+    }
+    else
+    {
+        if (rw_set_.WriteSetSize() > 0)
+        {
+            assert(false);
+#ifdef RANGE_PARTITION_ENABLED
+            lock_write_ranges_.Reset();
+            PushOperation(&lock_write_ranges_);
+            Process(lock_write_ranges_);
+#else
+            lock_write_buckets_.Reset();
+            PushOperation(&lock_write_buckets_);
+            Process(lock_write_buckets_);
+#endif
+        }
+        else
+        {
+            PushOperation(&set_ts_);
+            Process(set_ts_);
         }
     }
 }

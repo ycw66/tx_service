@@ -144,6 +144,11 @@ int Sharder::Init(
         {
             txlog_ips_ = *txlog_ips;
             txlog_ports_ = *txlog_ports;
+
+            for (uint16_t port : txlog_ports_)
+            {
+                LOG(INFO) << "txlog_port = " << port;
+            }
         }
 
         if (log_agent_ != nullptr)

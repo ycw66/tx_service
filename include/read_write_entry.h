@@ -94,6 +94,18 @@ struct ScanSetEntry
     CcEntryAddr cce_addr_;
 };
 
+struct CmdForwardEntry
+{
+    TxKey key_;
+    uint32_t key_shard_code_;
+    CcEntryAddr cce_addr_;
+
+    CmdForwardEntry(TxKey &&key, uint32_t key_shard)
+        : key_(std::move(key)), key_shard_code_(key_shard), cce_addr_()
+    {
+    }
+};
+
 /**
  * Txn commands on the same object.
  */
@@ -138,6 +150,9 @@ struct CmdSetEntry
     // Whether a overwrite command exists. If true, commands before this cmd are
     // discarded since there is no point writing them into the log.
     bool has_overwrite_{};
+    // Store the forward write key_shard_code info If this key's bucket is in
+    // migration
+    std::unique_ptr<CmdForwardEntry> forward_entry_{nullptr};
 };
 
 struct WriteEntry

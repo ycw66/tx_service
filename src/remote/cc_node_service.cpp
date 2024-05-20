@@ -993,5 +993,44 @@ void CcNodeService::UploadBatch(
                << static_cast<uint32_t>(req.ErrorCode());
 }
 
+void CcNodeService::PublishBucketsMigrating(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::PubBucketsMigratingRequest *request,
+    ::txservice::remote::PubBucketsMigratingResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    const NodeGroupId ng_id = request->node_group_id();
+    DLOG(INFO) << "CcNodeService received PublishBucketsMigrating RPC of #ng"
+               << ng_id << ", is_migrating:" << (int) request->is_migrating();
+
+    if (Sharder::Instance().LeaderNodeId(ng_id) != Sharder::Instance().NodeId())
+    {
+        response->set_node_group_id(ng_id);
+        response->set_success(false);
+        LOG(INFO) << "CcNodeService finish PublishBucketsMigrating RPC of #ng"
+                  << ng_id << ", current node is not leader !!!";
+        return;
+    }
+
+    LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
+    bool is_migrating = request->is_migrating();
+    cc_shards->SetBucketMigrating(is_migrating);
+
+    if (is_migrating)
+    {
+        WaitNoNakedBucketRefCc req;
+        cc_shards->EnqueueToCcShard(0, &req);
+        req.Wait();
+    }
+
+    response->set_node_group_id(ng_id);
+    response->set_success(true);
+
+    LOG(INFO) << "CcNodeService finish PublishBucketsMigrating RPC of #ng"
+              << ng_id;
+}
+
 }  // namespace remote
 }  // namespace txservice

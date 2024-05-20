@@ -920,6 +920,7 @@ public:
                 log_hd,
                 conf.at("checkpointer_delay_seconds"))
     {
+        assert(store_hd != nullptr);
         uint32_t core_cnt = conf.at("core_num");
         pool_.reserve(core_cnt);
         thd_pool_.reserve(core_cnt);

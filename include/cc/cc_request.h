@@ -2951,6 +2951,12 @@ public:
 #endif
     }
 
+    void SetNotTruncateLog()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
+    }
+
     std::vector<size_t> accumulated_scan_cnt_;
 
 private:
@@ -4593,6 +4599,8 @@ public:
         is_local_ = false;
         remote_input_.key_str_ = key_str;
         remote_input_.cmd_str_ = cmd_str;
+        remote_input_.cmd_ = nullptr;
+        remote_input_.is_owner_ = false;
 
         key_shard_code_ = key_shard_code;
         tx_ts_ = tx_ts;
@@ -4705,6 +4713,107 @@ public:
         BlockOnFetch
     };
     ApplyBlockType block_type_{ApplyBlockType::NoBlocking};
+};
+
+struct UploadTxCommandsCc
+    : public TemplatedCcRequest<UploadTxCommandsCc, PostProcessResult>
+{
+public:
+    UploadTxCommandsCc()
+        : cce_addr_(nullptr),
+          object_version_(0),
+          commit_ts_(0),
+          cmd_str_list_(),
+          has_overwrite_(false)
+    //,is_remote_(false)
+    {
+    }
+
+    UploadTxCommandsCc(const UploadTxCommandsCc &rhs) = delete;
+    UploadTxCommandsCc(UploadTxCommandsCc &&rhs) = delete;
+
+    bool ValidTermCheck() override
+    {
+        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
+        if (tx_term_ <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
+        {
+            return false;
+        }
+
+        assert(cce_addr_ != nullptr && cce_addr_->CcePtr() != 0 &&
+               cce_addr_->Term() > 0);
+
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (cce_addr_->Term() != cc_ng_term)
+        {
+            return false;
+        }
+
+        const LruEntry *lru_entry =
+            reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+        ccm_ = lru_entry->GetCcMap();
+        assert(ccm_ != nullptr);
+        return true;
+    }
+
+    void Reset(const CcEntryAddr *addr,
+               uint64_t tx_number,
+               int64_t tx_term,
+               uint64_t object_version,
+               uint64_t commit_ts,
+               const std::vector<std::string> *cmd_list,
+               bool has_overwrite,
+               CcHandlerResult<PostProcessResult> *res)
+    {
+        TemplatedCcRequest<UploadTxCommandsCc, PostProcessResult>::Reset(
+            nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
+
+        cce_addr_ = addr;
+        object_version_ = object_version;
+        commit_ts_ = commit_ts;
+        cmd_str_list_ = cmd_list;
+        has_overwrite_ = has_overwrite;
+
+        // is_remote_ = false;
+        ccm_ = nullptr;
+    }
+
+    const CcEntryAddr *CceAddr() const
+    {
+        return cce_addr_;
+    }
+
+    uint64_t ObjectVersion() const
+    {
+        return object_version_;
+    }
+
+    uint64_t CommitTs() const
+    {
+        return commit_ts_;
+    }
+
+    const std::vector<std::string> *CommandList()
+    {
+        return cmd_str_list_;
+    }
+
+    bool HasOverWrite()
+    {
+        return has_overwrite_;
+    }
+
+private:
+    const CcEntryAddr *cce_addr_;
+    // commit_ts of object before execute these tx commands
+    uint64_t object_version_;
+    // commit_ts of this transaction.
+    uint64_t commit_ts_;
+    const std::vector<std::string> *cmd_str_list_;
+    bool has_overwrite_;
+
+    // TODO(lzx): remote request, use std::vector<std::string_veiw>* cmds
+    //  bool is_remote_{false};
 };
 
 struct RequestAborterCc : public CcRequestBase

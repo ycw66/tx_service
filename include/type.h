@@ -491,7 +491,13 @@ inline static TableName cluster_config_ccm_name{
     cluster_config_ccm_name_sv.data(),
     cluster_config_ccm_name_sv.size(),
     TableType::ClusterConfig};
+
+#ifdef ON_KEY_OBJECT
+// Set buckets count to be the same as the slots count.
+inline static const uint16_t total_range_buckets = 0x3FFF;
+#else
 inline static const uint16_t total_range_buckets = 4096;
+#endif
 
 enum struct SlicePosition
 {

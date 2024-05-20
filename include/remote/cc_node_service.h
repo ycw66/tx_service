@@ -100,6 +100,12 @@ public:
                      ::txservice::remote::UploadBatchResponse *response,
                      ::google::protobuf::Closure *done) override;
 
+    void PublishBucketsMigrating(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::PubBucketsMigratingRequest *request,
+        ::txservice::remote::PubBucketsMigratingResponse *response,
+        ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

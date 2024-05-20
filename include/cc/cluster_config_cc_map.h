@@ -263,6 +263,9 @@ public:
             req.AbortCcRequest(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
+#ifndef RANGE_PARTITION_ENABLED
+        shard_->SetBucketMigrating(true);
+#endif
         const std::string_view &content = req.LogContentView();
         ::txlog::ClusterScaleOpMessage scale_op_msg;
         scale_op_msg.ParseFromArray(content.data(), content.length());
@@ -291,6 +294,7 @@ public:
         }
 
         bool locked = false, update_local_config = false;
+        bool is_bucket_migrating = false;
         if (is_coordinator)
         {
             if (scale_op_msg.event_type() ==
@@ -318,6 +322,11 @@ public:
                     locked = true;
                 }
             }
+
+            if (scale_op_msg.stage() != ::txlog::ClusterScaleStage::CleanScale)
+            {
+                is_bucket_migrating = true;
+            }
         }
         else
         {
@@ -339,6 +348,11 @@ public:
                 {
                     update_local_config = true;
                 }
+
+                if (!dm_finished)
+                {
+                    is_bucket_migrating = true;
+                }
             }
             else if (scale_op_msg.event_type() ==
                      ::txlog::ClusterScaleOpMessage_ScaleOpType_RemoveNode)
@@ -357,8 +371,17 @@ public:
                 {
                     update_local_config = true;
                 }
+
+                if (!update_local_config)
+                {
+                    is_bucket_migrating = true;
+                }
             }
         }
+
+#ifndef RANGE_PARTITION_ENABLED
+        shard_->SetBucketMigrating(is_bucket_migrating);
+#endif
 
         if (locked)
         {

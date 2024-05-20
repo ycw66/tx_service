@@ -765,5 +765,33 @@ protected:
     CcHandlerResult<ObjectCommandResult> cc_res_{nullptr};
 };
 
+struct RemoteUploadTxCommandsCc : public UploadTxCommandsCc
+{
+public:
+    RemoteUploadTxCommandsCc();
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
+    // TableName remote_table_name_{empty_sv, TableType::Primary};
+
+    CcEntryAddr cce_addr_;
+    std::vector<std::string> cmds_vec_;
+    CcHandlerResult<PostProcessResult> cc_res_{nullptr};
+};
+
 }  // namespace remote
 }  // namespace txservice

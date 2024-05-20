@@ -49,6 +49,7 @@ public:
 #ifdef ON_KEY_OBJECT
         cmd_set_.clear();
         cce_with_writelock_size_ = 0;
+        need_forward_cmd_cnt_ = 0;
 #endif
     }
 
@@ -68,7 +69,8 @@ public:
         for (auto &[tbl_name, rset] : rset_)
         {
             if (tbl_name.Type() == TableType::Catalog ||
-                tbl_name.Type() == TableType::RangePartition)
+                tbl_name.Type() == TableType::RangePartition ||
+                tbl_name.Type() == TableType::RangeBucket)
             {
                 set_size += rset.size();
             }
@@ -143,7 +145,8 @@ public:
             it->second.read_cnt_++;
         }
         else if (!(*table_name == catalog_ccm_name) &&
-                 (table_name->Type() != TableType::RangePartition))
+                 (table_name->Type() != TableType::RangePartition) &&
+                 (table_name->Type() != TableType::RangeBucket))
         {
             ++data_rset_cnt_;
         }
@@ -193,7 +196,8 @@ public:
             if (cce_it != tbl_read_set.end())
             {
                 if (!(table_name == catalog_ccm_name) &&
-                    (table_name.Type() != TableType::RangePartition))
+                    (table_name.Type() != TableType::RangePartition) &&
+                    (table_name.Type() != TableType::RangeBucket))
                 {
                     --data_rset_cnt_;
                 }
@@ -222,7 +226,8 @@ public:
         if (cce_it != tbl_read_set.end())
         {
             if (!(tbl_name == catalog_ccm_name) &&
-                (tbl_name.Type() != TableType::RangePartition))
+                (tbl_name.Type() != TableType::RangePartition) &&
+                (tbl_name.Type() != TableType::RangeBucket))
             {
                 --data_rset_cnt_;
             }
@@ -448,7 +453,8 @@ public:
         for (auto tbl_it = rset_.begin(); tbl_it != rset_.end();)
         {
             if (tbl_it->first == catalog_ccm_name ||
-                tbl_it->first.Type() == TableType::RangePartition)
+                tbl_it->first.Type() == TableType::RangePartition ||
+                tbl_it->first.Type() == TableType::RangeBucket)
             {
                 ++tbl_it;
             }
@@ -529,7 +535,8 @@ public:
                              const CcEntryAddr &addr)
     {
         assert(table_name.Type() != TableType::Catalog ||
-               table_name.Type() != TableType::RangePartition);
+               table_name.Type() != TableType::RangePartition ||
+               table_name.Type() != TableType::RangeBucket);
 
         auto iter = rset_.find(table_name);
         if (iter == rset_.end())
@@ -561,7 +568,8 @@ public:
                           const TxKey *key,
                           const TxCommand *cmd,
                           bool object_modified,
-                          bool enable_wal)
+                          bool enable_wal,
+                          uint32_t forward_key_shard = UINT32_MAX)
     {
 #ifdef ON_KEY_OBJECT
         auto [table_it, success] = cmd_set_.try_emplace(table_name);
@@ -593,9 +601,17 @@ public:
                 // set for writing log and post-processing. If the command
                 // fails, only to release the write lock.
                 entry.AddCommand(cmd);
+
+                if (forward_key_shard != UINT32_MAX &&
+                    entry.forward_entry_ != nullptr)
+                {
+                    assert(cmd != nullptr);
+                    entry.forward_entry_ = std::make_unique<CmdForwardEntry>(
+                        key->Clone(), forward_key_shard);
+                    need_forward_cmd_cnt_++;
+                }
             }
         }
-
 #endif
     }
 
@@ -639,6 +655,13 @@ public:
 #endif
     }
 
+    void IncreaseObjectCntWithWriteLock()
+    {
+#ifdef ON_KEY_OBJECT
+        cce_with_writelock_size_++;
+#endif
+    }
+
     bool ObjectModified() const
     {
 #ifdef ON_KEY_OBJECT
@@ -663,6 +686,15 @@ public:
         forward_write_cnt_ = 0;
     }
 
+    size_t ObjectCountToForwardWrite()
+    {
+#ifdef ON_KEY_OBJECT
+        return need_forward_cmd_cnt_;
+#else
+        return 0;
+#endif
+    }
+
 private:
     // rset_, wset_cnt_, read_cache_ are not string owner.
     std::unordered_map<TableName, std::unordered_map<CcEntryAddr, ReadSetEntry>>
@@ -683,6 +715,8 @@ private:
     // the count of different cc entries the command set contains that acquires
     // writelock
     uint32_t cce_with_writelock_size_{};
+    // the count of cmd keys to acquire write lock on forward node group
+    uint32_t need_forward_cmd_cnt_{0};
 #endif
 };
 }  // namespace txservice

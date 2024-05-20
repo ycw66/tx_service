@@ -1845,3 +1845,76 @@ void txservice::remote::RemoteApplyCc::Acknowledge()
     const ApplyRequest &req = input_msg_->apply_cc_req();
     hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 }
+
+txservice::remote::RemoteUploadTxCommandsCc::RemoteUploadTxCommandsCc()
+{
+    res_ = &cc_res_;
+
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse);
+
+    cc_res_.post_lambda_ = [this](CcHandlerResult<PostProcessResult> *res)
+    {
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+
+        PostprocessResponse *resp = output_msg_.mutable_post_resp();
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
+
+        const UploadTxCommandsRequest &req = input_msg_->upload_cmds_req();
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemoteUploadTxCommandsCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_upload_cmds_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_post_resp();
+
+    {
+        const UploadTxCommandsRequest &cmds_req = input_msg->upload_cmds_req();
+        uint64_t object_version = cmds_req.object_version();
+        uint64_t commit_ts = cmds_req.commit_ts();
+        bool has_overwrite = cmds_req.has_overwrite();
+
+        assert(commit_ts > 0);
+        cmds_vec_.reserve(cmds_req.cmd_list_size());
+        for (int idx = 0; idx < cmds_req.cmd_list_size(); ++idx)
+        {
+            cmds_vec_.emplace_back(cmds_req.cmd_list(idx));
+        }
+
+        const CceAddr_msg &cce_addr_msg = cmds_req.cce_addr();
+        cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
+                         cce_addr_msg.term(),
+                         cmds_req.node_group_id(),
+                         cce_addr_msg.core_id());
+
+        UploadTxCommandsCc::Reset(&cce_addr_,
+                                  input_msg->tx_number(),
+                                  input_msg->tx_term(),
+                                  object_version,
+                                  commit_ts,
+                                  &cmds_vec_,
+                                  has_overwrite,
+                                  &cc_res_);
+    }
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}

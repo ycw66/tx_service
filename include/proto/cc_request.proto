@@ -178,6 +178,19 @@ message OnLeaderChangeResponse
 	bool error = 1;
 }
 
+message PubBucketsMigratingRequest
+{
+	uint32 node_group_id = 1;
+    bool is_migrating = 2;
+}
+
+message PubBucketsMigratingResponse
+{
+	uint32 node_group_id = 1;
+    // no bucket_info is used without lock
+    bool success = 2;
+}
+
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -197,6 +210,7 @@ service CcRpcService {
     rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);
     rpc GenerateSkFromPk(GenerateSkFromPkRequest) returns (GenerateSkFromPkResponse);
     rpc UploadBatch(UploadBatchRequest) returns (UploadBatchResponse);
+    rpc PublishBucketsMigrating(PubBucketsMigratingRequest) returns (PubBucketsMigratingResponse);
 }
 
 message NodeConfigBuf
@@ -839,6 +853,16 @@ message ApplyResponse {
     bool is_ack = 9;
 }
 
+message UploadTxCommandsRequest {
+    uint32 src_node_id = 1;
+    uint32 node_group_id = 2;
+    CceAddr_msg cce_addr = 3;
+    uint64 object_version = 4;
+    uint64 commit_ts = 5;
+    repeated bytes cmd_list = 6;
+    bool has_overwrite = 7;
+}
+
 message PublishRequest {
     string chan = 1;
     string message = 2;
@@ -886,6 +910,7 @@ message CcMessage {
         ApplyRequest = 50;
         ApplyResponse = 51;
         PublishRequest = 52;
+        UploadTxCommandsRequest = 53;
     }
 
     MessageType type = 1;
@@ -935,5 +960,6 @@ message CcMessage {
         ApplyRequest apply_cc_req = 58;
         ApplyResponse apply_cc_resp = 59;
         PublishRequest publish_req = 60;
+        UploadTxCommandsRequest upload_cmds_req=61;
     }
 }

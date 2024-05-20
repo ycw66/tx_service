@@ -370,6 +370,7 @@ public:
                    dirty_payload_ == nullptr &&
                    dirty_payload_status_ == RecordStatus::NonExistent);
         }
+        return key_lock_.IsEmpty() && !HasReplayCommandList();
 #endif
         return key_lock_.IsEmpty();
     }

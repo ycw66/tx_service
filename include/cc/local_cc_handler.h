@@ -374,6 +374,16 @@ public:
                         std::string_view chan,
                         std::string_view message) override;
 
+    void UploadTxCommands(uint64_t tx_number,
+                          int64_t tx_term,
+                          uint16_t command_id,
+                          const CcEntryAddr &cce_addr,
+                          uint64_t obj_version,
+                          uint64_t commit_ts,
+                          const std::vector<std::string> *cmd_list,
+                          bool has_overwrite,
+                          CcHandlerResult<PostProcessResult> &hres) override;
+
     void CleanCcEntryForTest(const TableName &table_name,
                              const TxKey &key,
                              bool only_archives,
@@ -450,6 +460,7 @@ private:
     CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
     CcRequestPool<KickoutCcEntryCc> kickout_ccentry_pool_;
     CcRequestPool<ApplyCc> apply_pool;
+    CcRequestPool<UploadTxCommandsCc> cmd_commit_pool;
 
     CircularQueue<std::unique_ptr<CcScanner>> pk_forward_scanner_{64};
     CircularQueue<std::unique_ptr<CcScanner>> pk_backward_scanner_{64};

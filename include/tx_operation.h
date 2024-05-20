@@ -130,7 +130,7 @@ struct ReadOperation : TransactionOperation
 public:
     explicit ReadOperation(
         TransactionExecution *txm,
-        CcHandlerResult<ReadKeyResult> *lock_range_result = nullptr);
+        CcHandlerResult<ReadKeyResult> *lock_range_bucket_result = nullptr);
 
     void Reset();
     void Forward(TransactionExecution *txm) override;
@@ -143,8 +143,12 @@ public:
     CcHandlerResult<ReadKeyResult> hd_result_;
     bool local_cache_miss_{false};
 
+// TODO(lzx): remove "lock_bucket_result_" and "lock_range_result_", just
+// use TxExecution::lock_bucket_result_ to set lock_bucket_op_->hd_result_.
 #ifdef RANGE_PARTITION_ENABLED
     CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
+#else
+    CcHandlerResult<ReadKeyResult> *lock_bucket_result_{nullptr};
 #endif
 };
 
@@ -240,6 +244,43 @@ public:
     TableName range_table_name_{empty_sv, TableType::RangePartition};
     // RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
+
+    std::unordered_map<TableName, TableWriteSet>::iterator table_it_;
+    std::unordered_map<TableName, TableWriteSet>::iterator table_end_;
+    TableWriteSet::iterator write_key_it_;
+    TableWriteSet::iterator write_key_end_;
+    bool init_;
+    bool execute_immediately_{true};
+};
+
+struct LockWriteBucketsOp : public TransactionOperation
+{
+public:
+    explicit LockWriteBucketsOp(
+        CcHandlerResult<ReadKeyResult> *lock_bucket_result)
+        : lock_bucket_result_(lock_bucket_result)
+    {
+    }
+
+    void Forward(TransactionExecution *txm) override;
+
+    void Reset()
+    {
+        init_ = false;
+        is_running_ = false;
+        execute_immediately_ = true;
+    }
+
+    /**
+     * @brief Advances the internal iterator to the next write key to acquire a
+     * write lock. Also Check if current write key needs to be forward written
+     * (bucket is migrating).
+     */
+    void Advance(TransactionExecution *txm, const BucketInfo *bucket_info);
+
+    // TableName range_table_name_{empty_sv, TableType::RangePartition};
+    // RangeRecord range_rec_;
+    CcHandlerResult<ReadKeyResult> *lock_bucket_result_{nullptr};
 
     std::unordered_map<TableName, TableWriteSet>::iterator table_it_;
     std::unordered_map<TableName, TableWriteSet>::iterator table_end_;
@@ -975,7 +1016,7 @@ struct ObjectCommandOp : TransactionOperation
 {
     explicit ObjectCommandOp(
         TransactionExecution *txm,
-        CcHandlerResult<ReadKeyResult> *lock_range_result = nullptr);
+        CcHandlerResult<ReadKeyResult> *lock_range_bucket_result = nullptr);
     void Reset(const TableName *table_name,
                const ObjectTableOption *table_option,
                const TxKey *key,
@@ -994,6 +1035,11 @@ struct ObjectCommandOp : TransactionOperation
 
 #ifdef RANGE_PARTITION_ENABLED
     CcHandlerResult<ReadKeyResult> *lock_range_result_;
+#else
+    // TODO(lzx): remove "lock_bucket_result_" and "lock_range_result_", just
+    // use TxExecution::lock_bucket_result_ to set lock_bucket_op_->hd_result_.
+    CcHandlerResult<ReadKeyResult> *lock_bucket_result_;
+    uint32_t forward_key_shard_{UINT32_MAX};
 #endif
 };
 
@@ -1001,7 +1047,7 @@ struct MultiObjectCommandOp : TransactionOperation
 {
     explicit MultiObjectCommandOp(
         TransactionExecution *txm,
-        CcHandlerResult<ReadKeyResult> *lock_range_result = nullptr);
+        CcHandlerResult<ReadKeyResult> *lock_range_bucket_result = nullptr);
     void Reset(MultiObjectCommandTxRequest *tx_req);
 
     void Forward(TransactionExecution *txm) override;
@@ -1024,7 +1070,33 @@ struct MultiObjectCommandOp : TransactionOperation
     size_t range_lock_cur_{0};
     std::vector<uint32_t> vct_key_shard_code_;
     CcHandlerResult<ReadKeyResult> *lock_range_result_;
+#else
+    size_t bucket_lock_cur_{0};
+    CcHandlerResult<ReadKeyResult> *lock_bucket_result_;
+    // [{key shard code, forward key shard code}, ...]
+    std::vector<std::pair<uint32_t, uint32_t>> vct_key_shard_code_;
 #endif
+};
+
+// Only acquire key write lock on forward NodeGroup (dirty owner of bucket)
+// without execute tx command when the bucket is in migration.
+struct CmdForwardAcquireWriteOp : TransactionOperation
+{
+public:
+    explicit CmdForwardAcquireWriteOp(TransactionExecution *txm);
+    void Reset(size_t acquire_write_cnt);
+    void Reset();
+    void AggregateAcquiredKeys(TransactionExecution *txm);
+    void Forward(TransactionExecution *txm) override;
+
+    CcHandlerResult<std::vector<AcquireKeyResult>> hd_result_;
+    std::vector<CmdForwardEntry *> acquire_write_entries_{16};
+
+    // Number of remote keys on which the acquire write operation needs to
+    // acquire write intentions/locks.
+    std::atomic<int32_t> remote_ack_cnt_{0};
+
+    TransactionExecution *txm_{nullptr};
 };
 
 class NotifyMigrationClosure : public google::protobuf::Closure
@@ -1154,27 +1226,41 @@ public:
                TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
+#ifndef RANGE_PARTITION_ENABLED
+    /**
+     * Publish is_migrating to all node groups.
+     * And finish handler_result after receiving all rpc responses.
+     **/
+    static void SendBucketsMigratingRpc(bool is_migrating,
+                                        bool &result,
+                                        bool &rpc_failed);
+#endif
+
     std::unordered_map<NodeGroupId, BucketMigrateInfo> bucket_migrate_infos_;
     /**
      * Cluster scale tx has different op processing order based on the event
      * type. For add node, the order is
      * 1. prepare_log_op_
+     * == pub_buckets_migrate_begin_op_ #HashPartition
      * 2. acquire_cluster_config_write_op_
      * 3. update_cluster_config_log_op_
      * 4. flush_new_cluster_config_op_
      * 5. install_cluster_config_op_
      * 6. notify_migration_op_
      * 7. check_migration_is_finished_op_
+     * ==  pub_buckets_migrate_end_op_ #HashPartition
      * 8. clean_log_op_
      *
      * For remove node, the order is
      * 1. prepare_log_op_
+     * == pub_buckets_migrate_begin_op_ #HashPartition
      * 2. notify_migration_op_
      * 3. check_migration_is_finished_op_
      * 4. acquire_cluster_config_write_op_
      * 5. update_cluster_config_log_op_
      * 6. flush_new_cluster_config_op_
      * 7. install_cluster_config_op_
+     * ==  pub_buckets_migrate_end_op_ #HashPartition
      * 8. clean_log_op_
      *
      * Basically for add node we're adding new nodes into the cluster first,
@@ -1230,6 +1316,23 @@ public:
     CheckMigrationIsFinishedOp check_migration_is_finished_op_;
 
     WriteToLogOp clean_log_op_;
+
+#ifndef RANGE_PARTITION_ENABLED
+    /**
+     * @brief Before buckets migrating, notify all nodes that reading bucket
+     * info from RangeBucketCcMap instead of no-lock reading
+     * LocalCcShards::buckets_infos_.
+     * @result Identify that there is no tx reading buckets_infos_ directly on
+     * all nodes.
+     */
+    AsyncOp<Void> pub_buckets_migrate_begin_op_;
+
+    /**
+     * @brief Notify all nodes that buckets migration finshed and can read
+     * bucket info from buckets_infos directly.
+     */
+    AsyncOp<Void> pub_buckets_migrate_end_op_;
+#endif
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);

@@ -189,6 +189,8 @@ enum struct CcErrorCode : uint8_t
 
     TASK_EXPIRED,
 
+    LOG_NOT_TRUNCATABLE,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 
@@ -256,6 +258,8 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::DATA_NOT_ON_LOCAL_NODE, "DATA_NOT_ON_LOCAL_NODE"},
 
     {CcErrorCode::TASK_EXPIRED, "TASK_EXPIRED"},
+
+    {CcErrorCode::LOG_NOT_TRUNCATABLE, "LOG_NOT_TRUNCATABLE"},
 
     // NOTICE: please keep this variable at tail.
     {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},

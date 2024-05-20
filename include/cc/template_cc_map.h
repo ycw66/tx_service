@@ -5355,6 +5355,9 @@ public:
         //
         // indicate if export cce failed due to oom
         bool is_scan_mem_full = false;
+#ifdef ON_KEY_OBJECT
+        bool replay_cmds_notnull = false;
+#endif
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_ &&
@@ -5387,7 +5390,6 @@ public:
             {
                 cce->KickOutArchiveRecords(recycle_ts);
             }
-#endif
 
             if (req.filter_lambda_(key->Hash()) &&
                 (cce->NeedCkpt() || req.include_persisted_data_))
@@ -5413,10 +5415,69 @@ public:
                     break;
                 }
             }
+#else
+            uint64_t key_hash = key->Hash();
+            if (req.filter_lambda_(key_hash))
+            {
+                if (cce->HasReplayCommandList())
+                {
+                    // If the data is owned by this ng, fetch the record,
+                    // otherwise only skip this record for now and don't
+                    // truncate redo log.
+                    assert(cce->PayloadStatus() == RecordStatus::Unknown);
+                    uint16_t bucket_id =
+                        Sharder::Instance().MapKeyHashToBucketId(key_hash);
+                    if (shard_->GetBucketOwner(bucket_id, cc_ng_id_) ==
+                        cc_ng_id_)
+                    {
+                        TxKey tx_key(key);
+                        shard_->FetchRecord(table_name_,
+                                            table_schema_,
+                                            TxKey(key),
+                                            cce,
+                                            this,
+                                            cc_ng_id_,
+                                            ng_term,
+                                            nullptr);
+                    }
+                    replay_cmds_notnull = true;
+                }
+                else if (cce->NeedCkpt())
+                {
+                    auto export_result =
+                        ExportForCkpt(cce,
+                                      *key,
+                                      req.DataSyncVec(vec_idx),
+                                      req.ArchiveVec(vec_idx),
+                                      req.MoveBaseIdxVec(vec_idx),
+                                      req.previous_scan_ts_,
+                                      req.data_sync_ts_,
+                                      recycle_ts,
+                                      Type(),
+                                      shard_->EnableMvcc(),
+                                      req.accumulated_scan_cnt_[vec_idx],
+                                      false,
+                                      false);
+
+                    if (export_result.second)
+                    {
+                        is_scan_mem_full = true;
+                        break;
+                    }
+                }
+            }
+#endif
 
             // Forward iterator
             it++;
         }
+
+#ifdef ON_KEY_OBJECT
+        if (replay_cmds_notnull)
+        {
+            req.SetNotTruncateLog();
+        }
+#endif
 
         bool no_more_data = (it == end_it) || (it == end_it_next_page_it);
 
@@ -6717,6 +6778,11 @@ public:
     }
 
     bool Execute(ApplyCc &req) override
+    {
+        return true;
+    }
+
+    bool Execute(UploadTxCommandsCc &req) override
     {
         return true;
     }
@@ -8672,8 +8738,7 @@ protected:
                 }
                 else
 #else
-                // TODO(liunyl): enable this after cluster scale bool is
-                // added if (shard_->DuringClusterScale())
+                if (shard_->IsBucketsMigrating())
                 {
                     // This will disallow this bucket from accepting upload
                     // batch request during cluster scale since we might already
