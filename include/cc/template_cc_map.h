@@ -6989,6 +6989,13 @@ public:
                                     : merged_page;
                 }
             }
+            else
+            {
+                assert(!page->Empty());
+                auto page_it = ccmp_.find(old_page_key);
+                assert(page_it != ccmp_.end());
+                TryUpdatePageKey(page_it);
+            }
         }
 
         size_ -= free_cnt;
