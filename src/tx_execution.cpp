@@ -152,7 +152,31 @@ void TransactionExecution::Reset()
 
 #ifndef RANGE_PARTITION_ENABLED
     ClearCachedBucketInfos();
+#else
+    lock_range_result_.Reset();
+    lock_range_op_.Reset();
+    lock_write_ranges_.Reset();
 #endif
+    init_txn_.Reset();
+    read_.Reset();
+    scan_open_.Reset();
+    scan_next_.Reset();
+
+    obj_cmd_.Reset(nullptr, nullptr, nullptr, nullptr);
+
+    acquire_write_.Reset(0, 0);
+    set_ts_.Reset();
+    validate_.Reset(0);
+    update_txn_.Reset();
+    post_process_.Reset(0, 0, 0);
+    write_log_.Reset();
+
+    analyze_table_all_op_.Reset(0);
+    broadcast_stat_op_.Reset(0);
+    reload_cache_op_.Reset(0);
+    fault_inject_op_.Reset();
+    clean_entry_op_.Reset();
+    abundant_lock_op_.Reset();
 }
 
 void TransactionExecution::Restart(CcHandler *handler,
@@ -4447,7 +4471,11 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
 
     uint32_t acquire_write_cnt =
         rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
-    if (acquire_write_cnt > 0 && acquire_write_.hd_result_.IsError())
+    // If the lock range failed, the acquire write operation will not be
+    // executed at all. Therefore, should first check whether the acquire write
+    // operation has been executed.
+    if (acquire_write_cnt > 0 && acquire_write_.hd_result_.IsFinished() &&
+        acquire_write_.hd_result_.IsError())
     {
         std::vector<AcquireKeyResult> &acquire_key_vec =
             acquire_write_.hd_result_.Value();
