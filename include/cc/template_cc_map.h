@@ -1922,7 +1922,9 @@ public:
                       uint64_t read_ts,
                       bool is_read_snapshot,
                       bool keep_deleted = true,
-                      bool is_ckpt_delta = false)
+                      bool is_ckpt_delta = false,
+                      bool is_require_keys = true,
+                      bool is_require_recs = true)
     {
         assert(scan_type != ScanType::ScanUnknow);
 
@@ -1946,7 +1948,9 @@ public:
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
-                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
+                is_require_keys,
+                is_require_recs);
             break;
         case ScanType::ScanKey:
             ScanKey(
@@ -1959,7 +1963,9 @@ public:
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
-                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
+                is_require_keys,
+                is_require_recs);
             break;
         default:
             break;
@@ -2715,7 +2721,9 @@ public:
                          uint64_t read_ts,
                          bool is_read_snapshot,
                          bool keep_deleted = true,
-                         bool is_ckpt_delta = false)
+                         bool is_ckpt_delta = false,
+                         bool is_require_keys = true,
+                         bool is_require_recs = true)
     {
         assert(scan_type != ScanType::ScanUnknow);
 
@@ -2737,7 +2745,9 @@ public:
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
-                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
+                is_require_keys,
+                is_require_recs);
             break;
         case ScanType::ScanKey:
             ScanKey(
@@ -2749,7 +2759,9 @@ public:
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
-                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
+                is_require_keys,
+                is_require_recs);
             break;
         default:
             break;
@@ -3483,6 +3495,9 @@ public:
                                      : CcOperation::Read;
         }
 
+        bool is_require_keys = req.IsRequireKeys();
+        bool is_require_recs = req.IsRequireRecords();
+
         CcHandlerResult<RangeScanSliceResult> *hd_res = req.Result();
         const KeyT *req_start_key = nullptr;
         if (req.StartKey() != nullptr)
@@ -3541,35 +3556,6 @@ public:
             remote_scan_cache = req.GetRemoteScanCache(core_id);
             assert(remote_scan_cache != nullptr);
         }
-
-        auto last_cce_of_cache =
-            [&req, scan_cache, remote_scan_cache]() -> CcEntry<KeyT, ValueT> *
-        {
-            if (req.IsLocal())
-            {
-                if (scan_cache->Last())
-                {
-                    return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                        scan_cache->Last()->cce_addr_.CcePtr());
-                }
-                else
-                {
-                    return nullptr;
-                }
-            }
-            else
-            {
-                if (remote_scan_cache->Size() > 0)
-                {
-                    return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                        remote_scan_cache->LastCce());
-                }
-                else
-                {
-                    return nullptr;
-                }
-            }
-        };
 
         if (req.SliceId().Slice() == nullptr)
         {
@@ -3741,7 +3727,10 @@ public:
                              ng_term,
                              req.ReadTimestamp(),
                              is_read_snapshot,
-                             is_locked);
+                             is_locked,
+                             false,
+                             is_require_keys,
+                             is_require_recs);
             }
             else
             {
@@ -3752,7 +3741,10 @@ public:
                                 ng_term,
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
-                                is_locked);
+                                is_locked,
+                                false,
+                                is_require_keys,
+                                is_require_recs);
             }
 
             return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
@@ -3850,7 +3842,10 @@ public:
                                  ng_term,
                                  req.ReadTimestamp(),
                                  is_read_snapshot,
-                                 is_locked);
+                                 is_locked,
+                                 false,
+                                 is_require_keys,
+                                 is_require_recs);
                 }
                 else
                 {
@@ -3861,7 +3856,10 @@ public:
                                     ng_term,
                                     req.ReadTimestamp(),
                                     is_read_snapshot,
-                                    is_locked);
+                                    is_locked,
+                                    false,
+                                    is_require_keys,
+                                    is_require_recs);
                 }
             }
             if (req.Direction() == ScanDirection::Forward)
@@ -4216,7 +4214,9 @@ public:
 
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
-            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
+            if (CcEntry<KeyT, ValueT> *last_cce =
+                    req.LastCceOfCache<KeyT, ValueT>(core_id);
+                last_cce)
             {
                 while (scan_ccm_it->second != last_cce)
                 {
@@ -4517,7 +4517,9 @@ public:
 
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
-            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
+            if (CcEntry<KeyT, ValueT> *last_cce =
+                    req.LastCceOfCache<KeyT, ValueT>(core_id);
+                last_cce)
             {
                 while (scan_ccm_it->second != last_cce)
                 {
@@ -4532,7 +4534,9 @@ public:
             // acquires the read intent on the last scanned key to prevent
             // if from kicking out. The next scan batch will resume from the
             // last key without searching the cc map.
-            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
+            if (CcEntry<KeyT, ValueT> *last_cce =
+                    req.LastCceOfCache<KeyT, ValueT>(core_id);
+                last_cce)
             {
                 CcPage<KeyT, ValueT> *last_ccp = scan_ccm_it.GetPage();
                 bool add_intent =
@@ -8244,10 +8248,12 @@ protected:
                  uint64_t read_ts,
                  bool is_read_snapshot,
                  bool keep_deleted,
-                 bool is_ckpt_delta = false)
+                 bool is_ckpt_delta = false,
+                 bool is_require_keys = true,
+                 bool is_require_recs = true)
     {
         TemplateScanTuple<KeyT, ValueT> *tuple = nullptr;
-        uint32_t tuple_size = 0;
+        uint32_t tuple_size = ScanCache::BasicTupleSize;
 
         if (is_read_snapshot)
         {
@@ -8273,20 +8279,29 @@ protected:
 #else
             tuple = typed_cache->AddScanTuple();
 #endif
-            tuple->KeyObj().Copy(*key);
-            tuple_size = key->Size();
 
-            if (v_rec.payload_status_ == RecordStatus::Normal ||
-                (is_ckpt_delta &&
-                 v_rec.payload_status_ == RecordStatus::Deleted))
+            if (is_require_keys ||
+                v_rec.payload_status_ != RecordStatus::Normal)
             {
-                if (v_rec.payload_ptr_ != nullptr)
+                tuple->KeyObj().Copy(*key);
+                tuple_size += key->Size();
+            }
+
+            if (is_require_recs)
+            {
+                if (v_rec.payload_status_ == RecordStatus::Normal ||
+                    (is_ckpt_delta &&
+                     v_rec.payload_status_ == RecordStatus::Deleted))
                 {
-                    tuple->SetRecord(v_rec.payload_ptr_);
-                    // We're only copying the shared_ptr here so we
-                    // exclude the actual payload size.
+                    if (v_rec.payload_ptr_ != nullptr)
+                    {
+                        tuple->SetRecord(v_rec.payload_ptr_);
+                        // We're only copying the shared_ptr here so we
+                        // exclude the actual payload size.
+                    }
                 }
             }
+
             tuple->key_ts_ = v_rec.commit_ts_;
             tuple->rec_status_ = v_rec.payload_status_;
 #endif
@@ -8307,26 +8322,33 @@ protected:
 #else
             tuple = typed_cache->AddScanTuple();
 #endif
-            tuple->KeyObj().Copy(*key);
-            tuple_size = key->Size();
-
-            if (rec_status == RecordStatus::Normal ||
-                (is_ckpt_delta && rec_status == RecordStatus::Deleted))
+            if (is_require_keys)
             {
-                if (cce->payload_ != nullptr)
+                tuple->KeyObj().Copy(*key);
+                tuple_size += key->Size();
+            }
+
+            if (is_require_recs)
+            {
+                if (rec_status == RecordStatus::Normal ||
+                    (is_ckpt_delta && rec_status == RecordStatus::Deleted))
                 {
+                    if (cce->payload_ != nullptr)
+                    {
 #ifndef ON_KEY_OBJECT
-                    tuple->SetRecord(cce->payload_);
+                        tuple->SetRecord(cce->payload_);
 #else
-                    // Redis KEYS command doesn't need value. But
-                    // ObjectCcMap doesn't override ScanKey() on local
-                    // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
-                    // may be called, and it need not set record.
+                        // Redis KEYS command doesn't need value. But
+                        // ObjectCcMap doesn't override ScanKey() on local
+                        // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
+                        // may be called, and it need not set record.
 #endif
-                    // We're only copying the shared_ptr here so we
-                    // exclude the actual payload size.
+                        // We're only copying the shared_ptr here so we
+                        // exclude the actual payload size.
+                    }
                 }
             }
+
             tuple->rec_status_ = rec_status;
             tuple->key_ts_ = cce->CommitTs();
         }
@@ -8348,9 +8370,18 @@ protected:
                  uint64_t read_ts,
                  bool is_read_snapshot,
                  bool keep_deleted,
-                 bool is_ckpt_delta = false) const
+                 bool is_ckpt_delta = false,
+                 bool is_require_keys = true,
+                 bool is_require_recs = true) const
     {
-        uint32_t tuple_size = 0;
+        // Skip key and/or payload whenever unnecessary by filling an
+        // empty key/payload, so the receiver doesn't have to care about whether
+        // skipping when deserializing.
+        static KeyT empty_key;
+        static ValueT empty_val;
+        const ValueT *payload = &empty_val;
+
+        uint32_t tuple_size = RemoteScanSliceCache::BasicTupleSize;
 
         if (is_read_snapshot)
         {
@@ -8368,19 +8399,34 @@ protected:
             {
                 return;
             }
-            key->Serialize(remote_cache->keys_);
-            tuple_size += key->Size();
 
-            if (v_rec.payload_status_ == RecordStatus::Normal ||
-                (is_ckpt_delta &&
-                 v_rec.payload_status_ == RecordStatus::Deleted))
+            if (!(is_require_keys ||
+                  v_rec.payload_status_ != RecordStatus::Normal))
             {
-                if (v_rec.payload_ptr_ != nullptr)
+                key = &empty_key;
+            }
+
+            remote_cache->key_off_vec_.push_back(remote_cache->keys_.size());
+            key->Serialize(remote_cache->keys_);
+            tuple_size += key->SerializedLength();
+
+            if (is_require_recs)
+            {
+                if (v_rec.payload_status_ == RecordStatus::Normal ||
+                    (is_ckpt_delta &&
+                     v_rec.payload_status_ == RecordStatus::Deleted))
                 {
-                    v_rec.payload_ptr_->Serialize(remote_cache->records_);
-                    tuple_size += v_rec.payload_ptr_->SerializedLength();
+                    if (v_rec.payload_ptr_ != nullptr)
+                    {
+                        payload = v_rec.payload_ptr_.get();
+                    }
                 }
             }
+
+            remote_cache->rec_off_vec_.push_back(remote_cache->records_.size());
+            payload->Serialize(remote_cache->records_);
+            tuple_size += payload->SerializedLength();
+
             remote_cache->rec_status_.push_back(
                 remote::ToRemoteType::ConvertRecordStatus(
                     v_rec.payload_status_));
@@ -8395,25 +8441,39 @@ protected:
             {
                 return;
             }
+
+            if (!(is_require_keys || rec_status != RecordStatus::Normal))
+            {
+                key = &empty_key;
+            }
+
+            remote_cache->key_off_vec_.push_back(remote_cache->keys_.size());
             key->Serialize(remote_cache->keys_);
             tuple_size += key->SerializedLength();
 
-            if (rec_status == RecordStatus::Normal ||
-                (is_ckpt_delta && rec_status == RecordStatus::Deleted))
+            if (is_require_recs)
             {
-                if (cce->payload_ != nullptr)
+                if (rec_status == RecordStatus::Normal ||
+                    (is_ckpt_delta && rec_status == RecordStatus::Deleted))
                 {
-#ifndef ON_KEY_OBJECT
-                    cce->payload_->Serialize(remote_cache->records_);
-                    tuple_size += cce->payload_->SerializedLength();
-#else
-                    // Redis KEYS command doesn't need value. But
-                    // ObjectCcMap doesn't override ScanKey() on local
-                    // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
-                    // may be called, and it need not set record.
-#endif
+                    if (cce->payload_ != nullptr)
+                    {
+                        payload = cce->payload_.get();
+                    }
                 }
             }
+
+#ifndef ON_KEY_OBJECT
+            remote_cache->rec_off_vec_.push_back(remote_cache->records_.size());
+            payload->Serialize(remote_cache->records_);
+            tuple_size += payload->SerializedLength();
+#else
+            // Redis KEYS command doesn't need value. But
+            // ObjectCcMap doesn't override ScanKey() on local
+            // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
+            // may be called, and it need not set record.
+#endif
+
             remote_cache->rec_status_.push_back(
                 remote::ToRemoteType::ConvertRecordStatus(rec_status));
             remote_cache->key_ts_.push_back(cce->CommitTs());
@@ -8447,6 +8507,9 @@ protected:
                  bool keep_deleted,
                  bool is_ckpt_delta = false) const
     {
+        static ValueT empty_val;
+        const ValueT *payload = &empty_val;
+
         remote::ScanTuple_msg *tuple = nullptr;
         uint32_t tuple_size = 0;
 
@@ -8481,13 +8544,16 @@ protected:
                 (is_ckpt_delta &&
                  v_rec.payload_status_ == RecordStatus::Deleted))
             {
-                tuple->clear_record();
                 if (v_rec.payload_ptr_ != nullptr)
                 {
-                    v_rec.payload_ptr_->Serialize(*tuple->mutable_record());
-                    tuple_size += v_rec.payload_ptr_->Size();
+                    payload = v_rec.payload_ptr_.get();
                 }
             }
+
+            tuple->clear_record();
+            payload->Serialize(*tuple->mutable_record());
+            tuple_size += payload->Size();
+
             tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
                 v_rec.payload_status_));
             tuple->set_key_ts(v_rec.commit_ts_);
@@ -8515,20 +8581,23 @@ protected:
             if (rec_status == RecordStatus::Normal ||
                 (is_ckpt_delta && rec_status == RecordStatus::Deleted))
             {
-                tuple->clear_record();
                 if (cce->payload_ != nullptr)
                 {
-#ifndef ON_KEY_OBJECT
-                    cce->payload_->Serialize(*tuple->mutable_record());
-                    tuple_size += cce->payload_->Size();
-#else
-                    // Redis KEYS command doesn't need value. But
-                    // ObjectCcMap doesn't override ScanKey() on local
-                    // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
-                    // may be called, and it need not set record.
-#endif
+                    payload = cce->payload_.get();
                 }
             }
+
+            tuple->clear_record();
+#ifndef ON_KEY_OBJECT
+            payload->Serialize(*tuple->mutable_record());
+            tuple_size += payload->Size();
+#else
+            // Redis KEYS command doesn't need value. But
+            // ObjectCcMap doesn't override ScanKey() on local
+            // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
+            // may be called, and it need not set record.
+#endif
+
             tuple->set_rec_status(
                 remote::ToRemoteType::ConvertRecordStatus(rec_status));
             tuple->set_key_ts(cce->CommitTs());

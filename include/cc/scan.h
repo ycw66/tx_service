@@ -11,7 +11,7 @@ namespace txservice
 enum class ScanDirection : uint8_t
 {
     Forward,
-    Backward
+    Backward,
 };
 
 enum class ScanIndexType : uint8_t

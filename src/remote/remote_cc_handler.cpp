@@ -652,6 +652,9 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_slice->set_protocol(ToRemoteType::ConvertProtocol(proto));
     scan_slice->set_is_for_write(scanner.is_for_write_);
     scan_slice->set_is_covering_keys(scanner.is_covering_keys_);
+    scan_slice->set_is_require_keys(scanner.is_require_keys_);
+    scan_slice->set_is_require_recs(scanner.is_require_recs_);
+    scan_slice->set_is_require_sort(scanner.is_require_sort_);
     scan_slice->set_prefetch_size(prefetch_size);
     stream_sender_.SendMessageToNg(cc_ng_id, send_msg, &hd_res);
 }

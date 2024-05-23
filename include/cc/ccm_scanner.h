@@ -112,8 +112,7 @@ public:
                                     uint64_t cce_ptr,
                                     int64_t term,
                                     uint32_t core_id,
-                                    uint32_t ng_id,
-                                    bool is_ckpt_delta = false) = 0;
+                                    uint32_t ng_id) = 0;
 
     virtual const ScanTuple *LastTuple() const = 0;
 
@@ -162,7 +161,7 @@ public:
 
     bool IsFull() const
     {
-        return mem_size_ >= 1024 * 16;
+        return mem_size_ >= 1024 * 60;
     }
 
     TemplateScanTuple<KeyT, ValueT> *AddScanTuple()
@@ -198,8 +197,7 @@ public:
                             uint64_t cce_ptr,
                             int64_t term,
                             uint32_t core_id,
-                            uint32_t ng_id,
-                            bool is_ckpt_delta = false) override
+                            uint32_t ng_id) override
     {
         assert(size_ <= cache_.size());
 
@@ -214,21 +212,15 @@ public:
             scan_tuple = &new_tuple;
         }
 
+        // When the key's timestamp is 0, the tuple's key is not included in
+        // this scan. Only deserializes the key when the key is included.
+        assert(key_ts > 0);
         scan_tuple->key_ts_ = key_ts;
-        if (key_ts > 0)
-        {
-            // When the key's timestamp is 0, the tuple's key is not included in
-            // this scan. Only deserializes the key when the key is included.
-            scan_tuple->KeyObj().Deserialize(
-                key_str.data(), key_offset, key_schema_);
-        }
+        scan_tuple->KeyObj().Deserialize(
+            key_str.data(), key_offset, key_schema_);
 
         scan_tuple->rec_status_ = rec_status;
-        if (rec_status == RecordStatus::Normal ||
-            (rec_status == RecordStatus::Deleted && is_ckpt_delta))
-        {
-            scan_tuple->SetRecord(record_str.data(), rec_offset);
-        }
+        scan_tuple->SetRecord(record_str.data(), rec_offset);
 
         scan_tuple->gap_ts_ = gap_ts;
         scan_tuple->cce_addr_.SetCce(cce_ptr, term, ng_id, core_id);
@@ -372,6 +364,16 @@ public:
         return is_covering_keys_;
     }
 
+    bool IsRequireKeys() const
+    {
+        return is_require_keys_;
+    }
+
+    bool IsRequireRecords() const
+    {
+        return is_require_recs_;
+    }
+
     IsolationLevel Isolation() const
     {
         return iso_level_;
@@ -400,6 +402,9 @@ public:
     bool is_ckpt_delta_{false};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
 };
@@ -809,29 +814,31 @@ public:
      */
     void CommitAtCore(uint16_t core_id) override
     {
-        std::vector<CompoundIndex> &next_chain = index_chain_[core_id];
-        next_chain.clear();
-        next_chain.reserve(scans_[core_id].Size());
+        size_t sz = scans_[core_id].Size();
+        if (sz > 0)
+        {
+            std::vector<CompoundIndex> &next_chain = index_chain_[core_id];
+            next_chain.clear();
+            next_chain.reserve(sz);
 
-        CompoundIndex head_index;
-        if (scans_[core_id].Size() == 0)
-        {
-            head_index = Inf();
-        }
-        else
-        {
-            for (uint32_t idx = 0; idx < scans_[core_id].Size() - 1; ++idx)
+            for (uint32_t idx = 0; idx < sz - 1; ++idx)
             {
                 next_chain.emplace_back(core_id, idx + 1);
             }
             // The next index of the last tuple is infinity.
             next_chain.emplace_back(Inf());
-            assert(next_chain.size() == scans_[core_id].Size());
+            assert(next_chain.size() == sz);
 
-            head_index = {core_id, 0};
+            if (is_require_sort_)
+            {
+                CompoundIndex head_index(core_id, 0);
+                Merge(head_index);
+            }
+            else
+            {
+                Concat(core_id, next_chain);
+            }
         }
-
-        Merge(head_index);
     }
 
 private:
@@ -1009,6 +1016,13 @@ private:
         }
 
         Merge(merge_head);
+    }
+
+    void Concat(uint16_t core_id, std::vector<CompoundIndex> &chain)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        chain.back() = head_index_;
+        head_index_ = {core_id, 0};
     }
 
     CompoundIndex AdvanceMergeIndex(CompoundIndex index)

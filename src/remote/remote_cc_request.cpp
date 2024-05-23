@@ -1135,6 +1135,9 @@ void txservice::remote::RemoteScanSlice::Reset(
                      ToLocalType::ConvertProtocol(scan_slice_req.protocol()),
                      scan_slice_req.is_for_write(),
                      scan_slice_req.is_covering_keys(),
+                     scan_slice_req.is_require_keys(),
+                     scan_slice_req.is_require_recs(),
+                     scan_slice_req.is_require_sort(),
                      scan_slice_req.prefetch_size());
 
     output_msg_.set_tx_number(input_msg->tx_number());

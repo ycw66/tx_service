@@ -173,13 +173,13 @@ struct RemoteScanCache
 struct RemoteScanSliceCache
 {
     RemoteScanSliceCache(uint16_t shard_cnt)
-        : cache_mem_size_(0), shard_cnt_(shard_cnt), trailing_cnt_(0)
+        : cache_mem_size_(0), shard_cnt_(shard_cnt)
     {
     }
 
     bool IsFull() const
     {
-        return cache_mem_size_ >= 1024 * 20;
+        return cache_mem_size_ >= 1024 * 60;
     }
 
     void Reset(uint16_t shard_cnt)
@@ -191,24 +191,44 @@ struct RemoteScanSliceCache
         rec_status_.clear();
         keys_.clear();
         records_.clear();
+        key_off_vec_.clear();
+        rec_off_vec_.clear();
         cache_mem_size_ = 0;
-        trailing_cnt_ = 0;
         shard_cnt_ = shard_cnt;
     }
 
+    /**
+     * Sender remove trailing records.
+     *
+     * It is hard for the receiver to remove trailing records, since Key might
+     * not transferred.
+     */
     void RemoveLast()
     {
-        trailing_cnt_++;
+        uint32_t cache_mem_size = cache_mem_size_;
+        cache_mem_size_ -= keys_.size() - key_off_vec_.back();
+        cache_mem_size_ -= records_.size() - rec_off_vec_.back();
+        assert(cache_mem_size_ <= cache_mem_size);
+
+        key_ts_.pop_back();
+        gap_ts_.pop_back();
+        cce_ptr_.pop_back();
+        term_.pop_back();
+        rec_status_.pop_back();
+        keys_.erase(key_off_vec_.back());
+        records_.erase(rec_off_vec_.back());
+        key_off_vec_.pop_back();
+        rec_off_vec_.pop_back();
     }
 
     uint64_t LastCce()
     {
-        return cce_ptr_.at(cce_ptr_.size() - 1 - trailing_cnt_);
+        return cce_ptr_.at(cce_ptr_.size() - 1);
     }
 
     size_t Size() const
     {
-        return cce_ptr_.size() - trailing_cnt_;
+        return cce_ptr_.size();
     }
 
     std::vector<uint64_t> key_ts_;
@@ -218,9 +238,10 @@ struct RemoteScanSliceCache
     std::vector<remote::RecordStatusType> rec_status_;
     std::string keys_;
     std::string records_;
+    std::vector<size_t> key_off_vec_;  // Used to remove trailing keys.
+    std::vector<size_t> rec_off_vec_;  // Used to remove trailing records.
     uint32_t cache_mem_size_;
     uint16_t shard_cnt_;
-    size_t trailing_cnt_;
 };
 
 struct RangeScanSliceResult

@@ -1996,6 +1996,9 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool is_for_write = scan_open.tx_req_->is_for_write_;
     bool is_for_share = scan_open.tx_req_->is_for_share_;
     bool is_covering_keys = scan_open.tx_req_->is_covering_keys_;
+    bool is_require_keys = scan_open.tx_req_->is_require_keys_;
+    bool is_require_recs = scan_open.tx_req_->is_require_recs_;
+    bool is_require_sort = scan_open.tx_req_->is_require_sort_;
 
     scan_open.Reset();
     scan_open.is_running_ = true;
@@ -2047,7 +2050,10 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               protocol_,
                               is_for_write,
                               is_ckpt_delta,
-                              is_covering_keys
+                              is_covering_keys,
+                              is_require_keys,
+                              is_require_recs,
+                              is_require_sort
 #ifdef ON_KEY_OBJECT
                               ,
                               scan_open.tx_req_->obj_type_,

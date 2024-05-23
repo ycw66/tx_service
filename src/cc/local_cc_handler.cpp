@@ -765,7 +765,10 @@ void txservice::LocalCcHandler::ScanOpen(
     CcProtocol proto,
     bool is_for_write,
     bool is_ckpt_delta,
-    bool is_covering_keys
+    bool is_covering_keys,
+    bool is_require_keys,
+    bool is_require_recs,
+    bool is_require_sort
 #ifdef ON_KEY_OBJECT
     ,
     int32_t obj_type,
@@ -867,6 +870,9 @@ void txservice::LocalCcHandler::ScanOpen(
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->is_covering_keys_ = is_covering_keys;
+    scanner_ptr->is_require_keys_ = is_require_keys;
+    scanner_ptr->is_require_recs_ = is_require_recs;
+    scanner_ptr->is_require_sort_ = is_require_sort;
     scanner_ptr->iso_level_ = iso_level;
     scanner_ptr->protocol_ = proto;
     scanner_ptr->read_local_ = false;
@@ -1244,6 +1250,9 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  proto,
                  scanner.is_for_write_,
                  scanner.is_covering_keys_,
+                 scanner.is_require_keys_,
+                 scanner.is_require_recs_,
+                 scanner.is_require_sort_,
                  prefetch_size);
 
         uint32_t core_cnt = cc_shards_.Count();

@@ -1009,8 +1009,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                               tuple_msg.cce_addr().cce_ptr(),
                                               tuple_msg.cce_addr().term(),
                                               tuple_msg.cce_addr().core_id(),
-                                              ng_id,
-                                              scanner.is_ckpt_delta_);
+                                              ng_id);
                 }
             }
 

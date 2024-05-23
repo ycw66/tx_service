@@ -335,6 +335,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                       bool is_for_write = false,
                       bool is_for_share = false,
                       bool is_covering_keys = false,
+                      bool is_require_keys = true,
+                      bool is_require_recs = true,
+                      bool is_require_sort = true,
                       bool is_read_local = false,
                       const std::function<void()> *yield_fptr = nullptr,
                       const std::function<void()> *resume_fptr = nullptr,
@@ -357,6 +360,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           is_for_write_(is_for_write),
           is_for_share_(is_for_share),
           is_covering_keys_(is_covering_keys),
+          is_require_keys_(is_require_keys),
+          is_require_recs_(is_require_recs),
+          is_require_sort_(is_require_sort),
           read_local_(is_read_local),
           scan_alias_(UINT64_MAX)
 #ifdef ON_KEY_OBJECT
@@ -378,6 +384,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                bool is_for_write = false,
                bool is_for_share = false,
                bool is_covering_keys = false,
+               bool is_require_keys = true,
+               bool is_require_recs = true,
+               bool is_require_sort = true,
                bool is_read_local = false,
                const std::function<void()> *yield_fptr = nullptr,
                const std::function<void()> *resume_fptr = nullptr,
@@ -402,6 +411,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         is_for_write_ = is_for_write;
         is_for_share_ = is_for_share;
         is_covering_keys_ = is_covering_keys;
+        is_require_keys_ = is_require_keys;
+        is_require_recs_ = is_require_recs;
+        is_require_sort_ = is_require_sort;
         read_local_ = is_read_local;
         scan_alias_ = UINT64_MAX;
 #ifdef ON_KEY_OBJECT
@@ -431,6 +443,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     bool is_for_write_{false};
     bool is_for_share_{false};
     bool is_covering_keys_{true};
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     bool read_local_{false};
     uint64_t scan_alias_{UINT64_MAX};
 

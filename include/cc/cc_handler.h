@@ -305,7 +305,10 @@ public:
         CcProtocol proto = CcProtocol::OCC,
         bool is_for_write = false,
         bool is_ckpt_delta = false,
-        bool is_covering_keys = false
+        bool is_covering_keys = false,
+        bool is_require_keys = true,
+        bool is_require_recs = true,
+        bool is_require_sort = true
 #ifdef ON_KEY_OBJECT
         ,
         int32_t obj_type = -1,

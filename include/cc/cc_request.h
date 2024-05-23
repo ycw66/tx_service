@@ -1767,6 +1767,9 @@ public:
              CcProtocol protocol,
              bool read_for_write,
              bool is_covering_keys,
+             bool is_require_keys,
+             bool is_require_recs,
+             bool is_require_sort,
              uint8_t prefetch_size)
     {
         assert(hd_res.Value().is_local_);
@@ -1797,6 +1800,9 @@ public:
         cc_ng_term_ = ng_term;
         read_for_write_ = read_for_write;
         is_covering_keys_ = is_covering_keys;
+        is_require_keys_ = is_require_keys;
+        is_require_recs_ = is_require_recs;
+        is_require_sort_ = is_require_sort;
 
         unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
@@ -1822,6 +1828,9 @@ public:
              CcProtocol protocol,
              bool read_for_write,
              bool is_covering_keys,
+             bool is_require_keys,
+             bool is_require_recs,
+             bool is_require_sort,
              uint8_t prefetch_size)
     {
         assert(!hd_res.Value().is_local_);
@@ -1852,6 +1861,9 @@ public:
         cc_ng_term_ = ng_term;
         read_for_write_ = read_for_write;
         is_covering_keys_ = is_covering_keys;
+        is_require_keys_ = is_require_keys;
+        is_require_recs_ = is_require_recs;
+        is_require_sort_ = is_require_sort;
         prefetch_size_ = prefetch_size;
 
         unfinished_core_cnt_.store(1, std::memory_order_relaxed);
@@ -2067,6 +2079,38 @@ public:
         return ts_;
     }
 
+    template <typename KeyT, typename ValueT>
+    CcEntry<KeyT, ValueT> *LastCceOfCache(uint16_t shard_id)
+    {
+        if (IsLocal())
+        {
+            ScanCache *scan_cache = GetLocalScanCache(shard_id);
+            if (scan_cache->LastTuple())
+            {
+                return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                    scan_cache->LastTuple()->cce_addr_.CcePtr());
+            }
+            else
+            {
+                return nullptr;
+            }
+        }
+        else
+        {
+            RemoteScanSliceCache *remote_scan_cache =
+                GetRemoteScanCache(shard_id);
+            if (remote_scan_cache->Size() > 0)
+            {
+                return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                    remote_scan_cache->LastCce());
+            }
+            else
+            {
+                return nullptr;
+            }
+        }
+    }
+
     ScanCache *GetLocalScanCache(size_t shard_id)
     {
         return IsLocal() ? res_->Value().ccm_scanner_->Cache(shard_id)
@@ -2236,6 +2280,21 @@ public:
         return is_covering_keys_;
     }
 
+    bool IsRequireKeys() const
+    {
+        return is_require_keys_;
+    }
+
+    bool IsRequireRecords() const
+    {
+        return is_require_recs_;
+    }
+
+    bool IsRequireSort() const
+    {
+        return is_require_sort_;
+    }
+
     /**
      * @brief Returns the number of slices to prefetch when loading a cache-miss
      * slice.
@@ -2301,6 +2360,14 @@ private:
     uint8_t prefetch_size_{0};
     bool read_for_write_{false};
     bool is_covering_keys_{false};
+
+    /**
+     * For select count(*), we can skip copying keys and vals. We can
+     * skip merge-sort.
+     */
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
 
     uint32_t range_id_{0};
 
@@ -2500,45 +2567,6 @@ public:
 
             if (tuple_idx == tuple_cnt)
             {
-                auto [scan_end, is_set] = scan_slice_result.PeekLastKey();
-                assert(is_set && scan_end != nullptr);
-
-                // For remote scans, the scan result is a string representation
-                // of scanned key-value pairs. It may include keys beyond the
-                // scan's last key, due to parallel scans across multi cores at
-                // the remote node. Removes the keys from the scan cache beyond
-                // the scan's end.
-                if (range_scanner.Direction() == ScanDirection::Forward)
-                {
-                    assert(scan_end->KeyPtr() == nullptr ||
-                           scan_slice_result.slice_position_ ==
-                               txservice::SlicePosition::Middle ||
-                           scan_slice_result.slice_position_ ==
-                               txservice::SlicePosition::LastSliceInRange);
-
-                    while (scan_end->KeyPtr() != nullptr &&
-                           shard_cache->Size() > 0 &&
-                           *scan_end < shard_cache->LastTuple()->Key())
-                    {
-                        shard_cache->RemoveLast();
-                    }
-                }
-                else
-                {
-                    assert(scan_end->KeyPtr() == nullptr ||
-                           scan_slice_result.slice_position_ ==
-                               txservice::SlicePosition::Middle ||
-                           scan_slice_result.slice_position_ ==
-                               txservice::SlicePosition::FirstSliceInRange);
-
-                    while (scan_end->KeyPtr() != nullptr &&
-                           shard_cache->Size() > 0 &&
-                           shard_cache->LastTuple()->Key() < *scan_end)
-                    {
-                        shard_cache->RemoveLast();
-                    }
-                }
-
                 range_scanner.CommitAtCore(remote_core_idx);
 
                 if (!MoveForward(ccs.core_id_))
