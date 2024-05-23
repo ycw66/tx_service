@@ -32,6 +32,7 @@ struct ScanCache
 {
 public:
     static constexpr size_t ScanBatchSize = 128;
+    static constexpr size_t BasicTupleSize = 40;
 
     ScanCache(CcScanner *scanner)
         : idx_(0), size_(0), scanner_(scanner), mem_size_(0)

@@ -172,6 +172,8 @@ struct RemoteScanCache
 
 struct RemoteScanSliceCache
 {
+    static constexpr size_t BasicTupleSize = 40;
+
     RemoteScanSliceCache(uint16_t shard_cnt)
         : cache_mem_size_(0), shard_cnt_(shard_cnt)
     {
