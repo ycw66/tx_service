@@ -596,14 +596,9 @@ public:
                     // avoid further data store read.
                     TemplateStoreRange<KeyT> *old_store_range =
                         old_entry->TypedStoreRange();
-                    size_t orig_store_range_size = old_store_range->MemUsage();
                     const TxKey &tx_key = old_info->new_key_.front();
                     split_range_res = old_store_range->SplitRange(
                         tx_key.GetKey<KeyT>(), new_slice_info);
-                    size_t new_store_range_size = old_store_range->MemUsage();
-                    assert(orig_store_range_size >= new_store_range_size);
-                    shard_->local_shards_.DecreaseRangeSliceMemUsage(
-                        orig_store_range_size - new_store_range_size);
                     if (!split_range_res)
                     {
                         // If split fails due to slice is pinned or is loading
@@ -1079,19 +1074,19 @@ public:
                     // slice specs we read from data store is unreliable since
                     // it could've already been updated before the crash.
 
-                    int64_t size_change =
-                        old_table_range_entry->InitRangeSlices(
-                            std::move(range_slices), this->cc_ng_id_);
-                    if (size_change > 0)
-                    {
-                        shard_->local_shards_.IncreaseRangeSliceMemUsage(
-                            size_change);
-                    }
-                    else
-                    {
-                        shard_->local_shards_.DecreaseRangeSliceMemUsage(
-                            -size_change);
-                    }
+                    std::unique_lock<std::mutex> heap_lk(
+                        shard_->local_shards_.table_ranges_heap_mux_);
+                    mi_override_thread(
+                        shard_->local_shards_.GetTableRangesHeapThreadId());
+                    mi_heap_t *prev_heap = mi_heap_set_default(
+                        shard_->local_shards_.GetTableRangesHeap());
+
+                    old_table_range_entry->InitRangeSlices(
+                        std::move(range_slices), this->cc_ng_id_);
+
+                    mi_heap_set_default(prev_heap);
+                    mi_restore_default_thread_id();
+                    heap_lk.unlock();
                     old_table_range_entry->RangeSlices()->Lock();
                 }
             }

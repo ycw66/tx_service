@@ -87,6 +87,9 @@ LocalCcShards::LocalCcShards(
     local_clock.store(ts_base);
     timer_thd_ = std::thread([this] { TimerRun(); });
 
+    // For mariadb, this thread is the main thread of the mariadb process.
+    InitializeTableRangesHeap();
+
     InitRangeBuckets(
         node_id, ng_configs->size(), cluster_config_version, range_bucket_seed);
 
@@ -754,6 +757,10 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
 
+    std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
+    mi_override_thread(table_ranges_thread_id_);
+    mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
+
     // Init table ranges
     assert(range_table_name.Type() == TableType::RangePartition);
     auto table_it = table_ranges_.try_emplace(range_table_name);
@@ -816,17 +823,11 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         std::vector<SliceInitInfo> slices;
         slices.emplace_back(
             catalog_factory_->NegativeInfKey(), 0, SliceStatus::FullyCached);
-        int64_t mem_change =
-            ranges.begin()->second->InitRangeSlices(std::move(slices), ng_id);
-        if (mem_change > 0)
-        {
-            IncreaseRangeSliceMemUsage(mem_change);
-        }
-        else if (mem_change < 0)
-        {
-            DecreaseRangeSliceMemUsage(-mem_change);
-        }
+        ranges.begin()->second->InitRangeSlices(std::move(slices), ng_id);
     }
+
+    mi_heap_set_default(prev_heap);
+    mi_restore_default_thread_id();
 }
 
 void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id)
@@ -907,20 +908,7 @@ void LocalCcShards::CleanTableRange(const TableName &table_name,
     auto table_it = table_ranges_.find(table_name);
     if (table_it != table_ranges_.end())
     {
-        auto &ranges_of_all_ngs = table_it->second;
-        for (auto &ng_range : ranges_of_all_ngs)
-        {
-            for (auto &[key, range] : ng_range.second)
-            {
-                std::shared_lock<std::shared_mutex> lk(range->mux_);
-                const StoreRange *store_range = range->RangeSlices();
-                if (store_range)
-                {
-                    DecreaseRangeSliceMemUsage(store_range->MemUsage());
-                }
-            }
-        }
-        ranges_of_all_ngs.erase(ng_id);
+        table_it->second.erase(ng_id);
     }
     auto id_table_it = table_range_ids_.find(table_name);
     if (id_table_it != table_range_ids_.end())
@@ -934,18 +922,6 @@ void LocalCcShards::DropTableRanges(NodeGroupId ng_id)
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     for (auto &table_range : table_ranges_)
     {
-        for (auto &ng_range : table_range.second)
-        {
-            for (auto &[key, range] : ng_range.second)
-            {
-                std::shared_lock<std::shared_mutex> lk(range->mux_);
-                if (range->RangeSlices())
-                {
-                    DecreaseRangeSliceMemUsage(
-                        range->RangeSlices()->MemUsage());
-                }
-            }
-        }
         table_range.second.erase(ng_id);
     }
     for (auto &range_id : table_range_ids_)
@@ -956,7 +932,6 @@ void LocalCcShards::DropTableRanges(NodeGroupId ng_id)
 
 void LocalCcShards::KickoutRangeSlices()
 {
-    size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     // Since we don't maintain a lru list of store range, we just
     // kickout range slices that have not been accessed for at least
@@ -980,13 +955,26 @@ void LocalCcShards::KickoutRangeSlices()
                         current_ts - last_accessed > 600000000)
                     {
                         lk.unlock();
-                        size_t decreased = range_entry->DropStoreRange();
-                        if (decreased > 0 &&
-                            DecreaseRangeSliceMemUsage(decreased) <=
-                                target_memory_size)
+                        std::unique_lock<std::shared_mutex> uniq_lk(
+                            range_entry->mux_);
+                        if (range_entry->IsStoreRangeFree())
                         {
-                            // We've cleaned up enough memory space.
-                            return;
+                            std::unique_lock<std::mutex> heap_lk(
+                                table_ranges_heap_mux_);
+                            mi_override_thread(GetTableRangesHeapThreadId());
+                            mi_heap_t *prev_heap =
+                                mi_heap_set_default(GetTableRangesHeap());
+
+                            range_entry->DropStoreRange();
+
+                            bool has_enough_mem = HasEnoughTableRangesMemory();
+                            mi_heap_set_default(prev_heap);
+                            mi_restore_default_thread_id();
+                            if (has_enough_mem)
+                            {
+                                // We've cleaned up enough memory space.
+                                return;
+                            }
                         }
                     }
                     else if (current_ts > last_accessed &&
@@ -1011,13 +999,23 @@ void LocalCcShards::KickoutRangeSlices()
               { return a.first < b.first; });
     for (auto &[time, entry] : scanned_ranges)
     {
-        size_t decreased = entry->DropStoreRange();
-        if (decreased &&
-            DecreaseRangeSliceMemUsage(decreased) <= target_memory_size)
+        std::unique_lock<std::shared_mutex> uniq_lk(entry->mux_);
+        if (entry->IsStoreRangeFree())
         {
-            // We've cleaned up enough
-            // memory space.
-            return;
+            std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
+            mi_override_thread(GetTableRangesHeapThreadId());
+            mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
+
+            entry->DropStoreRange();
+
+            bool has_enough_mem = HasEnoughTableRangesMemory();
+            mi_heap_set_default(prev_heap);
+            mi_restore_default_thread_id();
+            if (has_enough_mem)
+            {
+                // We've cleaned up enough memory space.
+                return;
+            }
         }
     }
 }
@@ -1681,14 +1679,23 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                 if (Sharder::MapRangeIdToBucketId(
                         entry->GetRangeInfo()->PartitionId()) == bucket_id)
                 {
-                    size_t mem_decreased;
-                    if (!entry->DropStoreRangeAndSyncInfo(mem_decreased))
+                    std::unique_lock<std::shared_mutex> uniq_lk(entry->mux_);
+                    if (entry->IsStoreRangeFree(true))
+                    {
+                        std::unique_lock<std::mutex> heap_lk(
+                            table_ranges_heap_mux_);
+                        mi_override_thread(GetTableRangesHeapThreadId());
+                        mi_heap_t *prev_heap =
+                            mi_heap_set_default(GetTableRangesHeap());
+
+                        entry->DropStoreRange();
+
+                        mi_heap_set_default(prev_heap);
+                        mi_restore_default_thread_id();
+                    }
+                    else
                     {
                         return false;
-                    }
-                    if (mem_decreased > 0)
-                    {
-                        DecreaseRangeSliceMemUsage(mem_decreased);
                     }
                 }
             }
@@ -4625,6 +4632,24 @@ void LocalCcShards::DefragmentWorker()
                           << ", actual used memory " << stats.allocated_;
             }
         }
+
+#ifdef RANGE_PARTITION_ENABLED
+        if (table_ranges_heap_ != nullptr)
+        {
+            int64_t allocated = 0, committed = 0;
+            std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
+            mi_override_thread(table_ranges_thread_id_);
+            mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
+
+            mi_thread_stats(&allocated, &committed);
+
+            mi_restore_default_thread_id();
+            mi_heap_set_default(prev_heap);
+            heap_lk.unlock();
+            LOG(INFO) << "Table ranges memory usage report, committed "
+                      << committed << ", allocated " << allocated;
+        }
+#endif
 
         worker_lk.lock();
     }

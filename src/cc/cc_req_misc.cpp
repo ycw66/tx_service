@@ -268,16 +268,25 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
     {
         std::unique_lock<std::shared_mutex> lk(range_entry_->mux_);
         assert(range_entry_->RangeSlices() == nullptr);
-        int64_t size_change =
-            range_entry_->InitRangeSlices(std::move(slice_info_), cc_ng_id_);
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-        size_t mem_usage = shards->IncreaseRangeSliceMemUsage(size_change);
+
+        std::unique_lock<std::mutex> heap_lk(shards->table_ranges_heap_mux_);
+        mi_override_thread(shards->GetTableRangesHeapThreadId());
+        mi_heap_t *prev_heap =
+            mi_heap_set_default(shards->GetTableRangesHeap());
+
+        range_entry_->InitRangeSlices(std::move(slice_info_), cc_ng_id_);
+        bool range_slice_mem_full = shards->TableRangesMemoryFull();
+
+        mi_heap_set_default(prev_heap);
+        mi_restore_default_thread_id();
+        heap_lk.unlock();
 
         for (auto [req, ccs] : requesters_)
         {
             ccs->Enqueue(req);
         }
-        if (mem_usage > shards->range_slice_memory_limit_)
+        if (range_slice_mem_full)
         {
             range_entry_->fetch_range_slices_req_ = nullptr;
             lk.unlock();

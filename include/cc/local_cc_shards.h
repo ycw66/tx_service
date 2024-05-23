@@ -369,6 +369,74 @@ public:
     void StartBackgroudWorkers();
 
     /**
+     * @brief Create new heap used by table ranges only.
+     *
+     * Note that this function should only be invoked by threads whose life
+     * cycle can last until the end of the process.
+     */
+    void InitializeTableRangesHeap()
+    {
+#ifdef RANGE_PARTITION_ENABLED
+        std::unique_lock<std::mutex> lk(table_ranges_heap_mux_);
+        if (!table_ranges_heap_)
+        {
+            table_ranges_thread_id_ = mi_thread_id();
+            table_ranges_heap_ = mi_heap_new();
+        }
+#endif
+    }
+
+    mi_threadid_t GetTableRangesHeapThreadId() const
+    {
+        return table_ranges_thread_id_;
+    }
+
+    mi_heap_t *GetTableRangesHeap() const
+    {
+        return table_ranges_heap_;
+    }
+
+    /**
+     * @brief Check whether the table ranges heap reach the limitation.
+     * NOTE: Be sure that this function is called in context of table ranges
+     * heap.
+     */
+    bool TableRangesMemoryFull()
+    {
+        if (table_ranges_heap_ != nullptr)
+        {
+            int64_t allocated, committed;
+            mi_thread_stats(&allocated, &committed);
+            return (static_cast<size_t>(allocated) >=
+                    range_slice_memory_limit_);
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    /**
+     * @brief Check whether the table ranges heap has enough memory.
+     * NOTE: Be sure that this function is called in context of table ranges
+     * heap.
+     */
+    bool HasEnoughTableRangesMemory()
+    {
+        if (table_ranges_heap_ != nullptr)
+        {
+            size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
+            int64_t allocated, committed;
+            mi_thread_stats(&allocated, &committed);
+            return (static_cast<size_t>(allocated) <= target_memory_size);
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    /**
      * -------------------------------------
      *
      * Catalog Operation Interface
@@ -471,9 +539,12 @@ public:
     {
         std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
         std::vector<TableRangeEntry *> new_entries;
-        bool range_slice_mem_full =
-            range_slice_mem_usage_.load(std::memory_order_relaxed) >
-            range_slice_memory_limit_;
+
+        std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
+        mi_override_thread(table_ranges_thread_id_);
+        mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
+
+        bool range_slice_mem_full = TableRangesMemoryFull();
 
         std::map<TxKey, TableRangeEntry::uptr> *ranges =
             GetTableRangesForATableInternal(table_name, ng_id);
@@ -529,11 +600,12 @@ public:
 
             if (ng_id == range_ng && slice_keys && !range_slice_mem_full)
             {
-                int64_t size = new_range_ptr->InitRangeSlices(
-                    std::move(*slice_keys), range_ng);
-                assert(size > 0);
-                IncreaseRangeSliceMemUsage(size);
+                new_range_ptr->InitRangeSlices(std::move(*slice_keys),
+                                               range_ng);
             }
+
+            mi_restore_default_thread_id();
+            mi_heap_set_default(prev_heap);
 
             return new_range_ptr;
         }
@@ -553,20 +625,12 @@ public:
                     r_start, r_end, partition_id, range_ng, *this);
                 range_slices->InitSlices(std::move(*slice_keys));
             }
-            int64_t mem_change =
-                range_entry->UpdateRangeEntry(version, std::move(range_slices));
-            if (mem_change > 0)
-            {
-                // This would only happen rarely during recover when the old
-                // range slice version is read from data store. To avoid
-                // blocking tx processor, do not call KickoutRangeSlices.
-                IncreaseRangeSliceMemUsage(mem_change);
-            }
-            else if (mem_change < 0)
-            {
-                DecreaseRangeSliceMemUsage(-mem_change);
-            }
+            range_entry->UpdateRangeEntry(version, std::move(range_slices));
         }
+
+        mi_restore_default_thread_id();
+        mi_heap_set_default(prev_heap);
+
         return static_cast<TemplateTableRangeEntry<KeyT> *>(
             range_it->second.get());
     }
@@ -882,27 +946,6 @@ public:
         std::shared_ptr<DataSyncStatus> status = nullptr,
         CcHandlerResult<Void> *hres = nullptr);
 
-    size_t DecreaseRangeSliceMemUsage(size_t size)
-    {
-        size_t old_size =
-            range_slice_mem_usage_.fetch_sub(size, std::memory_order_relaxed);
-        if (old_size < size)
-        {
-            // The sub has caused overflow, in this case just reset usage to
-            // 0.
-            range_slice_mem_usage_.store(0, std::memory_order_release);
-            return 0;
-        }
-        return old_size - size;
-    }
-
-    size_t IncreaseRangeSliceMemUsage(size_t size)
-    {
-        return range_slice_mem_usage_.fetch_add(size,
-                                                std::memory_order_relaxed) +
-               size;
-    }
-
     /**
      * @brief When TxService is stopping, this function will be called.
      *
@@ -1178,6 +1221,10 @@ public:
     std::mutex data_migration_op_pool_mux_;
     std::vector<std::unique_ptr<DataMigrationOp>> migration_op_pool_;
 
+    // protects the table ranges heap to avoid concurrent memory requests by
+    // multiple threads.
+    std::mutex table_ranges_heap_mux_;
+
 private:
     void TimerRun();
     // Internal interface that exposes non const return type and does
@@ -1341,6 +1388,10 @@ private:
         std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>>
         bucket_infos_;
 
+    // heap memory resource used by table ranges.
+    mi_heap_t *table_ranges_heap_{nullptr};
+    mi_threadid_t table_ranges_thread_id_{0};
+
     // Protects meta data (table_ranges_ and table_catalogs_)
     mutable std::shared_mutex meta_data_mux_;
 #ifndef RANGE_PARTITION_ENABLED
@@ -1351,9 +1402,6 @@ private:
     // configuration instead of table schema, hence we need a separate place to
     // store this information.
     std::unordered_map<TableName, std::string> prebuilt_tables_;
-
-    // Memory used by range slices
-    std::atomic_size_t range_slice_mem_usage_{0};
 
     TxService *tx_service_;
 

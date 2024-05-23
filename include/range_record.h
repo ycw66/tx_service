@@ -425,16 +425,24 @@ public:
         }
     }
 
-    virtual bool DropStoreRangeAndSyncInfo(size_t &mem_decreased) = 0;
-
     virtual void SetRangeEndTxKey(TxKey end_tx_key) = 0;
 
     virtual void SetVersion(uint64_t version) = 0;
 
-    virtual int64_t InitRangeSlices(std::vector<SliceInitInfo> &&slices,
-                                    NodeGroupId ng_id) = 0;
+    virtual void InitRangeSlices(std::vector<SliceInitInfo> &&slices,
+                                 NodeGroupId ng_id) = 0;
 
-    virtual size_t DropStoreRange() = 0;
+    /**
+     * @brief Check whether the store range is free or not.
+     * NOTE: Holding the table range entry unique lock during invoke this
+     * function.
+     */
+    virtual bool IsStoreRangeFree(bool sync_info = false) = 0;
+    /**
+     * @brief Drop store range. Be sure the store range is free, and holding the
+     * table range entry unique lock during invoke this function.
+     */
+    virtual void DropStoreRange() = 0;
 
     uint64_t GetLastSyncTs()
     {
@@ -492,15 +500,12 @@ public:
     {
     }
 
-    int64_t UpdateRangeEntry(uint64_t version_ts,
-                             std::unique_ptr<TemplateStoreRange<KeyT>> slices)
+    void UpdateRangeEntry(uint64_t version_ts,
+                          std::unique_ptr<TemplateStoreRange<KeyT>> slices)
     {
         range_info_.version_ts_ = version_ts;
         std::lock_guard<std::shared_mutex> lk(mux_);
-        int64_t orig_size = range_slices_ ? range_slices_->MemUsage() : 0;
-        int64_t new_size = slices ? slices->MemUsage() : 0;
         range_slices_ = std::move(slices);
-        return new_size - orig_size;
     }
 
     void SetRangeEndTxKey(TxKey end_tx_key) override
@@ -528,8 +533,8 @@ public:
         return range_slices_.get();
     }
 
-    int64_t InitRangeSlices(std::vector<SliceInitInfo> &&slices,
-                            NodeGroupId ng_id) override
+    void InitRangeSlices(std::vector<SliceInitInfo> &&slices,
+                         NodeGroupId ng_id) override
     {
         std::unique_ptr<TemplateStoreRange<KeyT>> range_slices =
             std::make_unique<TemplateStoreRange<KeyT>>(
@@ -540,28 +545,44 @@ public:
                 *Sharder::Instance().GetLocalCcShards());
 
         range_slices->InitSlices(std::move(slices));
-        size_t old_size = 0;
-        if (range_slices_)
-        {
-            old_size = range_slices_->MemUsage();
-        }
-        size_t current_size = range_slices->MemUsage();
         range_slices_ = std::move(range_slices);
-        return current_size - old_size;
     }
 
-    size_t DropStoreRange() override
+    /**
+     * @brief Check whether the store range is free or not.
+     * NOTE: Holding the table range entry unique lock during invoke this
+     * function.
+     */
+    bool IsStoreRangeFree(bool sync_info = false) override
+    {
+        if (!sync_info)
+        {
+            return range_slices_ && range_slices_->Pins() == 0;
+        }
+
+        // If the sync_info flag is true, it means this function is called
+        // during bucket migration and we're cleaning up range slices that are
+        // migrated away. In this case we should make sure that no range slices
+        // in this bucket is loaded into memory after this function returns
+        // true. So we need to wait til the current fetch req is finished.
+        return range_slices_ != nullptr ? range_slices_->Pins() == 0
+                                        : fetch_range_slices_req_ == nullptr;
+    }
+
+    /**
+     * @brief Drop store range. Be sure the store range is free, and holding the
+     * table range entry unique lock during invoke this function.
+     *
+     */
+    void DropStoreRange() override
     {
         // We need to make sure that there's no one accesing StoreRange before
         // dropping store range.
-        std::unique_lock<std::shared_mutex> lk(mux_);
-        size_t mem_decreased = 0;
-        if (range_slices_ && range_slices_->Pins() == 0)
+        if (range_slices_)
         {
-            mem_decreased += range_slices_->MemUsage();
+            assert(range_slices_->Pins() == 0);
             range_slices_ = nullptr;
         }
-        return mem_decreased;
     }
 
     const RangeInfo *GetRangeInfo() const override
@@ -590,35 +611,6 @@ public:
 
         range_info_.SetDirty(
             std::move(new_key), std::move(new_partition_id), commit_ts);
-    }
-
-    bool DropStoreRangeAndSyncInfo(size_t &mem_decreased) override
-    {
-        std::unique_lock<std::shared_mutex> lk(mux_);
-        mem_decreased = 0;
-        if (range_slices_)
-        {
-            if (range_slices_->Pins() == 0)
-            {
-                mem_decreased = range_slices_->MemUsage();
-                range_slices_ = nullptr;
-            }
-            else
-            {
-                return false;
-            }
-        }
-        else if (fetch_range_slices_req_ != nullptr)
-        {
-            // This function is only called during bucket migration and we're
-            // cleaning up range slices that are migrated away. In this case we
-            // should make sure that no range slices in this bucket is loaded
-            // into memory after this function returns true. So we need to wait
-            // til the current fetch req is finished.
-            return false;
-        }
-
-        return true;
     }
 
     uint64_t Version() const override

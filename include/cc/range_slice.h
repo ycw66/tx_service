@@ -576,12 +576,6 @@ public:
         return last_accessed_ts_.load(std::memory_order_relaxed);
     }
 
-    size_t MemUsage() const
-    {
-        std::shared_lock<std::shared_mutex> lk(mux_);
-        return size_;
-    }
-
 protected:
     enum struct LoadSliceStatus
     {
@@ -608,8 +602,8 @@ protected:
     virtual std::pair<size_t, size_t> SearchSlice(
         const StoreSlice *slice) const = 0;
     virtual StoreSlice *GetSlice(size_t slice_idx) const = 0;
-    virtual size_t UpdateSlice(StoreSlice *slice,
-                               std::vector<SliceChangeInfo> &split_info) = 0;
+    virtual void UpdateSlice(StoreSlice *slice,
+                             std::vector<SliceChangeInfo> &split_info) = 0;
 
     void CollectCacheHit(CcShard &ccs);
     void CollectCacheMiss(CcShard &ccs);
@@ -651,8 +645,6 @@ protected:
     // This is the value we rely on to decide if a StoreRange can be
     // safely evicted from memory.
     std::atomic_uint32_t pins_{0};
-    // Memory usage of StoreRange.
-    size_t size_;
 
     friend class StoreSlice;
     friend struct TableRangeEntry;
@@ -674,7 +666,6 @@ public:
     {
         std::unique_ptr<TemplateStoreSlice<KeyT>> slice =
             std::make_unique<TemplateStoreSlice<KeyT>>(start_key, end_key);
-        size_ = sizeof(TemplateStoreRange<KeyT>) + slice->MemUsage();
         slices_.emplace_back(std::move(slice));
     }
 
@@ -752,19 +743,6 @@ public:
         }
 
         assert(slices_.size() == boundary_keys_.size() + 1);
-        size_ = sizeof(TemplateStoreRange<KeyT>);
-        size_ += boundary_keys_.capacity() * sizeof(std::unique_ptr<KeyT>);
-        for (const auto &slice_key : boundary_keys_)
-        {
-            size_ += slice_key->MemUsage();
-        }
-
-        size_ += slices_.capacity() *
-                 sizeof(std::unique_ptr<TemplateStoreSlice<KeyT>>);
-        if (!slices_.empty())
-        {
-            size_ += slices_.front()->MemUsage() * slices_.size();
-        }
     }
 
     StoreSlice *FindSlice(const TxKey &key) override
@@ -848,12 +826,9 @@ public:
             }
         }
         auto slice = slices_.begin() + remove_offset;
-        size_t mem_decreased = 0;
         while (boundary != boundary_keys_.end())
         {
             // Remove boundary keys >= new end key
-            mem_decreased += (*boundary)->MemUsage();
-            mem_decreased += (*slice)->MemUsage();
             removed_slices.emplace_back(TxKey(std::move(*boundary)),
                                         (*slice)->Size(),
                                         (*slice)->status_);
@@ -868,9 +843,6 @@ public:
         // when new ranges are inserted into the table range table in
         // LocalCcShards, and set to the start of the first splitted range.
         range_end_key_ = nullptr;
-        // Update size
-        assert(size_ > mem_decreased);
-        size_ -= mem_decreased;
 
         return true;
     }
@@ -1232,8 +1204,8 @@ private:
         return slice_idx < slices_.size() ? slices_[slice_idx].get() : nullptr;
     }
 
-    size_t UpdateSlice(StoreSlice *slice,
-                       std::vector<SliceChangeInfo> &split_keys) override
+    void UpdateSlice(StoreSlice *slice,
+                     std::vector<SliceChangeInfo> &split_keys) override
     {
         assert(split_keys.size() > 1);
 
@@ -1262,14 +1234,11 @@ private:
         typed_slice->SetEndKey(next_slice_start_key.get());
         slice->size_ = split_keys[0].cur_size_;
         slice->post_ckpt_size_ = split_keys[0].post_update_size_;
-        size_t mem_size_change = 0;
 
         for (size_t idx = 1; idx < split_keys.size(); ++idx)
         {
             const KeyT *sub_slice_start = next_slice_start_key.get();
             const KeyT *sub_slice_end = nullptr;
-
-            mem_size_change += next_slice_start_key->MemUsage();
 
             size_t boundary_keys_idx = slice_idx + idx - 1;
             // Inserts the new boundary keys.
@@ -1309,14 +1278,10 @@ private:
             sub_slice->status_ = slice->status_;
             sub_slice->last_load_ts_ = slice->last_load_ts_;
 
-            mem_size_change += sub_slice->MemUsage();
-
             // Inserts the new sub-slices following the first sub-slice.
             slices_.emplace(slices_.begin() + slice_idx + idx,
                             std::move(sub_slice));
         }
-
-        return mem_size_change;
     }
 
     /**

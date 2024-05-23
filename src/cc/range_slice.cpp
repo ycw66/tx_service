@@ -571,12 +571,21 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
 
         slice_lk.lock();
 
-        size_t mem_size_change = UpdateSlice(slice, split_keys);
+        std::unique_lock<std::mutex> heap_lk(
+            local_cc_shards_.table_ranges_heap_mux_);
+        mi_override_thread(local_cc_shards_.GetTableRangesHeapThreadId());
+        mi_heap_t *prev_heap =
+            mi_heap_set_default(local_cc_shards_.GetTableRangesHeap());
+
+        UpdateSlice(slice, split_keys);
+
+        bool range_slice_mem_full = local_cc_shards_.TableRangesMemoryFull();
+        mi_heap_set_default(prev_heap);
+        mi_restore_default_thread_id();
+        heap_lk.unlock();
 
         slice->to_alter_ = false;
-        size_ += mem_size_change;
-        if (local_cc_shards_.IncreaseRangeSliceMemUsage(mem_size_change) >
-            local_cc_shards_.range_slice_memory_limit_)
+        if (range_slice_mem_full)
         {
             range_lk.unlock();
             slice_lk.unlock();
