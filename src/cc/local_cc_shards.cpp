@@ -573,6 +573,9 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             // Mark the table as sync in progress to avoid concurrent data sync
             // before range split tx finishes if this is the first started range
             // split.
+            TableName table_name =
+                TableName(ds_split_range_op_msg.table_name(),
+                          TableName::Type(ds_split_range_op_msg.table_name()));
             const TableName range_table_name = TableName{
                 ds_split_range_op_msg.table_name(), TableType::RangePartition};
             const TableName base_table_name = TableName{
@@ -656,7 +659,20 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                 txservice::AbortTx(txm);
                 return;
             }
+
+            auto task_limiter_key = TaskLimiterKey(node_group_id,
+                                                   tx_term,
+                                                   table_name.StringView(),
+                                                   table_name.Type(),
+                                                   partition_id);
+            // Checkpoint cannot start at `tx_term` until recover is finished,
+            // we should be the only one trying to sync the range.
+            auto limiter = task_limiters_.emplace(
+                task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
+            assert(limiter.second == true);
+
             replay_log_cc.SetFinish();
+
             StoreRange *store_range = range_entry->PinStoreRange();
             if (!store_range)
             {
@@ -688,6 +704,8 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                     {
                         // Term is invalid, we are no longer leader. Abort tx.
                         txservice::AbortTx(txm);
+                        PopPendingTask(
+                            node_group_id, tx_term, table_name, partition_id);
                         return;
                     }
                     else
@@ -722,6 +740,8 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                 range_entry->UnPinStoreRange();
                 txservice::CommitTx(txm);
             }
+
+            PopPendingTask(node_group_id, tx_term, table_name, partition_id);
         });
 
     split_recover_thd.detach();
@@ -1782,16 +1802,15 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
     std::shared_ptr<DataSyncStatus> status,
     CcHandlerResult<Void> *hres)
 {
-    TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
     const RangeInfo *range_info = range_entry->GetRangeInfo();
     NodeGroupId range_ng =
         GetRangeOwnerInternal(range_info->PartitionId(), ng_id)->BucketOwner();
     if (range_ng == ng_id)
     {
         auto task_limiter_key = TaskLimiterKey(ng_id,
-                                               range_table_name.StringView(),
-                                               range_table_name.Type(),
+                                               ng_term,
+                                               table_name.StringView(),
+                                               table_name.Type(),
                                                range_info->PartitionId());
 
         std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
@@ -1931,7 +1950,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
     std::function<bool(size_t)> filter_lambda)
 {
     auto task_limiter_key = TaskLimiterKey(
-        ng_id, table_name.StringView(), table_name.Type(), core_idx);
+        ng_id, ng_term, table_name.StringView(), table_name.Type(), core_idx);
     std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
     auto iter = task_limiters_.find(task_limiter_key);
     bool enqueued_task = false;
@@ -2374,7 +2393,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     {
         // table dropped
         data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-        ClearAllPendingTasks(ng_id, table_name, range_id);
+        ClearAllPendingTasks(ng_id, expected_ng_term, table_name, range_id);
     }
     else
     {
@@ -2384,11 +2403,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         {
             if (data_sync_task->SyncTsAdjustable())
             {
-                auto task_limiter_key =
-                    TaskLimiterKey(ng_id,
-                                   range_tbl_name.StringView(),
-                                   range_tbl_name.Type(),
-                                   range_id);
+                auto task_limiter_key = TaskLimiterKey(ng_id,
+                                                       expected_ng_term,
+                                                       table_name.StringView(),
+                                                       table_name.Type(),
+                                                       range_id);
                 std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
                 auto iter = task_limiters_.find(task_limiter_key);
                 assert(iter != task_limiters_.end());
@@ -2407,7 +2426,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
             {
                 data_sync_task->SetFinish();
-                PopPendingTask(ng_id, table_name, range_id);
+                PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
                 assert(need_process == false);
             }
             else
@@ -2419,7 +2438,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         {
             // range no longer belong to this ng.
             data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            PopPendingTask(ng_id, table_name, range_id);
+            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
         }
     }
 
@@ -2440,7 +2459,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
         // Finish this task and notify the caller.
         data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        PopPendingTask(ng_id, table_name, range_id);
+        PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
         if (ng_term >= 0)
         {
@@ -2516,7 +2535,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             // directly.
             data_sync_task->SetError();
 
-            ClearAllPendingTasks(ng_id, table_name, range_id);
+            ClearAllPendingTasks(ng_id, expected_ng_term, table_name, range_id);
         }
         else
         {
@@ -2557,7 +2576,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                       << ". Return finish directly.";
 
             data_sync_task->SetFinish();
-            PopPendingTask(ng_id, table_name, range_id);
+            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             return;
         }
@@ -2608,7 +2627,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         txservice::AbortTx(data_sync_txm);
 
         data_sync_task->SetError();
-        PopPendingTask(ng_id, table_name, range_id);
+        PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
         return;
     }
@@ -2793,7 +2812,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 else if (cc.ErrorCode() == CcErrorCode::NG_TERM_CHANGED)
                 {
                     data_sync_task->SetError();
-                    PopPendingTask(ng_id, table_name, range_id);
+                    PopPendingTask(
+                        ng_id, expected_ng_term, table_name, range_id);
                     // Term is invalid, we are no longer leader. Abort data
                     // sync.
                     txservice::AbortTx(data_sync_txm);
@@ -2827,7 +2847,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             data_sync_task->SetError();
             // Handle the pending tasks for the same range
-            PopPendingTask(ng_id, table_name, range_id);
+            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             range_entry->UnPinStoreRange();
             txservice::AbortTx(data_sync_txm);
@@ -2886,7 +2906,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
 
         data_sync_task->SetFinish();
-        PopPendingTask(ng_id, table_name, range_id);
+        PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
         // Nothing to flush in this range.
         // Commit the data sync txm
         txservice::CommitTx(data_sync_txm);
@@ -2925,7 +2945,10 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
         {
             // Commit the data sync txm
             txservice::CommitTx(data_sync_txm);
-            PopPendingTask(task->node_group_id_, task->table_name_, worker_idx);
+            PopPendingTask(task->node_group_id_,
+                           task->node_group_term_,
+                           task->table_name_,
+                           worker_idx);
 
             bool res = store_hd_->CkptEnd(task->table_name_,
                                           catalog_entry->schema_.get(),
@@ -2964,7 +2987,10 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
 
             task->SetError(err_code);
 
-            PopPendingTask(task->node_group_id_, task->table_name_, worker_idx);
+            PopPendingTask(task->node_group_id_,
+                           task->node_group_term_,
+                           task->table_name_,
+                           worker_idx);
 
             txservice::AbortTx(data_sync_txm);
         }
@@ -3011,14 +3037,17 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     {
         data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
 
-        ClearAllPendingTasks(ng_id, table_name, worker_idx);
+        ClearAllPendingTasks(ng_id, expected_ng_term, table_name, worker_idx);
     }
     else
     {
         if (data_sync_task->SyncTsAdjustable())
         {
-            auto task_limiter_key = TaskLimiterKey(
-                ng_id, table_name.StringView(), table_name.Type(), worker_idx);
+            auto task_limiter_key = TaskLimiterKey(ng_id,
+                                                   expected_ng_term,
+                                                   table_name.StringView(),
+                                                   table_name.Type(),
+                                                   worker_idx);
             std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
             auto iter = task_limiters_.find(task_limiter_key);
             assert(iter != task_limiters_.end());
@@ -3040,7 +3069,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         {
             data_sync_task->SetFinish();
 
-            PopPendingTask(ng_id, table_name, worker_idx);
+            PopPendingTask(ng_id, expected_ng_term, table_name, worker_idx);
 
             assert(need_process == false);
         }
@@ -3067,7 +3096,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         // Finish this task and notify the caller.
         data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
 
-        PopPendingTask(ng_id, table_name, worker_idx);
+        PopPendingTask(ng_id, expected_ng_term, table_name, worker_idx);
 
         if (ng_term >= 0)
         {
@@ -3144,7 +3173,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             // directly.
             data_sync_task->SetError();
 
-            ClearAllPendingTasks(ng_id, table_name, worker_idx);
+            ClearAllPendingTasks(
+                ng_id, expected_ng_term, table_name, worker_idx);
         }
         else
         {
@@ -3185,7 +3215,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             data_sync_task->SetFinish();
 
-            PopPendingTask(ng_id, table_name, worker_idx);
+            PopPendingTask(ng_id, expected_ng_term, table_name, worker_idx);
 
             return;
         }
@@ -3554,6 +3584,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 #endif
 
 void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
+                                   int64_t ng_term,
                                    const TableName &table_name,
 #ifdef RANGE_PARTITION_ENABLED
                                    uint32_t range_id
@@ -3562,12 +3593,13 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
 #endif
 )
 {
+    assert(!table_name.IsMeta());
 #ifdef RANGE_PARTITION_ENABLED
     auto task_limiter_key = TaskLimiterKey(
-        ng_id, table_name.StringView(), TableType::RangePartition, range_id);
+        ng_id, ng_term, table_name.StringView(), table_name.Type(), range_id);
 #else
     auto task_limiter_key = TaskLimiterKey(
-        ng_id, table_name.StringView(), table_name.Type(), core_idx);
+        ng_id, ng_term, table_name.StringView(), TableType::Primary, core_idx);
 #endif
 
     std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
@@ -3598,6 +3630,7 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
 }
 
 void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
+                                         int64_t ng_term,
                                          const TableName &table_name,
 #ifdef RANGE_PARTITION_ENABLED
                                          uint32_t range_id
@@ -3606,16 +3639,14 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
 #endif
 )
 {
+    assert(!table_name.IsMeta());
+
 #ifdef RANGE_PARTITION_ENABLED
-    TableName range_table_name{table_name.StringView(),
-                               TableType::RangePartition};
-    auto task_limiter_key = TaskLimiterKey(ng_id,
-                                           range_table_name.StringView(),
-                                           range_table_name.Type(),
-                                           range_id);
+    auto task_limiter_key = TaskLimiterKey(
+        ng_id, ng_term, table_name.StringView(), table_name.Type(), range_id);
 #else
     auto task_limiter_key = TaskLimiterKey(
-        ng_id, table_name.StringView(), table_name.Type(), core_idx);
+        ng_id, ng_term, table_name.StringView(), TableType::Primary, core_idx);
 #endif
 
     std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
@@ -3777,7 +3808,10 @@ void LocalCcShards::SplitFlushRange(
             range_entry->UnPinStoreRange();
             data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
 
-            PopPendingTask(node_group, table_name, data_sync_task->range_id_);
+            PopPendingTask(node_group,
+                           data_sync_task->node_group_term_,
+                           table_name,
+                           data_sync_task->range_id_);
             txservice::AbortTx(split_txm);
 
             return;
@@ -3825,7 +3859,10 @@ void LocalCcShards::SplitFlushRange(
 
         data_sync_task->SetError();
 
-        PopPendingTask(node_group, table_name, data_sync_task->range_id_);
+        PopPendingTask(node_group,
+                       data_sync_task->node_group_term_,
+                       table_name,
+                       data_sync_task->range_id_);
         txservice::AbortTx(split_txm);
 
         return;
@@ -3836,7 +3873,10 @@ void LocalCcShards::SplitFlushRange(
 
     data_sync_task->SetFinish();
 
-    PopPendingTask(node_group, table_name, data_sync_task->range_id_);
+    PopPendingTask(node_group,
+                   data_sync_task->node_group_term_,
+                   table_name,
+                   data_sync_task->range_id_);
 
     LOG(INFO) << "Split range on table " << range_table_name.StringView()
               << " partition " << range_entry->GetRangeInfo()->PartitionId()
@@ -4152,7 +4192,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             }
 
             range_entry->UnPinStoreRange();
-            PopPendingTask(node_group, table_name, data_sync_task->range_id_);
+            PopPendingTask(
+                node_group, leader_term, table_name, data_sync_task->range_id_);
         }
 
         if (succ)

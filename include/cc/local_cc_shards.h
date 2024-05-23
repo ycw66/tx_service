@@ -13,6 +13,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <tuple>
 #include <unordered_map>
@@ -1243,6 +1244,7 @@ private:
 #endif
 
     void PopPendingTask(NodeGroupId ng_id,
+                        int64_t ng_term,
                         const TableName &table_name,
 #ifdef RANGE_PARTITION_ENABLED
                         uint32_t range_id
@@ -1252,6 +1254,7 @@ private:
     );
 
     void ClearAllPendingTasks(NodeGroupId ng_id,
+                              int64_t ng_term,
                               const TableName &table_name,
 #ifdef RANGE_PARTITION_ENABLED
                               uint32_t range_id
@@ -1387,20 +1390,24 @@ private:
     {
 #ifdef RANGE_PARTITION_ENABLED
         explicit TaskLimiterKey(NodeGroupId node_group_id,
+                                int64_t node_group_term,
                                 std::string_view table_name,
                                 TableType table_type,
                                 uint32_t range_id)
             : node_group_id_(node_group_id),
+              node_group_term_(node_group_term),
               table_name_(table_name, table_type),
               range_id_(range_id)
         {
         }
 #else
         explicit TaskLimiterKey(NodeGroupId node_group_id,
+                                int64_t node_group_term,
                                 std::string_view table_name,
                                 TableType table_type,
                                 uint16_t core_id)
             : node_group_id_(node_group_id),
+              node_group_term_(node_group_term),
               table_name_(table_name, table_type),
               core_id_(core_id)
         {
@@ -1409,6 +1416,8 @@ private:
 
         TaskLimiterKey(const TaskLimiterKey &rhs)
             : node_group_id_(rhs.node_group_id_),
+              node_group_term_(rhs.node_group_term_),
+              // deep copy
               table_name_(rhs.table_name_.StringView().data(),
                           rhs.table_name_.StringView().size(),
                           rhs.table_name_.Type())
@@ -1430,16 +1439,19 @@ private:
         {
 #ifdef RANGE_PARTITION_ENABLED
             return node_group_id_ == other.node_group_id_ &&
+                   node_group_term_ == other.node_group_term_ &&
                    table_name_ == other.table_name_ &&
                    range_id_ == other.range_id_;
 #else
             return node_group_id_ == other.node_group_id_ &&
+                   node_group_term_ == other.node_group_term_ &&
                    table_name_ == other.table_name_ &&
                    core_id_ == other.core_id_;
 #endif
         }
 
         NodeGroupId node_group_id_;
+        int64_t node_group_term_;
         TableName table_name_;
 #ifdef RANGE_PARTITION_ENABLED
         uint32_t range_id_;
@@ -1454,14 +1466,16 @@ private:
         {
 #ifdef RANGE_PARTITION_ENABLED
             size_t h1 = std::hash<NodeGroupId>()(key.node_group_id_);
-            size_t h2 = std::hash<TableName>()(key.table_name_);
-            size_t h3 = std::hash<uint32_t>()(key.range_id_);
-            return h1 ^ (h2 << 1) ^ (h3 << 5);
+            size_t h2 = std::hash<int64_t>()(key.node_group_term_);
+            size_t h3 = std::hash<TableName>()(key.table_name_);
+            size_t h4 = std::hash<uint32_t>()(key.range_id_);
+            return h1 ^ (h2 << 1) ^ (h3 << 3) ^ (h4 << 5);
 #else
             size_t h1 = std::hash<NodeGroupId>()(key.node_group_id_);
-            size_t h2 = std::hash<TableName>()(key.table_name_);
-            size_t h3 = std::hash<uint16_t>()(key.core_id_);
-            return h1 ^ (h2 << 1) ^ (h3 << 5);
+            size_t h2 = std::hash<int64_t>()(key.node_group_term_);
+            size_t h3 = std::hash<TableName>()(key.table_name_);
+            size_t h4 = std::hash<uint16_t>()(key.core_id_);
+            return h1 ^ (h2 << 1) ^ (h3 << 3) ^ (h4 << 5);
 #endif
         }
     };
