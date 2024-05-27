@@ -7527,12 +7527,18 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         CODE_FAULT_INJECTOR("add_dropped_table_for_test", {
             std::string t1_table_name = "./test/t1";
             TableName t1_tbl(t1_table_name, TableType::Primary);
-            assert(ranges_in_bucket_snapshot_.find(t1_tbl) ==
-                   ranges_in_bucket_snapshot_.end());
-            auto tbl_it = ranges_in_bucket_snapshot_.try_emplace(t1_tbl);
-            tbl_it.first->second.insert(3793);
-
-            LOG(INFO) << "Add new dropped table for test";
+            for (auto id : status_->bucket_ids_[migrate_bucket_idx_])
+            {
+                if (id == 1109)
+                {
+                    auto tbl_it =
+                        ranges_in_bucket_snapshot_.try_emplace(t1_tbl);
+                    tbl_it.first->second.insert(24);
+                    LOG(INFO)
+                        << "Add new dropped table for test, range id = " << 24
+                        << ", bucket id = " << id;
+                }
+            }
         });
 
         if (ranges_in_bucket_snapshot_.size())
