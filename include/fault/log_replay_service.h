@@ -160,7 +160,6 @@ private:
               cc_ng_id_(cc_ng_id),
               cc_ng_term_(cc_ng_term),
               mux_(),
-              cv_(),
               recovering_(recovering)
         {
         }
@@ -171,7 +170,6 @@ private:
         int64_t cc_ng_term_;
         // protects finished_cnt_ and recovery_error_.
         bthread::Mutex mux_;
-        bthread::ConditionVariable cv_;
         std::atomic<WaitingStatus> status_{WaitingStatus::Active};
         std::atomic<size_t> on_fly_cnt_{0};
         // Only true if this stream is for log replay.
@@ -190,7 +188,6 @@ private:
     void WaitAndClearRequests(
         brpc::StreamId stream_id,
         bthread::Mutex &mux,
-        bthread::ConditionVariable &cv,
         std::atomic<size_t> &on_fly_cnt,
         std::atomic<WaitingStatus> &status,
         bool &recovery_error,

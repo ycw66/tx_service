@@ -46,6 +46,7 @@ namespace txservice
 namespace fault
 {
 thread_local CcRequestPool<ReplayLogCc> replay_cc_pool_;
+thread_local CcRequestPool<ParseDataLogCc> parse_datalog_cc_pool_;
 ReplayService::ReplayService(LocalCcShards &local_shards,
                              TxLog *log_agent,
                              std::string ip,
@@ -322,7 +323,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         info = &inbound_connections_.find(stream_id)->second;
     }
     bthread::Mutex &mux = info->mux_;
-    bthread::ConditionVariable &cv = info->cv_;
     bool &recovery_error = info->recovery_error_;
     uint16_t next_core = 0;
     std::atomic<WaitingStatus> &status = info->status_;
@@ -384,16 +384,14 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 msg.cluster_scale_op_msg().commit_ts(),
                 msg.cluster_scale_op_msg().txn(),
                 mux,
-                cv,
                 status,
                 on_fly_cnt,
-                recovery_error,
-                msg_vec);
+                recovery_error);
 
-            local_shards_.EnqueueCcRequest(0, cc_req);
             on_fly_cnt.fetch_add(1, std::memory_order_release);
+            local_shards_.EnqueueCcRequest(0, cc_req);
             WaitAndClearRequests(
-                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
+                stream_id, mux, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -409,16 +407,14 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 msg.cluster_scale_op_msg().commit_ts(),
                 msg.cluster_scale_op_msg().txn(),
                 mux,
-                cv,
                 status,
                 on_fly_cnt,
-                recovery_error,
-                msg_vec);
+                recovery_error);
 
-            local_shards_.EnqueueCcRequest(0, cc_req);
             on_fly_cnt.fetch_add(1, std::memory_order_release);
+            local_shards_.EnqueueCcRequest(0, cc_req);
             WaitAndClearRequests(
-                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
+                stream_id, mux, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -440,21 +436,19 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                           schema_op_msg.commit_ts(),
                           schema_op_msg.txn(),
                           mux,
-                          cv,
                           status,
                           on_fly_cnt,
                           recovery_error,
-                          msg_vec,
                           nullptr,
                           &range_split_tables);
 
+            on_fly_cnt.fetch_add(1, std::memory_order_release);
             local_shards_.EnqueueCcRequest(0, cc_req);
 
             // wait for this schema operation to be recovered at all shards
             // before processing next
-            on_fly_cnt.fetch_add(1, std::memory_order_release);
             WaitAndClearRequests(
-                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
+                stream_id, mux, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -499,19 +493,17 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 ts,
                 txn,
                 mux,
-                cv,
                 status,
                 on_fly_cnt,
                 recovery_error,
-                msg_vec,
                 res_pair.first->second);
 
+            on_fly_cnt.fetch_add(1, std::memory_order_release);
             local_shards_.EnqueueCcRequest(0, cc_req);
             // wait for this range split operation to be recovered at all shards
             // before processing next
-            on_fly_cnt.fetch_add(1, std::memory_order_release);
             WaitAndClearRequests(
-                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
+                stream_id, mux, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -520,111 +512,19 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
         // parse and process log records
         const std::string &log_records = msg.binary_log_records();
-        size_t offset = 0;
-        int binary_log_cnt = 0;
-        while (offset < log_records.size())
-        {
-            // 8-byte for commit_ts
-            uint64_t commit_ts = *reinterpret_cast<const uint64_t *>(
-                log_records.data() + offset);
-            offset += sizeof(uint64_t);
-            // 4-byte for log_blob length
-            uint32_t blob_length = *reinterpret_cast<const uint32_t *>(
-                log_records.data() + offset);
-            offset += sizeof(uint32_t);
-
-            std::string_view blob(log_records.data() + offset, blob_length);
-            offset += blob_length;
-
-            // parse log_blob
-            size_t blob_offset = 0;
-            while (blob_offset < blob.size())
-            {
-                // 1-byte integer for the length of the table name
-                uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
-                    blob.data() + blob_offset);
-                blob_offset += sizeof(uint8_t);
-
-                // Table name string
-                std::string_view table_name_view(blob.data() + blob_offset,
-                                                 table_name_len);
-                blob_offset += table_name_len;
-#ifdef ON_KEY_OBJECT
-                TableType table_type = TableType::Primary;
-                // 4-byte integer for the length of the serialized object keys
-                // and commands of this tx.
-                uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
-                    blob.data() + blob_offset);
-                blob_offset += sizeof(uint32_t);
-#else
-
-                // 1-byte integer for the type of table
-                uint8_t table_type_number = *reinterpret_cast<const uint8_t *>(
-                    blob.data() + blob_offset);
-                TableType table_type;
-                switch (table_type_number)
-                {
-                case 0:
-                    table_type = TableType::Primary;
-                    break;
-                case 1:
-                    table_type = TableType::Secondary;
-                    break;
-                case 2:
-                    table_type = TableType::UniqueSecondary;
-                    break;
-                default:
-                    // Should not have meta table in data log.
-                    assert(false);
-                    break;
-                }
-                blob_offset += sizeof(uint8_t);
-
-                // 4-byte integer for the length of the serialized
-                // records from the table
-                uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
-                    blob.data() + blob_offset);
-                blob_offset += sizeof(uint32_t);
-#endif
-
-                ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
-                cc_req->Reset(
-                    cc_ng_id,
-                    table_name_view,
-                    table_type,
-                    std::string_view(blob.data() + blob_offset, kv_len),
-                    commit_ts,
-                    0,
-                    mux,
-                    cv,
-                    status,
-                    on_fly_cnt,
-                    recovery_error,
-                    msg_vec,
-                    nullptr,
-                    nullptr,
-                    next_core);
-                binary_log_cnt++;
-
-                // Enqueues the replay request to the first local shard. The
-                // shard will deserialize the log record and only insert the
-                // records belonging to its cc map. The replay request is then
-                // moved to remaining shards one after another and is replayed
-                // at individual shards separately.
-                local_shards_.EnqueueCcRequest(next_core, cc_req);
-                next_core = (next_core + 1) % local_shards_.Count();
-
-                blob_offset += kv_len;
-            }
-        }
-        on_fly_cnt.fetch_add(binary_log_cnt, std::memory_order_relaxed);
+        ParseDataLogCc *cc_req = parse_datalog_cc_pool_.NextRequest();
+        cc_req->Reset(
+            log_records, cc_ng_id, mux, status, on_fly_cnt, recovery_error);
+        on_fly_cnt.fetch_add(1, std::memory_order_release);
+        local_shards_.EnqueueCcRequest(next_core, cc_req);
+        next_core = (next_core + 1) % local_shards_.Count();
 
         if (msg.has_finish())
         {
             // finish log replay of this log group
             // wait for all preceding ReplayLogCc requests finish
             WaitAndClearRequests(
-                stream_id, mux, cv, on_fly_cnt, status, recovery_error);
+                stream_id, mux, on_fly_cnt, status, recovery_error);
             // update recovering status and then close this stream,
             // log_shipping_agent has to create a new stream to send recoverTx
             // log records. when accepting that new stream, set no
@@ -685,7 +585,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
     {
         WaitAndClearRequests(stream_id,
                              mux,
-                             cv,
                              on_fly_cnt,
                              status,
                              recovery_error,
@@ -749,7 +648,6 @@ void ReplayService::on_closed(brpc::StreamId id)
     }
     WaitAndClearRequests(id,
                          info->mux_,
-                         info->cv_,
                          info->on_fly_cnt_,
                          info->status_,
                          info->recovery_error_);
@@ -767,7 +665,6 @@ void ReplayService::on_closed(brpc::StreamId id)
 
 void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
                                          bthread::Mutex &mux,
-                                         bthread::ConditionVariable &cv,
                                          std::atomic<size_t> &on_fly_cnt_,
                                          std::atomic<WaitingStatus> &status,
                                          bool &recovery_error,
@@ -778,13 +675,12 @@ void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
         on_fly_cnt > 200000 && waiting_status == WaitingStatus::WaitForMany)
     {
         status.store(waiting_status, std::memory_order_relaxed);
-        std::unique_lock<bthread::Mutex> lk(mux);
         on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
         while (on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll ||
                on_fly_cnt > 200000 &&
                    waiting_status == WaitingStatus::WaitForMany)
         {
-            cv.wait(lk);
+            bthread_usleep(100);
             on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
         }
         status.store(WaitingStatus::Active, std::memory_order_relaxed);

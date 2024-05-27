@@ -170,5 +170,11 @@ public:
 
     virtual TxKey NegativeInfKey() = 0;
     virtual TxKey PositiveInfKey() = 0;
+    virtual size_t KeyHash(const char *buf,
+                           size_t offset,
+                           const txservice::Schema *key_schema)
+    {
+        return 0;
+    }
 };
 }  // namespace txservice

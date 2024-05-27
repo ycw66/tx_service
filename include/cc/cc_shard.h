@@ -198,6 +198,8 @@ public:
      */
     void Enqueue(uint32_t thd_id, CcRequestBase *req);
 
+    void Enqueue(uint32_t thd_id, uint32_t shard_code, CcRequestBase *req);
+
     /**
      * @brief Puts a cc request into the shard's request wait list until memory
      * is avaliable.
@@ -331,6 +333,11 @@ public:
     Catalog *GetCatalog()
     {
         return nullptr;
+    }
+
+    CatalogFactory *GetCatalogFactory()
+    {
+        return catalog_factory_;
     }
 
     /**

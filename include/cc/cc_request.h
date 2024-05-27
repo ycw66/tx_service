@@ -51,6 +51,8 @@
 
 namespace txservice
 {
+thread_local inline CcRequestPool<ReplayLogCc> replay_cc_pool_;
+
 template <typename KeyT, typename ValueT>
 class TemplateCcMap;
 
@@ -3243,27 +3245,24 @@ public:
         uint64_t commit_ts,
         uint64_t txn,
         bthread::Mutex &mux,
-        bthread::ConditionVariable &cv,
         std::atomic<fault::ReplayService::WaitingStatus> &status,
         std::atomic<size_t> &on_fly_cnt,
         bool &recovery_error,
-        std::shared_ptr<std::vector<::txlog::ReplayMessage>> &msg_vec,
         std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr,
         std::unordered_set<TableName> *range_splitting = nullptr,
         uint16_t first_core = 0)
     {
-        table_name_holder_ = TableName(table_name_view, table_type);
+        table_name_str_ = table_name_view;
+        table_name_holder_ = TableName(table_name_str_, table_type);
         TemplatedCcRequest<ReplayLogCc, Void>::Reset(
             &table_name_holder_, &result_, ng_id, txn, -1);
-        log_blob_view_ = blob;
+        log_blob_str_ = blob;
         commit_ts_ = commit_ts;
         result_.Reset();
         external_mux_ = &mux;
-        external_cv_ = &cv;
         external_status_ = &status;
         external_on_fly_cnt_ = &on_fly_cnt;
         recovery_error_ = &recovery_error;
-        msg_vec_ = msg_vec;
         next_core_ = UINT16_MAX;
         first_core_ = first_core;
         range_split_started_ = range_split_started;
@@ -3399,47 +3398,23 @@ public:
         // specified log record has been replayed in all cores of this node.
         // HandlerResult is not used by external caller, hence we don't need to
         // call HandlerResult.SetFinished().
-        msg_vec_ = nullptr;
-        size_t on_fly_cnt =
-            external_on_fly_cnt_->fetch_sub(1, std::memory_order_acquire) - 1;
-        if (on_fly_cnt <= 200000 &&
-                external_status_->load(std::memory_order_relaxed) ==
-                    fault::ReplayService::WaitingStatus::WaitForMany ||
-            on_fly_cnt == 0 &&
-                external_status_->load(std::memory_order_relaxed) ==
-                    fault::ReplayService::WaitingStatus::WaitForAll)
-        {
-            BAIDU_SCOPED_LOCK(*external_mux_);
-            external_cv_->notify_all();
-        }
+        external_on_fly_cnt_->fetch_sub(1, std::memory_order_relaxed);
     }
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
 
-        msg_vec_ = nullptr;
         {
             BAIDU_SCOPED_LOCK(*external_mux_);
             *recovery_error_ = true;
         }
-        size_t on_fly_cnt =
-            external_on_fly_cnt_->fetch_sub(1, std::memory_order_acquire) - 1;
-        if (on_fly_cnt <= 200000 &&
-                external_status_->load(std::memory_order_relaxed) ==
-                    fault::ReplayService::WaitingStatus::WaitForMany ||
-            on_fly_cnt == 0 &&
-                external_status_->load(std::memory_order_relaxed) ==
-                    fault::ReplayService::WaitingStatus::WaitForAll)
-        {
-            BAIDU_SCOPED_LOCK(*external_mux_);
-            external_cv_->notify_all();
-        }
+        external_on_fly_cnt_->fetch_sub(1, std::memory_order_relaxed);
     }
 
-    const std::string_view &LogContentView() const
+    const std::string_view LogContentView() const
     {
-        return log_blob_view_;
+        return log_blob_str_;
     }
 
     uint64_t CommitTs() const
@@ -3508,14 +3483,14 @@ private:
         "",
         0,
         TableType::Primary};  //  not string owner, sv -> protobuf message.
-    std::string_view log_blob_view_;
+    std::string table_name_str_;
+    std::string log_blob_str_;
     // Temporarily store the currently parsed offset when fetch record from
     // kvstore asynchronously.
     size_t offset_{0};
     uint64_t commit_ts_;
     CcHandlerResult<Void> result_{nullptr};
     bthread::Mutex *external_mux_;
-    bthread::ConditionVariable *external_cv_;
     std::atomic<fault::ReplayService::WaitingStatus> *external_status_;
     std::atomic<uint64_t> *external_on_fly_cnt_;
     bool *recovery_error_;
@@ -3524,15 +3499,146 @@ private:
     const struct TableSchema *table_schema_{nullptr};
     // Reserved for range split log replay
     std::shared_ptr<std::atomic_uint32_t> range_split_started_{nullptr};
-    // Keep a reference of replay msg until replay is finished since
-    // log_blob_view_ and table_name_holder_ points to ReplayMessage.
-    std::shared_ptr<std::vector<::txlog::ReplayMessage>> msg_vec_;
 
     // Reserved for schema op log replay
     const std::unordered_set<TableName> *range_splitting_;
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);
+};
+
+struct ParseDataLogCc : public CcRequestBase
+{
+public:
+    ParseDataLogCc() = default;
+
+    void Reset(const std::string &log_records,
+               uint32_t cc_ng_id,
+               bthread::Mutex &mux,
+               std::atomic<fault::ReplayService::WaitingStatus> &status,
+               std::atomic<uint64_t> &on_fly_cnt,
+               bool &recovery_error)
+    {
+        log_records_ = log_records;
+        cc_ng_id_ = cc_ng_id;
+        mux_ = &mux;
+        status_ = &status;
+        on_fly_cnt_ = &on_fly_cnt;
+        recovery_error_ = &recovery_error;
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        size_t offset = 0;
+        // core of first key in log
+        int dest_core = 0;
+        std::vector<ReplayLogCc *> replay_cc_list;
+        replay_cc_list.reserve(160);
+        while (offset < log_records_.size())
+        {
+            // 8-byte for commit_ts
+            uint64_t commit_ts = *reinterpret_cast<const uint64_t *>(
+                log_records_.data() + offset);
+            offset += sizeof(uint64_t);
+            // 4-byte for log_blob length
+            uint32_t blob_length = *reinterpret_cast<const uint32_t *>(
+                log_records_.data() + offset);
+            offset += sizeof(uint32_t);
+
+            std::string_view blob(log_records_.data() + offset, blob_length);
+            offset += blob_length;
+
+            // parse log_blob
+            size_t blob_offset = 0;
+            while (blob_offset < blob.size())
+            {
+                // 1-byte integer for the length of the table name
+                uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
+                    blob.data() + blob_offset);
+                blob_offset += sizeof(uint8_t);
+
+                // Table name string
+                std::string_view table_name_view(blob.data() + blob_offset,
+                                                 table_name_len);
+                blob_offset += table_name_len;
+#ifdef ON_KEY_OBJECT
+                TableType table_type = TableType::Primary;
+                // 4-byte integer for the length of the serialized object keys
+                // and commands of this tx.
+                uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
+                    blob.data() + blob_offset);
+                blob_offset += sizeof(uint32_t);
+#else
+
+                // 1-byte integer for the type of table
+                uint8_t table_type_number = *reinterpret_cast<const uint8_t *>(
+                    blob.data() + blob_offset);
+                TableType table_type;
+                switch (table_type_number)
+                {
+                case 0:
+                    table_type = TableType::Primary;
+                    break;
+                case 1:
+                    table_type = TableType::Secondary;
+                    break;
+                case 2:
+                    table_type = TableType::UniqueSecondary;
+                    break;
+                default:
+                    // Should not have meta table in data log.
+                    assert(false);
+                    break;
+                }
+                blob_offset += sizeof(uint8_t);
+
+                // 4-byte integer for the length of the serialized
+                // records from the table
+                uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
+                    blob.data() + blob_offset);
+                blob_offset += sizeof(uint32_t);
+#endif
+                size_t hash = ccs.GetCatalogFactory()->KeyHash(
+                    blob.data(), blob_offset, nullptr);
+                dest_core = hash ? (hash & 0x3FF) % ccs.core_cnt_
+                                 : (dest_core + 1) % ccs.core_cnt_;
+                ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
+                replay_cc_list.push_back(cc_req);
+                cc_req->Reset(
+                    cc_ng_id_,
+                    table_name_view,
+                    table_type,
+                    std::string_view(blob.data() + blob_offset, kv_len),
+                    commit_ts,
+                    0,
+                    *mux_,
+                    *status_,
+                    *on_fly_cnt_,
+                    *recovery_error_,
+                    nullptr,
+                    nullptr,
+                    dest_core);
+
+                blob_offset += kv_len;
+            }
+        }
+        on_fly_cnt_->fetch_add(replay_cc_list.size() - 1,
+                               std::memory_order_relaxed);
+        for (auto cc_req : replay_cc_list)
+        {
+            ccs.Enqueue(ccs.core_id_, cc_req->FirstCore(), cc_req);
+        }
+        return true;
+    }
+
+private:
+    std::string log_records_;
+    uint32_t cc_ng_id_;
+    bthread::Mutex *mux_;
+    std::atomic<fault::ReplayService::WaitingStatus> *status_;
+    std::atomic<uint64_t> *on_fly_cnt_;
+    bool *recovery_error_;
+    uint16_t next_core_ = 0;
 };
 
 struct BroadcastStatisticsCc
