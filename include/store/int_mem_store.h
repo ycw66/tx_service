@@ -141,7 +141,9 @@ public:
     }
 
     bool DiscoverAllTableNames(
-        std::vector<std::string> &norm_name_vec) const override
+        std::vector<std::string> &norm_name_vec,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) const override
     {
         assert(false);
         return false;
@@ -159,14 +161,20 @@ public:
         assert(false);
         return false;
     }
-    bool FetchDatabase(std::string_view db,
-                       std::string &definition,
-                       bool &found) const override
+    bool FetchDatabase(
+        std::string_view db,
+        std::string &definition,
+        bool &found,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) const override
     {
         assert(false);
         return false;
     }
-    bool FetchAllDatabase(std::vector<std::string> &dbnames) const override
+    bool FetchAllDatabase(
+        std::vector<std::string> &dbnames,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) const override
     {
         assert(false);
         return false;

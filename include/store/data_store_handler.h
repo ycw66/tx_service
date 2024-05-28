@@ -215,16 +215,24 @@ public:
     }
 
     virtual bool DiscoverAllTableNames(
-        std::vector<std::string> &norm_name_vec) const = 0;
+        std::vector<std::string> &norm_name_vec,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) const = 0;
 
     //-- database
     virtual bool UpsertDatabase(std::string_view db,
                                 std::string_view definition) const = 0;
     virtual bool DropDatabase(std::string_view db) const = 0;
-    virtual bool FetchDatabase(std::string_view db,
-                               std::string &definition,
-                               bool &found) const = 0;
-    virtual bool FetchAllDatabase(std::vector<std::string> &dbnames) const = 0;
+    virtual bool FetchDatabase(
+        std::string_view db,
+        std::string &definition,
+        bool &found,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) const = 0;
+    virtual bool FetchAllDatabase(
+        std::vector<std::string> &dbnames,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) const = 0;
 
     virtual bool DropKvTable(const std::string &kv_table_name) const = 0;
 
