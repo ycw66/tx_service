@@ -25,11 +25,11 @@ void LruEntry::SetCkptTs(uint64_t ts)
     }
 
 #else
-    uint64_t curr_val = commit_ts_and_status_;
+    uint64_t curr_val = commit_ts_and_status_.load(std::memory_order_acquire);
     uint64_t curr_commit_ts = curr_val >> 8;
     if (curr_commit_ts <= ts)
     {
-        commit_ts_and_status_ = curr_val | 0x10;
+        commit_ts_and_status_.store(curr_val | 0x10, std::memory_order_release);
     }
 
 #endif
@@ -40,7 +40,7 @@ bool LruEntry::IsPersistent() const
 #ifndef ON_KEY_OBJECT
     return CommitTs() <= ckpt_ts_;
 #else
-    uint64_t curr_val = commit_ts_and_status_;
+    uint64_t curr_val = commit_ts_and_status_.load(std::memory_order_acquire);
     // The fifth bit represents if the latest version has been flushed.
     return curr_val & 0x10;
 
@@ -49,7 +49,7 @@ bool LruEntry::IsPersistent() const
 
 RecordStatus LruEntry::PayloadStatus() const
 {
-    uint64_t curr_val = commit_ts_and_status_;
+    uint64_t curr_val = commit_ts_and_status_.load(std::memory_order_acquire);
     // The lowest 4 bits encode the record status.
     RecordStatus status = static_cast<RecordStatus>(curr_val & 0x0F);
     return status;
@@ -58,11 +58,13 @@ RecordStatus LruEntry::PayloadStatus() const
 void LruEntry::SetCommitTsPayloadStatus(uint64_t ts, RecordStatus status)
 {
     uint8_t stat = static_cast<uint8_t>(status);
-    uint64_t curr_ts = commit_ts_and_status_ >> 8;
+    uint64_t curr_ts =
+        commit_ts_and_status_.load(std::memory_order_acquire) >> 8;
 
     if (curr_ts < ts)
     {
-        commit_ts_and_status_ = (ts << 8) | stat;
+        commit_ts_and_status_.store((ts << 8) | stat,
+                                    std::memory_order_release);
     }
 }
 
@@ -171,6 +173,25 @@ void LruEntry::UpdateCcPage(LruPage *page)
     {
         cc_lock_and_extra_->UpdateCcPage(page);
     }
+}
+
+void LruEntry::SetBeingCkpt()
+{
+    commit_ts_and_status_.fetch_or(0x20, std::memory_order_acq_rel);
+}
+
+void LruEntry::ClearBeingCkpt()
+{
+    uint64_t mask = UINT64_MAX;      // All bits set to 1
+    mask &= ~(1ULL << 5);            // Clear the 6th bit
+    commit_ts_and_status_.fetch_and(mask,
+                                    std::memory_order_acq_rel);
+}
+
+bool LruEntry::GetBeingCkpt()
+{
+    uint64_t curr_val = commit_ts_and_status_.load(std::memory_order_acquire);
+    return curr_val & 0x20;
 }
 
 TxKey FlushRecord::Key() const

@@ -4589,6 +4589,105 @@ void LocalCcShards::SyncTableStatisticsWorker()
     }
 }
 
+void LocalCcShards::DefragmentWork(std::vector<uint16_t> &core_ids)
+{
+    if (Count() == 0)
+    {
+        return;
+    }
+
+    std::vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
+    for (auto node_group : node_groups)
+    {
+        int64_t leader_term = Sharder::Instance().LeaderTerm(node_group);
+        if (leader_term < 0)
+        {
+            continue;
+        }
+
+        CkptTsCc ckpt_req(cc_shards_.size(), node_group);
+
+        // Use ckpt ts as sync ts. It will be used next round to decide
+        // if table has any updates since last sync.
+        for (auto &ccs : cc_shards_)
+        {
+            ccs->Enqueue(&ckpt_req);
+        }
+        ckpt_req.Wait();
+
+        uint64_t ckpt_ts = ckpt_req.GetCkptTs();
+
+        // Get table names in this node group, stats sync worker should
+        // be TableName string owner.
+        std::unordered_map<TableName, bool> tables =
+            GetCatalogTableNameSnapshot(node_group, ckpt_ts);
+
+        for (auto it = tables.begin(); it != tables.end(); ++it)
+        {
+            if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
+            {
+                // Skip the node groups that are no longer on this node.
+                break;
+            }
+
+            const TableName &table_name = it->first;
+            if (table_name.IsMeta())
+            {
+                continue;
+            }
+
+            // Start a tx for adding read intent on pause pos
+            TransactionExecution *defrag_tx =
+                txservice::NewTxInit(tx_service_,
+                                     IsolationLevel::RepeatableRead,
+                                     CcProtocol::Locking,
+                                     node_group);
+
+            DefragHeapCc defrag_heap_cc(table_name,
+                                        node_group,
+                                        leader_term,
+                                        Count(),
+                                        core_ids.size(),
+                                        defrag_tx->TxNumber(),
+                                        32);
+            // only defrag the cc shards that are in the core_ids
+            for (auto core_id : core_ids)
+            {
+                auto cc_shard = GetCcShard(core_id);
+                cc_shard->Enqueue(&defrag_heap_cc);
+            }
+            defrag_heap_cc.Wait();
+
+            for (auto core_id : core_ids)
+            {
+                auto &defrag_cnt = defrag_heap_cc.defrag_cnt_[core_id];
+                auto &total_cnt = defrag_heap_cc.total_cnt_[core_id];
+                auto &lock_cnt = defrag_heap_cc.lock_cnt_[core_id];
+                auto &non_persistent_cnt = defrag_heap_cc.ckpt_cnt_[core_id];
+                auto &kv_load_cnt = defrag_heap_cc.kv_load_cnt_[core_id];
+                auto &non_frag_cnt = defrag_heap_cc.non_frag_cnt_[core_id];
+                assert(defrag_cnt + lock_cnt + non_persistent_cnt +
+                           kv_load_cnt + non_frag_cnt ==
+                       total_cnt);
+
+                float defrag_ratio = static_cast<float>(defrag_cnt) / total_cnt;
+                LOG(INFO) << "Defragmentation for table " << table_name.Trace()
+                          << " finished on core " << core_id
+                          << ", defrag count: " << defrag_cnt
+                          << ", lock count: " << lock_cnt
+                          << ", ckpt count: " << non_persistent_cnt
+                          << ", kv load count: " << kv_load_cnt
+                          << ", non frag count: " << non_frag_cnt
+                          << ", total count: " << total_cnt
+                          << ", defrag ratio: " << 100 * defrag_ratio;
+            }
+
+            txservice::CommitTx(defrag_tx);
+        }
+    }
+    LOG(INFO) << "Start defragmentation end";
+}
+
 void LocalCcShards::DefragmentWorker()
 {
     std::unique_lock<std::mutex> worker_lk(defragment_worker_ctx_.mux_);
@@ -4607,6 +4706,8 @@ void LocalCcShards::DefragmentWorker()
         }
 
         worker_lk.unlock();
+        std::vector<HeapMemStats> all_core_stats;
+        std::vector<uint16_t> fragment_core_ids;
         for (auto &ccs : cc_shards_)
         {
             auto heap = ccs->GetShardHeap();
@@ -4622,15 +4723,24 @@ void LocalCcShards::DefragmentWorker()
 
             LOG(INFO) << "ccs " << ccs->core_id_
                       << " memory usage report, committed " << stats.committed_
-                      << ", allocated " << stats.allocated_;
+                      << ", allocated " << stats.allocated_ << ", frag ratio "
+                      << 100 * (static_cast<float>(stats.committed_ -
+                                                   stats.allocated_) /
+                                stats.committed_);
             if (stats.committed_ > ccs->memory_limit_ * 0.7 &&
                 stats.allocated_ < stats.committed_ * 0.8)
             {
                 LOG(INFO) << "Found memory fragementation in ccs "
                           << ccs->core_id_
                           << ", total comitted memory: " << stats.committed_
-                          << ", actual used memory " << stats.allocated_;
+                          << ", actual used memory " << stats.allocated_
+                          << ", frag ratio "
+                          << 100 * (static_cast<float>(stats.committed_ -
+                                                       stats.allocated_) /
+                                    stats.committed_);
+                fragment_core_ids.push_back(ccs->core_id_);
             }
+            all_core_stats.push_back(stats);
         }
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -4650,6 +4760,59 @@ void LocalCcShards::DefragmentWorker()
                       << committed << ", allocated " << allocated;
         }
 #endif
+
+        if (!fragment_core_ids.empty())
+        {
+            // Do defragment
+            DefragmentWork(fragment_core_ids);
+
+            // for (auto &ccs : cc_shards_)
+            //{
+            // auto heap = ccs->GetShardHeap();
+            // if (heap == nullptr)
+            //{
+            // continue;
+            //}
+
+            // HeapMemStats stats;
+            // CollectMemStatsCc cc(&stats, false);
+            // ccs->Enqueue(&cc);
+            // cc.Wait();
+
+            // if (std::find(fragment_core_ids.begin(),
+            // fragment_core_ids.end(),
+            // ccs->core_id_) != fragment_core_ids.end())
+            //{
+            // HeapMemStats before_defragment =
+            // all_core_stats[ccs->core_id_];
+            // LOG(INFO)
+            //<< "defrag result ccs " << ccs->core_id_
+            //<< " ,before defrag committed: "
+            //<< before_defragment.committed_
+            //<< " ,allocated: " << before_defragment.allocated_
+            //<< " ,frag ratio: "
+            //<< 100 * (static_cast<float>(
+            // before_defragment.committed_ -
+            // before_defragment.allocated_) /
+            // before_defragment.committed_)
+            //<< " ,after defrag committed: " << stats.committed_
+            //<< " ,allocated: " << stats.allocated_
+            //<< " ,frag ratio: "
+            //<< 100 * (static_cast<float>(stats.committed_ -
+            // stats.allocated_) /
+            // stats.committed_)
+            //<< " ,defrag reduce committed: "
+            //<< before_defragment.committed_ - stats.committed_
+            //<< " ,defrag reduce allocate: "
+            //<< before_defragment.allocated_ - stats.allocated_
+            //<< " ,defrag ratio: "
+            //<< 100 * (static_cast<float>(
+            // before_defragment.allocated_ -
+            // stats.allocated_) /
+            // before_defragment.committed_);
+            //}
+            //}
+        }
 
         worker_lk.lock();
     }

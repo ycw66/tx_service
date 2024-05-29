@@ -690,6 +690,7 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
         FlushRecord *ref = &records[index];
         ref->cce_->SetCkptTs(ref->commit_ts_);
 #endif
+        ref->cce_->ClearBeingCkpt();
     }
 
     if (index == records.size())

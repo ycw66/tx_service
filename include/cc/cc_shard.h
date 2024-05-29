@@ -108,7 +108,7 @@ public:
 
     // Try to return memory not used back to system. This will decrease
     // committed size if success.
-    bool TryHeapCollect();
+    bool TryHeapCollect(bool force = false);
 
     CcShard *cc_shard_;
     mi_heap_t *heap_;

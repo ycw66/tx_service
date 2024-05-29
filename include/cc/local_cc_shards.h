@@ -1746,6 +1746,7 @@ private:
 
     WorkerThreadContext defragment_worker_ctx_;
     void DefragmentWorker();
+    void DefragmentWork(std::vector<uint16_t> &core_ids);
 
     // For cluster Publish message
     std::function<void(std::string_view, std::string_view)> publish_func_;

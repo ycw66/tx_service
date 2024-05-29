@@ -214,12 +214,6 @@ public:
                 return false;
             }
 
-            req.SetCcePtr(cce);
-
-            assert(cce != nullptr);
-            cce_addr.SetCce(
-                reinterpret_cast<uint64_t>(cce), ng_term, shard_->core_id_);
-
             // For ON_KEY_OBJECT, we add lock regardless of whether the record
             // is deleted, so just pass RecordStatus::Normal.
             std::tie(acquired_lock, err_code) =
@@ -248,6 +242,14 @@ public:
         {
             // Lock acquired, set the result.
             obj_result.lock_acquired_ = acquired_lock;
+            if (acquired_lock != LockType::NoLock)
+            {
+                req.SetCcePtr(cce);
+
+                assert(cce != nullptr);
+                cce_addr.SetCce(
+                    reinterpret_cast<uint64_t>(cce), ng_term, shard_->core_id_);
+            }
             break;
         }
         case CcErrorCode::ACQUIRE_LOCK_BLOCKED:

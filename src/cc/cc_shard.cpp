@@ -1784,15 +1784,16 @@ bool CcShardHeap::Full() const
 
 // Try to return memory not used back to system. This will decrease
 // committed size if success.
-bool CcShardHeap::TryHeapCollect()
+bool CcShardHeap::TryHeapCollect(bool force)
 {
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
     // If there's actually memory freed by us but not returned to this
     // system, process with collect. Otherwise do not even try since
     // collect is pretty expensive (at least ms level).
-    if (cc_shard_->Now() > last_failed_collect_ts_ + 1000000 &&
-        allocated < committed * 0.8 && allocated < (int64_t) memory_limit_)
+    if ((cc_shard_->Now() > last_failed_collect_ts_ + 1000000 &&
+        allocated < committed * 0.8 && allocated < (int64_t) memory_limit_) ||
+        force == true)
     {
         mi_heap_collect(heap_, true);
         mi_thread_stats(&allocated, &committed);

@@ -61,6 +61,11 @@ public:
         return KeyType::Normal;
     }
 
+    bool DefragIfNecessary(mi_heap_t *heap)
+    {
+      return false;
+    }
+
     friend bool operator==(const CatalogKey &lhs, const CatalogKey &rhs);
     friend bool operator!=(const CatalogKey &lhs, const CatalogKey &rhs);
     friend bool operator<(const CatalogKey &lhs, const CatalogKey &rhs);

@@ -2687,6 +2687,174 @@ private:
     CcHandlerResult<RangeScanSliceResult> *hd_res_{nullptr};
 };
 
+struct DefragHeapCc : public CcRequestBase
+{
+public:
+    DefragHeapCc() = delete;
+    ~DefragHeapCc() = default;
+
+    DefragHeapCc(const TableName &table_name,
+                 const uint64_t &node_group_id,
+                 const int64_t &node_group_term,
+                 const uint16_t &core_cnt,
+                 const uint16_t &enqueued_core_cnt,
+                 const TxNumber &txn,
+                 const size_t &scan_batch_size)
+        : table_name_(&table_name),
+          node_group_id_(node_group_id),
+          node_group_term_(node_group_term),
+          core_cnt_(core_cnt),
+          unfinished_cnt_(enqueued_core_cnt),
+          scan_batch_size_(scan_batch_size),
+          mux_(),
+          cv_()
+    {
+        tx_number_ = txn;
+        for (size_t i = 0; i < core_cnt; i++)
+        {
+            pause_pos_.emplace_back();
+            defrag_cnt_.emplace_back(0);
+            lock_cnt_.emplace_back(0);
+            kv_load_cnt_.emplace_back(0);
+            ckpt_cnt_.emplace_back(0);
+            non_frag_cnt_.emplace_back(0);
+            total_cnt_.emplace_back(0);
+            ccmp_key_defraged_.emplace_back(false);
+        }
+    };
+
+    bool ValidTermCheck()
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (cc_ng_term < 0 || cc_ng_term != node_group_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
+
+        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
+        // if ccm is not exist anymore for some reason, just skip it
+        if (ccm == nullptr)
+        {
+            SetFinish(ccs.core_id_);
+            return false;
+        }
+
+        ccm->Execute(*this);
+
+        return false;
+    }
+
+    void SetError(CcErrorCode err)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        err_ = err;
+        --unfinished_cnt_;
+        if (unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        std::lock_guard<std::mutex> lk(mux_);
+        err_ = err_code;
+        --unfinished_cnt_;
+        if (unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
+    }
+
+    bool IsError()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return err_ != CcErrorCode::NO_ERROR;
+    }
+
+    CcErrorCode ErrorCode()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return err_;
+    }
+
+    void SetFinish(size_t core_id)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        --unfinished_cnt_;
+        if (unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
+    }
+
+    bool IsDrained(size_t core_idx) const
+    {
+        return pause_pos_[core_idx].second;
+    }
+
+    uint32_t NodeGroupId()
+    {
+        return node_group_id_;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
+    }
+
+    void Reset()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        unfinished_cnt_ = core_cnt_;
+        for (size_t i = 0; i < core_cnt_; i++)
+        {
+            pause_pos_.emplace_back();
+        }
+        err_ = CcErrorCode::NO_ERROR;
+    }
+
+    std::pair<LruEntry *, bool> &PausePos(size_t core_idx)
+    {
+        return pause_pos_[core_idx];
+    }
+
+    const TableName *table_name_;
+    const uint64_t node_group_id_{0};
+    const int64_t node_group_term_{0};
+    const uint16_t core_cnt_{0};
+    uint32_t unfinished_cnt_;
+    const size_t scan_batch_size_{0};
+
+    std::vector<std::pair<LruEntry *, bool>> pause_pos_;
+    std::vector<size_t> defrag_cnt_;
+    std::vector<size_t> lock_cnt_;
+    std::vector<size_t> kv_load_cnt_;
+    std::vector<size_t> ckpt_cnt_;
+    std::vector<size_t> non_frag_cnt_;
+    std::vector<size_t> total_cnt_;
+    std::vector<bool> ccmp_key_defraged_;
+
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
+    std::mutex mux_;
+    std::condition_variable cv_;
+};
+
 struct DataSyncScanCc : public CcRequestBase
 {
 public:
@@ -4985,7 +5153,8 @@ struct RequestAborterCc : public CcRequestBase
 
 struct CollectMemStatsCc : public CcRequestBase
 {
-    explicit CollectMemStatsCc(HeapMemStats *stats) : stats_(stats)
+    explicit CollectMemStatsCc(HeapMemStats *stats)
+        : stats_(stats)
     {
     }
 
@@ -4995,6 +5164,8 @@ struct CollectMemStatsCc : public CcRequestBase
     {
         // this cc will only execute in context of shard heap, so the stats
         // collected are shard heap stats
+        //
+        assert(mi_heap_get_default() == ccs.GetShardHeap()->heap_);
         mi_thread_stats(&stats_->allocated_, &stats_->committed_);
         std::lock_guard<std::mutex> lk(mux_);
         finished_ = true;

@@ -7,6 +7,8 @@
 #include <utility>  //std::move
 #include <vector>   //std::vector
 
+#include <mimalloc.h>
+
 #include "tx_serialize.h"
 
 namespace txservice
@@ -96,6 +98,11 @@ struct TxRecord
     virtual size_t Size() const
     {
         return 0;
+    }
+
+    virtual bool DefragIfNecessary(mi_heap_t *heap)
+    {
+      return false;
     }
 };
 

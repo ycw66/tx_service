@@ -10,7 +10,6 @@
 #include <utility>  // std::move
 #include <vector>
 
-#include "boost/stacktrace.hpp"
 #include "cc_req_base.h"
 #include "non_blocking_lock.h"
 #include "tx_id.h"
@@ -303,6 +302,12 @@ public:
 
     uint64_t CommitTs() const;
 
+    void SetBeingCkpt();
+
+    void ClearBeingCkpt();
+
+    bool GetBeingCkpt();
+
 #ifndef ON_KEY_OBJECT
     uint64_t CkptTs() const
     {
@@ -328,19 +333,18 @@ public:
 
 protected:
     KeyGapLockAndExtraData *cc_lock_and_extra_{nullptr};
-
-private:
     /**
      * @brief The 8-byte integer encodes the record's commit timestamp and
      * status. The higher 7 bytes represent the timestamp. The 7-byte integer is
      * big enough to encode 100 years from now on (2024) in micro seconds. The
      * lowest 4 bits (0-3 bits) represent record status. The next 4 bits (4-7
      * bits) are reserved for other usage: when MVCC is not needed, the 5th bit
-     * represents whether or not the latest version has been flushed.
-     *
+     * represents whether or not the latest version has been flushed. And, the
+     * 6th bit represents wheter or not the cce is in progress of being ckpt to kv store.
      */
-    uint64_t commit_ts_and_status_{0};
+    std::atomic<uint64_t> commit_ts_and_status_{0};
 
+private:
 #ifndef ON_KEY_OBJECT
     // The commit timestamp of the latest checkpoint version record.
     uint64_t ckpt_ts_{0};
@@ -583,6 +587,16 @@ public:
     // save versions exclude the current version.(descending order,eg.[4,3,2,1])
     std::unique_ptr<std::list<VersionRecord<ValueT>>> archives_{nullptr};
 #endif
+
+    std::unique_ptr<CcEntry<KeyT, ValueT>> CloneForDefragment()
+    {
+        auto clone = std::make_unique<CcEntry<KeyT, ValueT>>();
+        auto cur_val = commit_ts_and_status_.load(std::memory_order_acquire);
+        clone->commit_ts_and_status_.store(cur_val, std::memory_order_release);
+        clone->cc_lock_and_extra_ = cc_lock_and_extra_;
+        clone->payload_ = std::move(payload_);
+        return clone;
+    }
 
     inline static size_t basic_mem_overhead_ = sizeof(CcEntry<KeyT, ValueT>);
 
@@ -1859,7 +1873,6 @@ private:
 };
 
 }  // namespace txservice
-
 namespace std
 {
 template <>

@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <mimalloc.h>
 
 #include "schema.h"
 #include "tx_serialize.h"
@@ -103,7 +104,14 @@ public:
               {
                   const T *key = static_cast<const T *>(this_obj);
                   return key->Type();
-              })
+              }),
+          defrag_if_necessary_func_(
+              [](void *this_obj, mi_heap_t *heap)
+              {
+                 T *key = static_cast<T *>(this_obj);
+                 return key->DefragIfNecessary(heap);
+              }
+              )
     {
     }
 
@@ -169,6 +177,11 @@ public:
                                    : KeyType::NegativeInf;
     }
 
+    bool DefragIfNecessary(void *this_obj, mi_heap_t *heap) const
+    {
+      return defrag_if_necessary_func_(this_obj, heap);
+    }
+
 protected:
     typedef void (*DeleteFunc)(void *obj_ptr);
     DeleteFunc const delete_func_;
@@ -207,6 +220,9 @@ protected:
 
     typedef KeyType (*TypeFunc)(const void *this_obj);
     TypeFunc const type_func_;
+
+    typedef bool (*DefragIfNecessaryFunc)(void *this_obj, mi_heap_t *heap);
+    DefragIfNecessaryFunc const defrag_if_necessary_func_;
 };
 
 class TxKey
@@ -310,6 +326,11 @@ public:
     void Serialize(std::string &str) const
     {
         interface_->SerializeStr(GetConstPtr(), str);
+    }
+
+    bool DefragIfNecessary(mi_heap_t *heap) const
+    {
+      return interface_->DefragIfNecessary(GetPtr(), heap);
     }
 
 #ifdef ON_KEY_OBJECT
@@ -867,6 +888,11 @@ struct VoidKey
         {
             return KeyType::Normal;
         }
+    }
+
+    bool DefragIfNecessary(mi_heap_t *heap)
+    {
+      return false;
     }
 
     static const VoidKey *NegativeInfinity()

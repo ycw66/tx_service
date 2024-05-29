@@ -21,6 +21,7 @@
 #include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
+#include "mimalloc.h"
 #include "proto/cc_request.pb.h"
 #include "remote/remote_cc_handler.h"  //RemoteCcHandler
 #include "remote/remote_cc_request.h"
@@ -4636,6 +4637,12 @@ public:
                                    ckpt_vec_size,
                                    export_base_table_record_if_need,
                                    skip_archived_key);
+
+            if (export_size.first > 0)
+            {
+                cce->SetBeingCkpt();
+            }
+
             export_size.second = false;
         }
 
@@ -5023,6 +5030,7 @@ public:
                             req.accumulated_scan_cnt_[shard_->core_id_],
                             false,
                             false);
+
                         if (export_result.second)
                         {
                             is_scan_mem_full = true;
@@ -5541,6 +5549,220 @@ public:
         return false;
     }
 #endif
+
+    bool Execute(DefragHeapCc &req) override
+    {
+        size_t vec_idx = shard_->core_id_;
+        if (req.IsDrained(vec_idx))
+        {
+            // scan is already finished on this core
+            req.SetFinish(vec_idx);
+            return false;
+        }
+
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            return false;
+        }
+
+        auto &pause_pos = req.PausePos(vec_idx);
+        auto &defrag_cnt = req.defrag_cnt_[vec_idx];
+        auto &lock_cnt = req.lock_cnt_[vec_idx];
+        auto &kv_load_cnt = req.kv_load_cnt_[vec_idx];
+        auto &ckpt_cnt = req.ckpt_cnt_[vec_idx];
+        auto &no_frag_cnt = req.non_frag_cnt_[vec_idx];
+        auto &total_cnt = req.total_cnt_[vec_idx];
+        std::vector<bool>::reference ccmp_key_defraged =
+            req.ccmp_key_defraged_[vec_idx];
+
+        mi_heap_t *heap = mi_heap_get_default();
+        // Defrag the keys in ccmp at first
+        if (!ccmp_key_defraged)
+        {
+            typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator it;
+            if (pause_pos.first == nullptr)
+            {
+                it = ccmp_.begin();
+            }
+            else
+            {
+                CcEntry<KeyT, ValueT> *pause_entry =
+                    static_cast<CcEntry<KeyT, ValueT> *>(pause_pos.first);
+                CcPage<KeyT, ValueT> *ccp = static_cast<CcPage<KeyT, ValueT> *>(
+                    pause_entry->GetCcPage());
+                size_t idx_in_page = ccp->FindEntry(pause_entry);
+                KeyT &key = ccp->keys_[idx_in_page];
+                it = ccmp_.upper_bound(key);
+                if (it != ccmp_.begin())
+                {
+                    it--;
+                }
+                ReleaseCceLock(pause_entry->GetKeyLock(),
+                               pause_entry,
+                               req.Txn(),
+                               cc_ng_id_);
+            }
+
+            // defrag ccmap key
+            for (size_t scan_cnt = 0;
+                 scan_cnt < req.scan_batch_size_ && it != ccmp_.end();
+                 scan_cnt++)
+            {
+                const KeyT &key = it->first;
+                TxKey tx_key(&key);
+                tx_key.DefragIfNecessary(heap);
+                it++;
+            }
+
+            if (it == ccmp_.end())
+            {
+                ccmp_key_defraged = true;
+                pause_pos = {nullptr, false};
+            }
+            else
+            {
+                // if this is batch pause, pause on the 1st ccentry of the
+                // CcPage
+                assert(pause_pos.second == false);
+                CcPage<KeyT, ValueT> &ccp = it->second;
+                assert(ccp.entries_.size() > 0);
+                CcEntry<KeyT, ValueT> *cce = ccp.entries_.at(0).get();
+                pause_pos.first = cce;
+                pause_pos.second = false;
+                bool add_intent = cce->GetOrCreateKeyLock(shard_, this, &ccp)
+                                      .AcquireReadIntent(req.Txn());
+                assert(add_intent);
+                (void) add_intent;
+                shard_->UpsertLockHoldingTx(req.Txn(),
+                                            req.node_group_term_,
+                                            cce,
+                                            false,
+                                            cc_ng_id_,
+                                            table_name_.Type());
+            }
+
+            shard_->Enqueue(&req);
+        }
+        // then defrag the cc page
+        else
+        {
+            Iterator it;
+            Iterator end_it = End();
+
+            if (pause_pos.first == nullptr)
+            {
+                it = Begin();
+                it++;
+            }
+            else
+            {
+                CcEntry<KeyT, ValueT> *pause_entry =
+                    static_cast<CcEntry<KeyT, ValueT> *>(pause_pos.first);
+                CcPage<KeyT, ValueT> *ccp = static_cast<CcPage<KeyT, ValueT> *>(
+                    pause_entry->GetCcPage());
+                it = Iterator(pause_entry, ccp, &neg_inf_);
+                ReleaseCceLock(pause_entry->GetKeyLock(),
+                               pause_entry,
+                               req.Txn(),
+                               cc_ng_id_);
+            }
+
+            for (size_t scan_cnt = 0;
+                 scan_cnt < req.scan_batch_size_ && it != end_it;
+                 scan_cnt++)
+            {
+                // defrag the keys_ and entries_ when enter a new page
+                if (it != end_it && it.GetIdxInPage() == 0)
+                {
+                    auto current_page = it.GetPage();
+                    float keys_utilization = mi_heap_page_utilization(
+                        heap, current_page->keys_.data());
+                    if (keys_utilization < 0.8)
+                    {
+                        std::vector<KeyT> new_keys;
+                        new_keys.reserve(current_page->keys_.capacity());
+                        for (auto &key : current_page->keys_)
+                        {
+                            new_keys.push_back(std::move(key));
+                        }
+                        current_page->keys_ = std::move(new_keys);
+                    }
+
+                    float entries_utilization = mi_heap_page_utilization(
+                        heap, current_page->entries_.data());
+                    if (entries_utilization < 0.8)
+                    {
+                        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
+                            new_entries;
+                        new_entries.reserve(current_page->entries_.capacity());
+                        for (auto &entry : current_page->entries_)
+                        {
+                            new_entries.push_back(std::move(entry));
+                        }
+                        current_page->entries_ = std::move(new_entries);
+                    }
+                }
+
+                auto rs = it.DefragCurrentIfNecessary(heap);
+
+                if (rs == DefragResult::FAILED_BY_LOCK)
+                {
+                    lock_cnt++;
+                }
+                else if (rs == DefragResult::FAILED_BY_CKPT)
+                {
+                    ckpt_cnt++;
+                }
+                else if (rs == DefragResult::FAILED_BY_KV_LOADING)
+                {
+                    kv_load_cnt++;
+                }
+                else if (rs == DefragResult::DEFRAGED)
+                {
+                    defrag_cnt++;
+                }
+                else if (rs == DefragResult::NOFRAGED)
+                {
+                    no_frag_cnt++;
+                }
+
+                total_cnt++;
+
+                // Forward iterator
+                it++;
+            }
+
+            if (it == end_it)
+            {
+                pause_pos = {nullptr, true};
+                // scan data drained
+                req.SetFinish(vec_idx);
+            }
+            else
+            {
+                // set the pause_key_ to mark resume position
+                assert(pause_pos.second == false);
+                pause_pos.first = it->second;
+                pause_pos.second = false;
+                bool add_intent =
+                    it->second->GetOrCreateKeyLock(shard_, this, it.GetPage())
+                        .AcquireReadIntent(req.Txn());
+                assert(add_intent);
+                (void) add_intent;
+                shard_->UpsertLockHoldingTx(req.Txn(),
+                                            req.node_group_term_,
+                                            it->second,
+                                            false,
+                                            cc_ng_id_,
+                                            table_name_.Type());
+
+                shard_->Enqueue(&req);
+            }
+        }
+        return false;
+    }
 
     bool Execute(BroadcastStatisticsCc &req) override
     {
@@ -7136,6 +7358,16 @@ public:
     }
 
 protected:
+    // The CcEntry defragment result
+    enum DefragResult
+    {
+        FAILED_BY_LOCK = 0,
+        FAILED_BY_CKPT,
+        FAILED_BY_KV_LOADING,
+        DEFRAGED,
+        NOFRAGED
+    };
+
     class Iterator
     {
         using iterator_category = std::bidirectional_iterator_tag;
@@ -7344,7 +7576,7 @@ protected:
             return *this;
         }
 
-        // Postfix increment
+        // Postfix incremen+t
         Iterator operator++(int)
         {
             Iterator tmp = *this;
@@ -7378,7 +7610,91 @@ protected:
             return current_page_;
         }
 
-    private:
+        const size_t &GetIdxInPage()
+        {
+            return idx_in_page_;
+        }
+
+        DefragResult DefragCurrentIfNecessary(mi_heap_t *heap)
+        {
+            assert(current_page_ != nullptr &&
+                   idx_in_page_ < current_page_->Size());
+
+            KeyT *key = const_cast<KeyT *>(current_.first);
+            CcEntry<KeyT, ValueT> *cce = current_.second;
+            NonBlockingLock *key_lock = cce->GetKeyLock();
+            NonBlockingLock *gap_lock = cce->GetGapLock();
+            RecordStatus record_status = cce->PayloadStatus();
+
+            // it is possible to move the re-allocate the cce during
+            // defragmentation, and cce pointer will be changed, since cce
+            // pointer will be kept some where else and used later so we need to
+            // avoid defrag in case of below conditions
+            // 1. key or gap lock is not empty(cce pointer kept by cc req for
+            // re-entry)
+            // 2. cce is not persistent(flush worker save the record, cce
+            // pointer used for update ckpt ts)
+            // 3. record status is unknown(fetch from data store, cce pointer
+            // used for backfill)
+            if ((key_lock != nullptr && !key_lock->IsEmpty()) ||
+                (gap_lock != nullptr && !gap_lock->IsEmpty()))
+            {
+                return FAILED_BY_LOCK;
+            }
+
+            if (cce->GetBeingCkpt())
+            {
+                return FAILED_BY_CKPT;
+            }
+
+            if (record_status == RecordStatus::Unknown)
+            {
+                return FAILED_BY_KV_LOADING;
+            }
+
+            // if defrag happen on key or cce or cce payload
+            bool defraged = false;
+
+            // defrag key
+            TxKey tx_key = TxKey(key);
+            defraged = tx_key.DefragIfNecessary(heap);
+
+            // defrag cce
+            float cce_utilization = mi_heap_page_utilization(heap, cce);
+            if (cce_utilization < 0.8)
+            {
+                auto cce_clone = cce->CloneForDefragment();
+                cce = cce_clone.get();
+                current_page_->entries_[idx_in_page_] = std::move(cce_clone);
+                defraged = true;
+                UpdateCurrent();
+            }
+
+            // defrag cce payload
+            TxRecord *payload = static_cast<TxRecord *>(cce->payload_.get());
+            float payload_utilization = mi_heap_page_utilization(heap, payload);
+            if (payload_utilization < 0.8)
+            {
+                cce->payload_ = std::make_unique<ValueT>(*cce->payload_);
+                defraged = true;
+            }
+            else
+            {
+                bool payload_defraged = payload->DefragIfNecessary(heap);
+                if (payload_defraged)
+                {
+                    defraged = true;
+                }
+            }
+
+            if (defraged)
+            {
+                return DEFRAGED;
+            }
+
+            return NOFRAGED;
+        }
+
         void UpdateCurrent()
         {
             assert(current_page_ != nullptr &&
@@ -7396,6 +7712,8 @@ protected:
         CcPage<KeyT, ValueT> *current_page_{nullptr};
         size_t idx_in_page_{};
     };
+
+    friend Iterator;
 
     /**
      * @brief Returns an iterator that points to negative infinity.
