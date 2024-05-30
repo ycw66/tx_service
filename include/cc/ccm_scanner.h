@@ -375,6 +375,26 @@ public:
         return is_require_recs_;
     }
 
+    bool IsRequireSort() const
+    {
+        return is_require_sort_;
+    }
+
+    void SetRequireKeys()
+    {
+        is_require_keys_ = true;
+    }
+
+    void SetRequireRecords()
+    {
+        is_require_recs_ = true;
+    }
+
+    void SetRequireSort()
+    {
+        is_require_sort_ = true;
+    }
+
     IsolationLevel Isolation() const
     {
         return iso_level_;

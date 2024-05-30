@@ -2151,6 +2151,11 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                 wset_reverse_iters_.emplace(open_result.scan_alias_, wset_rit);
             }
         }
+
+        // When WriteSet is not empty, ScanScanner should be merged with
+        // WriteSet. Thus is_require_keys and is_require_sort shoud be enabled.
+        open_result.scanner_->SetRequireKeys();
+        open_result.scanner_->SetRequireSort();
     }
 
     assert(scans_.find(open_result.scan_alias_) == scans_.end());
