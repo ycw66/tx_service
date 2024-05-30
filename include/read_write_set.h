@@ -565,6 +565,7 @@ public:
     void AddObjectCommand(const TableName &table_name,
                           const CcEntryAddr &cce_addr,
                           uint64_t cce_version,
+                          uint64_t last_vali_ts,
                           const TxKey *key,
                           const TxCommand *cmd,
                           bool object_modified,
@@ -582,7 +583,7 @@ public:
             key->Serialize(key_str);
             bool inserted = false;
             std::tie(cce_it, inserted) = table_cmd_set.try_emplace(
-                cce_addr, cce_version, std::move(key_str));
+                cce_addr, cce_version, last_vali_ts, std::move(key_str));
             assert(inserted);
             cce_with_writelock_size_++;
         }
@@ -636,7 +637,7 @@ public:
 
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        *ObjectCommandCce() const
+        *ObjectCommandSet() const
     {
 #ifdef ON_KEY_OBJECT
         return &cmd_set_;

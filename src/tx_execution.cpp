@@ -3655,8 +3655,19 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
         candidate = std::max(candidate, acquire_key.commit_ts_ + 1);
     }
 
-    // TODO(zkl): update candidate with ObjectCommandOp's result's last_vali_ts_
-    //  and commit_ts_
+#ifdef ON_KEY_OBJECT
+    const std::unordered_map<TableName,
+                             std::unordered_map<CcEntryAddr, CmdSetEntry>>
+        *cmd_set = rw_set_.ObjectCommandSet();
+    for (const auto &[table_name, cce_set] : *cmd_set)
+    {
+        for (const auto &[cce_addr, cmd_set_entry] : cce_set)
+        {
+            candidate = std::max(candidate, cmd_set_entry.last_vali_ts_ + 1);
+            candidate = std::max(candidate, cmd_set_entry.object_version_ + 1);
+        }
+    }
+#endif
 
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, ReadSetEntry>>
@@ -4136,7 +4147,7 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
 
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        &tx_cmd_set = *rw_set_.ObjectCommandCce();
+        &tx_cmd_set = *rw_set_.ObjectCommandSet();
 
     // organize by node group
     std::unordered_map<
@@ -4585,7 +4596,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 #ifdef ON_KEY_OBJECT
         const std::unordered_map<TableName,
                                  std::unordered_map<CcEntryAddr, CmdSetEntry>>
-            *cmd_cce_set = rw_set_.ObjectCommandCce();
+            *cmd_cce_set = rw_set_.ObjectCommandSet();
         assert(cmd_cce_set != nullptr);
 
         for (const auto &[table_name, cce_set] : *cmd_cce_set)
@@ -4693,7 +4704,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
             const std::unordered_map<
                 TableName,
                 std::unordered_map<CcEntryAddr, CmdSetEntry>> *cmd_cce_set =
-                rw_set_.ObjectCommandCce();
+                rw_set_.ObjectCommandSet();
             assert(cmd_cce_set != nullptr);
 
             for (const auto &[table_name, cce_set] : *cmd_cce_set)
@@ -5888,6 +5899,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         bool object_modified = cmd_result.object_modified_;
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
         uint64_t commit_ts = cmd_result.commit_ts_;
+        uint64_t last_vali_ts = cmd_result.last_vali_ts_;
 
         if (obj_cmd_op.auto_commit_ && txservice_skip_wal)
         {
@@ -5904,6 +5916,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             rw_set_.AddObjectCommand(*table_name,
                                      cce_addr,
                                      commit_ts,
+                                     last_vali_ts,
                                      obj_cmd_op.key_,
                                      obj_cmd_op.command_,
                                      object_modified,
@@ -6184,6 +6197,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                 rw_set_.AddObjectCommand(*req->table_name_,
                                          cmd_res.cce_addr_,
                                          cmd_res.commit_ts_,
+                                         cmd_res.last_vali_ts_,
                                          &vct_key->at(i),
                                          vct_cmd->at(i),
                                          object_modified,
@@ -6234,6 +6248,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         *req->table_name_,
                         cmd_res.cce_addr_,
                         cmd_res.commit_ts_,
+                        cmd_res.last_vali_ts_,
                         &vct_key->at(i),
                         vct_cmd->at(i),
                         cmd_res.object_modified_,
@@ -6331,7 +6346,7 @@ void TransactionExecution::Process(CmdForwardAcquireWriteOp &forward_acquire)
     size_t res_idx = 0, entry_idx = 0;
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        &tx_cmd_set = *rw_set_.ObjectCommandCce();
+        &tx_cmd_set = *rw_set_.ObjectCommandSet();
     for (const auto &[table_name, obj_cmd_set] : tx_cmd_set)
     {
         for (const auto &[cce_addr, obj_cmd_entry] : obj_cmd_set)

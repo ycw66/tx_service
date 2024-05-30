@@ -111,8 +111,11 @@ struct CmdForwardEntry
  */
 struct CmdSetEntry
 {
-    CmdSetEntry(uint64_t object_version, std::string &&key)
+    CmdSetEntry(uint64_t object_version,
+                uint64_t last_vali_ts,
+                std::string &&key)
         : object_version_(object_version),
+          last_vali_ts_(last_vali_ts),
           obj_key_str_(std::move(key)),
           has_overwrite_(false)
     {
@@ -142,6 +145,8 @@ struct CmdSetEntry
     // commit_ts of the object cce when the commands apply to it, commands on
     // the same object must apply in commit_ts order
     uint64_t object_version_{};
+    // The cce's last_validation ts, for setting commit ts of this txn.
+    uint64_t last_vali_ts_{};
     bool object_modified_{};
     // serialized key, for writing log
     std::string obj_key_str_{};
