@@ -1792,7 +1792,7 @@ bool CcShardHeap::TryHeapCollect(bool force)
     // system, process with collect. Otherwise do not even try since
     // collect is pretty expensive (at least ms level).
     if ((cc_shard_->Now() > last_failed_collect_ts_ + 1000000 &&
-        allocated < committed * 0.8 && allocated < (int64_t) memory_limit_) ||
+         allocated < committed * 0.8 && allocated < (int64_t) memory_limit_) ||
         force == true)
     {
         mi_heap_collect(heap_, true);

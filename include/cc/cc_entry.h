@@ -340,7 +340,8 @@ protected:
      * lowest 4 bits (0-3 bits) represent record status. The next 4 bits (4-7
      * bits) are reserved for other usage: when MVCC is not needed, the 5th bit
      * represents whether or not the latest version has been flushed. And, the
-     * 6th bit represents wheter or not the cce is in progress of being ckpt to kv store.
+     * 6th bit represents wheter or not the cce is in progress of being ckpt to
+     * kv store.
      */
     std::atomic<uint64_t> commit_ts_and_status_{0};
 

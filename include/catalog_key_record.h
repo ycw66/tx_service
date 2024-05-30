@@ -63,7 +63,7 @@ public:
 
     bool DefragIfNecessary(mi_heap_t *heap)
     {
-      return false;
+        return false;
     }
 
     friend bool operator==(const CatalogKey &lhs, const CatalogKey &rhs);

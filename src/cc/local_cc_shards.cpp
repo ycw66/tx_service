@@ -4649,7 +4649,7 @@ void LocalCcShards::DefragmentWork(std::vector<uint16_t> &core_ids)
                                         Count(),
                                         core_ids.size(),
                                         defrag_tx->TxNumber(),
-                                        32);
+                                        16);
             // only defrag the cc shards that are in the core_ids
             for (auto core_id : core_ids)
             {

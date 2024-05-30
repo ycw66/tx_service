@@ -182,10 +182,9 @@ void LruEntry::SetBeingCkpt()
 
 void LruEntry::ClearBeingCkpt()
 {
-    uint64_t mask = UINT64_MAX;      // All bits set to 1
-    mask &= ~(1ULL << 5);            // Clear the 6th bit
-    commit_ts_and_status_.fetch_and(mask,
-                                    std::memory_order_acq_rel);
+    uint64_t mask = UINT64_MAX;  // All bits set to 1
+    mask &= ~(1ULL << 5);        // Clear the 6th bit
+    commit_ts_and_status_.fetch_and(mask, std::memory_order_acq_rel);
 }
 
 bool LruEntry::GetBeingCkpt()

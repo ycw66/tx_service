@@ -1,11 +1,12 @@
 #pragma once
 
+#include <mimalloc.h>
+
 #include <cassert>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <mimalloc.h>
 
 #include "schema.h"
 #include "tx_serialize.h"
@@ -108,10 +109,9 @@ public:
           defrag_if_necessary_func_(
               [](void *this_obj, mi_heap_t *heap)
               {
-                 T *key = static_cast<T *>(this_obj);
-                 return key->DefragIfNecessary(heap);
-              }
-              )
+                  T *key = static_cast<T *>(this_obj);
+                  return key->DefragIfNecessary(heap);
+              })
     {
     }
 
@@ -179,7 +179,7 @@ public:
 
     bool DefragIfNecessary(void *this_obj, mi_heap_t *heap) const
     {
-      return defrag_if_necessary_func_(this_obj, heap);
+        return defrag_if_necessary_func_(this_obj, heap);
     }
 
 protected:
@@ -330,7 +330,7 @@ public:
 
     bool DefragIfNecessary(mi_heap_t *heap) const
     {
-      return interface_->DefragIfNecessary(GetPtr(), heap);
+        return interface_->DefragIfNecessary(GetPtr(), heap);
     }
 
 #ifdef ON_KEY_OBJECT
@@ -892,7 +892,7 @@ struct VoidKey
 
     bool DefragIfNecessary(mi_heap_t *heap)
     {
-      return false;
+        return false;
     }
 
     static const VoidKey *NegativeInfinity()

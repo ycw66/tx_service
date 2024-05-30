@@ -1,13 +1,12 @@
 #pragma once
 
 #include <assert.h>
+#include <mimalloc.h>
 
 #include <memory>
 #include <string>
 #include <utility>  //std::move
 #include <vector>   //std::vector
-
-#include <mimalloc.h>
 
 #include "tx_serialize.h"
 
@@ -102,7 +101,7 @@ struct TxRecord
 
     virtual bool DefragIfNecessary(mi_heap_t *heap)
     {
-      return false;
+        return false;
     }
 };
 

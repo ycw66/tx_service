@@ -201,7 +201,7 @@ public:
 
     bool DefragIfNecessary(mi_heap_t *heap)
     {
-      return true;
+        return true;
     }
 
     static const RangeBucketKey *NegativeInfinity()

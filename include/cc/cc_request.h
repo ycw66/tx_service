@@ -5153,8 +5153,7 @@ struct RequestAborterCc : public CcRequestBase
 
 struct CollectMemStatsCc : public CcRequestBase
 {
-    explicit CollectMemStatsCc(HeapMemStats *stats)
-        : stats_(stats)
+    explicit CollectMemStatsCc(HeapMemStats *stats) : stats_(stats)
     {
     }
 
