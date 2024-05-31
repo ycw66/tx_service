@@ -414,7 +414,11 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                     if (!scan_req.IsDrained(i))
                     {
 #ifdef RANGE_PARTITION_ENABLED
-                        paused_key = std::move(last_finished_pos[i]);
+                        // Should use one copy of the key, instead of move the
+                        // ownership of the key, because this round of scan may
+                        // failed again.
+                        assert(paused_key.IsOwner());
+                        paused_key.Copy(last_finished_pos[i]);
 #endif
                     }
                 }
@@ -560,7 +564,14 @@ CcErrorCode SkGenerator::ScanPkAndGenerateSk(
                     if (!scan_req.IsDrained(core_idx))
                     {
 #ifdef RANGE_PARTITION_ENABLED
-                        last_finished_pos[core_idx] = paused_key.Clone();
+                        if (last_finished_pos[core_idx].IsOwner())
+                        {
+                            last_finished_pos[core_idx].Copy(paused_key);
+                        }
+                        else
+                        {
+                            last_finished_pos[core_idx] = paused_key.Clone();
+                        }
 #endif
                     }
 #endif
