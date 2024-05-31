@@ -4887,7 +4887,8 @@ public:
             Sharder::Instance().ShardToCcNodeGroup(key_shard_code),
             txn,
             tx_term,
-            proto);
+            proto,
+            iso_level);
 
         if (!is_local_)
         {
@@ -4908,6 +4909,7 @@ public:
         tx_ts_ = tx_ts;
         cce_ptr_ = nullptr;
         block_type_ = ApplyBlockType::NoBlocking;
+        apply_and_commit_ = commit;
     }
 
     bool IsLocal() const

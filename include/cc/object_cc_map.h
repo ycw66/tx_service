@@ -589,6 +589,7 @@ public:
             // Execute and copy the command. The command will be committed
             // in PostWriteCc if the txn commits.
             assert(cce->IsNullPendingCmd());
+            assert(cce->payload_ != nullptr);
             ValueT &object = *cce->payload_;
             object_modified = cmd->ExecuteOn(object);
 
