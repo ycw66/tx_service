@@ -552,7 +552,7 @@ LockType NonBlockingLock::SearchLock(TxNumber txn)
     {
         return LockType::ReadLock;
     }
-    else if (read_intentions_.find(txn) == read_intentions_.end())
+    else if (read_intentions_.find(txn) != read_intentions_.end())
     {
         return LockType::ReadIntent;
     }
