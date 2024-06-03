@@ -899,7 +899,11 @@ public:
             nullptr)
         : local_cc_shards_(node_id,
                            conf.at("core_num"),
+#ifdef RANGE_PARTITION_ENABLED
                            conf.at("range_split_worker_num"),
+#else
+                           0,
+#endif
                            conf.at("node_memory_limit_mb"),
                            conf.at("node_log_limit_mb"),
                            conf.at("realtime_sampling"),
