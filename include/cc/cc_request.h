@@ -2081,51 +2081,15 @@ public:
         return ts_;
     }
 
-    template <typename KeyT, typename ValueT>
-    CcEntry<KeyT, ValueT> *LastCceOfCache(uint16_t shard_id)
-    {
-        if (IsLocal())
-        {
-            ScanCache *scan_cache = GetLocalScanCache(shard_id);
-            if (scan_cache->LastTuple())
-            {
-                return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                    scan_cache->LastTuple()->cce_addr_.CcePtr());
-            }
-            else
-            {
-                return nullptr;
-            }
-        }
-        else
-        {
-            RemoteScanSliceCache *remote_scan_cache =
-                GetRemoteScanCache(shard_id);
-            if (remote_scan_cache->Size() > 0)
-            {
-                return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                    remote_scan_cache->LastCce());
-            }
-            else
-            {
-                return nullptr;
-            }
-        }
-    }
-
     ScanCache *GetLocalScanCache(size_t shard_id)
     {
-        return IsLocal() ? res_->Value().ccm_scanner_->Cache(shard_id)
-                         : nullptr;
+        assert(IsLocal());
+        return res_->Value().ccm_scanner_->Cache(shard_id);
     }
 
     RemoteScanSliceCache *GetRemoteScanCache(size_t shard_id)
     {
-        if (IsLocal())
-        {
-            return nullptr;
-        }
-
+        assert(!IsLocal());
         RangeScanSliceResult &slice_result = res_->Value();
         assert(shard_id < slice_result.remote_scan_caches_->size());
         return &slice_result.remote_scan_caches_->at(shard_id);

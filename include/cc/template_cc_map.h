@@ -3558,6 +3558,40 @@ public:
             assert(remote_scan_cache != nullptr);
         }
 
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]() {
+            return req.IsLocal() ? scan_cache->IsFull()
+                                 : remote_scan_cache->IsFull();
+        };
+
+        auto last_cce_of_cache =
+            [&req, scan_cache, remote_scan_cache]() -> CcEntry<KeyT, ValueT> *
+        {
+            if (req.IsLocal())
+            {
+                if (scan_cache->Last())
+                {
+                    return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                        scan_cache->Last()->cce_addr_.CcePtr());
+                }
+                else
+                {
+                    return nullptr;
+                }
+            }
+            else
+            {
+                if (remote_scan_cache->Size() > 0)
+                {
+                    return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                        remote_scan_cache->LastCce());
+                }
+                else
+                {
+                    return nullptr;
+                }
+            }
+        };
+
         if (req.SliceId().Slice() == nullptr)
         {
             // The scan slice request is first dispatched to one core, which
@@ -3982,46 +4016,108 @@ public:
                                     req.EndInclusive());
             }
 
-            auto scan_loop_func = [&, this](const KeyT *end_key,
-                                            bool inclusive,
-                                            bool end_finalized)
-                -> std::pair<ScanReturnType, CcErrorCode>
+            auto scan_batch_func =
+                [this, &scan_tuple_func](
+                    CcPage<KeyT, ValueT> *ccp,
+                    size_t start_idx,
+                    size_t end_idx) -> std::pair<ScanReturnType, CcErrorCode>
             {
-                Iterator pos_inf_it = End();
-                const KeyT *cce_key = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
-
-                auto is_cache_full =
-                    [&req, scan_cache, remote_scan_cache]() -> bool {
-                    return req.IsLocal() ? scan_cache->IsFull()
-                                         : remote_scan_cache->IsFull();
-                };
-
-                while (scan_ccm_it != pos_inf_it &&
-                       (end_finalized || !is_cache_full()) &&
-                       (*cce_key < *end_key ||
-                        (inclusive && *cce_key == *end_key)))
+                ScanReturnType scan_ret = ScanReturnType::Success;
+                CcErrorCode err_code = CcErrorCode::NO_ERROR;
+                for (size_t idx = start_idx; idx < end_idx; ++idx)
                 {
-                    auto [scan_ret, err_code] =
-                        scan_tuple_func(cce_key, cce, ccp, ScanType::ScanBoth);
-
+                    const KeyT &key = ccp->keys_[idx];
+                    CcEntry<KeyT, ValueT> *cce = ccp->entries_[idx].get();
+                    std::tie(scan_ret, err_code) =
+                        scan_tuple_func(&key, cce, ccp, ScanType::ScanBoth);
                     if (scan_ret != ScanReturnType::Success)
                     {
-                        return {scan_ret, err_code};
+                        break;
                     }
-
-                    ++scan_ccm_it;
-                    cce_key = scan_ccm_it->first;
-                    cce = scan_ccm_it->second;
-                    ccp = scan_ccm_it.GetPage();
                 }
-
-                return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
+                return {scan_ret, err_code};
             };
 
-            auto [scan_ret, err] =
-                scan_loop_func(initial_end, init_end_inclusive, end_finalized);
+            auto scan_loop_func = [this, &scan_batch_func, &is_cache_full](
+                                      Iterator &scan_ccm_it,
+                                      const KeyT &end_key,
+                                      bool inclusive,
+                                      bool end_finalized)
+                -> std::pair<ScanReturnType, CcErrorCode>
+            {
+                ScanReturnType scan_ret = ScanReturnType::Success;
+                CcErrorCode err_code = CcErrorCode::NO_ERROR;
+
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                size_t idx_in_page = scan_ccm_it.GetIdxInPage();
+
+                if (ccp == &pos_inf_page_)
+                {
+                    return {scan_ret, err_code};
+                }
+
+                assert(idx_in_page < ccp->keys_.size());
+
+                while (ccp)
+                {
+                    size_t page_idx_end;
+                    if (end_key < ccp->LastKey() ||
+                        (!inclusive && end_key == ccp->LastKey()))
+                    {
+                        auto it =
+                            std::lower_bound(ccp->keys_.begin() + idx_in_page,
+                                             ccp->keys_.end(),
+                                             end_key);
+                        if (inclusive && *it == end_key)
+                        {
+                            ++it;
+                        }
+                        page_idx_end = std::distance(ccp->keys_.begin(), it);
+                    }
+                    else
+                    {
+                        page_idx_end = ccp->Size();
+                    }
+
+                    std::tie(scan_ret, err_code) =
+                        scan_batch_func(ccp, idx_in_page, page_idx_end);
+                    if (scan_ret != ScanReturnType::Success)
+                    {
+                        break;
+                    }
+
+                    if (page_idx_end == ccp->keys_.size())
+                    {
+                        // The page is fully scanned.
+                        if (ccp->next_page_ == &pos_inf_page_)
+                        {
+                            scan_ccm_it = End();
+                            ccp = nullptr;
+                        }
+                        else if (!end_finalized && is_cache_full())
+                        {
+                            scan_ccm_it =
+                                Iterator(ccp->next_page_, 0, &neg_inf_);
+                            ccp = nullptr;
+                        }
+                        else
+                        {
+                            ccp = ccp->next_page_;
+                            idx_in_page = 0;
+                        }
+                    }
+                    else
+                    {
+                        scan_ccm_it = Iterator(ccp, page_idx_end, &neg_inf_);
+                        ccp = nullptr;
+                    }
+                }
+
+                return {scan_ret, err_code};
+            };
+
+            auto [scan_ret, err] = scan_loop_func(
+                scan_ccm_it, *initial_end, init_end_inclusive, end_finalized);
             switch (scan_ret)
             {
             case ScanReturnType::Blocked:
@@ -4187,8 +4283,8 @@ public:
                     // batch's end. Re-scans the cc map using the batch's end.
                     if (trailing_cnt == 0)
                     {
-                        auto [scan_ret, err] =
-                            scan_loop_func(end_key, end_inclusive, true);
+                        auto [scan_ret, err] = scan_loop_func(
+                            scan_ccm_it, *end_key, end_inclusive, true);
                         switch (scan_ret)
                         {
                         case ScanReturnType::Blocked:
@@ -4215,9 +4311,7 @@ public:
 
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
-            if (CcEntry<KeyT, ValueT> *last_cce =
-                    req.LastCceOfCache<KeyT, ValueT>(core_id);
-                last_cce)
+            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
             {
                 while (scan_ccm_it->second != last_cce)
                 {
@@ -4283,46 +4377,112 @@ public:
                                     req.EndInclusive());
             }
 
-            auto scan_loop_func = [&, this](const KeyT *end_key,
-                                            bool inclusive,
-                                            bool end_finalized)
-                -> std::pair<ScanReturnType, CcErrorCode>
+            auto scan_batch_func =
+                [this, &scan_tuple_func](
+                    CcPage<KeyT, ValueT> *ccp,
+                    ssize_t start_idx,
+                    ssize_t end_idx) -> std::pair<ScanReturnType, CcErrorCode>
             {
-                Iterator neg_inf_it = Begin();
-                const KeyT *cce_key = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
-
-                auto is_cache_full =
-                    [&req, scan_cache, remote_scan_cache]() -> bool {
-                    return req.IsLocal() ? scan_cache->IsFull()
-                                         : remote_scan_cache->IsFull();
-                };
-
-                while (scan_ccm_it != neg_inf_it &&
-                       (end_finalized || !is_cache_full()) &&
-                       (*end_key < *cce_key ||
-                        (inclusive && *end_key == *cce_key)))
+                ScanReturnType scan_ret = ScanReturnType::Success;
+                CcErrorCode err_code = CcErrorCode::NO_ERROR;
+                for (ssize_t idx = start_idx; idx > end_idx; --idx)
                 {
-                    auto [scan_ret, err_code] =
-                        scan_tuple_func(cce_key, cce, ccp, ScanType::ScanBoth);
-
+                    const KeyT &key = ccp->keys_[idx];
+                    CcEntry<KeyT, ValueT> *cce = ccp->entries_[idx].get();
+                    std::tie(scan_ret, err_code) =
+                        scan_tuple_func(&key, cce, ccp, ScanType::ScanBoth);
                     if (scan_ret != ScanReturnType::Success)
                     {
-                        return {scan_ret, err_code};
+                        break;
                     }
-
-                    --scan_ccm_it;
-                    cce_key = scan_ccm_it->first;
-                    cce = scan_ccm_it->second;
-                    ccp = scan_ccm_it.GetPage();
                 }
-
-                return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
+                return {scan_ret, err_code};
             };
 
-            auto [scan_ret, err] =
-                scan_loop_func(initial_end, init_end_inclusive, end_finalized);
+            auto scan_loop_func = [this, &scan_batch_func, &is_cache_full](
+                                      Iterator &scan_ccm_it,
+                                      const KeyT &end_key,
+                                      bool inclusive,
+                                      bool end_finalized)
+                -> std::pair<ScanReturnType, CcErrorCode>
+            {
+                ScanReturnType scan_ret = ScanReturnType::Success;
+                CcErrorCode err_code = CcErrorCode::NO_ERROR;
+
+                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                ssize_t idx_in_page = scan_ccm_it.GetIdxInPage();
+
+                if (ccp == &neg_inf_page_)
+                {
+                    return {scan_ret, err_code};
+                }
+
+                assert(static_cast<size_t>(idx_in_page) < ccp->keys_.size());
+
+                auto comp = [](const KeyT &iter_key, const KeyT &end_key)
+                { return end_key < iter_key; };
+
+                while (ccp)
+                {
+                    ssize_t page_idx_end;
+                    if (ccp->FirstKey() < end_key ||
+                        (!inclusive && ccp->FirstKey() == end_key))
+                    {
+                        auto rbegin = ccp->keys_.rbegin() +
+                                      (ccp->Size() - idx_in_page - 1);
+                        auto it = std::lower_bound(
+                            rbegin, ccp->keys_.rend(), end_key, comp);
+                        if (inclusive && *it == end_key)
+                        {
+                            ++it;
+                        }
+                        page_idx_end = idx_in_page - std::distance(rbegin, it);
+                    }
+                    else
+                    {
+                        page_idx_end = -1;
+                    }
+
+                    std::tie(scan_ret, err_code) =
+                        scan_batch_func(ccp, idx_in_page, page_idx_end);
+                    if (scan_ret != ScanReturnType::Success)
+                    {
+                        break;
+                    }
+
+                    if (page_idx_end == -1)
+                    {
+                        // The page is fully scanned.
+                        if (ccp->prev_page_ == &neg_inf_page_)
+                        {
+                            scan_ccm_it = Begin();
+                            ccp = nullptr;
+                        }
+                        else if (!end_finalized && is_cache_full())
+                        {
+                            scan_ccm_it = Iterator(ccp->prev_page_,
+                                                   ccp->prev_page_->Size() - 1,
+                                                   &pos_inf_);
+                            ccp = nullptr;
+                        }
+                        else
+                        {
+                            ccp = ccp->prev_page_;
+                            idx_in_page = ccp->Size() - 1;
+                        }
+                    }
+                    else
+                    {
+                        scan_ccm_it = Iterator(ccp, page_idx_end, &pos_inf_);
+                        ccp = nullptr;
+                    }
+                }
+
+                return {scan_ret, err_code};
+            };
+
+            auto [scan_ret, err] = scan_loop_func(
+                scan_ccm_it, *initial_end, init_end_inclusive, end_finalized);
             switch (scan_ret)
             {
             case ScanReturnType::Blocked:
@@ -4490,8 +4650,8 @@ public:
                     // batch's end. Re-scans the cc map using the batch's end.
                     if (trailing_cnt == 0)
                     {
-                        auto [scan_ret, err] =
-                            scan_loop_func(end_key, end_inclusive, true);
+                        auto [scan_ret, err] = scan_loop_func(
+                            scan_ccm_it, *end_key, end_inclusive, true);
                         switch (scan_ret)
                         {
                         case ScanReturnType::Blocked:
@@ -4518,9 +4678,7 @@ public:
 
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
-            if (CcEntry<KeyT, ValueT> *last_cce =
-                    req.LastCceOfCache<KeyT, ValueT>(core_id);
-                last_cce)
+            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
             {
                 while (scan_ccm_it->second != last_cce)
                 {
@@ -4535,9 +4693,7 @@ public:
             // acquires the read intent on the last scanned key to prevent
             // if from kicking out. The next scan batch will resume from the
             // last key without searching the cc map.
-            if (CcEntry<KeyT, ValueT> *last_cce =
-                    req.LastCceOfCache<KeyT, ValueT>(core_id);
-                last_cce)
+            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
             {
                 CcPage<KeyT, ValueT> *last_ccp = scan_ccm_it.GetPage();
                 bool add_intent =
@@ -7610,7 +7766,7 @@ protected:
             return current_page_;
         }
 
-        const size_t &GetIdxInPage()
+        size_t GetIdxInPage() const
         {
             return idx_in_page_;
         }
@@ -7699,8 +7855,8 @@ protected:
         {
             assert(current_page_ != nullptr &&
                    idx_in_page_ < current_page_->Size());
-            current_.first = &current_page_->keys_.at(idx_in_page_);
-            current_.second = current_page_->entries_.at(idx_in_page_).get();
+            current_.first = &current_page_->keys_[idx_in_page_];
+            current_.second = current_page_->entries_[idx_in_page_].get();
         }
 
     protected:

@@ -2525,6 +2525,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             }
             else
             {
+                assert(scanner.IsRequireKeys());
+
                 auto &wset_it = it->second.first;
                 const TxKey &write_key = wset_it->first;
                 TxKey ccm_key = cc_scan_tuple->Key();
@@ -2749,6 +2751,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             }
             else
             {
+                assert(scanner.IsRequireKeys());
+
                 auto &wset_it = rit->second.first;
                 const TxKey &write_key = wset_it->first;
                 TxKey ccm_key = cc_scan_tuple->Key();
