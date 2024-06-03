@@ -3798,6 +3798,7 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
     return true;
 }
 
+#ifdef RANGE_PARTITION_ENABLED
 void LocalCcShards::SplitFlushRange(
     std::unique_lock<std::mutex> &task_worker_lk)
 {
@@ -3924,6 +3925,7 @@ void LocalCcShards::SplitFlushRange(
               << " succeeded.";
     txservice::CommitTx(split_txm);
 }
+#endif
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 {
@@ -4330,6 +4332,7 @@ void LocalCcShards::FlushDataWorker()
     }
 }
 
+#ifdef RANGE_PARTITION_ENABLED
 void LocalCcShards::RangeSplitWorker()
 {
     std::unique_lock<std::mutex> range_split_worker_lk(
@@ -4358,6 +4361,7 @@ void LocalCcShards::RangeSplitWorker()
         SplitFlushRange(range_split_worker_lk);
     }
 }
+#endif
 
 void LocalCcShards::UpdateSliceSpecWorker()
 {
