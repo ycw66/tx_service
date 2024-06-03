@@ -8697,7 +8697,9 @@ protected:
         // skipping when deserializing.
         static KeyT empty_key;
         static ValueT empty_val;
+#ifndef ON_KEY_OBJECT
         const ValueT *payload = &empty_val;
+#endif
 
         uint32_t tuple_size = RemoteScanSliceCache::BasicTupleSize;
 
@@ -8769,6 +8771,7 @@ protected:
             key->Serialize(remote_cache->keys_);
             tuple_size += key->SerializedLength();
 
+#ifndef ON_KEY_OBJECT
             if (is_require_recs)
             {
                 if (rec_status == RecordStatus::Normal ||
@@ -8781,7 +8784,6 @@ protected:
                 }
             }
 
-#ifndef ON_KEY_OBJECT
             remote_cache->rec_off_vec_.push_back(remote_cache->records_.size());
             payload->Serialize(remote_cache->records_);
             tuple_size += payload->SerializedLength();
@@ -8826,7 +8828,9 @@ protected:
                  bool is_ckpt_delta = false) const
     {
         static ValueT empty_val;
+#ifndef ON_KEY_OBJECT
         const ValueT *payload = &empty_val;
+#endif
 
         remote::ScanTuple_msg *tuple = nullptr;
         uint32_t tuple_size = 0;
@@ -8896,6 +8900,7 @@ protected:
             key->Serialize(*tuple->mutable_key());
             tuple_size += key->Size();
 
+#ifndef ON_KEY_OBJECT
             if (rec_status == RecordStatus::Normal ||
                 (is_ckpt_delta && rec_status == RecordStatus::Deleted))
             {
@@ -8906,7 +8911,6 @@ protected:
             }
 
             tuple->clear_record();
-#ifndef ON_KEY_OBJECT
             payload->Serialize(*tuple->mutable_record());
             tuple_size += payload->Size();
 #else
