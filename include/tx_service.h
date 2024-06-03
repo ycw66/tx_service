@@ -899,6 +899,7 @@ public:
             nullptr)
         : local_cc_shards_(node_id,
                            conf.at("core_num"),
+                           conf.at("range_split_worker_num"),
                            conf.at("node_memory_limit_mb"),
                            conf.at("node_log_limit_mb"),
                            conf.at("realtime_sampling"),

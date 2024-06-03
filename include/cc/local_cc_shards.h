@@ -165,6 +165,7 @@ public:
     LocalCcShards(
         uint32_t node_id,                 // = 0,
         uint16_t core_cnt,                // = 1,
+        uint16_t range_split_worker_cnt,  // =0
         uint32_t memory_limit_mb,         // = 1000,
         uint32_t log_limit_mb,            // = 1000,
         bool realtime_sampling,           // = false,
@@ -1409,6 +1410,50 @@ private:
 
     bool realtime_sampling_;
 
+#ifdef RANGE_PARTITION_ENABLED
+    struct RangeSplitTask
+    {
+        RangeSplitTask(std::shared_ptr<DataSyncTask> data_sync_task,
+                       const TableSchema *schema,
+                       std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
+                       std::unique_ptr<std::vector<FlushRecord>> archive_vec,
+                       std::unique_ptr<std::vector<TxKey>> mv_base_vec,
+                       std::vector<TxKey> &&split_keys,
+                       TableRangeEntry *range_entry,
+                       TransactionExecution *data_sync_txm,
+                       std::shared_ptr<void> defer_unpin)
+            : schema_(schema),
+              data_sync_vec_(std::move(data_sync_vec)),
+              archive_vec_(std::move(archive_vec)),
+              mv_base_vec_(std::move(mv_base_vec)),
+              split_keys_(std::move(split_keys)),
+              range_entry_(range_entry),
+              data_sync_task_(data_sync_task),
+              data_sync_txm_(data_sync_txm),
+              defer_unpin_(defer_unpin)
+        {
+        }
+
+        const TableSchema *schema_;
+        std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
+        std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
+        std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
+
+        std::vector<TxKey> split_keys_;
+
+        TableRangeEntry *range_entry_{nullptr};
+
+        // Increased by worker after finishing the retrieved work.
+        std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};
+        TransactionExecution *data_sync_txm_{nullptr};
+        std::shared_ptr<void> defer_unpin_{nullptr};
+    };
+
+    WorkerThreadContext range_split_worker_ctx_;
+    std::deque<std::unique_ptr<RangeSplitTask>> pending_range_split_task_;
+    void RangeSplitWorker();
+#endif
+
     /**
      * DataSync Operation Interface
      */
@@ -1566,17 +1611,7 @@ private:
      * table, after this function returns, we can assume the splitting ranges
      * are flushed too.
      */
-    void SplitFlushRange(const TableName &table_name,
-                         const TableSchema *schema,
-                         NodeGroupId node_group,
-                         TransactionExecution *txm,
-                         TableRangeEntry *range_entry,
-                         std::vector<TxKey> &&split_keys,
-                         std::shared_ptr<DataSyncTask> data_sync_task,
-                         std::vector<FlushRecord> &&previous_data_sync_vec,
-                         std::vector<FlushRecord> &&previous_archive_vec,
-                         std::vector<TxKey> &&previous_mv_base_vec,
-                         std::shared_ptr<void> defer_unpin);
+    void SplitFlushRange(std::unique_lock<std::mutex> &task_worker_lk);
 
     struct UpdateSliceSpecWork
     {
@@ -1735,6 +1770,7 @@ private:
 
     WorkerThreadContext statistics_worker_ctx_;
     void SyncTableStatisticsWorker();
+
     /**
      * Generate sk from pk
      */

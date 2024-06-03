@@ -37,6 +37,7 @@ std::atomic<uint64_t> LocalCcShards::local_clock(0);
 LocalCcShards::LocalCcShards(
     uint32_t node_id,
     uint16_t core_cnt,
+    uint16_t range_split_worker_cnt,
     uint32_t memory_limit_mb,
     uint32_t log_limit_mb,
     bool realtime_sampling,
@@ -62,6 +63,18 @@ LocalCcShards::LocalCcShards(
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
       realtime_sampling_(realtime_sampling),
+
+#ifdef RANGE_PARTITION_ENABLED
+#ifdef EXT_TX_PROC_ENABLED
+      range_split_worker_ctx_(range_split_worker_cnt > 0
+                                  ? range_split_worker_cnt
+                                  : (core_cnt >= 2 ? (core_cnt / 2) : 1)),
+#else
+      range_split_worker_ctx_(
+          range_split_worker_cnt > 0 ? range_split_worker_cnt : core_cnt),
+#endif
+#endif
+
 #ifdef EXT_TX_PROC_ENABLED
 #ifdef RANGE_PARTITION_ENABLED
       data_sync_worker_ctx_(core_cnt >= 2 ? (core_cnt / 2) : 1),
@@ -149,6 +162,14 @@ void LocalCcShards::StartBackgroudWorkers()
     {
         slice_update_worker_ctx_.worker_thd_.push_back(
             std::thread([this] { UpdateSliceSpecWorker(); }));
+    }
+
+    LOG(INFO) << "Range Split Worker Num: "
+              << range_split_worker_ctx_.worker_num_;
+    for (int id = 0; id < range_split_worker_ctx_.worker_num_; id++)
+    {
+        range_split_worker_ctx_.worker_thd_.push_back(
+            std::thread([this] { RangeSplitWorker(); }));
     }
 #endif
 
@@ -2315,6 +2336,8 @@ void LocalCcShards::Terminate()
 #ifdef RANGE_PARTITION_ENABLED
     // Terminate the slice update worker thds.
     slice_update_worker_ctx_.Terminate();
+
+    range_split_worker_ctx_.Terminate();
 #endif
 
     if (realtime_sampling_)
@@ -2565,6 +2588,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // use the current table schema, 2) for the [Unique]secondary table, only
     // in the case that there is no key schema corresponding to the index table
     // in the current table schema, should use the dirty table schema.
+
+    // FIXME(lokax): catalog_rec::CopySchema() If the node group is not
+    // pinned
     const TableSchema *table_schema = catalog_rec.Schema();
     if (table_name.Type() == TableType::Secondary ||
         table_name.Type() == TableType::UniqueSecondary)
@@ -2864,36 +2890,26 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
         if (!split_keys.empty())
         {
-            // Create a new thread to execute range split.
-            auto range_split_worker = std::thread(
-                [this,
-                 &table_name,
-                 table_schema,
-                 range_entry,
-                 split_keys = std::move(split_keys),
-                 &ng_id,
-                 defer_unpin,
-                 data_sync_txm,
-                 data_sync_task,
-                 previous_data_sync_vec = std::move(data_sync_vec),
-                 previous_archive_vec = std::move(archive_vec),
-                 previous_mv_base_vec = std::move(mv_base_vec)]() mutable
-                {
-                    SplitFlushRange(table_name,
-                                    table_schema,
-                                    ng_id,
-                                    data_sync_txm,
-                                    range_entry,
-                                    std::move(split_keys),
-                                    data_sync_task,
-                                    std::move(*previous_data_sync_vec),
-                                    std::move(*previous_archive_vec),
-                                    std::move(*previous_mv_base_vec),
-                                    defer_unpin);
-                });
-            range_split_worker.detach();
+            std::lock_guard<std::mutex> range_split_worker_lk(
+                range_split_worker_ctx_.mux_);
+
+            auto range_split_task =
+                std::make_unique<RangeSplitTask>(data_sync_task,
+                                                 table_schema,
+                                                 std::move(data_sync_vec),
+                                                 std::move(archive_vec),
+                                                 std::move(mv_base_vec),
+                                                 std::move(split_keys),
+                                                 range_entry,
+                                                 data_sync_txm,
+                                                 defer_unpin);
+
+            pending_range_split_task_.push_back(std::move(range_split_task));
+            range_split_worker_ctx_.cv_.notify_one();
+
             return;
         }
+
         // 4.2 Flush records into data store if the range in which the
         // records locate need't to split.
         std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
@@ -3783,20 +3799,37 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
 }
 
 void LocalCcShards::SplitFlushRange(
-    const TableName &table_name,
-    const TableSchema *table_schema,
-    NodeGroupId node_group,
-    TransactionExecution *split_txm,
-    TableRangeEntry *range_entry,
-    std::vector<TxKey> &&split_keys,
-    std::shared_ptr<DataSyncTask> data_sync_task,
-    std::vector<FlushRecord> &&previous_data_sync_vec,
-    std::vector<FlushRecord> &&previous_archive_vec,
-    std::vector<TxKey> &&previous_mv_base_vec,
-    std::shared_ptr<void> defer_unpin)
+    std::unique_lock<std::mutex> &task_worker_lk)
 {
+    std::shared_ptr<void> lock_task_worker(nullptr,
+                                           [&task_worker_lk](void *)
+                                           {
+                                               if (!task_worker_lk.owns_lock())
+                                               {
+                                                   // Need to gain ownership
+                                                   // before returnning back to
+                                                   // caller.
+                                                   task_worker_lk.lock();
+                                               }
+                                           });
+
+    std::unique_ptr<RangeSplitTask> range_split_task =
+        std::move(pending_range_split_task_.front());
+    pending_range_split_task_.pop_front();
+
+    task_worker_lk.unlock();
+
+    TableRangeEntry *range_entry = range_split_task->range_entry_;
+    std::shared_ptr<DataSyncTask> &data_sync_task =
+        range_split_task->data_sync_task_;
+    const TableName &table_name = data_sync_task->table_name_;
     const TableName range_table_name{table_name.String(),
                                      TableType::RangePartition};
+    auto &split_keys = range_split_task->split_keys_;
+    const TableSchema *table_schema = range_split_task->schema_;
+    TransactionExecution *split_txm = range_split_task->data_sync_txm_;
+    NodeGroupId node_group = data_sync_task->node_group_id_;
+
     std::string log_output(
         "Splitting table " + table_name.String() + " range " +
         std::to_string(range_entry->GetRangeInfo()->PartitionId()) + " into " +
@@ -3851,9 +3884,10 @@ void LocalCcShards::SplitFlushRange(
                                   range_entry->GetRangeInfo(),
                                   std::move(new_range_ids),
                                   data_sync_task->data_sync_ts_,
-                                  std::move(previous_data_sync_vec),
-                                  std::move(previous_archive_vec),
-                                  std::move(previous_mv_base_vec));
+                                  std::move(*range_split_task->data_sync_vec_),
+                                  std::move(*range_split_task->archive_vec_),
+                                  std::move(*range_split_task->mv_base_vec_));
+
     split_txm->Execute(&split_req);
     split_req.Wait();
     if (split_req.IsError() || !split_req.Result())
@@ -4293,6 +4327,35 @@ void LocalCcShards::FlushDataWorker()
     while (!pending_flush_work_.empty())
     {
         FlushData(flush_worker_lk);
+    }
+}
+
+void LocalCcShards::RangeSplitWorker()
+{
+    std::unique_lock<std::mutex> range_split_worker_lk(
+        range_split_worker_ctx_.mux_);
+    while (range_split_worker_ctx_.status_ == WorkerStatus::Active)
+    {
+        range_split_worker_ctx_.cv_.wait(
+            range_split_worker_lk,
+            [this]
+            {
+                return !pending_range_split_task_.empty() ||
+                       range_split_worker_ctx_.status_ ==
+                           WorkerStatus::Terminated;
+            });
+
+        if (pending_range_split_task_.empty())
+        {
+            continue;
+        }
+
+        SplitFlushRange(range_split_worker_lk);
+    }
+
+    while (!pending_range_split_task_.empty())
+    {
+        SplitFlushRange(range_split_worker_lk);
     }
 }
 
@@ -4878,4 +4941,5 @@ void LocalCcShards::ClearGenerateSkStatus(NodeGroupId ng_id,
     RangeGenerateSkStatus &range_status = tx_it->second;
     range_status.erase(partition_id);
 }
+
 }  // namespace txservice
