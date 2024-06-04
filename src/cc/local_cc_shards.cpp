@@ -4752,7 +4752,6 @@ void LocalCcShards::DefragmentWork(std::vector<uint16_t> &core_ids)
             txservice::CommitTx(defrag_tx);
         }
     }
-    LOG(INFO) << "Start defragmentation end";
 }
 
 void LocalCcShards::DefragmentWorker()

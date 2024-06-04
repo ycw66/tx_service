@@ -458,6 +458,16 @@ public:
         }
         return mem_usage_;
     }
+
+    bool DefragIfNecessary(mi_heap_t *heap)
+    {
+        TxRecord *payload = static_cast<TxRecord *>(payload_.get());
+        if (payload != nullptr)
+        {
+            return payload->DefragIfNecessary(heap);
+        }
+        return false;
+    }
 };
 
 /**
@@ -596,6 +606,9 @@ public:
         clone->commit_ts_and_status_.store(cur_val, std::memory_order_release);
         clone->cc_lock_and_extra_ = cc_lock_and_extra_;
         clone->payload_ = std::move(payload_);
+#ifndef ON_KEY_OBJECT
+        clone->archives_ = std::move(archives_);
+#endif
         return clone;
     }
 

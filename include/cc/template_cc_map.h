@@ -7816,32 +7816,70 @@ protected:
             defraged = tx_key.DefragIfNecessary(heap);
 
             // defrag cce
-            float cce_utilization = mi_heap_page_utilization(heap, cce);
-            if (cce_utilization < 0.8)
+            if (cce != nullptr)
             {
-                auto cce_clone = cce->CloneForDefragment();
-                cce = cce_clone.get();
-                current_page_->entries_[idx_in_page_] = std::move(cce_clone);
-                defraged = true;
-                UpdateCurrent();
+                float cce_utilization = mi_heap_page_utilization(heap, cce);
+                if (cce_utilization < 0.8)
+                {
+                    auto cce_clone = cce->CloneForDefragment();
+                    cce = cce_clone.get();
+                    current_page_->entries_[idx_in_page_] =
+                        std::move(cce_clone);
+                    defraged = true;
+                    UpdateCurrent();
+                }
             }
 
             // defrag cce payload
             TxRecord *payload = static_cast<TxRecord *>(cce->payload_.get());
-            float payload_utilization = mi_heap_page_utilization(heap, payload);
-            if (payload_utilization < 0.8)
+            if (payload != nullptr)
             {
-                cce->payload_ = std::make_unique<ValueT>(*cce->payload_);
-                defraged = true;
-            }
-            else
-            {
-                bool payload_defraged = payload->DefragIfNecessary(heap);
-                if (payload_defraged)
+                float payload_utilization =
+                    mi_heap_page_utilization(heap, payload);
+                if (payload_utilization < 0.8)
                 {
+#ifdef ON_KEY_OBJECT
+                    cce->payload_ = std::make_unique<ValueT>(*cce->payload_);
+#else
+                    cce->payload_ = std::make_shared<ValueT>(*cce->payload_);
+#endif
                     defraged = true;
                 }
+                else
+                {
+                    bool payload_defraged = payload->DefragIfNecessary(heap);
+                    if (payload_defraged)
+                    {
+                        defraged = true;
+                    }
+                }
             }
+
+#ifndef ON_KEY_OBJECT
+            if (cce->archives_ != nullptr)
+            {
+                auto archives = cce->archives_.get();
+                for (auto it = archives->begin(); it != archives->end(); ++it)
+                {
+                    // try to defrag the list
+                    void *archive_address = &(*it);
+                    if (mi_heap_page_utilization(heap, archive_address) < 0.8)
+                    {
+                        auto value_copy = *it;
+                        auto next_it = std::next(it);
+                        archives->erase(it);
+                        it = archives->insert(next_it, value_copy);
+                        defraged = true;
+                    }
+
+                    bool vs_rec_defraged = it->DefragIfNecessary(heap);
+                    if (vs_rec_defraged)
+                    {
+                        defraged = true;
+                    }
+                }
+            }
+#endif
 
             if (defraged)
             {
