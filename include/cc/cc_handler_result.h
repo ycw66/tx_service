@@ -229,6 +229,12 @@ public:
 
     CcHandlerResult &operator=(const CcHandlerResult &rhs) = delete;
 
+    void Reset()
+    {
+        CcHandlerResultBase::Reset();
+        runtime_resume_func_ = nullptr;
+    }
+
     void SetValue(const T &val) = delete;
 
     void SetValue(T &&val)
@@ -313,5 +319,6 @@ private:
 
 public:
     std::function<void(CcHandlerResult<T> *)> post_lambda_;
+    const std::function<void()> *runtime_resume_func_{};
 };
 }  // namespace txservice

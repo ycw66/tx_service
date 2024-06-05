@@ -48,7 +48,11 @@ bool CcHandlerResult<T>::SetFinished()
                     post_lambda_(this);
                 }
 #ifdef EXT_TX_PROC_ENABLED
-                if (txm_ != nullptr && is_blocking_)
+                if (runtime_resume_func_)
+                {
+                    (*runtime_resume_func_)();
+                }
+                else if (txm_ != nullptr && is_blocking_)
                 {
                     txm_->Enlist();
                 }
@@ -69,7 +73,11 @@ bool CcHandlerResult<T>::SetFinished()
             }
 
 #ifdef EXT_TX_PROC_ENABLED
-            if (txm_ != nullptr && is_blocking_)
+            if (runtime_resume_func_)
+            {
+                (*runtime_resume_func_)();
+            }
+            else if (txm_ != nullptr && is_blocking_)
             {
                 txm_->Enlist();
             }
@@ -143,7 +151,11 @@ bool CcHandlerResult<T>::ForceError()
         }
 
 #ifdef EXT_TX_PROC_ENABLED
-        if (txm_ != nullptr && is_blocking_)
+        if (runtime_resume_func_)
+        {
+            (*runtime_resume_func_)();
+        }
+        else if (txm_ != nullptr && is_blocking_)
         {
             txm_->Enlist();
         }

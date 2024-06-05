@@ -539,7 +539,7 @@ public:
                 // For every 1024 busy wait cycles, checks if the busy wait
                 // window exceeds 1000ms.
                 auto tnow = std::chrono::steady_clock::now();
-                if (tnow - tstart >= 1000ms && IsIdle())
+                if (tnow - tstart >= 10ms && IsIdle())
                 {
                     idle_rnd = 0;
 

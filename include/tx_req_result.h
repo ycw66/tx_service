@@ -47,6 +47,11 @@ public:
           waiting_(false),
           yield_func_(yield_fp),
           resume_func_(resume_fp)
+#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+          ,
+          allow_yield_call_(yield_fp != nullptr),
+          allow_resume_call_(resume_fp != nullptr)
+#endif
     {
     }
 
@@ -78,6 +83,26 @@ public:
 
     void Finish(const T &val)
     {
+#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+        if (resume_func_ != nullptr)
+        {
+            // No need for lock since the txrequest sender bthread and the
+            // txm forward thread are the same thread or coordinated
+            // already.
+            value_ = val;
+            status_ = TxResultStatus::Finished;
+
+            // The yield func and resume func can only be called once each.
+            if (allow_resume_call_)
+            {
+                (*resume_func_)();
+                allow_resume_call_ = false;
+            }
+            // resume_func_ = nullptr;
+            return;
+        }
+#endif
+
         std::unique_lock<bthread::Mutex> lk(mutex_);
 
         value_ = val;
@@ -108,6 +133,25 @@ public:
 
     void Finish(T &&val)
     {
+#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+        if (resume_func_ != nullptr)
+        {
+            // No need for lock since the txrequest sender bthread and the
+            // txm forward thread are the same thread or coordinated
+            // already.
+            value_ = val;
+            status_ = TxResultStatus::Finished;
+
+            // The yield func and resume func can only be called once each.
+            if (allow_resume_call_)
+            {
+                (*resume_func_)();
+                allow_resume_call_ = false;
+            }
+            return;
+        }
+#endif
+
         std::unique_lock<bthread::Mutex> lk(mutex_);
 
         value_ = std::move(val);
@@ -132,6 +176,25 @@ public:
 
     void FinishError(TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR)
     {
+#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+        if (resume_func_ != nullptr)
+        {
+            // No need for lock since the txrequest sender bthread and the
+            // txm forward thread are the same thread or coordinated
+            // already.
+            status_ = TxResultStatus::Error;
+            error_code_ = err_code;
+
+            // The yield func and resume func can only be called once each.
+            if (allow_resume_call_)
+            {
+                (*resume_func_)();
+                allow_resume_call_ = false;
+            }
+            return;
+        }
+#endif
+
         std::unique_lock<bthread::Mutex> lk(mutex_);
 
         status_ = TxResultStatus::Error;
@@ -172,10 +235,60 @@ public:
         waiting_ = false;
         yield_func_ = yield_fptr;
         resume_func_ = resume_fptr;
+
+#ifdef ON_KEY_OBJECT
+        allow_yield_call_ = yield_fptr != nullptr;
+        allow_resume_call_ = resume_fptr != nullptr;
+        pass_resume_func_to_ccreq_ = false;
+        yield_cnt_ = 0;
+#endif
+    }
+
+    /**
+     * The resume func can only be called once, either when cc_result->SetFinish
+     * or tx_result->SetFinish.
+     * When the txm sends the ccrequest, the resume functor is released to
+     * CcHandlerResult. If the txm fails to send the ccrequest, i.e. term
+     * failure when InitTxnOp, the resume functor will be called when tx_result
+     * is SetFinished or SetError.
+     *
+     * @return
+     */
+    const std::function<void()> *ReleaseResumeFunc()
+    {
+#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+        allow_resume_call_ = false;
+        return resume_func_;
+#else
+        return nullptr;
+#endif
     }
 
     int Wait()
     {
+#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+        if (yield_func_ != nullptr)
+        {
+            // The yield func and resume func can only be called once each.
+            if (allow_yield_call_)
+            {
+                (*yield_func_)();
+                allow_yield_call_ = false;
+            }
+            else if (status_ == TxResultStatus::Unknown)
+            {
+                // The yield_func already called once. Just yield the bthread
+                // worker.
+                int wait_time_us =
+                    std::min(initial_wait_time_us_ * std::pow(2, yield_cnt_),
+                             static_cast<double>(max_wait_time_us_));
+                bthread_usleep(wait_time_us);
+                yield_cnt_++;
+            }
+            return 0;
+        }
+#endif
+
         if (yield_func_ != nullptr)
         {
             std::unique_lock<bthread::Mutex> lk(mutex_);
@@ -217,6 +330,18 @@ private:
     const std::function<void()> *yield_func_;
     const std::function<void()> *resume_func_;
 
-    friend struct TxRequest;
+#ifdef ON_KEY_OBJECT
+    bool allow_yield_call_{};
+    bool allow_resume_call_{};
+    // whether the resume func can be passed to cc handler result
+    bool pass_resume_func_to_ccreq_{};
+
+    int yield_cnt_{};
+    inline static int initial_wait_time_us_ = 100;
+    inline static int max_wait_time_us_ = 20000;
+#endif
+
+    template <typename Subtype, typename ResultType>
+    friend struct TemplateTxRequest;
 };
 }  // namespace txservice

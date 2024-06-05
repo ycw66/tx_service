@@ -245,12 +245,12 @@ void TransactionExecution::Enlist()
     }
 }
 
-void TransactionExecution::ExternalForward()
+void TransactionExecution::ExternalForward(bool enlist_txm_if_fails)
 {
     if (bind_to_ext_proc_)
     {
         bool success = tx_processor_->ForwardTx(this);
-        if (!success)
+        if (!success && enlist_txm_if_fails)
         {
             tx_processor_->EnlistTx(this);
         }
@@ -5849,6 +5849,17 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
 
     CcHandlerResult<ObjectCommandResult> &hd_res = obj_cmd_op.hd_result_;
     hd_res.Reset();
+#ifdef EXT_TX_PROC_ENABLED
+    // Pass the resume func to cc handler result. So that the tx request sender
+    // will be resumed once the cc request finishes, on contrary to after the
+    // txm be forwarded in next RunOneRound.
+    const std::function<void()> *tx_resume_func =
+        rec_resp_->ReleaseResumeFunc();
+    if (tx_resume_func != nullptr)
+    {
+        hd_res.runtime_resume_func_ = tx_resume_func;
+    }
+#endif
 
     // Directly commit the new value to the object if autocommit and
     // skip_wal are both set, on contrary to acquiring lock and committing

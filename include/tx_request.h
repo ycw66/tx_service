@@ -84,6 +84,35 @@ struct TemplateTxRequest : TxRequest
 
     void Wait()
     {
+#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+        if (tx_result_.yield_func_)
+        {
+            CHECK(txm_ != nullptr);
+            txm_->ExternalForward();
+            // WARNING: Must wait here regardless of the tx_result status after
+            // first forward.
+            tx_result_.Wait();
+
+            // No need for lock when accessing tx_result_.status_ since the txm
+            // can only be externally forwarded and the reader and writer are
+            // the same thread.
+            TxResultStatus &result_status = tx_result_.status_;
+            while (result_status == TxResultStatus::Unknown)
+            {
+                // After Wait() returns, the txm must be forwardable or already
+                // finished.
+                // Allow the txm to be forwarded both externally and by
+                // TxProcessor leads to complexity. Just let the bthread to
+                // forward the txm itself and don't enlist the txm even if it
+                // fails.
+                bool allow_enlist_txm = false;
+                txm_->ExternalForward(allow_enlist_txm);
+                tx_result_.Wait();
+            }
+            return;
+        }
+#endif
+
         TxResultStatus result_status = TxResultStatus::Unknown;
         do
         {
@@ -769,8 +798,10 @@ struct ObjectCommandTxRequest
                            const KeyT *key,
                            TxCommand *command,
                            bool auto_commit = true,
-                           TransactionExecution *txm = nullptr)
-        : TemplateTxRequest(nullptr, nullptr, txm),
+                           TransactionExecution *txm = nullptr,
+                           const std::function<void()> *yield_fptr = nullptr,
+                           const std::function<void()> *resume_fptr = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           table_name_(table_name),
           table_option_(table_option),
           key_(key),
