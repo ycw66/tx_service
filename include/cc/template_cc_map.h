@@ -490,7 +490,7 @@ public:
                     // does not exist at all, or there is an entry with the
                     // Deleted status. In either case, the data store size of
                     // this entry can be set to 0.
-                    cce->data_store_size_.store(0, std::memory_order_relaxed);
+                    cce->data_store_size_ = 0;
                 }
 #endif
 
@@ -5095,8 +5095,7 @@ public:
                 if (cce->NeedCkpt())
                 {
                     bool need_export = true;
-                    if (cce->data_store_size_.load(std::memory_order_acquire) ==
-                        INT32_MAX)
+                    if (cce->data_store_size_ == INT32_MAX)
                     {
                         // Load data store size by pinning the slice. Data
                         // store size is required to decide slice & range
@@ -5120,14 +5119,13 @@ public:
                                 UINT8_MAX);
                         if (pin_status == RangeSliceOpStatus::Successful)
                         {
-                            if (cce->data_store_size_.load(
-                                    std::memory_order_acquire) == INT32_MAX)
+                            if (cce->data_store_size_ == INT32_MAX)
                             {
                                 // If data store size is still unavailable
                                 // after the slice is loaded from data
                                 // store, that means this entry does not
                                 // exist in data store.
-                                cce->data_store_size_.store(0);
+                                cce->data_store_size_ = 0;
                             }
                             slice_id.Unpin();
                         }
@@ -6680,14 +6678,13 @@ public:
             }
             else
             {
-                int32_t data_store_size =
-                    cce->data_store_size_.load(std::memory_order_relaxed);
+                int32_t data_store_size = cce->data_store_size_;
                 if (data_store_size == INT32_MAX)
                 {
                     // If data_store_size is unset (INT32_MAX) after the
                     // slice is pinned, it means that this key does not
                     // exist in the data store.
-                    cce->data_store_size_.store(0, std::memory_order_release);
+                    cce->data_store_size_ = 0;
                     data_store_size = 0;
                 }
 
@@ -7042,7 +7039,7 @@ public:
                 RecordStatus new_status = RecordStatus::Deleted;
                 cce->SetCommitTsPayloadStatus(1U, new_status);
                 cce->SetCkptTs(1U);
-                cce->data_store_size_.store(0, std::memory_order_relaxed);
+                cce->data_store_size_ = 0;
             }
             else
             {
@@ -8005,11 +8002,9 @@ protected:
 #ifdef RANGE_PARTITION_ENABLED
                 // Initialize the data store size if it is unspecified
                 // before
-                if (cce->data_store_size_.load(std::memory_order_acquire) ==
-                    INT32_MAX)
+                if (cce->data_store_size_ == INT32_MAX)
                 {
-                    cce->data_store_size_.store(rec_store_size,
-                                                std::memory_order_relaxed);
+                    cce->data_store_size_ = rec_store_size;
                 }
 #endif
 
@@ -8052,8 +8047,7 @@ protected:
             cce->SetCkptTs(data_item.version_ts_);
 
 #ifdef RANGE_PARTITION_ENABLED
-            cce->data_store_size_.store(rec_store_size,
-                                        std::memory_order_relaxed);
+            cce->data_store_size_ = rec_store_size;
 #endif
         };
 

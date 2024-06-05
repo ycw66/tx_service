@@ -685,7 +685,7 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 #ifdef RANGE_PARTITION_ENABLED
         FlushRecord *ref = records[index];
         ref->cce_->SetCkptTs(ref->commit_ts_);
-        ref->cce_->data_store_size_.fetch_add(ref->delta_size_);
+        ref->cce_->data_store_size_ += ref->delta_size_;
 #else
         FlushRecord *ref = &records[index];
         ref->cce_->SetCkptTs(ref->commit_ts_);

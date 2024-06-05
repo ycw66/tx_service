@@ -343,7 +343,7 @@ protected:
      * 6th bit represents wheter or not the cce is in progress of being ckpt to
      * kv store.
      */
-    std::atomic<uint64_t> commit_ts_and_status_{0};
+    uint64_t commit_ts_and_status_{0};
 
 private:
 #ifndef ON_KEY_OBJECT
@@ -358,7 +358,7 @@ public:
      * is directly written into ccmap and we don't know the record size
      * in KV storage.
      */
-    std::atomic<int32_t> data_store_size_{INT32_MAX};
+    int32_t data_store_size_{INT32_MAX};
 #endif
 };
 
@@ -602,11 +602,12 @@ public:
     std::unique_ptr<CcEntry<KeyT, ValueT>> CloneForDefragment()
     {
         auto clone = std::make_unique<CcEntry<KeyT, ValueT>>();
-        auto cur_val = commit_ts_and_status_.load(std::memory_order_acquire);
-        clone->commit_ts_and_status_.store(cur_val, std::memory_order_release);
+        clone->commit_ts_and_status_ = commit_ts_and_status_;
         clone->cc_lock_and_extra_ = cc_lock_and_extra_;
         clone->payload_ = std::move(payload_);
 #ifndef ON_KEY_OBJECT
+        clone->SetCkptTs(CkptTs());
+        clone->data_store_size_ = data_store_size_;
         clone->archives_ = std::move(archives_);
 #endif
         return clone;
@@ -1016,18 +1017,16 @@ public:
             ref.commit_ts_ = commit_ts;
 
 #ifdef RANGE_PARTITION_ENABLED
-            int32_t data_store_size =
-                data_store_size_.load(std::memory_order_acquire);
-            if (data_store_size != INT32_MAX)
+            if (data_store_size_ != INT32_MAX)
             {
                 if (ref.payload_status_ != RecordStatus::Deleted)
                 {
                     ref.delta_size_ =
-                        key.Size() + ref.PayloadSize() - data_store_size;
+                        key.Size() + ref.PayloadSize() - data_store_size_;
                 }
                 else
                 {
-                    ref.delta_size_ = -data_store_size;
+                    ref.delta_size_ = -data_store_size_;
                 }
             }
             else
@@ -1160,9 +1159,7 @@ public:
                             }
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
-                            int32_t data_store_size = data_store_size_.load(
-                                std::memory_order_acquire);
-                            if (data_store_size == INT32_MAX)
+                            if (data_store_size_ == INT32_MAX)
                             {
                                 // Mark the delta as unknwon
                                 ref.delta_size_ = INT32_MAX;
@@ -1172,13 +1169,13 @@ public:
                                 if (ref.payload_status_ ==
                                     RecordStatus::Deleted)
                                 {
-                                    ref.delta_size_ = -data_store_size;
+                                    ref.delta_size_ = -data_store_size_;
                                 }
                                 else
                                 {
                                     ref.delta_size_ = key.Size() +
                                                       ref.PayloadSize() -
-                                                      data_store_size;
+                                                      data_store_size_;
                                 }
                             }
                         }
