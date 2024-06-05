@@ -195,7 +195,8 @@ int Sharder::Init(
                             ng_id,
                             node_id_,
                             *local_shards_,
-                            log_agent_->LogGroupCount()));
+                            log_agent_ != nullptr ? log_agent_->LogGroupCount()
+                                                  : 0));
                 }
             }
         }

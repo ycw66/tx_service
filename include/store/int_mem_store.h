@@ -41,11 +41,12 @@ public:
     {
         for (const auto &ref : batch)
         {
-            const CompositeKey<int> &key =
-                *dynamic_cast<const CompositeKey<int> *>(ref.Key());
+            const CompositeKey<int> *key =
+                ref.Key().GetKey<CompositeKey<int>>();
+
             const CompositeRecord<int> &rec = *ref.Payload();
 
-            int key_val = std::get<0>(key.Tuple());
+            int key_val = std::get<0>(key->Tuple());
             if (ref.payload_status_ == RecordStatus::Deleted)
             {
                 int_store_.erase(key_val);
@@ -209,7 +210,7 @@ public:
         const txservice::TableName &ccm_table_name,
         const std::unordered_map<
             txservice::TableName,
-            std::pair<uint64_t, std::vector<txservice::TxKey::Uptr>>>
+            std::pair<uint64_t, std::vector<txservice::TxKey>>>
             &sample_pool_map,
         uint64_t version) override
     {
@@ -217,12 +218,9 @@ public:
         return false;
     }
 
-    bool UpsertRanges(
-        const TableName &table_name,
-        std::vector<
-            std::tuple<const TxKey *, int32_t, std::vector<StoreSlice *>>>
-            range_info,
-        uint64_t version) override
+    bool UpsertRanges(const TableName &table_name,
+                      std::vector<SplitRangeInfo> range_info,
+                      uint64_t version) override
     {
         return true;
     }
@@ -258,7 +256,7 @@ public:
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
-    bool CopyBaseToArchive(std::vector<const TxKey *> &batch,
+    bool CopyBaseToArchive(std::vector<TxKey> &batch,
                            uint32_t node_group,
                            const txservice::TableName &table_name,
                            const txservice::TableSchema *table_schema) override
@@ -279,7 +277,7 @@ public:
                              txservice::RecordStatus &rec_status,
                              uint64_t &commit_ts) override
     {
-        auto &typed_key = dynamic_cast<const CompositeKey<int> &>(key);
+        auto &typed_key = reinterpret_cast<const CompositeKey<int> &>(key);
         int int_key = std::get<0>(typed_key.Tuple());
         auto &ref =
             int_archives_[std::pair<TableName, int>(table_name, int_key)];
@@ -306,7 +304,7 @@ public:
                        std::vector<txservice::VersionTxRecord> &archives,
                        uint64_t from_ts) override
     {
-        auto &typed_key = dynamic_cast<const CompositeKey<int> &>(key);
+        auto &typed_key = reinterpret_cast<const CompositeKey<int> &>(key);
         int int_key = std::get<0>(typed_key.Tuple());
         auto &ref =
             int_archives_[std::pair<TableName, int>(table_name, int_key)];
@@ -360,17 +358,6 @@ public:
     {
         assert(false);
         return std::string("");
-    }
-
-    std::unique_ptr<DataStoreScanner> ScanPkAndNewSkColumns(
-        const TableName &table_name,
-        const TableSchema *table_schema,
-        NodeGroupId ng_id,
-        const std::vector<DataStoreSearchCond> &search_conds,
-        const std::vector<TableName> &new_indexes_name) override
-    {
-        assert(false);
-        return nullptr;
     }
 
     bool UpdateClusterConfig(

@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include "schema.h"
@@ -695,12 +696,10 @@ public:
         return std::make_unique<CompositeKey<Types...>>(*this);
     }
 
-    void Copy(const TxKey &rhs)
+    void Copy(const CompositeKey<Types...> &rhs)
     {
-        const CompositeKey<Types...> &typed_rhs =
-            static_cast<const CompositeKey<Types...> &>(rhs);
-        fields_ = typed_rhs.fields_;
-        field_cnt_ = typed_rhs.field_cnt_;
+        fields_ = rhs.fields_;
+        field_cnt_ = rhs.field_cnt_;
     }
 
     const std::tuple<Types...> &Tuple() const
@@ -711,6 +710,26 @@ public:
     std::tuple<Types...> &Tuple()
     {
         return fields_;
+    }
+
+    size_t MemUsage() const
+    {
+        return 0;
+    }
+
+    TxKey CloneTxKey() const
+    {
+        return TxKey();
+    }
+
+    KeyType Type() const
+    {
+        return KeyType::Normal;
+    }
+
+    size_t Size() const
+    {
+        return 0;
     }
 
     std::string ToString() const
@@ -731,13 +750,33 @@ public:
         return &pos_inf;
     }
 
-private:
-    std::tuple<Types...> fields_;
-    size_t field_cnt_;
+    bool DefragIfNecessary(mi_heap_t *heap)
+    {
+        return false;
+    }
+
+    static const ::txservice::TxKeyInterface *TxKeyImpl()
+    {
+        static const txservice::TxKeyInterface tx_key_impl{
+            *CompositeKey::NegativeInfinity()};
+        return &tx_key_impl;
+    }
 
     static CompositeKey<Types...> neg_inf;
     static CompositeKey<Types...> pos_inf;
+
+private:
+    std::tuple<Types...> fields_;
+    size_t field_cnt_;
 };
+
+template <typename... Types>
+CompositeKey<Types...> CompositeKey<Types...>::neg_inf =
+    CompositeKey<Types...>();
+
+template <typename... Types>
+CompositeKey<Types...> CompositeKey<Types...>::pos_inf =
+    CompositeKey<Types...>();
 
 struct VoidKey
 {

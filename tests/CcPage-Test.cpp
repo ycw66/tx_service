@@ -52,6 +52,7 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
         {0, {NodeConfig(0, "127.0.0.1", 8600)}}};
     LocalCcShards local_cc_shards(0,
                                   1,
+                                  0,
                                   10000,
                                   10000,
                                   false,

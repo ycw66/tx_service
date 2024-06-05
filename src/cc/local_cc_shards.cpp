@@ -190,8 +190,10 @@ void LocalCcShards::StartBackgroudWorkers()
             std::thread([this] { SyncTableStatisticsWorker(); }));
     }
 
+#ifndef RUNNING_TXSERVICE_ALONE
     defragment_worker_ctx_.worker_thd_.push_back(
         std::thread([this] { DefragmentWorker(); }));
+#endif
 }
 
 uint64_t LocalCcShards::ClockTs()

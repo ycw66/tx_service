@@ -755,6 +755,7 @@ size_t CcShard::Clean()
     LruPage *ccp = clean_start_ccp_ ? clean_start_ccp_ : head_ccp_.lru_next_;
     size_t free_cnt = 0;
 
+#ifndef RUNNING_TXSERVICE_ALONE
     assert(shard_heap_ != nullptr);
     while ((shard_heap_->Full() || free_cnt < CcShard::freeBatchSize) &&
            ccp != &tail_ccp_)
@@ -765,6 +766,7 @@ size_t CcShard::Clean()
         free_cnt += freed;
         ccp = next;
     }
+#endif
     clean_start_ccp_ = ccp;
 
     // notify the checkpointer thread to do checkpoint if there is not freeable

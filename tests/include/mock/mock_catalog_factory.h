@@ -156,11 +156,11 @@ public:
         assert(false);
         return nullptr;
     }
-    std::pair<TxKey::Uptr, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
+    std::pair<TxKey, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
         const TableName &table_name) const override
     {
         assert(false);
-        return std::pair(nullptr, nullptr);
+        return std::pair(TxKey(), nullptr);
     }
     void AddDirtyIndex(const TableName &index_name) override
     {
@@ -239,10 +239,11 @@ public:
         return nullptr;
     }
 
-    std::unique_ptr<txservice::CcScanner> CreateRangeCcmScanner(
-        txservice::ScanDirection direction,
-        const txservice::Schema *key_schema,
-        const TableName &range_table_name) override
+    std::unique_ptr<TableRangeEntry> CreateTableRange(
+        TxKey start_key,
+        uint64_t version_ts,
+        int64_t partition_id,
+        std::unique_ptr<StoreRange> slices = nullptr) override
     {
         assert(false);
         return nullptr;
@@ -262,6 +263,15 @@ public:
         return nullptr;
     }
 
+    std::unique_ptr<txservice::CcScanner> CreateRangeCcmScanner(
+        txservice::ScanDirection direction,
+        const txservice::Schema *key_schema,
+        const TableName &range_table_name) override
+    {
+        assert(false);
+        return nullptr;
+    }
+
     std::unique_ptr<Statistics> CreateTableStatistics(
         const TableSchema *table_schema, NodeGroupId cc_ng_id) override
     {
@@ -271,8 +281,7 @@ public:
 
     std::unique_ptr<Statistics> CreateTableStatistics(
         const TableSchema *table_schema,
-        std::unordered_map<TableName,
-                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+        std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
             sample_pool_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id) override
@@ -281,16 +290,16 @@ public:
         return nullptr;
     }
 
-    const TxKey *NegativeInfKey() override
+    TxKey NegativeInfKey() override
     {
         assert(false);
-        return nullptr;
+        return TxKey();
     }
 
-    const TxKey *PositiveInfKey() override
+    TxKey PositiveInfKey() override
     {
         assert(false);
-        return nullptr;
+        return TxKey();
     }
 };
 

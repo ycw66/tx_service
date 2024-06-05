@@ -2,7 +2,7 @@
 #include <filesystem>
 #include <iostream>
 
-#include "../log_service/include/log_server.h"
+#include "../../log_service/include/log_server.h"
 #include "mock/mock_catalog_factory.h"
 #include "mock/mock_log_agent.h"
 #include "store/int_mem_store.h"
@@ -22,7 +22,11 @@ static std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs{
 static std::vector<uint16_t> ports{8600};
 static std::vector<uint16_t> tx_ports{8602};
 
-TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
+int32_t range_bucket_seed = 9001;
+uint64_t cluster_config_version = 2;
+
+TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
+          "[start-ts-collector]")
 {
     //== Create and start TxService
     std::filesystem::path output_dir = std::filesystem::path("/tmp/");
@@ -38,11 +42,7 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("core_num", core_num));
     tx_service_conf.insert(
-        std::pair<std::string, uint32_t>("checkpointer_interval", 10));
-    tx_service_conf.insert(
-        std::pair<std::string, uint32_t>("checkpointer_delay_seconds", 0));
-    tx_service_conf.insert(std::pair<std::string, uint32_t>(
-        "collect_active_tx_ts_interval_seconds", 2));
+        std::pair<std::string, uint32_t>("range_split_worker_num", 0));
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("node_memory_limit_mb", 1000));
     tx_service_conf.insert(
@@ -50,53 +50,39 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("realtime_sampling", 0));
     tx_service_conf.insert(
+        std::pair<std::string, uint32_t>("checkpointer_interval", 10));
+    tx_service_conf.insert(
+        std::pair<std::string, uint32_t>("checkpointer_delay_seconds", 0));
+    tx_service_conf.insert(std::pair<std::string, uint32_t>(
+        "collect_active_tx_ts_interval_seconds", 2));
+    tx_service_conf.insert(
         std::pair<std::string, uint32_t>("rep_group_cnt", 3));
 
-    uint16_t log_server_port = 8602;
-    std::vector<uint16_t> log_instance_ports = ports;
-    for (auto it = log_instance_ports.begin(); it != log_instance_ports.end();
-         it++)
-    {
-        *it += 2;
-    }
-    output_dir.append("tx_log");
-    std::filesystem::create_directory(output_dir);
-    // braft need: must add protocol
-    std::string txlog_path = "local://" + output_dir.string();
-    std::cout << "txlog_path: " << txlog_path << std::endl;
+    std::unique_ptr<TxService> tx_service_ =
+        std::make_unique<TxService>(&mock_catalog_factory,
+                                    &MockSystemHandler::Instance(),
+                                    tx_service_conf,
+                                    node_id,
+                                    &ng_configs,
+                                    range_bucket_seed,
+                                    cluster_config_version,
+                                    store_hd.get(),
+                                    nullptr,
+                                    true,
+                                    true);
 
-    std::unique_ptr<::txlog::LogServer> txlog_server =
-        std::make_unique<::txlog::LogServer>(node_id,
-                                             log_server_port,
-                                             ips,
-                                             log_instance_ports,
-                                             txlog_path,
-                                             0,
-                                             1);
-    int err = txlog_server->Start();
-    if (err != 0)
-    {
-        std::cout << "==Failed to start the tx log service in this node."
-                  << std::endl;
-    }
-    REQUIRE(err == 0);
+    tx_service_->Start(node_id,
+                       &ng_configs,
+                       cluster_config_version,
+                       &tx_ips,
+                       &tx_ports,
+                       nullptr,
+                       nullptr,
+                       nullptr,
+                       tx_service_conf,
+                       nullptr,
+                       local_path);
 
-    std::unique_ptr<TxService> tx_service_ = std::make_unique<TxService>(
-        local_path,
-        &mock_catalog_factory,
-        &MockSystemHandler::Instance(),
-        tx_service_conf,
-        node_id,
-        &ng_configs,
-        9001,
-        2,
-        &tx_ips,
-        &tx_ports,
-        store_hd.get(),
-        std::make_unique<MockLogAgent>(txlog_server->LogGroupCount(),
-                                       txlog_server->LogGroupReplicaNum()));
-
-    tx_service_->Start();
     TxStartTsCollector::Instance().SetDelaySeconds(2);
 
     sleep(3);

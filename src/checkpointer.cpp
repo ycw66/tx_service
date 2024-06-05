@@ -330,7 +330,9 @@ void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
                                      int64_t term,
                                      uint64_t ckpt_ts)
 {
+#ifndef RUNNING_TXSERVICE_ALONE
     log_agent_->UpdateCheckpointTs(node_group, term, ckpt_ts);
+#endif
 }
 
 bool Checkpointer::CkptEntryForTest(const TableName &tbl_name,
