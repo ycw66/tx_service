@@ -4822,6 +4822,19 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
+        if (req.schema_version_ != 0 &&
+            table_schema_->Version() != req.schema_version_)
+        {
+            LOG(WARNING) << "Table schema version mismatched for data sync "
+                            "scan, table name: "
+                         << req.table_name_->String()
+                         << " ,scan carried version: " << req.schema_version_
+                         << " ,ccmap version: " << table_schema_->Version();
+            // yield util version matched
+            shard_->Enqueue(&req);
+            return false;
+        }
+
         const KeyT *const req_start_key = req.start_key_ != nullptr
                                               ? req.start_key_->GetKey<KeyT>()
                                               : KeyT::NegativeInfinity();
@@ -5402,6 +5415,19 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
+        if (req.schema_version_ != 0 &&
+            table_schema_->Version() != req.schema_version_)
+        {
+            LOG(WARNING) << "Table schema version mismatched for data sync "
+                            "scan, table name: "
+                         << req.table_name_->String()
+                         << " ,scan carried version: " << req.schema_version_
+                         << " ,ccmap version: " << table_schema_->Version();
+            // yield util version matched
+            shard_->Enqueue(&req);
+            return false;
+        }
+
         const KeyT *const req_start_key = req.start_key_ != nullptr
                                               ? req.start_key_->GetKey<KeyT>()
                                               : KeyT::NegativeInfinity();
@@ -5718,6 +5744,19 @@ public:
         if (ng_term < 0)
         {
             req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            return false;
+        }
+
+        if (table_schema_->Version() != req.schema_version_)
+        {
+            LOG(WARNING)
+                << "Table schema version mismatched for defragment heap "
+                   "scan, table name: "
+                << req.table_name_->String()
+                << " ,scan carried version: " << req.schema_version_
+                << " ,ccmap version: " << table_schema_->Version();
+            // yield util version matched
+            shard_->Enqueue(&req);
             return false;
         }
 

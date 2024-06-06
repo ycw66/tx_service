@@ -2663,13 +2663,15 @@ public:
                  const uint16_t &core_cnt,
                  const uint16_t &enqueued_core_cnt,
                  const TxNumber &txn,
-                 const size_t &scan_batch_size)
+                 const size_t &scan_batch_size,
+                 const uint64_t &schema_version)
         : table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
           core_cnt_(core_cnt),
           unfinished_cnt_(enqueued_core_cnt),
           scan_batch_size_(scan_batch_size),
+          schema_version_(schema_version),
           mux_(),
           cv_()
     {
@@ -2813,6 +2815,10 @@ public:
     std::vector<size_t> non_frag_cnt_;
     std::vector<size_t> total_cnt_;
     std::vector<bool> ccmp_key_defraged_;
+    // keep schema vesion after acquire read lock on catalog, to prevent the
+    // concurrency issue with Truncate Table, detail ref to tx issue #1130
+    // TODO(xxx) general solution for #1130
+    const uint64_t schema_version_{0};
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
     std::mutex mux_;
@@ -2853,7 +2859,8 @@ public:
                    bool only_one_core,
                    std::function<bool(size_t hash_code)> filter
 #endif
-                   )
+                   ,
+                   uint64_t schema_version = 0)
         : table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
@@ -2878,6 +2885,8 @@ public:
           only_scan_one_core_(only_one_core),
           filter_lambda_(filter)
 #endif
+          ,
+          schema_version_(schema_version)
     {
         tx_number_ = txn;
         assert(scan_batch_size_ > DataSyncScanBatchSize);
@@ -3179,6 +3188,12 @@ private:
     bool only_scan_one_core_{false};
     std::function<bool(size_t hash_code)> filter_lambda_;
 #endif
+    // keep schema vesion after acquire read lock on catalog, to prevent the
+    // concurrency issue with Truncate Table, detail ref to tx issue #1130
+    // If schema_version_ is 0, the check will be bypassed, since this data sync
+    // scan is part of range split which block the schema change
+    // TODO(xxx) general solution for #1130
+    const uint64_t schema_version_{0};
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;

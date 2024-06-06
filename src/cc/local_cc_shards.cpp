@@ -2708,7 +2708,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                            data_sync_txm->TxNumber(),
                            &start_tx_key,
                            &end_tx_key,
-                           false);
+                           false,
+                           false,
+                           false,
+                           table_schema->Version());
 
     while (!scan_data_drained)
     {
@@ -3275,7 +3278,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                            nullptr,
                            data_sync_task->forward_cache_,
                            true,
-                           data_sync_task->filter_lambda_);
+                           data_sync_task->filter_lambda_,
+                           table_schema->Version());
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
@@ -4711,6 +4715,29 @@ void LocalCcShards::DefragmentWork(std::vector<uint16_t> &core_ids)
                                      IsolationLevel::RepeatableRead,
                                      CcProtocol::Locking,
                                      node_group);
+            if (defrag_tx == nullptr)
+            {
+                LOG(ERROR) << "Defragment transaction init failed, table_name: "
+                           << table_name.StringView();
+                continue;
+            }
+
+            // Acquire read lock on base table for preventing schema change
+            const TableName base_table_name{table_name.GetBaseTableNameSV(),
+                                            TableType::Primary};
+            CatalogKey table_key(base_table_name);
+            TxKey tbl_tx_key(&table_key);
+            CatalogRecord catalog_rec;
+
+            ReadTxRequest read_tbl_req;
+            read_tbl_req.Set(&catalog_ccm_name,
+                             &tbl_tx_key,
+                             &catalog_rec,
+                             false,
+                             false,
+                             true);
+            defrag_tx->Execute(&read_tbl_req);
+            read_tbl_req.Wait();
 
             DefragHeapCc defrag_heap_cc(table_name,
                                         node_group,
@@ -4718,7 +4745,8 @@ void LocalCcShards::DefragmentWork(std::vector<uint16_t> &core_ids)
                                         Count(),
                                         core_ids.size(),
                                         defrag_tx->TxNumber(),
-                                        16);
+                                        16,
+                                        catalog_rec.Schema()->Version());
             // only defrag the cc shards that are in the core_ids
             for (auto core_id : core_ids)
             {
