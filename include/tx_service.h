@@ -9,6 +9,7 @@
 #include <algorithm>  // std::min
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstddef>
 #include <list>
@@ -19,6 +20,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -74,7 +76,11 @@ public:
                 LocalCcShards &shards,
                 TxLog *txlog_hd,
                 metrics::MetricsRegistry *metrics_registry = nullptr,
-                metrics::CommonLabels common_labels = {})
+                metrics::CommonLabels common_labels = {},
+                std::vector<std::tuple<metrics::Name,
+                                       metrics::Type,
+                                       std::vector<metrics::LabelGroup>>>
+                    external_metrics = {})
         : thd_id_(thd_id),
           terminated_(false),
           tx_proc_status_(TxProcessorStatus::Busy),
@@ -124,6 +130,19 @@ public:
                                "post_process",
                                "scan_next",
                                "write_log"}}});
+        }
+
+        if (metrics::enable_metrics && !external_metrics.empty())
+        {
+            auto meter = GetMeter();
+            for (auto tuple : external_metrics)
+            {
+                auto metric_name = std::get<0>(tuple);
+                auto metric_type = std::get<1>(tuple);
+                auto metric_labels = std::get<2>(tuple);
+                meter->Register(
+                    metric_name, metric_type, std::move(metric_labels));
+            }
         }
 
         coordi_ = std::make_shared<TxProcCoordinator>();
@@ -896,7 +915,11 @@ public:
         metrics::CommonLabels common_labels = {},
         std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr,
         std::function<void(std::string_view, std::string_view)> publish_func =
-            nullptr)
+            nullptr,
+        std::vector<std::tuple<metrics::Name,
+                               metrics::Type,
+                               std::vector<metrics::LabelGroup>>>
+            external_metrics = {})
         : local_cc_shards_(node_id,
                            conf.at("core_num"),
 #ifdef RANGE_PARTITION_ENABLED
@@ -940,7 +963,8 @@ public:
                                                   local_cc_shards_,
                                                   log_hd,
                                                   metrics_registry,
-                                                  common_labels));
+                                                  common_labels,
+                                                  external_metrics));
             }
             else
             {
