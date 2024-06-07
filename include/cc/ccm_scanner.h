@@ -213,19 +213,28 @@ public:
             scan_tuple = &new_tuple;
         }
 
-        // When the key's timestamp is 0, the tuple's key is not included in
-        // this scan. Only deserializes the key when the key is included.
-        assert(key_ts > 0);
-        scan_tuple->key_ts_ = key_ts;
-        scan_tuple->KeyObj().Deserialize(
-            key_str.data(), key_offset, key_schema_);
+        if (key_ts == 0)
+        {
+            // ScanGap
+            scan_tuple->key_ts_ = 0;
+            scan_tuple->gap_ts_ = 0;
+            scan_tuple->cce_addr_.SetCce(cce_ptr, term, ng_id, core_id);
+        }
+        else
+        {
+            // When the key's timestamp is 0, the tuple's key is not included in
+            // this scan. Only deserializes the key when the key is included.
+            assert(key_ts > 0);
+            scan_tuple->key_ts_ = key_ts;
+            scan_tuple->KeyObj().Deserialize(
+                key_str.data(), key_offset, key_schema_);
 
-        scan_tuple->rec_status_ = rec_status;
-        scan_tuple->SetRecord(record_str.data(), rec_offset);
+            scan_tuple->rec_status_ = rec_status;
+            scan_tuple->SetRecord(record_str.data(), rec_offset);
 
-        scan_tuple->gap_ts_ = gap_ts;
-        scan_tuple->cce_addr_.SetCce(cce_ptr, term, ng_id, core_id);
-
+            scan_tuple->gap_ts_ = gap_ts;
+            scan_tuple->cce_addr_.SetCce(cce_ptr, term, ng_id, core_id);
+        }
         ++size_;
         return scan_tuple;
     }

@@ -283,11 +283,6 @@ public:
         }
     }
 
-    int64_t TxTerm()
-    {
-        return tx_term_;
-    }
-
     uint16_t CommandId()
     {
         return input_msg_->command_id();
@@ -363,7 +358,6 @@ private:
     bool is_ckpt_delta_{false};
     CcHandlerResult<Void> cc_res_{nullptr};
     std::atomic<uint32_t> unfinish_cnt_{0};
-    int64_t tx_term_{0};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
 
@@ -397,11 +391,6 @@ public:
     RemoteScanNextBatch();
     void Reset(std::unique_ptr<CcMessage> input_msg);
     bool ValidTermCheck() override;
-
-    int64_t TxTerm()
-    {
-        return tx_term_;
-    }
 
     bool IsForWrite() const
     {
@@ -473,7 +462,6 @@ private:
     RemoteScanCache scan_cache_;
     // The address of the CC map of the blocked core.
     CcHandlerResult<Void> cc_res_{nullptr};
-    int64_t tx_term_{0};
     uint64_t snapshot_ts_{0};
 
     // The pointer of the cc entry to which this request is directed. The
