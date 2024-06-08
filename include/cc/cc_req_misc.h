@@ -3,8 +3,10 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -392,6 +394,29 @@ private:
     bool failed_{false};
 };
 
+struct InitKeyCacheCc : public CcRequestBase
+{
+public:
+    static constexpr size_t MaxScanBatchSize = 64;
+    InitKeyCacheCc() = delete;
+    InitKeyCacheCc(FillStoreSliceCc &fill_cc, uint16_t core_cnt)
+        : fill_cc_(fill_cc), unfinished_cnt_(core_cnt)
+    {
+        pause_pos_.resize(core_cnt);
+    }
+    bool Execute(CcShard &ccs) override;
+    void SetFinish(uint16_t core, bool succ);
+    StoreSlice &Slice();
+    StoreRange &Range();
+    void SetPauseKey(TxKey &key, uint16_t core_id);
+    TxKey &PauseKey(uint16_t core_id);
+
+private:
+    FillStoreSliceCc &fill_cc_;
+    std::atomic<uint16_t> unfinished_cnt_{0};
+    std::vector<TxKey> pause_pos_;
+};
+
 struct FillStoreSliceCc : public CcRequestBase
 {
 public:
@@ -440,6 +465,11 @@ public:
         return range_;
     }
 
+    StoreSlice &Slice()
+    {
+        return range_slice_;
+    }
+
     LoadRangeSliceRequest *LoadRequest()
     {
         return &load_slice_req_;
@@ -470,6 +500,16 @@ public:
         next_idxs_[core_idx] = index;
     }
 
+    NodeGroupId NodeGroup() const
+    {
+        return cc_ng_id_;
+    }
+
+    int64_t Term() const
+    {
+        return cc_ng_term_;
+    }
+
 private:
     const TableName *table_name_;
     NodeGroupId cc_ng_id_;
@@ -482,6 +522,7 @@ private:
     std::vector<size_t> next_idxs_;
     std::vector<std::vector<SliceDataItem>> partitioned_slice_data_;
     LoadRangeSliceRequest load_slice_req_;
+    InitKeyCacheCc init_cc_;
 
     StoreSlice &range_slice_;
     StoreRange &range_;

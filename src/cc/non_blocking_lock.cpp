@@ -411,6 +411,7 @@ bool NonBlockingLock::ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs)
 bool NonBlockingLock::AcquireReadIntent(TxNumber tx_number)
 {
     if (read_locks_.find(tx_number) != read_locks_.end() ||
+        read_intentions_.find(tx_number) != read_intentions_.end() ||
         (write_lk_type_ != WriteLockType::NoWritelock &&
          write_txn_ == tx_number))
     {

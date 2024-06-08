@@ -430,7 +430,9 @@ public:
     virtual void SetVersion(uint64_t version) = 0;
 
     virtual void InitRangeSlices(std::vector<SliceInitInfo> &&slices,
-                                 NodeGroupId ng_id) = 0;
+                                 NodeGroupId ng_id,
+                                 bool init_key_cache,
+                                 bool empty_range = false) = 0;
 
     /**
      * @brief Check whether the store range is free or not.
@@ -534,7 +536,9 @@ public:
     }
 
     void InitRangeSlices(std::vector<SliceInitInfo> &&slices,
-                         NodeGroupId ng_id) override
+                         NodeGroupId ng_id,
+                         bool init_key_cache,
+                         bool empty_range = false) override
     {
         std::unique_ptr<TemplateStoreRange<KeyT>> range_slices =
             std::make_unique<TemplateStoreRange<KeyT>>(
@@ -542,7 +546,9 @@ public:
                 range_info_.EndKey(),
                 range_info_.PartitionId(),
                 ng_id,
-                *Sharder::Instance().GetLocalCcShards());
+                *Sharder::Instance().GetLocalCcShards(),
+                init_key_cache,
+                empty_range);
 
         range_slices->InitSlices(std::move(slices));
         range_slices_ = std::move(range_slices);
@@ -628,12 +634,15 @@ public:
         range_info_.version_ts_ = version;
     }
 
-    bool KickoutKeyInSlice(const KeyT &key)
+    bool KickoutKeyInSlice(const KeyT &key,
+                           bool remove_from_key_cache,
+                           uint16_t core_id)
     {
         std::shared_lock<std::shared_mutex> lk(mux_);
         if (range_slices_ != nullptr)
         {
-            return range_slices_->KickoutSlice(key);
+            return range_slices_->KickoutSlice(
+                key, remove_from_key_cache, core_id);
         }
         return true;
     }

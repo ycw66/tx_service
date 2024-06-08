@@ -10,8 +10,11 @@
 #include <vector>
 
 #include "cc_req_misc.h"
+#include "cuckoofilter/cuckoofilter.h"
 #include "error_messages.h"
+#include "fault_inject.h"
 #include "range_slice_type.h"
+#include "sharder.h"
 #include "tx_key.h"
 #include "type.h"
 
@@ -30,6 +33,9 @@ struct KVCatalogInfo;
 struct CcRequestBase;
 struct TableSchema;
 struct FlushRecord;
+
+// whether use key cache to skip kv read.
+inline bool txservice_enable_key_cache = false;
 
 namespace store
 {
@@ -75,6 +81,7 @@ enum struct RangeSliceOpStatus
      * ng on recover.
      */
     NotOwner,
+    KeyNotExists,
     Error,
 };
 
@@ -263,9 +270,27 @@ public:
      */
     static constexpr uint32_t slice_upper_bound = 16 * 1024;
 
-    StoreSlice(size_t size, SliceStatus status)
-        : size_(size), status_(status), fetch_slice_cc_(nullptr)
+    StoreSlice(size_t size,
+               SliceStatus status,
+               bool init_key_cache,
+               bool empty_slice)
+        : size_(size),
+          status_(status),
+          fetch_slice_cc_(nullptr),
+          cache_validity_((txservice_enable_key_cache && init_key_cache)
+                              ? Sharder::Instance().GetLocalCcShardsCount()
+                              : 0)
     {
+        if (empty_slice && !cache_validity_.empty())
+        {
+            // If slice is empty, set the key cache as valid at the start.
+            for (uint16_t i = 0;
+                 i < Sharder::Instance().GetLocalCcShardsCount();
+                 i++)
+            {
+                SetKeyCacheValidity(i, true);
+            }
+        }
     }
 
     virtual ~StoreSlice();
@@ -365,6 +390,44 @@ public:
         last_load_ts_ = load_ts;
     }
 
+    bool IsValidInKeyCache(uint16_t core_id) const
+    {
+        assert(!cache_validity_.empty());
+        return cache_validity_[core_id] & 1;
+    }
+
+    void SetKeyCacheValidity(uint16_t core_id, bool valid)
+    {
+        assert(!cache_validity_.empty());
+        if (valid)
+        {
+            cache_validity_[core_id] |= 1;
+        }
+        else
+        {
+            cache_validity_[core_id] &= ~(1);
+        }
+    }
+
+    void SetLoadingKeyCache(uint16_t core_id, bool status)
+    {
+        assert(!cache_validity_.empty());
+        if (status)
+        {
+            cache_validity_[core_id] |= (1 << 1);
+        }
+        else
+        {
+            cache_validity_[core_id] &= ~(1 << 1);
+        }
+    }
+
+    bool IsLoadingKeyCache(uint16_t core_id)
+    {
+        assert(!cache_validity_.empty());
+        return cache_validity_[core_id] & (1 << 1);
+    }
+
 protected:
     bool IsRecentLoad() const;
 
@@ -404,6 +467,14 @@ protected:
 
     std::mutex slice_mux_;
 
+    // If this slice is included in the range key filter. Each core should only
+    // access its own bitset, so we do not need mutex protection.
+    // Note that byte is the smallest unit c++ sync across threads. To avoid
+    // data corruption we need at least 1 byte for each core mask.
+    // The first bit implies if the key cache is valid on this core, the second
+    // bit implies if the key cache is being loaded on this core.
+    std::vector<uint8_t> cache_validity_;
+
     friend class StoreRange;
     template <typename KeyT>
     friend class TemplateStoreRange;
@@ -416,8 +487,12 @@ public:
     TemplateStoreSlice(const KeyT *start,
                        const KeyT *end,
                        size_t size = 0,
-                       SliceStatus status = SliceStatus::PartiallyCached)
-        : StoreSlice(size, status), start_key_(start), end_key_(end)
+                       SliceStatus status = SliceStatus::PartiallyCached,
+                       bool init_key_cache = false,
+                       bool empty_slice = false)
+        : StoreSlice(size, status, init_key_cache, empty_slice),
+          start_key_(start),
+          end_key_(end)
     {
         assert(start != nullptr && end != nullptr);
     }
@@ -466,12 +541,18 @@ public:
     static constexpr uint32_t range_max_size =
         1024 * 1024;  // 1MB range size for testing range split
 #else
-    static constexpr uint32_t range_max_size = 134217728;
+    static constexpr uint32_t range_max_size =
+        536870912;  // 512 * 1024 * 1024 = 512MB
 #endif
+
+    static constexpr float_t key_cache_default_load_factor = 0.7;
+
+    static constexpr float_t new_range_load_factor = 0.7;
 
     StoreRange(uint32_t partition_id,
                NodeGroupId range_owner,
-               LocalCcShards &cc_shards);
+               LocalCcShards &cc_shards,
+               bool init_key_cache);
 
     StoreRange(const StoreRange &) = delete;
 
@@ -646,6 +727,20 @@ protected:
     // safely evicted from memory.
     std::atomic_uint32_t pins_{0};
 
+    // A key cache that caches all keys in this range. It is used if we cannot
+    // find a key in cc map. We will query for the key in this cache to make
+    // sure that the key exists in kv before loading the slice from kv.
+    // We maintain a cache for each core to reduce contention.
+    // We only maintain key cache for primary key for now. By assuming 200 bytes
+    // per row for pk table, and a load factor of 0.5, we can get the max size
+    // of each cuckoo filter is max_range_size / 200 / core_cnt * 2. The load
+    // factor is set to 0.5 since the size of a range can grow larger than max
+    // range size before it is flushed to kv. So we used a lower load factor to
+    // reduce collision. An add collision might result in the whole key cache
+    // being invalidated which is very expensive.
+    std::vector<std::unique_ptr<cuckoofilter::CuckooFilter<size_t, 4>>>
+        key_cache_;
+
     friend class StoreSlice;
     friend struct TableRangeEntry;
     friend struct RangeSliceId;
@@ -659,13 +754,22 @@ public:
                        const KeyT *end_key,
                        uint32_t partition_id,
                        NodeGroupId range_owner,
-                       LocalCcShards &cc_shards)
-        : StoreRange(partition_id, range_owner, cc_shards),
+                       LocalCcShards &cc_shards,
+                       bool init_key_cache,
+                       bool empty_range = false)
+        : StoreRange(partition_id, range_owner, cc_shards, init_key_cache),
           range_start_key_(start_key),
           range_end_key_(end_key)
     {
         std::unique_ptr<TemplateStoreSlice<KeyT>> slice =
-            std::make_unique<TemplateStoreSlice<KeyT>>(start_key, end_key);
+            std::make_unique<TemplateStoreSlice<KeyT>>(
+                start_key,
+                end_key,
+                0,
+                empty_range ? SliceStatus::FullyCached
+                            : SliceStatus::PartiallyCached,
+                init_key_cache,
+                empty_range ? init_key_cache : false);
         slices_.emplace_back(std::move(slice));
     }
 
@@ -717,8 +821,11 @@ public:
         SliceStatus slice_status = slice_keys[0].status_;
 
         std::unique_ptr<TemplateStoreSlice<KeyT>> slice =
-            std::make_unique<TemplateStoreSlice<KeyT>>(
-                slice_start, slice_end, slice_size, slice_status);
+            std::make_unique<TemplateStoreSlice<KeyT>>(slice_start,
+                                                       slice_end,
+                                                       slice_size,
+                                                       slice_status,
+                                                       !key_cache_.empty());
 
         slices_.emplace_back(std::move(slice));
 
@@ -731,8 +838,12 @@ public:
             slice_size = slice_keys[idx].size_;
             slice_status = slice_keys[idx].status_;
 
-            slice = std::make_unique<TemplateStoreSlice<KeyT>>(
-                slice_start, slice_end, slice_size, slice_status);
+            slice =
+                std::make_unique<TemplateStoreSlice<KeyT>>(slice_start,
+                                                           slice_end,
+                                                           slice_size,
+                                                           slice_status,
+                                                           !key_cache_.empty());
 
             slices_.emplace_back(std::move(slice));
 
@@ -778,6 +889,24 @@ public:
         return slices_;
     }
 
+    void InvalidateKeyCache(uint16_t core_id)
+    {
+        if (key_cache_.empty())
+        {
+            return;
+        }
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        // shared lock to avoid slice split
+        for (auto &slice : slices_)
+        {
+            slice->SetKeyCacheValidity(core_id, false);
+        }
+        key_cache_[core_id] =
+            std::make_unique<cuckoofilter::CuckooFilter<size_t, 4>>(
+                StoreRange::range_max_size *
+                StoreRange::key_cache_default_load_factor / 200 /
+                key_cache_.size());
+    }
     /**
      * @brief Split the range with new_end. new_end will be the new
      * end key of this range, and every slice after new_end will be removed
@@ -847,26 +976,30 @@ public:
         return true;
     }
 
-    RangeSliceId PinSlices(const TableName &tbl_name,
-                           int64_t ng_term,
-                           const KeyT &search_key,
-                           bool inclusive,
-                           const KeyT *end_key,
-                           bool end_inclusive,
-                           const Schema *key_schema,
-                           const Schema *rec_schema,
-                           uint64_t schema_ts,
-                           uint64_t snapshot_ts,
-                           const KVCatalogInfo *kv_info,
-                           CcRequestBase *cc_request,
-                           CcShard *cc_shard,
-                           store::DataStoreHandler *store_hd,
-                           bool force_load,
-                           uint8_t prefetch_size,
-                           uint8_t max_pin_cnt,
-                           bool forward_pin,
-                           RangeSliceOpStatus &pin_status,
-                           const StoreSlice *&last_pinned_slice)
+    RangeSliceId PinSlices(
+        const TableName &tbl_name,
+        int64_t ng_term,
+        const KeyT &search_key,
+        bool inclusive,
+        const KeyT *end_key,
+        bool end_inclusive,
+        const Schema *key_schema,
+        const Schema *rec_schema,
+        uint64_t schema_ts,
+        uint64_t snapshot_ts,
+        const KVCatalogInfo *kv_info,
+        CcRequestBase *cc_request,
+        CcShard *cc_shard,
+        store::DataStoreHandler *store_hd,
+        bool force_load,
+        uint8_t prefetch_size,
+        uint8_t max_pin_cnt,
+        bool forward_pin,
+        RangeSliceOpStatus &pin_status,
+        const StoreSlice *&last_pinned_slice,
+        bool check_key_cache = false,
+        uint16_t shard_id = 0  // only used if check_key_cache = true
+    )
     {
         // A shared lock on the range to prevent concurrent splitting or merging
         // of slices.
@@ -885,7 +1018,14 @@ public:
             pin_status = RangeSliceOpStatus::Retry;
             return RangeSliceId(this, slice);
         }
-
+        CODE_FAULT_INJECTOR("PinSlices_Fail", {
+            LOG(INFO) << "FaultInject  PinSlices_Fail, " << check_key_cache
+                      << ", is valid " << slice->IsValidInKeyCache(shard_id);
+            if (slice->status_ == SliceStatus::FullyCached)
+            {
+                slice->status_ = SliceStatus::PartiallyCached;
+            }
+        });
         if (slice->status_ == SliceStatus::FullyCached)
         {
             // collect metrics: slice cache hits
@@ -969,69 +1109,80 @@ public:
                 }
             }
             pins_.fetch_add(pin_slice_cnt, std::memory_order_release);
+            return RangeSliceId(this, slice);
         }
-        else
+        else if (check_key_cache && slice->IsValidInKeyCache(shard_id))
         {
-            last_pinned_slice = nullptr;
-
-            // collect metrics: slice cache miss
-            CollectCacheMiss(*cc_shard);
-
-            LoadSliceStatus load_ret = LoadSlice(tbl_name,
-                                                 ng_term,
-                                                 *slice,
-                                                 key_schema,
-                                                 rec_schema,
-                                                 schema_ts,
-                                                 snapshot_ts,
-                                                 kv_info,
-                                                 cc_request,
-                                                 cc_shard,
-                                                 store_hd,
-                                                 force_load,
-                                                 slice_lk);
-            switch (load_ret)
+            bool found = ContainsKey(search_key, shard_id);
+            if (!found)
             {
-            case LoadSliceStatus::Success:
-                pin_status = RangeSliceOpStatus::BlockedOnLoad;
-                break;
-            case LoadSliceStatus::Delay:
-                pin_status = RangeSliceOpStatus::Delay;
-                break;
-            case LoadSliceStatus::Retry:
-                pin_status = RangeSliceOpStatus::Retry;
-                break;
-            default:
-                pin_status = RangeSliceOpStatus::Error;
-                break;
+                // If the key is not found in range, directly return and skip
+                // loading slice from kv
+                pin_status = RangeSliceOpStatus::KeyNotExists;
+                return RangeSliceId(this, slice);
             }
+            // If key is found in range key cache, the key must exist in kv
+            // store. Load slice from kv to get the value.
+        }
+        last_pinned_slice = nullptr;
 
-            slice_lk.unlock();
+        // collect metrics: slice cache miss
+        CollectCacheMiss(*cc_shard);
 
-            size_t sid = slice_idx + 1;
-            for (size_t fid = 0; fid < prefetch_size && sid < slices_.size();
-                 ++fid, ++sid)
+        LoadSliceStatus load_ret = LoadSlice(tbl_name,
+                                             ng_term,
+                                             *slice,
+                                             key_schema,
+                                             rec_schema,
+                                             schema_ts,
+                                             snapshot_ts,
+                                             kv_info,
+                                             cc_request,
+                                             cc_shard,
+                                             store_hd,
+                                             force_load,
+                                             slice_lk);
+        switch (load_ret)
+        {
+        case LoadSliceStatus::Success:
+            pin_status = RangeSliceOpStatus::BlockedOnLoad;
+            break;
+        case LoadSliceStatus::Delay:
+            pin_status = RangeSliceOpStatus::Delay;
+            break;
+        case LoadSliceStatus::Retry:
+            pin_status = RangeSliceOpStatus::Retry;
+            break;
+        default:
+            pin_status = RangeSliceOpStatus::Error;
+            break;
+        }
+
+        slice_lk.unlock();
+
+        size_t sid = slice_idx + 1;
+        for (size_t fid = 0; fid < prefetch_size && sid < slices_.size();
+             ++fid, ++sid)
+        {
+            StoreSlice *prefetch_slice = slices_[sid].get();
+            std::unique_lock<std::mutex> prefetch_lk(
+                prefetch_slice->slice_mux_);
+
+            if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
             {
-                StoreSlice *prefetch_slice = slices_[sid].get();
-                std::unique_lock<std::mutex> prefetch_lk(
-                    prefetch_slice->slice_mux_);
-
-                if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
-                {
-                    LoadSlice(tbl_name,
-                              ng_term,
-                              *prefetch_slice,
-                              key_schema,
-                              rec_schema,
-                              schema_ts,
-                              snapshot_ts,
-                              kv_info,
-                              nullptr,
-                              cc_shard,
-                              store_hd,
-                              false,
-                              prefetch_lk);
-                }
+                LoadSlice(tbl_name,
+                          ng_term,
+                          *prefetch_slice,
+                          key_schema,
+                          rec_schema,
+                          schema_ts,
+                          snapshot_ts,
+                          kv_info,
+                          nullptr,
+                          cc_shard,
+                          store_hd,
+                          false,
+                          prefetch_lk);
             }
         }
 
@@ -1049,7 +1200,8 @@ public:
         uint32_t slice_idx = 0;
         uint32_t subrange_slice_idx = 0;
         size_t subrange_cnt =
-            std::ceil(post_ckpt_size / (StoreRange::range_max_size * 0.7));
+            std::ceil(post_ckpt_size / (StoreRange::range_max_size *
+                                        StoreRange::new_range_load_factor));
         size_t avg_subrange_size = post_ckpt_size / subrange_cnt;
 
         while (slice_idx < slices_.size())
@@ -1083,11 +1235,87 @@ public:
         return new_range_keys;
     }
 
-    bool KickoutSlice(const KeyT &kickout_key)
+    bool KickoutSlice(const KeyT &kickout_key,
+                      bool remove_from_key_cache,
+                      uint16_t core_id)
     {
         std::shared_lock<std::shared_mutex> s_lk(mux_);
         size_t slice_idx = SearchSlice(kickout_key, true);
-        return slices_[slice_idx]->Kickout();
+        bool ret = slices_[slice_idx]->Kickout();
+        if (ret && remove_from_key_cache)
+        {
+            // If kickout is success, remove this key from key cache.
+            DeleteKey(kickout_key, core_id, slices_[slice_idx].get());
+        }
+        return ret;
+    }
+
+    void DeleteKey(const KeyT &key, uint16_t core_id, StoreSlice *slice)
+    {
+        if (slice == nullptr)
+        {
+            TxKey search_key(&key);
+            slice = FindSlice(search_key);
+        }
+        if (slice->IsValidInKeyCache(core_id))
+        {
+            cuckoofilter::Status status =
+                key_cache_[core_id]->Delete(key.Hash());
+            // We should not try to delete a non-existing key.
+            assert(status != cuckoofilter::Status::NotFound);
+            (void) status;
+        }
+        // Delete key is not going to be called if slice is being loaded, so
+        // we don't need to worry about concurrent key cache initialization.
+    }
+
+    RangeSliceOpStatus AddKey(const KeyT &key,
+                              uint16_t core_id,
+                              StoreSlice *slice = nullptr,
+                              bool init = false)
+    {
+        assert(txservice_enable_key_cache);
+        if (slice == nullptr)
+        {
+            TxKey search_key(&key);
+            slice = FindSlice(search_key);
+        }
+        if (init || slice->IsValidInKeyCache(core_id))
+        {
+            if (!init && slice->IsLoadingKeyCache(core_id))
+            {
+                LOG(INFO) << "slice " << slice << ", core " << core_id;
+            }
+            assert(init || !slice->IsLoadingKeyCache(core_id));
+            cuckoofilter::Status status = key_cache_[core_id]->Add(key.Hash());
+            if (status == cuckoofilter::Status::Ok)
+            {
+                return RangeSliceOpStatus::Successful;
+            }
+            else
+            {
+                assert(cuckoofilter::Status::NotEnoughSpace);
+                // Add failed, we need to invalidate the filter.
+                InvalidateKeyCache(core_id);
+                return RangeSliceOpStatus::Error;
+            }
+        }
+        else if (slice->IsLoadingKeyCache(core_id))
+        {
+            // Retry later when key cache is initialized.
+            return RangeSliceOpStatus::Retry;
+        }
+        else
+        {
+            // cache is not valid, no op
+            return RangeSliceOpStatus::Successful;
+        }
+    }
+
+    bool ContainsKey(const KeyT &key, uint16_t core_id)
+    {
+        return key_cache_[core_id]->Contain(key.Hash()) ==
+               cuckoofilter::Status::Ok;
     }
 
     size_t PostCkptSize() override
@@ -1272,11 +1500,13 @@ private:
                     sub_slice_start,
                     sub_slice_end,
                     split_keys[idx].cur_size_,
-                    SliceStatus::PartiallyCached);
+                    SliceStatus::PartiallyCached,
+                    !slice->cache_validity_.empty());
 
             sub_slice->post_ckpt_size_ = split_keys[idx].post_update_size_;
             sub_slice->status_ = slice->status_;
             sub_slice->last_load_ts_ = slice->last_load_ts_;
+            sub_slice->cache_validity_ = slice->cache_validity_;
 
             // Inserts the new sub-slices following the first sub-slice.
             slices_.emplace(slices_.begin() + slice_idx + idx,

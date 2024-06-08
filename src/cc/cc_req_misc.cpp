@@ -1,6 +1,9 @@
 #include "cc/cc_req_misc.h"
 
+#include <atomic>
+#include <cstddef>
 #include <unordered_map>
+#include <vector>
 
 #include "cc/cc_map.h"
 #include "cc/cc_shard.h"
@@ -10,6 +13,7 @@
 #include "range_slice.h"
 #include "sharder.h"
 #include "statistics.h"
+#include "tx_service.h"
 
 namespace txservice
 {
@@ -275,7 +279,8 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         mi_heap_t *prev_heap =
             mi_heap_set_default(shards->GetTableRangesHeap());
 
-        range_entry_->InitRangeSlices(std::move(slice_info_), cc_ng_id_);
+        range_entry_->InitRangeSlices(
+            std::move(slice_info_), cc_ng_id_, table_name_.IsBase());
         bool range_slice_mem_full = shards->TableRangesMemoryFull();
 
         mi_heap_set_default(prev_heap);
@@ -375,6 +380,89 @@ void LoadRangeSliceRequest::SetError()
     SetFinish();
 }
 
+void InitKeyCacheCc::SetFinish(uint16_t core, bool succ)
+{
+    if (succ)
+    {
+        fill_cc_.Slice().SetKeyCacheValidity(core, succ);
+    }
+    fill_cc_.Slice().SetLoadingKeyCache(core, false);
+
+    if (unfinished_cnt_.fetch_sub(1, std::memory_order_relaxed) == 1)
+    {
+        // Even if init key cache fails, we should still mark the fill store
+        // slice as success.
+        fill_cc_.Slice().CommitLoading(fill_cc_.Range(),
+                                       fill_cc_.LoadRequest()->SliceSize());
+    }
+}
+
+bool InitKeyCacheCc::Execute(CcShard &ccs)
+{
+    int64_t cc_ng_candid_term =
+        Sharder::Instance().CandidateLeaderTerm(fill_cc_.NodeGroup());
+    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(fill_cc_.NodeGroup());
+    if (std::max(cc_ng_candid_term, cc_ng_term) != fill_cc_.Term())
+    {
+        SetFinish(ccs.core_id_, false);
+        return false;
+    }
+
+    CcMap *ccm = ccs.GetCcm(fill_cc_.TblName(), fill_cc_.NodeGroup());
+    if (ccm == nullptr)
+    {
+        const CatalogEntry *catalog_entry =
+            ccs.InitCcm(fill_cc_.TblName(),
+                        fill_cc_.NodeGroup(),
+                        std::max(cc_ng_term, cc_ng_candid_term),
+                        this);
+
+        if (catalog_entry != nullptr)
+        {
+            // Successfully load table catalog from data store.
+            assert(catalog_entry->Version() > 0);
+
+            // For a filling range slice request, there must be a prior
+            // request reading and locking the table's schema, to prevent
+            // others from dropping the table. Hence, the table's schema
+            // must be avaliable.
+            assert(catalog_entry->schema_ != nullptr);
+            ccm = ccs.GetCcm(fill_cc_.TblName(), fill_cc_.NodeGroup());
+            assert(ccm != nullptr);
+        }
+        else
+        {
+            // The table's schema is not available yet. Cannot initialize the cc
+            // map. The request will be re-executed after the schema is fetched
+            // from the data store.
+            return false;
+        }
+    }
+
+    ccm->Execute(*this);
+
+    return false;
+}
+StoreRange &InitKeyCacheCc::Range()
+{
+    return fill_cc_.Range();
+}
+
+StoreSlice &InitKeyCacheCc::Slice()
+{
+    return fill_cc_.Slice();
+}
+
+void InitKeyCacheCc::SetPauseKey(TxKey &key, uint16_t core_id)
+{
+    pause_pos_[core_id] = key.Clone();
+}
+
+TxKey &InitKeyCacheCc::PauseKey(uint16_t core_id)
+{
+    return pause_pos_[core_id];
+}
+
 FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                                    NodeGroupId cc_ng_id,
                                    int64_t cc_ng_term,
@@ -400,6 +488,7 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                       snapshot_ts,
                       cc_ng_id,
                       cc_ng_term),
+      init_cc_(*this, cc_shards.Count()),
       range_slice_(slice),
       range_(range),
       local_cc_shards_(cc_shards)
@@ -512,6 +601,20 @@ void FillStoreSliceCc::SetFinish()
     {
         if (err_code == CcErrorCode::NO_ERROR)
         {
+            // Set key cache as valid after slice is loaded.
+            if (txservice_enable_key_cache && table_name_->IsBase())
+            {
+                // Only maintain key cache for base tables.
+                uint16_t core_cnt = local_cc_shards_.Count();
+                // If we need to init key cache, do not commit loading until
+                // init key cache is finished.
+                for (uint16_t core_id = 0; core_id < core_cnt; core_id++)
+                {
+                    Sharder::Instance().GetLocalCcShards()->EnqueueToCcShard(
+                        core_id, &init_cc_);
+                }
+                return;
+            }
             range_slice_.CommitLoading(range_, load_slice_req_.SliceSize());
         }
         else

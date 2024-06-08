@@ -3,6 +3,7 @@
 #include <bthread/bthread.h>
 #include <bthread/task_group.h>
 #include <butil/macros.h>
+#include <cuckoofilter/cuckoofilter.h>
 #include <mimalloc-2.1/mimalloc.h>
 #include <pthread.h>
 
@@ -975,6 +976,10 @@ public:
 
         txservice_skip_wal = skip_wal;
         txservice_skip_kv = skip_kv;
+        if (conf.find("enable_key_cache") != conf.end())
+        {
+            txservice_enable_key_cache = conf.at("enable_key_cache");
+        }
     }
 
     int Start(uint32_t node_id,

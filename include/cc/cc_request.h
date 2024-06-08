@@ -333,6 +333,7 @@ public:
         cce_ptr_ = nullptr;
         hd_result_idx_ = hd_res_idx;
         is_local_ = true;
+        block_by_lock_ = false;
     }
 
     void Reset(const TableName *tname,
@@ -359,6 +360,7 @@ public:
         cce_ptr_ = nullptr;
         hd_result_idx_ = hd_res_idx;
         is_local_ = false;
+        block_by_lock_ = false;
     }
 
     const void *Key() const
@@ -406,6 +408,16 @@ public:
         return is_local_;
     }
 
+    bool BlockedByLock() const
+    {
+        return block_by_lock_;
+    }
+
+    void SetBlockedByLock(bool val)
+    {
+        block_by_lock_ = val;
+    }
+
 private:
     const void *key_ptr_;
     const std::string *key_str_;
@@ -420,6 +432,7 @@ private:
     LruEntry *cce_ptr_{nullptr};
     uint32_t hd_result_idx_{0};
     bool is_local_{true};
+    bool block_by_lock_{false};
 };
 
 struct AcquireAllCc : public TemplatedCcRequest<AcquireAllCc, AcquireAllResult>

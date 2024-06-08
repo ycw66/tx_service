@@ -33,6 +33,7 @@
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_record.h"
+#include "tx_service.h"
 #include "tx_service_metrics.h"
 #include "tx_trace.h"
 #include "type.h"
@@ -146,7 +147,7 @@ public:
         CcEntryAddr &cce_addr = acquire_key_result.cce_addr_;
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
         CcPage<KeyT, ValueT> *ccp = nullptr;
-        bool resume = false;
+        bool block_by_lock = req.BlockedByLock();
         const KeyT *target_key = nullptr;
         KeyT decoded_key;
 
@@ -166,21 +167,56 @@ public:
         if (req.CcePtr() != nullptr)
         {
             // The request was blocked before and is now unblocked.
-            resume = true;
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-
-            std::tie(acquired_lock, err_code) =
-                LockHandleForResumedRequest(cce_ptr,
-                                            cce_ptr->PayloadStatus(),
-                                            &req,
-                                            req.NodeGroupId(),
-                                            ng_term,
-                                            req.TxTerm(),
-                                            CcOperation::Write,
-                                            req.Isolation(),
-                                            req.Protocol(),
-                                            0,
-                                            false);
+            if (block_by_lock)
+            {
+                std::tie(acquired_lock, err_code) =
+                    LockHandleForResumedRequest(cce_ptr,
+                                                cce_ptr->PayloadStatus(),
+                                                &req,
+                                                req.NodeGroupId(),
+                                                ng_term,
+                                                req.TxTerm(),
+                                                CcOperation::Write,
+                                                req.Isolation(),
+                                                req.Protocol(),
+                                                0,
+                                                false);
+            }
+            else
+            {
+                // Blocked by key cache add.
+                assert(table_name_.IsBase() && txservice_enable_key_cache);
+                ccp = static_cast<CcPage<KeyT, ValueT> *>(cce_ptr->GetCcPage());
+                auto it = Iterator(cce_ptr, ccp, &neg_inf_);
+                target_key = it->first;
+                auto res = shard_->local_shards_.AddKeyToKeyCache(
+                    table_name_, cc_ng_id_, shard_->core_id_, *target_key);
+                if (res == RangeSliceOpStatus::Retry)
+                {
+                    // If the insert fails due to key cache is being
+                    // initialized, retry later.
+                    req.SetBlockedByLock(false);
+                    shard_->Enqueue(&req);
+                    return false;
+                }
+                else if (res == RangeSliceOpStatus::Successful)
+                {
+                    // If the insert is successful, we need to set the
+                    // status to DELETED. We only delete from key cache
+                    // when a key is evicted from cc map and its status
+                    // is DELETED. So if the transaction aborts later
+                    // and we didn't update the payload status to
+                    // DELETED here, the status will remain as Unknown
+                    // until its kicked out from memory, and the key
+                    // will never be removed from key cache.
+                    cce_ptr->SetCommitTsPayloadStatus(1U,
+                                                      RecordStatus::Deleted);
+                    cce_ptr->SetCkptTs(1U);
+                }
+                hd_res->SetFinished();
+                return true;
+            }
         }
         else
         {
@@ -268,7 +304,7 @@ public:
         }
         else
         {
-            if (!resume)
+            if (!block_by_lock)
             {
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(&cc_entry,
@@ -315,6 +351,41 @@ public:
                 curr_version_ts =
                     curr_version_ts > 0 ? curr_version_ts : shard_->Now();
                 acquire_key_result.commit_ts_ = curr_version_ts;
+                if (txservice_enable_key_cache && table_name_.IsBase() &&
+                    cce_ptr->PayloadStatus() == RecordStatus::Unknown)
+                {
+                    // cce is just created by find emplace, add this key to
+                    // key cache. Usually a pk insert always does a read first
+                    // to check pk duplicate, which creates the cce first and
+                    // inserts the key into key cache. But for cases that
+                    // disregards current value, like hidden pk or auto incr pk
+                    // insert, the ReadCc is skipped and we need to update key
+                    // cache here.
+                    auto res = shard_->local_shards_.AddKeyToKeyCache(
+                        table_name_, cc_ng_id_, shard_->core_id_, *target_key);
+                    if (res == RangeSliceOpStatus::Retry)
+                    {
+                        // If the insert fails due to key cache is being
+                        // initialized, retry later.
+                        req.SetBlockedByLock(false);
+                        shard_->Enqueue(&req);
+                        return false;
+                    }
+                    else if (res == RangeSliceOpStatus::Successful)
+                    {
+                        // If the insert is successful, we need to set the
+                        // status to DELETED. We only delete from key cache
+                        // when a key is evicted from cc map and its status
+                        // is DELETED. So if the transaction aborts later
+                        // and we didn't update the payload status to
+                        // DELETED here, the status will remain as Unknown
+                        // until its kicked out from memory, and the key
+                        // will never be removed from key cache.
+                        cce_ptr->SetCommitTsPayloadStatus(
+                            1U, RecordStatus::Deleted);
+                        cce_ptr->SetCkptTs(1U);
+                    }
+                }
 
                 hd_res->SetFinished();
             }
@@ -333,6 +404,7 @@ public:
                         static_cast<remote::RemoteAcquire &>(req);
                     remote_req.Acknowledge();
                 }
+                req.SetBlockedByLock(true);
 
                 return false;
             }
@@ -1431,19 +1503,13 @@ public:
                                 shard_,
                                 pin_status,
                                 false,
-                                0);
+                                0,
+                                txservice_enable_key_cache &&
+                                    Type() == TableType::Primary);
 
-                        if (pin_status == RangeSliceOpStatus::Successful)
+                        if (pin_status == RangeSliceOpStatus::Successful ||
+                            pin_status == RangeSliceOpStatus::KeyNotExists)
                         {
-                            // The slice is unpinned immediately. This is
-                            // because the prior pin operation brings all
-                            // records in the slice into memory, including the
-                            // target record sharded to this core. Since cache
-                            // cleaning is done by the tx processor associated
-                            // with this core, the target record cannot be
-                            // kicked out before this read request finishes.
-                            slice_id.Unpin();
-
                             if (cc_op == CcOperation::ReadForWrite)
                             {
                                 Iterator it = FindEmplace(*look_key);
@@ -1451,6 +1517,11 @@ public:
                                 ccp = it.GetPage();
                                 if (cce == nullptr)
                                 {
+                                    if (pin_status ==
+                                        RangeSliceOpStatus::Successful)
+                                    {
+                                        slice_id.Unpin();
+                                    }
                                     hd_res->SetError(
                                         CcErrorCode::OUT_OF_MEMORY);
                                     return true;
@@ -1459,6 +1530,27 @@ public:
                                 if (cce->PayloadStatus() ==
                                     RecordStatus::Unknown)
                                 {
+                                    // Key does not exist, add it to key cache
+                                    if (txservice_enable_key_cache &&
+                                        table_name_.IsBase())
+                                    {
+                                        TemplateStoreRange<KeyT> *range =
+                                            static_cast<
+                                                TemplateStoreRange<KeyT> *>(
+                                                slice_id.Range());
+                                        auto res =
+                                            range->AddKey(*look_key,
+                                                          shard_->core_id_,
+                                                          slice_id.Slice());
+                                        // Retry only happens if SliceStatus ==
+                                        // BeingLoaded
+                                        // && KeyCache.BeingLoaded(), in which
+                                        // case the pin would never return
+                                        // success or key not exists.
+                                        assert(res !=
+                                               RangeSliceOpStatus::Retry);
+                                        (void) res;
+                                    }
                                     cce->SetCommitTsPayloadStatus(
                                         1U, RecordStatus::Deleted);
                                     cce->SetCkptTs(1U);
@@ -1467,9 +1559,30 @@ public:
                                 {
                                     assert(cce->CommitTs() > 1);
                                 }
+                                // Slice id will loose pointer stability after
+                                // it is unpinned. Wait until we added the key
+                                // to key cache before unpinning the slice.
+                                if (pin_status ==
+                                    RangeSliceOpStatus::Successful)
+                                {
+                                    // The slice is unpinned immediately. This
+                                    // is because the prior pin operation brings
+                                    // all records in the slice into memory,
+                                    // including the target record sharded to
+                                    // this core. Since cache cleaning is done
+                                    // by the tx processor associated with this
+                                    // core, the target record cannot be kicked
+                                    // out before this read request finishes.
+                                    slice_id.Unpin();
+                                }
                             }
                             else
                             {
+                                if (pin_status ==
+                                    RangeSliceOpStatus::Successful)
+                                {
+                                    slice_id.Unpin();
+                                }
                                 it = Find(*look_key);
                                 cce = it->second;
                                 ccp = it.GetPage();
@@ -6619,6 +6732,93 @@ public:
         return false;
     }
 
+    bool Execute(InitKeyCacheCc &req) override
+    {
+        Iterator map_it, map_end_it;
+        TxKey &resume_key = req.PauseKey(shard_->core_id_);
+        const KeyT *start_key = nullptr;
+        if (!resume_key.KeyPtr())
+        {
+            // First time being processed.
+            if (req.Slice().IsValidInKeyCache(shard_->core_id_))
+            {
+                // No need to init key cache.
+                req.SetFinish(shard_->core_id_, true);
+                return false;
+            }
+            req.Slice().SetLoadingKeyCache(shard_->core_id_, true);
+            start_key = req.Slice().StartTxKey().GetKey<KeyT>();
+        }
+        else
+        {
+            start_key = resume_key.GetKey<KeyT>();
+        }
+
+        if (start_key == nullptr || start_key->Type() == KeyType::NegativeInf)
+        {
+            map_it = Begin();
+        }
+        else
+        {
+            std::pair<Iterator, ScanType> start_pair =
+                ForwardScanStart(*start_key, true);
+            map_it = start_pair.first;
+            if (start_pair.second == ScanType::ScanGap)
+            {
+                ++map_it;
+            }
+        }
+
+        const KeyT *end_key = req.Slice().EndTxKey().GetKey<KeyT>();
+
+        // nullptr end key means PositiveInfinity
+        if (end_key == nullptr || end_key->Type() == KeyType::PositiveInf)
+        {
+            map_end_it = End();
+        }
+        else
+        {
+            std::pair<Iterator, ScanType> end_pair =
+                ForwardScanStart(*end_key, true);
+            map_end_it = end_pair.first;
+            if (end_pair.second == ScanType::ScanGap)
+            {
+                ++map_end_it;
+            }
+        }
+
+        TemplateStoreRange<KeyT> *range =
+            static_cast<TemplateStoreRange<KeyT> *>(&req.Range());
+
+        for (size_t scan_cnt = 0; scan_cnt < InitKeyCacheCc::MaxScanBatchSize &&
+                                  map_it != map_end_it;
+             map_it++, scan_cnt++)
+        {
+            const KeyT *key = map_it->first;
+            auto ret =
+                range->AddKey(*key, shard_->core_id_, &req.Slice(), true);
+            if (ret == RangeSliceOpStatus::Error)
+            {
+                // Stop immediately if one of the add key fails.
+                req.SetFinish(shard_->core_id_, false);
+                return false;
+            }
+        }
+
+        if (map_it == map_end_it)
+        {
+            req.SetFinish(shard_->core_id_, true);
+        }
+        else
+        {
+            // record pause position and resume in next round.
+            TxKey pause_key(map_it->first);
+            req.SetPauseKey(pause_key, shard_->core_id_);
+            shard_->Enqueue(&req);
+        }
+        return false;
+    }
+
     bool Execute(GetPostCkptSlice &req) override
     {
 #ifdef RANGE_PARTITION_ENABLED
@@ -9342,8 +9542,19 @@ protected:
             if (can_be_cleaned)
             {
 #ifdef RANGE_PARTITION_ENABLED
+                // The key cache contains all keys in this range, but when we
+                // delete a key from the range, the update is delayed until the
+                // cce is removed from ccmap. This is because we always search
+                // for key in ccmap first before trying to query the key cache.
+                // Remove the key from key cache if the key is in deleted
+                // status.
                 bool kick_ret = shard_->local_shards_.KickoutKeyInSlice(
-                    table_name_, cc_ng_id_, *key_it);
+                    table_name_,
+                    cc_ng_id_,
+                    *key_it,
+                    txservice_enable_key_cache && table_name_.IsBase() &&
+                        cce->PayloadStatus() == RecordStatus::Deleted,
+                    shard_->core_id_);
                 if (!kick_ret)
                 {
                     // If the slice is being loaded or pinned, do not

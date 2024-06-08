@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cstddef>
 #include <memory>
 #include <shared_mutex>
 #include <vector>
@@ -121,12 +122,31 @@ bool StoreSlice::IsRecentLoad() const
 
 StoreRange::StoreRange(uint32_t partition_id,
                        NodeGroupId range_owner,
-                       LocalCcShards &cc_shards)
+                       LocalCcShards &cc_shards,
+                       bool init_key_cache)
     : partition_id_(partition_id),
       cc_ng_id_(range_owner),
       local_cc_shards_(cc_shards),
       last_accessed_ts_(local_cc_shards_.ClockTs())
 {
+    if (init_key_cache && txservice_enable_key_cache)
+    {
+        uint16_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+        for (uint16_t id = 0; id < core_cnt; id++)
+        {
+            // Assume each record is 200 bytes, calculate the size of the key
+            // cache.
+            key_cache_.push_back(
+                std::make_unique<cuckoofilter::CuckooFilter<size_t, 4>>(
+                    StoreRange::range_max_size *
+                    StoreRange::key_cache_default_load_factor / 200 /
+                    core_cnt));
+        }
+    }
+    else
+    {
+        key_cache_.resize(0);
+    }
 }
 
 RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,

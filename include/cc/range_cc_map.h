@@ -12,6 +12,7 @@
 #include "range_bucket_cc_map.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
+#include "range_slice.h"
 #include "statistics.h"
 #include "template_cc_map.h"
 #include "tx_operation.h"
@@ -721,6 +722,14 @@ public:
                     new_range_infos.push_back(range_entry->TypedRangeInfo());
                 }
             }
+
+            // Invalidate key cache of this range on this core
+            if (txservice_enable_key_cache && this->table_name_.IsBase())
+            {
+                old_entry->TypedStoreRange()->InvalidateKeyCache(
+                    shard_->core_id_);
+            }
+
             assert(new_range_infos.size());
 
             // add new range entry to range cc map
@@ -980,7 +989,8 @@ public:
                             old_end_key,
                             old_info->partition_id_,
                             tx_node_id,
-                            *Sharder::Instance().GetLocalCcShards());
+                            *Sharder::Instance().GetLocalCcShards(),
+                            false);
                     store_range->InitSlices(std::move(range_slices));
                     std::vector<SliceInitInfo> new_slice_keys;
                     store_range->SplitRange(
@@ -1080,9 +1090,10 @@ public:
                         shard_->local_shards_.GetTableRangesHeapThreadId());
                     mi_heap_t *prev_heap = mi_heap_set_default(
                         shard_->local_shards_.GetTableRangesHeap());
-
                     old_table_range_entry->InitRangeSlices(
-                        std::move(range_slices), this->cc_ng_id_);
+                        std::move(range_slices),
+                        this->cc_ng_id_,
+                        this->table_name_.IsBase());
 
                     mi_heap_set_default(prev_heap);
                     mi_restore_default_thread_id();

@@ -846,7 +846,8 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         std::vector<SliceInitInfo> slices;
         slices.emplace_back(
             catalog_factory_->NegativeInfKey(), 0, SliceStatus::FullyCached);
-        ranges.begin()->second->InitRangeSlices(std::move(slices), ng_id);
+        ranges.begin()->second->InitRangeSlices(
+            std::move(slices), ng_id, range_table_name.IsBase(), true);
     }
 
     mi_heap_set_default(prev_heap);

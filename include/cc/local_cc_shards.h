@@ -601,8 +601,8 @@ public:
 
             if (ng_id == range_ng && slice_keys && !range_slice_mem_full)
             {
-                new_range_ptr->InitRangeSlices(std::move(*slice_keys),
-                                               range_ng);
+                new_range_ptr->InitRangeSlices(
+                    std::move(*slice_keys), range_ng, table_name.IsBase());
             }
 
             mi_restore_default_thread_id();
@@ -623,7 +623,12 @@ public:
                 const KeyT *r_start = range_entry->TypedRangeInfo()->StartKey();
                 const KeyT *r_end = range_entry->TypedRangeInfo()->EndKey();
                 range_slices = std::make_unique<TemplateStoreRange<KeyT>>(
-                    r_start, r_end, partition_id, range_ng, *this);
+                    r_start,
+                    r_end,
+                    partition_id,
+                    range_ng,
+                    *this,
+                    table_name.IsBase());
                 range_slices->InitSlices(std::move(*slice_keys));
             }
             range_entry->UpdateRangeEntry(version, std::move(range_slices));
@@ -728,6 +733,38 @@ public:
         const TableName &table_name, const NodeGroupId ng_id, const TxKey &key);
 
     template <typename KeyT>
+    RangeSliceOpStatus AddKeyToKeyCache(const TableName &table_name,
+                                        NodeGroupId cc_ng_id,
+                                        uint16_t core_id,
+                                        const KeyT &key)
+    {
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+
+        TableName range_table_name(table_name.StringView(),
+                                   TableType::RangePartition);
+        TxKey search_key(&key);
+
+        TemplateTableRangeEntry<KeyT> *range_entry =
+            static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(
+                    range_table_name, cc_ng_id, search_key));
+        if (!range_entry)
+        {
+            // key cache does not exist for this range.
+            return RangeSliceOpStatus::Error;
+        }
+        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
+        TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
+        if (!store_range)
+        {
+            // key cache does not exist for this range.
+            return RangeSliceOpStatus::Error;
+        }
+        store_range->UpdateLastAccessedTs(ClockTs());
+        return store_range->AddKey(key, core_id);
+    }
+
+    template <typename KeyT>
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                NodeGroupId cc_ng_id,
                                int64_t cc_ng_term,
@@ -741,7 +778,8 @@ public:
                                CcShard *cc_shard,
                                RangeSliceOpStatus &pin_status,
                                bool force_load,
-                               uint8_t prefetch_size)
+                               uint8_t prefetch_size,
+                               bool check_key_cache = false)
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -811,7 +849,9 @@ public:
                                       1,
                                       true,
                                       pin_status,
-                                      last_pinned_slice);
+                                      last_pinned_slice,
+                                      check_key_cache,
+                                      cc_shard->core_id_);
     }
 
     template <typename KeyT>
@@ -1000,7 +1040,9 @@ public:
     template <typename KeyT>
     bool KickoutKeyInSlice(const TableName &tbl_name,
                            const NodeGroupId ng_id,
-                           const KeyT &key)
+                           const KeyT &key,
+                           bool kickout_from_key_cache,
+                           uint16_t core_id)
     {
         std::shared_lock<std::shared_mutex> s_lk(meta_data_mux_);
 
@@ -1016,7 +1058,8 @@ public:
         }
         else
         {
-            bool res = entry->KickoutKeyInSlice(key);
+            bool res =
+                entry->KickoutKeyInSlice(key, kickout_from_key_cache, core_id);
             if (res
                 // TODO(liunyl): enable this after cluser scale is added.
                 // && DuringClusterScale()
@@ -1091,6 +1134,7 @@ public:
     {
 #ifdef RANGE_PARTITION_ENABLED
         assert(false);
+        return false;
 #else
         return buckets_migrating_.load(std::memory_order_relaxed);
 #endif
@@ -1398,6 +1442,7 @@ private:
 #ifndef RANGE_PARTITION_ENABLED
     std::atomic_bool buckets_migrating_{false};
 #endif
+
     // If enable_data_store is disabled for one table, its catalog needs to be
     // created at launch or on_leader_start. enable_data_store option comes from
     // configuration instead of table schema, hence we need a separate place to
