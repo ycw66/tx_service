@@ -124,9 +124,6 @@ public:
         trailing_cnt_++;
     }
 
-    virtual void TrailingTuples(
-        std::vector<const ScanTuple *> &tuple_buf) const = 0;
-
 protected:
     size_t idx_;
     size_t size_;
@@ -260,15 +257,6 @@ public:
         return &cache_[idx];
     }
 
-    void TrailingTuples(
-        std::vector<const ScanTuple *> &tuple_buf) const override
-    {
-        for (size_t idx = size_; idx < size_ + trailing_cnt_; idx++)
-        {
-            tuple_buf.push_back(At(idx));
-        }
-    }
-
 private:
     std::vector<TemplateScanTuple<KeyT, ValueT>> cache_;
     const Schema *const key_schema_;
@@ -305,8 +293,6 @@ public:
                                      *shard_code_and_sizes) const = 0;
     virtual void ShardCacheLastTuples(
         std::vector<const ScanTuple *> *last_tuples) const = 0;
-    virtual void ShardCacheTrailingTuples(
-        std::vector<const ScanTuple *> *trailing_tuples) const = 0;
 
     virtual const ScanTuple *Current() = 0;
     virtual CcmScannerType Type() const = 0;
@@ -497,12 +483,6 @@ public:
         {
             last_tuples->emplace_back(cache.LastTuple());
         }
-    }
-
-    void ShardCacheTrailingTuples(
-        std::vector<const ScanTuple *> *last_tuples) const override
-    {
-        // Hash partition does not have trailing tuples.
     }
 
     const ScanTuple *Current() override
@@ -742,15 +722,6 @@ public:
         for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
         {
             last_tuples->emplace_back(scans_[core_id].LastTuple());
-        }
-    }
-
-    void ShardCacheTrailingTuples(
-        std::vector<const ScanTuple *> *trailing_tuples) const override
-    {
-        for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
-        {
-            scans_[core_id].TrailingTuples(*trailing_tuples);
         }
     }
 

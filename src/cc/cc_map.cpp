@@ -30,6 +30,40 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     bool is_covering_keys,
     CcMap *ccm)
 {
+    // deduce the lock type to acquire
+    LockType lock_type = LockTypeUtil::DeduceLockType(
+        cc_op, iso_level, protocol, is_covering_keys);
+
+    return AcquireCceKeyLock(cce,
+                             page,
+                             cce_payload_status,
+                             req,
+                             ng_id,
+                             ng_term,
+                             tx_term,
+                             lock_type,
+                             cc_op,
+                             iso_level,
+                             protocol,
+                             read_ts,
+                             ccm);
+}
+
+std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
+    LruEntry *cce,
+    LruPage *page,
+    RecordStatus cce_payload_status,
+    CcRequestBase *req,
+    uint32_t ng_id,
+    int64_t ng_term,
+    int64_t tx_term,
+    LockType lock_type,
+    CcOperation cc_op,
+    IsolationLevel iso_level,
+    CcProtocol protocol,
+    uint64_t read_ts,
+    CcMap *ccm)
+{
     if (iso_level == IsolationLevel::Snapshot)
     {
         if (cc_op == CcOperation::ReadForWrite && read_ts < cce->CommitTs())
@@ -73,10 +107,6 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
             }
         }
     }
-
-    // deduce the lock type to acquire
-    LockType lock_type = LockTypeUtil::DeduceLockType(
-        cc_op, iso_level, protocol, is_covering_keys);
 
     TxNumber tx_number = req->Txn();
     LockOpStatus lock_op_status = LockOpStatus::Successful;

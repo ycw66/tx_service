@@ -252,6 +252,21 @@ protected:
         bool is_covering_keys,
         CcMap *ccm = nullptr);
 
+    std::pair<LockType, CcErrorCode> AcquireCceKeyLock(
+        LruEntry *cce,
+        LruPage *page,
+        RecordStatus cce_payload_status,
+        CcRequestBase *req,
+        uint32_t ng_id,
+        int64_t ng_term,
+        int64_t tx_term,
+        LockType lock_type,
+        CcOperation cc_op,
+        IsolationLevel iso_level,
+        CcProtocol protocol,
+        uint64_t read_ts,
+        CcMap *ccm = nullptr);
+
     /**
      * @brief do check after request is resumed from lock blocking queue.
      * @return  std::pair<LockType,CcErrorCode> : the first arg of the pair is

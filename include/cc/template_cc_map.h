@@ -3609,6 +3609,9 @@ public:
                                      : CcOperation::Read;
         }
 
+        LockType lock_type = LockTypeUtil::DeduceLockType(
+            cc_op, req.Isolation(), req.Protocol(), req.IsCoveringKeys());
+
         bool is_require_keys = req.IsRequireKeys();
         bool is_require_recs = req.IsRequireRecords();
 
@@ -3821,50 +3824,58 @@ public:
                 CcPage<KeyT, ValueT> *ccp,
                 ScanType scan_type) -> std::pair<ScanReturnType, CcErrorCode>
         {
-            auto lock_pair = AcquireCceKeyLock(cce,
-                                               ccp,
-                                               cce->PayloadStatus(),
-                                               &req,
-                                               ng_id,
-                                               ng_term,
-                                               tx_term,
-                                               cc_op,
-                                               req.Isolation(),
-                                               req.Protocol(),
-                                               req.ReadTimestamp(),
-                                               req.IsCoveringKeys());
-            switch (lock_pair.second)
-            {
-            case CcErrorCode::NO_ERROR:
-                break;
-            case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
-            {
-                req.SetBlockingInfo(
-                    shard_->core_id_,
-                    reinterpret_cast<uint64_t>(cce),
-                    scan_type,
-                    ScanSliceCc::ScanBlockingType::BlockOnFuture);
-                return {ScanReturnType::Blocked, CcErrorCode::NO_ERROR};
-            }
-            case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
-            {
-                req.SetBlockingInfo(shard_->core_id_,
-                                    reinterpret_cast<uint64_t>(cce),
-                                    scan_type,
-                                    ScanSliceCc::ScanBlockingType::BlockOnLock);
-                req.SetRangeCcNgTerm(ng_term);
-                // Lock fail should stop the execution of current
-                // CC request since it's already in blocking queue.
-                return {ScanReturnType::Blocked, CcErrorCode::NO_ERROR};
-            }
-            default:
-            {
-                // lock confilct: back off and retry.
-                return {ScanReturnType::Error, lock_pair.second};
-            }
-            }  //-- end: switch
+            bool is_locked = false;
 
-            bool is_locked = lock_pair.first != LockType::NoLock;
+            if (lock_type != LockType::NoLock ||
+                req.Isolation() == IsolationLevel::Snapshot)
+            {
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   ccp,
+                                                   cce->PayloadStatus(),
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   lock_type,
+                                                   cc_op,
+                                                   req.Isolation(),
+                                                   req.Protocol(),
+                                                   req.ReadTimestamp());
+                switch (lock_pair.second)
+                {
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetBlockingInfo(
+                        shard_->core_id_,
+                        reinterpret_cast<uint64_t>(cce),
+                        scan_type,
+                        ScanSliceCc::ScanBlockingType::BlockOnFuture);
+                    return {ScanReturnType::Blocked, CcErrorCode::NO_ERROR};
+                }
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+                {
+                    req.SetBlockingInfo(
+                        shard_->core_id_,
+                        reinterpret_cast<uint64_t>(cce),
+                        scan_type,
+                        ScanSliceCc::ScanBlockingType::BlockOnLock);
+                    req.SetRangeCcNgTerm(ng_term);
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
+                    return {ScanReturnType::Blocked, CcErrorCode::NO_ERROR};
+                }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    return {ScanReturnType::Error, lock_pair.second};
+                }
+                }  //-- end: switch
+
+                is_locked = lock_pair.first != LockType::NoLock;
+            }
+
             if (req.IsLocal())
             {
                 AddScanTuple(cce_key,
@@ -3920,11 +3931,7 @@ public:
                 // that it can't be kicked from memory and this cce addr is
                 // valid. This lock should be released when the scan slicecc
                 // resumes.
-                if (LockTypeUtil::DeduceLockType(cc_op,
-                                                 req.Isolation(),
-                                                 req.Protocol(),
-                                                 req.IsCoveringKeys()) ==
-                    LockType::NoLock)
+                if (lock_type == LockType::NoLock)
                 {
                     ReleaseCceLock(cce->GetKeyLock(),
                                    cce,
