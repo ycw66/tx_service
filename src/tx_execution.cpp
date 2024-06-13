@@ -6290,8 +6290,6 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                          !rw_set_.FindObjectCommand(*req->table_name_,
                                                     cmd_res.cce_addr_))
                 {
-                    DLOG(INFO)
-                        << "txm acquired readlock, ReadIntent or WriteIntent";
                     // Read lock is acquired under locking protocol. Add the cce
                     // to read set for later PostRead.
                     if (!rw_set_.AddRead(cmd_res.cce_addr_,
