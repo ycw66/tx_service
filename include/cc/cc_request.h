@@ -2874,7 +2874,8 @@ public:
 #endif
                    ,
                    uint64_t schema_version = 0)
-        : table_name_(&table_name),
+        : force_flush_(false),
+          table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
           core_cnt_(core_cnt),
@@ -3031,6 +3032,7 @@ public:
             accumulated_scan_cnt_.at(i) = 0;
         }
         err_ = CcErrorCode::NO_ERROR;
+        force_flush_ = false;
     }
 
     void SetError(CcErrorCode err)
@@ -3142,6 +3144,9 @@ public:
     }
 
     std::vector<size_t> accumulated_scan_cnt_;
+    // force DataSync task flush out this batch of scaned data whatever other
+    // criteria exists, e.g. scan mem is full
+    bool force_flush_{false};
 
 private:
     const TableName *table_name_{nullptr};

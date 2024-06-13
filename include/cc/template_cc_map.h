@@ -5829,6 +5829,7 @@ public:
                 {
                     // scan memory is full and there are
                     // data for flush
+                    req.force_flush_ = true;
                     req.SetFinish(vec_idx);
                     return false;
                 }

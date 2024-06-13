@@ -3530,9 +3530,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             scan_data_drained = scan_cc.IsDrained(0) && scan_data_drained;
 
-            if (data_sync_vec->size() + archive_vec->size() +
-                    mv_base_vec->size() >
-                rec_size_limit)
+            if ((data_sync_vec->size() + archive_vec->size() +
+                     mv_base_vec->size() >
+                 rec_size_limit) ||
+                scan_cc.force_flush_)
             {
                 {
                     std::unique_lock<bthread::Mutex> flight_task_lk(
