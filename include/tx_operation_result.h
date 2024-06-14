@@ -208,6 +208,7 @@ struct RemoteScanSliceCache
     void RemoveLast()
     {
         uint32_t cache_mem_size = cache_mem_size_;
+        (void) cache_mem_size;
         cache_mem_size_ -= keys_.size() - key_off_vec_.back();
         cache_mem_size_ -= records_.size() - rec_off_vec_.back();
         assert(cache_mem_size_ <= cache_mem_size);

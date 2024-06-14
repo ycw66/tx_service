@@ -691,11 +691,13 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                                                    table_name.StringView(),
                                                    table_name.Type(),
                                                    partition_id);
-            // Checkpoint cannot start at `tx_term` until recover is finished,
-            // we should be the only one trying to sync the range.
+        // Checkpoint cannot start at `tx_term` until recover is finished,
+        // we should be the only one trying to sync the range.
+#ifdef RANGE_PARTITION_ENABLED
             auto limiter = task_limiters_.emplace(
                 task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
             assert(limiter.second == true);
+#endif
 
             replay_log_cc.SetFinish();
 
@@ -3955,7 +3957,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     std::vector<FlushRecord> *data_sync_vec, *archive_vec;
     std::unique_ptr<std::vector<TxKey>> mv_base_owner;
     std::vector<TxKey> *mv_base_vec;
+#ifdef RANGE_PARTITION_ENABLED
     bool vec_owner = cur_work.vec_owner_;
+#endif
     if (cur_work.vec_owner_)
     {
         data_sync_vec_owner = std::move(cur_work.data_sync_vec_);
@@ -4769,20 +4773,39 @@ void LocalCcShards::DefragmentWork(std::vector<uint16_t> &core_ids)
                            kv_load_cnt + non_frag_cnt ==
                        total_cnt);
 
-                float defrag_ratio = static_cast<float>(defrag_cnt) / total_cnt;
-                LOG(INFO) << "Defragmentation for table " << table_name.Trace()
-                          << " finished on core " << core_id
-                          << ", defrag count: " << defrag_cnt
-                          << ", lock count: " << lock_cnt
-                          << ", ckpt count: " << non_persistent_cnt
-                          << ", kv load count: " << kv_load_cnt
-                          << ", non frag count: " << non_frag_cnt
-                          << ", total count: " << total_cnt
-                          << ", defrag ratio: " << 100 * defrag_ratio;
+                if (total_cnt > 0)
+                {
+                    float defrag_ratio =
+                        static_cast<float>(defrag_cnt) / total_cnt;
+                    LOG(INFO) << "Defragmentation for table "
+                              << table_name.Trace() << " finished on core "
+                              << core_id << ", defrag count: " << defrag_cnt
+                              << ", lock count: " << lock_cnt
+                              << ", ckpt count: " << non_persistent_cnt
+                              << ", kv load count: " << kv_load_cnt
+                              << ", non frag count: " << non_frag_cnt
+                              << ", total count: " << total_cnt
+                              << ", defrag ratio: " << 100 * defrag_ratio;
+                }
             }
 
             txservice::CommitTx(defrag_tx);
         }
+    }
+}
+
+void LocalCcShards::TriggerShardsHeapDefragment()
+{
+    std::unique_lock<std::mutex> worker_lk(defragment_worker_ctx_.mux_);
+    if (defragment_working_ == false)
+    {
+        LOG(INFO) << "Defragmentation triggered";
+        defragment_working_ = true;
+        defragment_worker_ctx_.cv_.notify_one();
+    }
+    else
+    {
+        defragment_triggered_during_working_ = true;
     }
 }
 
@@ -4791,15 +4814,31 @@ void LocalCcShards::DefragmentWorker()
     std::unique_lock<std::mutex> worker_lk(defragment_worker_ctx_.mux_);
     while (defragment_worker_ctx_.status_ == WorkerStatus::Active)
     {
-        defragment_worker_ctx_.cv_.wait_for(
-            worker_lk,
-            10s,
-            [this] {
-                return defragment_worker_ctx_.status_ ==
-                       WorkerStatus::Terminated;
-            });
+        // during defragment thread is doing its work, if there are more
+        // defragment request triggered, keep working
+        // TODO(githubzilla): implement parallel defragment
+        if (!defragment_triggered_during_working_)
+        {
+            defragment_worker_ctx_.cv_.wait_for(
+                worker_lk,
+                10s,
+                [this]
+                {
+                    return defragment_worker_ctx_.status_ ==
+                               WorkerStatus::Terminated ||
+                           defragment_working_;
+                });
+        }
+        else
+        {
+            LOG(INFO) << "Defragmentation triggered";
+            defragment_triggered_during_working_ = false;
+        }
+
         if (defragment_worker_ctx_.status_ == WorkerStatus::Terminated)
         {
+            defragment_working_ = false;
+            defragment_triggered_during_working_ = false;
             break;
         }
 
@@ -4824,7 +4863,8 @@ void LocalCcShards::DefragmentWorker()
                       << ", allocated " << stats.allocated_ << ", frag ratio "
                       << 100 * (static_cast<float>(stats.committed_ -
                                                    stats.allocated_) /
-                                stats.committed_);
+                                stats.committed_)
+                      << " ,wait list size: " << stats.wait_list_size_;
             if (stats.committed_ > ccs->memory_limit_ * 0.7 &&
                 stats.allocated_ < stats.committed_ * 0.8)
             {
@@ -4913,6 +4953,7 @@ void LocalCcShards::DefragmentWorker()
         }
 
         worker_lk.lock();
+        defragment_working_ = false;
     }
 }
 

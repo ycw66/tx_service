@@ -306,6 +306,11 @@ void CcShard::DequeueWaitList()
     cc_wait_list_.clear();
 }
 
+size_t CcShard::WaitListSize()
+{
+    return cc_wait_list_.size();
+}
+
 void CcShard::Enqueue(CcRequestBase *req)
 {
     cc_queue_size_.fetch_add(1, std::memory_order_relaxed);
@@ -749,17 +754,30 @@ void CcShard::VerifyLruList()
  * @brief Kick out freeable entries from ccmap.
  *
  * @return the number of freed entries in ccmap.
+ *         if heap fragmentation reachs 20%
  */
-size_t CcShard::Clean()
+std::pair<size_t, bool> CcShard::Clean()
 {
     LruPage *ccp = clean_start_ccp_ ? clean_start_ccp_ : head_ccp_.lru_next_;
     size_t free_cnt = 0;
+    bool heap_fragmented = false;
 
 #ifndef RUNNING_TXSERVICE_ALONE
     assert(shard_heap_ != nullptr);
-    while ((shard_heap_->Full() || free_cnt < CcShard::freeBatchSize) &&
+    int64_t heap_alloc, heap_commit;
+    while ((shard_heap_->Full(&heap_alloc, &heap_commit) ||
+            free_cnt < CcShard::freeBatchSize) &&
            ccp != &tail_ccp_)
     {
+        // if heap fragmentation exceed threshold, stop clean
+        if ((static_cast<double>(heap_alloc) /
+             static_cast<double>(heap_commit)) < 0.8)
+        {
+            heap_fragmented = true;
+            // if heap fragmentation happen, trigger defragment
+            local_shards_.TriggerShardsHeapDefragment();
+            break;
+        }
         // merge and removal might happen during Clean so ccp and ccp->lru_next_
         // might change
         auto [freed, next] = ccp->parent_map_->CleanPageAndReBalance(ccp);
@@ -771,13 +789,13 @@ size_t CcShard::Clean()
 
     // notify the checkpointer thread to do checkpoint if there is not freeable
     // entries to be kicked out from ccmap.
-    if (free_cnt == 0 && !local_shards_.IsWaitingCkpt())
+    if (free_cnt == 0 && !local_shards_.IsWaitingCkpt() && !heap_fragmented)
     {
         local_shards_.SetWaitingCkpt(true);
         NotifyCkpt();
     }
 
-    return free_cnt;
+    return {free_cnt, heap_fragmented};
 }
 
 /**
@@ -1723,20 +1741,30 @@ mi_heap_t *CcShardHeap::SetAsDefaultHeap()
     return mi_heap_set_default(heap_);
 }
 
-bool CcShardHeap::Full() const
+bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
 {
     // TODO(liunyl): fix allocated might be < 0 bug and change it to
     // size_t type.
     //
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
+    if (alloc != nullptr)
+    {
+        *alloc = allocated;
+    }
+
+    if (commit != nullptr)
+    {
+        *commit = committed;
+    }
     // if (allocated >= (int64_t) memory_limit_ ||
     //     committed > (memory_limit_ * 1.1))
     // {
     //     TryHeapCollect();
     // }
 
-    return allocated >= (int64_t) memory_limit_;
+    return allocated >= (int64_t) memory_limit_ ||
+           committed > (memory_limit_ * 1.1);
 }
 
 /**

@@ -5257,6 +5257,7 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             hd_result_.SetError(lock_bucket_result_->ErrorCode());
 
             bool force_error = hd_result_.ForceError();
+            (void) force_error;
             assert(force_error);
 
             txm->PostProcess(*this);

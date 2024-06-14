@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cassert>
 #include <condition_variable>
 #include <cstdint>
@@ -542,7 +543,7 @@ enum struct WorkerStatus
 
 struct WorkerThreadContext
 {
-    WorkerThreadContext(int worker_num)
+    explicit WorkerThreadContext(int worker_num)
         : worker_num_(worker_num), status_(WorkerStatus::Active)
     {
     }
@@ -562,11 +563,12 @@ struct WorkerThreadContext
             worker_thd_[i].join();
         }
     }
+
     const int worker_num_;
     std::vector<std::thread> worker_thd_;
     std::mutex mux_;
     std::condition_variable cv_;
-    WorkerStatus status_;
+    WorkerStatus status_{WorkerStatus::Active};
 };
 }  // namespace txservice
 
@@ -758,6 +760,7 @@ struct HeapMemStats
     HeapMemStats() = default;
     int64_t allocated_{0};
     int64_t committed_{0};
+    size_t wait_list_size_{0};
 };
 
 }  // namespace txservice

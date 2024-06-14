@@ -104,7 +104,7 @@ public:
     mi_heap_t *SetAsDefaultHeap();
 
     // Check if this heap is full
-    bool Full() const;
+    bool Full(int64_t *alloc = nullptr, int64_t *commit = nullptr) const;
 
     // Try to return memory not used back to system. This will decrease
     // committed size if success.
@@ -210,6 +210,8 @@ public:
      */
     void DequeueWaitList();
 
+    size_t WaitListSize();
+
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
      *
@@ -289,7 +291,12 @@ public:
      */
     TEntry *LocateTx(TxNumber tx_number);
 
-    size_t Clean();
+    /**
+     * Clean ccentry through the lru list
+     * @return size_t clean count
+     *         bool   heap fragmentation threshold reached
+     */
+    std::pair<size_t, bool> Clean();
 
     bool FlushEntryForTest(const TableName &tbl_name,
                            const TableSchema *tbl_schema,

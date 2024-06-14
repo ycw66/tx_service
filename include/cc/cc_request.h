@@ -5165,6 +5165,7 @@ struct CollectMemStatsCc : public CcRequestBase
         //
         assert(mi_heap_get_default() == ccs.GetShardHeap()->heap_);
         mi_thread_stats(&stats_->allocated_, &stats_->committed_);
+        stats_->wait_list_size_ = ccs.WaitListSize();
         std::lock_guard<std::mutex> lk(mux_);
         finished_ = true;
         cv_.notify_one();
