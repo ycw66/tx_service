@@ -6238,6 +6238,11 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
             {
                 const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
                 vct_rec.push_back(cmd_res.rec_status_);
+                if (obj_cmd_op.vct_hd_result_[i].ErrorCode() ==
+                    CcErrorCode::TASK_EXPIRED)
+                {
+                    continue;
+                }
 
                 assert(cmd_res.rec_status_ != RecordStatus::Unknown);
 

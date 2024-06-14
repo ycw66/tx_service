@@ -12,6 +12,8 @@
 namespace txservice
 {
 struct TxObject;
+struct LruEntry;
+class CcShard;
 
 struct TxCommandResult
 {
@@ -19,6 +21,27 @@ public:
     virtual ~TxCommandResult() = default;
     virtual void Serialize(std::string &buf) const = 0;
     virtual void Deserialize(const char *buf, size_t &offset) = 0;
+};
+
+enum class ExecResult
+{
+    Fail,   // Failed to execute command
+    Read,   // Success to execute readonly command
+    Write,  // Succes to execute the command and modified object.
+    Block,  // The command is blocked
+    Unlock  // There has not expected result and release ccentry lock
+};
+
+enum class BlockOperation
+{
+    NoBlock,     // Not block operation type
+    PopBlock,    // Pop an element if has or block until expired or insert an
+                 // element
+    PopNoBlock,  // Pop an element if has or return empty.
+    BlockLock,   // BLock on the object until the object has at least one
+                 // element, then lock the obj and return
+    PopElement,  // Pop the element, only used after BlockLock.
+    Discard      // To discard the blocked command
 };
 
 struct TxCommand
@@ -47,12 +70,10 @@ public:
     /**
      * Execute cmd on object to get the result.
      * @param object
-     * @return True: The object has been updated and need to write log;
-     *         False: The command is read only or failed to exec.
-     *         (Read only commands will neglect this value and should always
-     *          return FALSE)
+     * @return return ExecResult, ObjectCcMap.Execute will has different
+     * response with different return value.
      */
-    virtual bool ExecuteOn(const TxObject &object) = 0;
+    virtual ExecResult ExecuteOn(const TxObject &object) = 0;
 
     // Commit current command on obj_ptr, return the new object if the command
     // changes or deletes the object. Read only command need not commit.
@@ -96,6 +117,19 @@ public:
     // The default value is not need to clone, for lua, it should call this
     // method to set Volatile to true
     virtual void SetVolatile() = 0;
+
+    // Pop a blocked request from the queue if exist. The reason to add this
+    // method is due to it maybe needs some conditions with the related object.
+    // for example the object should has elements.
+    virtual bool AblePopBlockRequest(TxObject *object) const
+    {
+        return false;
+    }
+
+    virtual BlockOperation GetBlockOperationType()
+    {
+        return BlockOperation::NoBlock;
+    }
 };
 
 /**
@@ -109,6 +143,8 @@ struct MultiObjectTxCommand
 
     virtual std::vector<TxCommand *> *CommandPointers() = 0;
 
+    // For block commands, it need to rewrite below 4 methods to support
+    // flexible steps.
     virtual bool IsFinished() = 0;
     virtual bool IsLastStep() = 0;
     virtual size_t CmdSteps() = 0;
@@ -132,6 +168,33 @@ struct MultiObjectTxCommand
     virtual bool IsPassed() const
     {
         return true;
+    }
+
+    // To judge if this block command is expired or not.
+    virtual bool IsExpired() const
+    {
+        return false;
+    }
+    // The number of finished block commands. For block commands, they are not
+    // need to wait all block commands to finished, one or some of them are
+    // finished, the results can be satisfied, and it need the surplus commands
+    // to abort. If return 0. means it is not block command.
+    // Not all steps have blocked commands, maybe only one step has, other steps
+    // should return 0
+    virtual uint32_t NumOfFinishBlockCommands() const
+    {
+        return 0;
+    }
+    // Only called when NumOfFinishBlockCommands()>0 and (expired or the related
+    // commands have finished). In this method, it will decide which child
+    // commands should be discard and which is the next step to run.
+    // @return true: need to discard obsolete cc request and go to next step;
+    //          false: Only go to the next step and wait all local cc request
+    //          to finish
+    virtual bool ForwardResult()
+    {
+        assert(false);
+        return false;
     }
 };
 

@@ -5,6 +5,7 @@
 #include <cassert>
 
 #include "cc/cc_entry.h"
+#include "cc/cc_request.h"
 #include "cc/cc_shard.h"
 #include "error_messages.h"
 
@@ -567,4 +568,46 @@ void KeyGapLockAndExtraData::SetUsedStatus(bool is_used)
 {
     in_use_ = is_used;
 }
+#ifdef ON_KEY_OBJECT
+void KeyGapLockAndExtraData::PopBlockRequest(CcShard *ccs,
+                                             txservice::TxObject *object)
+{
+    for (size_t i = 0; i < queue_block_cmds_.Size(); i++)
+    {
+        ApplyCc *req = dynamic_cast<ApplyCc *>(queue_block_cmds_.Get(i));
+        assert(req != nullptr);
+        TxCommand *cmd = nullptr;
+        if (req->IsLocal())
+        {
+            cmd = req->CommandPtr();
+        }
+        else
+        {
+            cmd = req->remote_input_.cmd_;
+        }
+
+        assert(cmd != nullptr);
+
+        if (cmd->AblePopBlockRequest(object))
+        {
+            ccs->Enqueue(ccs->LocalCoreId(), req);
+            queue_block_cmds_.Erase(i);
+            break;
+        }
+    }
+}
+
+void KeyGapLockAndExtraData::AbortBlockRequest(TxNumber txid, CcErrorCode err)
+{
+    for (size_t i = 0; i < queue_block_cmds_.Size(); i++)
+    {
+        if (queue_block_cmds_.Get(i)->Txn() == txid)
+        {
+            queue_block_cmds_.Get(i)->AbortCcRequest(err);
+            queue_block_cmds_.Erase(i);
+            return;
+        }
+    }
+}
+#endif
 }  // namespace txservice

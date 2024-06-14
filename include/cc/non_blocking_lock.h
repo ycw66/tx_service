@@ -2,6 +2,7 @@
 
 #include <butil/logging.h>
 
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -369,6 +370,11 @@ public:
                               nullptr) &&
                    dirty_payload_ == nullptr &&
                    dirty_payload_status_ == RecordStatus::NonExistent);
+            return queue_block_cmds_.Size() == 0;
+        }
+        else
+        {
+            return false;
         }
         return key_lock_.IsEmpty() && !HasReplayCommandList();
 #endif
@@ -436,6 +442,13 @@ public:
         }
     }
 
+    void PushBlockRequest(CcRequestBase *req)
+    {
+        queue_block_cmds_.Enqueue(std::move(req));
+    }
+
+    void PopBlockRequest(CcShard *ccs, txservice::TxObject *object);
+    void AbortBlockRequest(TxNumber txid, CcErrorCode err);
 #endif
 
 private:
@@ -451,6 +464,9 @@ private:
     // status of temporary object
     RecordStatus dirty_payload_status_{RecordStatus::NonExistent};
     std::unique_ptr<ReplayTxnCmdList> replay_cmd_list_;
+    // blocked commands that wait to pop and execute after the conditions are
+    // satisfied.
+    CircularQueue<CcRequestBase *> queue_block_cmds_;
 #endif
 };
 

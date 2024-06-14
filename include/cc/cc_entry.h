@@ -314,6 +314,29 @@ public:
         return ckpt_ts_;
     }
 #endif
+#ifdef ON_KEY_OBJECT
+    void PopBlockRequest(CcShard *ccs, txservice::TxObject *object)
+    {
+        if (cc_lock_and_extra_ != nullptr)
+        {
+            cc_lock_and_extra_->PopBlockRequest(ccs, object);
+        }
+    }
+    void PushBlockRequest(CcRequestBase *req)
+    {
+        if (cc_lock_and_extra_ != nullptr)
+        {
+            cc_lock_and_extra_->PushBlockRequest(req);
+        }
+    }
+    void AbortBlockRequest(TxNumber txid, CcErrorCode err)
+    {
+        if (cc_lock_and_extra_ != nullptr)
+        {
+            cc_lock_and_extra_->AbortBlockRequest(txid, err);
+        }
+    }
+#endif
 
     /**
      * @brief Updates the checkpoint timestamp such that it is no smaller than

@@ -435,7 +435,9 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
     else
     {
         // Otherwise, the lock should have been recycled.
-        assert(!lock->IsEmpty());
+        // assert(!lock->IsEmpty());
+        // If its owner KeyGapLockAndExtraData has blocked commands, the lock
+        // will not be recycled even if it is empty.
     }
 }
 }  // namespace txservice

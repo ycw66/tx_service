@@ -1057,12 +1057,18 @@ struct MultiObjectCommandOp : TransactionOperation
 
     std::vector<CcHandlerResult<ObjectCommandResult>> vct_hd_result_;
     std::atomic_int32_t atm_cnt_{0};
+    // For blocked commands, it is not need to wait all commands to finished, it
+    // will wait one or more of them finished and send abort requests for other
+    // block commands.
+    std::atomic_int32_t atm_block_cnt_{0};
     // The count of commands executed on local node. This variable is used to
     // ensure all local command executed to avoid that the local commands
     // execute after released and visit released memory to make process crash.
     std::atomic_int32_t atm_local_cnt_{0};
     // Fast path to know whether error occurs instead of scan "vct_hd_result_"
     std::atomic<CcErrorCode> atm_err_code_{CcErrorCode::NO_ERROR};
+    // Used to abort blocked commands
+    std::vector<CcHandlerResult<ObjectCommandResult>> vct_abort_hd_result_;
 
 #ifdef RANGE_PARTITION_ENABLED
     // The current position of TxKey* to get key_shard_code in

@@ -5410,15 +5410,14 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
                 }
 
                 CcErrorCode err = res->ErrorCode();
-                if (err == CcErrorCode::NO_ERROR)
-                {
-                    atm_cnt_.fetch_sub(1, std::memory_order_release);
-                }
-                else
+                if (err != CcErrorCode::NO_ERROR &&
+                    err != CcErrorCode::TASK_EXPIRED)
                 {
                     atm_err_code_.store(err, std::memory_order_relaxed);
-                    atm_cnt_.fetch_sub(1, std::memory_order_release);
                 }
+
+                atm_block_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                atm_cnt_.fetch_sub(1, std::memory_order_release);
             };
 
             vct_hd_result_.emplace_back(std::move(hr));
@@ -5426,8 +5425,45 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
     }
 
     atm_local_cnt_.store(0, std::memory_order_relaxed);
-    atm_cnt_.store(len, std::memory_order_relaxed);
     atm_err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+    uint32_t num = tx_req_->Command()->NumOfFinishBlockCommands();
+    if (num > 0)
+    {
+        vct_abort_hd_result_.clear();
+        for (size_t i = 0; i < len; i++)
+        {
+            CcHandlerResult<ObjectCommandResult> hr(txm_);
+            hr.Value().Reset();
+            hr.Reset();
+            hr.post_lambda_ = [this](CcHandlerResult<ObjectCommandResult> *res)
+            {
+                if (res->Value().is_local_)
+                {
+                    atm_local_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                }
+
+                CcErrorCode err = res->ErrorCode();
+                if (err != CcErrorCode::NO_ERROR &&
+                    err != CcErrorCode::TASK_EXPIRED)
+                {
+                    atm_err_code_.store(err, std::memory_order_relaxed);
+                }
+
+                atm_block_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                atm_cnt_.fetch_sub(1, std::memory_order_release);
+            };
+
+            vct_abort_hd_result_.emplace_back(std::move(hr));
+        }
+
+        atm_block_cnt_.store(num, std::memory_order_relaxed);
+    }
+    else
+    {
+        atm_block_cnt_.store(len, std::memory_order_relaxed);
+    }
+
+    atm_cnt_.store(len, std::memory_order_relaxed);
 
 #ifdef RANGE_PARTITION_ENABLED
     vct_key_shard_code_.resize(len);
@@ -5515,7 +5551,82 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
         return;
     }
 
-    if (atm_cnt_.load(std::memory_order_acquire) == 0)
+    // NumOfFinishBlockCommands()>0 means the current step is to run block
+    // commands.
+    if (tx_req_->Command()->NumOfFinishBlockCommands() > 0)
+    {
+        MultiObjectTxCommand *mcmd = tx_req_->Command();
+        if (!mcmd->IsExpired() &&
+            atm_block_cnt_.load(std::memory_order_relaxed) > 0)
+        {
+            return;
+        }
+
+        if (!mcmd->ForwardResult())
+        {
+            if (atm_cnt_.load(std::memory_order_relaxed) == 0)
+            {
+                txm->PostProcess(*this);
+            }
+            return;
+        }
+
+        const std::vector<TxKey> *vct_key = tx_req_->VctKey();
+        const std::vector<TxCommand *> *vct_cmd = tx_req_->VctCommand();
+        uint64_t current_ts =
+            dynamic_cast<LocalCcHandler *>(txm->cc_handler_)->GetTsBaseValue();
+
+        int local_cnt = 0;
+
+        for (size_t i = 0; i < vct_key->size(); i++)
+        {
+            TxCommand *cmd = vct_cmd->at(i);
+
+            if (vct_hd_result_[i].IsFinished() ||
+                cmd->GetBlockOperationType() != BlockOperation::Discard)
+            {
+                continue;
+            }
+
+            auto &hd_res = vct_abort_hd_result_[i];
+            const TxKey &key = vct_key->at(i);
+            uint32_t key_shard_code = 0;
+
+#ifdef RANGE_PARTITION_ENABLED
+            uint32_t residual = key.Hash() & 0x3FF;
+            key_shard_code = vct_key_shard_code_[i] << 10 | residual;
+#else
+            key_shard_code = vct_key_shard_code_[i].first;
+#endif
+            txm->cc_handler_->ObjectCommand(
+                *tx_req_->table_name_,
+                key,
+                key_shard_code,
+                *cmd,
+                txm->TxNumber(),
+                txm->tx_term_,
+                txm->command_id_.load(std::memory_order_relaxed),
+                current_ts,
+                hd_res,
+                txm->iso_level_,
+                txm->protocol_,
+                false);
+
+            if (hd_res.Value().is_local_)
+            {
+                local_cnt++;
+            }
+        }
+
+        if (local_cnt > 0)
+        {
+            // For abort commands, only local commands need to call SetFinished
+            // to avoid to visit freed memory.
+            atm_local_cnt_.fetch_add(local_cnt, std::memory_order_relaxed);
+            atm_cnt_.fetch_add(local_cnt, std::memory_order_release);
+        }
+    }
+    else if (atm_cnt_.load(std::memory_order_acquire) == 0)
     {
         txm->PostProcess(*this);
     }

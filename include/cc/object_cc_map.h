@@ -204,6 +204,24 @@ public:
             auto it = FindEmplace(*look_key, false, req.IsReadOnly());
             cce = it->second;
             ccp = it.GetPage();
+            if (cmd->GetBlockOperationType() == BlockOperation::Discard)
+            {
+                assert(!req.apply_and_commit_);
+                if (cce != nullptr)
+                {
+                    cce->AbortBlockRequest(txn, CcErrorCode::TASK_EXPIRED);
+                    cce->RecycleKeyLock(*shard_);
+                }
+
+                if (req.is_local_)
+                {
+                    // Only local command need to call SetFinished to avoid
+                    // visit freed memory.
+                    hd_res->SetError(CcErrorCode::TASK_EXPIRED);
+                }
+
+                return true;
+            }
 
             if (cce == nullptr)
             {
@@ -566,6 +584,7 @@ public:
             cce->SetPendingCmd(nullptr);
         }
 
+        ExecResult exec_rst = ExecResult::Fail;
         if (dirty_payload_status == RecordStatus::Normal)
         {
             std::unique_ptr<ValueT> dirty_payload = cce->DirtyPayload();
@@ -574,7 +593,9 @@ public:
             // Temporary object exists, execute and commit the command on
             // the temporary object.
             ValueT &dirty_object = *dirty_payload;
-            object_modified = cmd->ExecuteOn(dirty_object);
+            exec_rst = cmd->ExecuteOn(dirty_object);
+            object_modified = (exec_rst == ExecResult::Write);
+
             if (object_modified)
             {
                 CommitCommandOnDirtyPayload(
@@ -591,7 +612,8 @@ public:
             assert(cce->IsNullPendingCmd());
             assert(cce->payload_ != nullptr);
             ValueT &object = *cce->payload_;
-            object_modified = cmd->ExecuteOn(object);
+            exec_rst = cmd->ExecuteOn(object);
+            object_modified = (exec_rst == ExecResult::Write);
 
             if (object_modified && !req.apply_and_commit_)
             {
@@ -632,7 +654,29 @@ public:
             }
         }
 
-        if (req.apply_and_commit_)
+        if (exec_rst == ExecResult::Block)
+        {
+            assert(!req.apply_and_commit_);
+            cce->PushBlockRequest(&req);
+            cce->SetDirtyPayload(nullptr);
+            cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
+            ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+            obj_result.lock_acquired_ = LockType::NoLock;
+            return false;
+        }
+        else if (exec_rst == ExecResult::Unlock)
+        {
+            assert(!req.apply_and_commit_);
+            cce->SetDirtyPayload(nullptr);
+            cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
+            ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+            obj_result.lock_acquired_ = LockType::NoLock;
+            obj_result.commit_ts_ = shard_->Now();
+            obj_result.rec_status_ = RecordStatus::Deleted;
+            hd_res->SetFinished();
+            return true;
+        }
+        else if (req.apply_and_commit_)
         {
             if (object_modified)
             {
@@ -680,6 +724,10 @@ public:
             // Release and try to recycle the lock.
             ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
+            if (object_modified)
+            {
+                cce->PopBlockRequest(shard_, cce->payload_.get());
+            }
         }
 
         // Updates last_vali_ts after successfully acquiring the write
@@ -805,6 +853,7 @@ public:
         cce->SetPendingCmd(nullptr);
 
         ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
+        cce->PopBlockRequest(shard_, cce->payload_.get());
         req.Result()->SetFinished();
         return true;
     }
