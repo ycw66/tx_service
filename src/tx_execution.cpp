@@ -2506,7 +2506,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     if (scanner.Direction() == ScanDirection::Forward)
     {
         auto it = wset_iters_.find(scan_next.alias_);
-
         while (scanner.Status() == ScannerStatus::Open)
         {
             cc_scan_tuple = scanner.Current();
@@ -2606,10 +2605,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         cc_scan_tuple->rec_status_ != RecordStatus::Unknown
                             ? cc_scan_tuple->key_ts_
                             : 0;
+
                     bool add_res = rw_set_.AddRead(
                         cc_scan_tuple->cce_addr_, read_ts, &table_name);
                     if (!add_res)
                     {
+                        DrainScanner(&scanner, table_name);
                         bool_resp_->FinishError(
                             TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                         return;
@@ -2831,10 +2832,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         cc_scan_tuple->rec_status_ != RecordStatus::Unknown
                             ? cc_scan_tuple->key_ts_
                             : 0;
+
                     bool add_res = rw_set_.AddRead(
                         cc_scan_tuple->cce_addr_, read_ts, &table_name);
                     if (!add_res)
                     {
+                        DrainScanner(&scanner, table_name);
                         bool_resp_->FinishError(
                             TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                         return;
@@ -3499,6 +3502,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
     acquire_write.Reset(rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt(),
                         rw_set_.WriteSetSize());
     acquire_write.is_running_ = true;
@@ -4823,6 +4827,7 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
     if (!state_stack_.empty())
     {
         assert(state_stack_.back() == &post_process);
