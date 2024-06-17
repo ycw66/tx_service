@@ -194,11 +194,13 @@ public:
         return LoadRangeSliceStatus::Error;
     }
 
-    virtual bool UpdateRangeSlices(const TableName &table_name,
-                                   uint64_t schema_ts,
-                                   TxKey range_start_key,
-                                   std::vector<const StoreSlice *> slices,
-                                   bool update_slice_keys)
+    virtual bool UpdateRangeSlices(
+        const txservice::TableName &table_name,
+        uint64_t version,
+        txservice::TxKey range_start_key,
+        std::vector<const txservice::StoreSlice *> slices,
+        int32_t partition_id,
+        uint64_t range_version)
     {
         return false;
     }

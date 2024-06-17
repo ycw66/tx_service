@@ -619,13 +619,18 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
 }
 
 bool StoreRange::UpdateRangeSlicesInStore(const TableName &table_name,
-                                          uint64_t schema_ts,
-                                          bool update_slice_keys,
+                                          uint64_t ckpt_ts,
+                                          uint64_t range_version,
                                           store::DataStoreHandler *store_hd)
 {
     // no range lock is needed since it is updated only by checkpointer.
-    return store_hd->UpdateRangeSlices(
-        table_name, schema_ts, RangeStartTxKey(), Slices(), update_slice_keys);
+
+    return store_hd->UpdateRangeSlices(table_name,
+                                       ckpt_ts,
+                                       RangeStartTxKey(),
+                                       Slices(),
+                                       partition_id_,
+                                       range_version);
 }
 
 StoreRange::LoadSliceStatus StoreRange::LoadSlice(

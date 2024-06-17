@@ -973,7 +973,7 @@ public:
                    std::vector<FlushRecord> *archive_vec,
                    std::vector<TxKey> *mv_vec,
                    CcHandlerResult<Void> &hres,
-                   bool delay_update_ckpt_ts);
+                   bool during_range_split);
 
     // Return last succ ckpt timestamp on table.
     void EnqueueDataSyncTaskForTable(
@@ -1728,10 +1728,11 @@ private:
      * is expected that flush_batch is in the same range.
      */
     bool UpdateStoreSlice(const TableName &tbl_name,
-                          uint64_t schema_ts,
+                          uint64_t ckpt_ts,
                           NodeGroupId node_group_id,
                           std::vector<FlushRecord> &flush_batch,
-                          bool flush_res);
+                          bool flush_res,
+                          bool during_range_split);
 
     /**
      * FlushData Operation Interface
@@ -1745,7 +1746,7 @@ private:
                       std::unique_ptr<std::vector<FlushRecord>> archive_vec,
                       std::unique_ptr<std::vector<TxKey>> mv_base_vec,
                       TransactionExecution *data_sync_txm,
-                      bool delay_update_ckpt_ts,
+                      bool during_range_split,
                       size_t scan_task_worker_idx)
             : node_group_id_(data_sync_task->node_group_id_),
               node_group_term_(data_sync_task->node_group_term_),
@@ -1756,7 +1757,7 @@ private:
               archive_vec_(std::move(archive_vec)),
               mv_base_vec_(std::move(mv_base_vec)),
               vec_owner_(true),
-              delay_update_ckpt_ts_(delay_update_ckpt_ts),
+              during_range_split(during_range_split),
               scan_task_worker_idx_(scan_task_worker_idx),
               data_sync_task_(data_sync_task),
               data_sync_txm_(data_sync_txm),
@@ -1773,7 +1774,7 @@ private:
                       std::vector<FlushRecord> *archive_vec,
                       std::vector<TxKey> *mv_base_vec,
                       CcHandlerResult<Void> *res,
-                      bool delay_update_ckpt_ts)
+                      bool during_range_split)
             : node_group_id_(node_group_id),
               node_group_term_(node_group_term),
               data_sync_ts_(data_sync_ts),
@@ -1783,7 +1784,7 @@ private:
               archive_vec_ptr_(archive_vec),
               mv_base_vec_ptr_(mv_base_vec),
               vec_owner_(false),
-              delay_update_ckpt_ts_(delay_update_ckpt_ts),
+              during_range_split(during_range_split),
               hand_res_(res)
         {
         }
@@ -1800,7 +1801,7 @@ private:
         std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
         std::vector<TxKey> *mv_base_vec_ptr_{nullptr};
         bool vec_owner_{true};
-        bool delay_update_ckpt_ts_{false};
+        bool during_range_split{false};
         size_t scan_task_worker_idx_{0};
 
         // Increased by worker after finishing the retrieved work.

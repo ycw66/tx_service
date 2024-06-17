@@ -782,7 +782,7 @@ struct FlushDataOp : public TransactionOperation
     std::vector<FlushRecord> *archive_vec_{nullptr};
     std::vector<TxKey> *mv_vec_{nullptr};
     CcHandlerResult<Void> hd_result_;
-    bool delay_update_ckpt_ts_{false};
+    bool during_range_split{false};
 };
 
 struct KickoutDataOp : public TransactionOperation

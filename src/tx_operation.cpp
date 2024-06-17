@@ -3126,7 +3126,7 @@ void FlushDataOp::Forward(TransactionExecution *txm)
 void FlushDataOp::Reset()
 {
     hd_result_.Reset();
-    delay_update_ckpt_ts_ = false;
+    during_range_split = false;
 }
 
 KickoutDataOp::KickoutDataOp(TransactionExecution *txm) : hd_result_(txm)
@@ -3250,7 +3250,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     flush_op_.mv_vec_ = &mv_base_vec_;
     flush_op_.schema_ = table_schema_;
     flush_op_.node_group_ = txm->TxCcNodeId();
-    flush_op_.delay_update_ckpt_ts_ = true;
+    flush_op_.during_range_split = true;
 
     commit_acquire_all_write_op_.table_name_ = &range_table_name_;
     commit_acquire_all_write_op_.cc_op_ = CcOperation::Write;
@@ -3402,7 +3402,7 @@ void SplitFlushRangeOp::Reset(
     flush_op_.mv_vec_ = &mv_base_vec_;
     flush_op_.schema_ = table_schema_;
     flush_op_.node_group_ = txm->TxCcNodeId();
-    flush_op_.delay_update_ckpt_ts_ = true;
+    flush_op_.during_range_split = true;
 
     commit_acquire_all_write_op_.table_name_ = &range_table_name_;
     commit_acquire_all_write_op_.cc_op_ = CcOperation::Write;

@@ -5514,7 +5514,7 @@ void TransactionExecution::Process(FlushDataOp &flush_op)
         flush_op.archive_vec_,
         flush_op.mv_vec_,
         flush_op.hd_result_,
-        flush_op.delay_update_ckpt_ts_);
+        flush_op.during_range_split);
 }
 
 void TransactionExecution::PostProcess(FlushDataOp &flush_op)

@@ -1261,7 +1261,7 @@ void LocalCcShards::FlushData(const TableName &table_name,
                               std::vector<FlushRecord> *archive_vec,
                               std::vector<TxKey> *mv_vec,
                               CcHandlerResult<Void> &hres,
-                              bool delay_update_ckpt_ts)
+                              bool during_range_split)
 {
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     pending_flush_work_.emplace_back(node_group,
@@ -1273,7 +1273,7 @@ void LocalCcShards::FlushData(const TableName &table_name,
                                      archive_vec,
                                      mv_vec,
                                      &hres,
-                                     delay_update_ckpt_ts);
+                                     during_range_split);
     flush_data_worker_ctx_.cv_.notify_one();
 }
 
@@ -3854,7 +3854,8 @@ void LocalCcShards::SplitFlushRange(
         if (!store_hd_->GetNextRangePartitionId(table_name, &new_part_id))
         {
             LOG(ERROR) << "Split range failed due to unable to get next "
-                          "partition id.";
+                          "partition id. table_name = "
+                       << table_name.StringView();
 
             range_entry->UnPinStoreRange();
             data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
@@ -3951,7 +3952,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     size_t scan_task_worker_idx = cur_work.scan_task_worker_idx_;
 #endif
 
-    bool is_delay_update_ckpt_ts = cur_work.delay_update_ckpt_ts_;
+    bool during_range_split = cur_work.during_range_split;
     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_owner,
         archive_vec_owner;
     std::vector<FlushRecord> *data_sync_vec, *archive_vec;
@@ -4065,7 +4066,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             // entry in ccmap to latest checkpoint version's commit_ts.
             if (flush_ret)
             {
-                if (!is_delay_update_ckpt_ts)
+                if (!during_range_split)
                 {
 #ifdef RANGE_PARTITION_ENABLED
                     std::vector<std::vector<FlushRecord *>>
@@ -4113,10 +4114,11 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 #ifdef RANGE_PARTITION_ENABLED
                     // Update the slice size in data store.l
                     while (!UpdateStoreSlice(table_name,
-                                             schema->Version(),
+                                             data_sync_ts,
                                              node_group,
                                              *data_sync_vec,
-                                             true))
+                                             true,
+                                             during_range_split))
                     {
                         // Keep retrying here since we've finished the flush
                         // already, it's too expensive to start from the
@@ -4143,10 +4145,11 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 #ifdef RANGE_PARTITION_ENABLED
                 // Reset the post ckpt size if flush failed
                 bool res = UpdateStoreSlice(table_name,
-                                            schema->Version(),
+                                            data_sync_ts,
                                             node_group,
                                             *data_sync_vec,
-                                            false);
+                                            false,
+                                            during_range_split);
                 // We're only updating in memory status here, so
                 // this should always succeed.
                 assert(res);
@@ -4437,27 +4440,46 @@ void LocalCcShards::UpdateSliceSpecWorker()
 }
 
 bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
-                                     uint64_t schema_ts,
+                                     uint64_t ckpt_ts,
                                      NodeGroupId node_group_id,
                                      std::vector<FlushRecord> &data_sync_vec,
-                                     bool flush_res)
+                                     bool flush_res,
+                                     bool during_range_split)
 {
     bool success = true;
     assert(data_sync_vec.size());
-    // All records in data sync vec should belong to the same range.
-    StoreRange *range =
-        FindRange(table_name, node_group_id, data_sync_vec[0].Key());
-    assert(range);
+
+    uint64_t range_version = 0;
+    StoreRange *range = nullptr;
+
+    {
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        TableName range_table_name(table_name.StringView(),
+                                   TableType::RangePartition);
+
+        TableRangeEntry *entry = GetTableRangeEntryInternal(
+            range_table_name, node_group_id, data_sync_vec[0].Key());
+        assert(entry);
+
+        range_version = entry->Version();
+        // All records in data sync vec should belong to the same range.
+        range = entry->RangeSlices();
+        assert(range);
+    }
 
     // Update in-memory slice size
     bool range_updated = range->UpdateSliceSizeAfterFlush(flush_res);
 
-    // Update data store slice size
-    if (flush_res && range_updated)
+    if (!during_range_split)
     {
-        success = range->UpdateRangeSlicesInStore(
-            table_name, schema_ts, true, store_hd_);
+        // Update data store slice size
+        if (flush_res && range_updated)
+        {
+            success = range->UpdateRangeSlicesInStore(
+                table_name, ckpt_ts, range_version, store_hd_);
+        }
     }
+    // else: SplitFlushRangeOp will update range slice in store
     return success;
 }
 

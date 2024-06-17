@@ -170,6 +170,7 @@ public:
     bool Execute(CcShard &ccs) override;
     void AppendTableRanges(std::vector<InitRangeEntry> &&ranges);
     void AppendTableRange(InitRangeEntry &&range);
+
     bool EmptyRanges() const;
     void SetFinish(int err);
 
@@ -203,12 +204,45 @@ public:
         return requesters_.size();
     }
 
+    void SetSliceVersion(uint64_t slice_version)
+    {
+        slice_version_ = slice_version;
+    }
+
+    uint64_t SliceVersion()
+    {
+        return slice_version_;
+    }
+
+    void SetSegmentCnt(uint64_t segment_cnt)
+    {
+        segment_cnt_ = segment_cnt;
+    }
+
+    uint64_t SegmentCnt()
+    {
+        return segment_cnt_;
+    }
+
+    void SetCurrentSegmentId(uint64_t segment_id)
+    {
+        segment_id_ = segment_id;
+    }
+
+    uint64_t CurrentSegmentId() const
+    {
+        return segment_id_;
+    }
+
     const TableName table_name_;
     NodeGroupId cc_ng_id_;
     int64_t cc_ng_term_;
     TableRangeEntry *range_entry_;
     std::vector<std::pair<CcRequestBase *, CcShard *>> requesters_;
     std::vector<SliceInitInfo> slice_info_;
+    uint64_t slice_version_{0};
+    uint64_t segment_cnt_{0};
+    uint64_t segment_id_{0};
 };
 
 /**

@@ -547,7 +547,7 @@ public:
 
     static constexpr float_t key_cache_default_load_factor = 0.7;
 
-    static constexpr float_t new_range_load_factor = 0.7;
+    static constexpr float_t new_range_load_factor = 0.1;
 
     StoreRange(uint32_t partition_id,
                NodeGroupId range_owner,
@@ -579,8 +579,8 @@ public:
                           bool forward_dir);
 
     bool UpdateRangeSlicesInStore(const TableName &table_name,
-                                  uint64_t schema_ts,
-                                  bool update_slice_keys,
+                                  uint64_t ckpt_ts,
+                                  uint64_t range_version,
                                   store::DataStoreHandler *store_hd);
 
     bool UpdateSliceSpec(StoreSlice *slice,
