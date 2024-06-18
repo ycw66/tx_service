@@ -5328,6 +5328,14 @@ public:
             }
             else
             {
+                if (cce->data_store_size_ == INT32_MAX)
+                {
+                    // If data store size is still unavailable after the slice
+                    // is loaded from data store, that means this entry does not
+                    // exist in data store.
+                    cce->data_store_size_ = 0;
+                }
+
                 auto export_result =
                     ExportForCkpt(cce,
                                   *key,

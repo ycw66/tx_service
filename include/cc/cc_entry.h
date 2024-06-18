@@ -1054,8 +1054,7 @@ public:
             }
             else
             {
-                // TODO(ysw): Enable this assert after fix testcase
-                // assert(false);
+                assert(false);
                 // Mark the delta as unknwon
                 ref.delta_size_ = INT32_MAX;
             }
