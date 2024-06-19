@@ -1230,9 +1230,6 @@ public:
 
     store::DataStoreHandler *const store_hd_;
 
-    // Trigger ccmap heap defragment
-    void TriggerShardsHeapDefragment();
-
     /*
 
     table_schema_op_pool_ and split_flush_range_op_pool_ are introduced to
@@ -1828,15 +1825,6 @@ private:
     using TxGenerateSkStatus =
         std::unordered_map<uint64_t, RangeGenerateSkStatus>;
     std::unordered_map<NodeGroupId, TxGenerateSkStatus> generate_sk_status_;
-
-    WorkerThreadContext defragment_worker_ctx_;
-    // indicate defragment thread is working rather than waiting on cv_
-    bool defragment_working_{false};
-    // defragment triggered when the defragment thread is in working state, so
-    // it has more work to do after finishing this round
-    bool defragment_triggered_during_working_{false};
-    void DefragmentWorker();
-    void DefragmentWork(std::vector<uint16_t> &core_ids);
 
     // For cluster Publish message
     std::function<void(std::string_view, std::string_view)> publish_func_;

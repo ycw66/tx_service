@@ -47,6 +47,7 @@ class Checkpointer;
 class LocalCcShards;
 struct StatisticsEntry;
 struct CheckDeadLockResult;
+struct DefragShardHeapCc;
 
 #define LOCK_VECTOR_SHRINK_THRESHOLD 4u
 #define RESIZE_LOCK_LIMIT 3u
@@ -185,6 +186,16 @@ public:
         return shard_data_sync_scan_heap_.get();
     }
 
+    bool IsDefragHeapCcOnFly()
+    {
+        return defrag_heap_cc_on_fly_;
+    }
+
+    void SetDefragHeapCcOnFly(bool on_fly)
+    {
+        defrag_heap_cc_on_fly_ = on_fly;
+    }
+
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
      *
@@ -294,9 +305,8 @@ public:
     /**
      * Clean ccentry through the lru list
      * @return size_t clean count
-     *         bool   heap fragmentation threshold reached
      */
-    std::pair<size_t, bool> Clean();
+    size_t Clean();
 
     bool FlushEntryForTest(const TableName &tbl_name,
                            const TableSchema *tbl_schema,
@@ -707,6 +717,9 @@ public:
      */
     void VerifyLruList();
 
+    std::unordered_map<TableName, bool> GetCatalogTableNameSnapshot(
+        NodeGroupId cc_ng_id);
+
     const uint32_t node_id_;
     const uint16_t core_id_;
     const uint16_t core_cnt_;
@@ -784,6 +797,8 @@ private:
     // heap only for data sync scan
     std::unique_ptr<CcShardHeap> shard_data_sync_scan_heap_{nullptr};
     mi_threadid_t shard_heap_thread_id_{0};
+    // indicating the per shard defrag heap cc is on fly
+    bool defrag_heap_cc_on_fly_{false};
     size_t last_failed_collect_ts_{0};
 
     // all the lock acquire/release on this ccshard. It used to reduce the cost
@@ -899,6 +914,9 @@ private:
     // The number of active tx reading buckets without adding readlock on
     // ccentry in RangeBucketCcMap.
     uint32_t tx_cnt_reading_naked_buckets_{0};
+
+    // defrag heap cc for this shard
+    std::unique_ptr<DefragShardHeapCc> defrag_heap_cc_;
 
     friend class LocalCcHandler;
     friend class LocalCcShards;

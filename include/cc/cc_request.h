@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -2383,7 +2384,9 @@ public:
     {
         for (size_t i = 0; i < shard_cnt_; i++)
         {
-            memory_usage_kb_vec_.emplace_back(0);
+            memory_allocated_vec_.emplace_back(0);
+            memory_committed_vec_.emplace_back(0);
+            heap_full_vec_.emplace_back(false);
         }
     }
 
@@ -2396,8 +2399,10 @@ public:
         std::unique_lock<std::mutex> lk(mux_);
         ckpt_ts_ = std::min(ckpt_ts_, ccs.ActiveTxMinTs(cc_ng_id_));
         int64_t allocated, committed;
-        mi_thread_stats(&allocated, &committed);
-        memory_usage_kb_vec_[ccs.LocalCoreId()] = allocated / 1000;
+        bool full = ccs.GetShardHeap()->Full(&allocated, &committed);
+        memory_allocated_vec_[ccs.LocalCoreId()] = allocated;
+        memory_committed_vec_[ccs.LocalCoreId()] = committed;
+        heap_full_vec_[ccs.LocalCoreId()] = full;
 
         assert(finish_cnt_ < shard_cnt_);
         ++finish_cnt_;
@@ -2425,11 +2430,29 @@ public:
     uint64_t GetMemUsage() const
     {
         uint64_t total_usage = 0;
-        for (uint64_t shard_usage : memory_usage_kb_vec_)
+        for (uint64_t shard_usage : memory_allocated_vec_)
         {
             total_usage += shard_usage;
         }
-        return total_usage;
+        // return in kb
+        return total_usage / 1024;
+    }
+
+    void ShardMemoryUsageReport()
+    {
+        for (uint16_t core_id = 0; core_id < memory_allocated_vec_.size();
+             core_id++)
+        {
+            uint64_t &allocated = memory_allocated_vec_[core_id];
+            uint64_t &committed = memory_committed_vec_[core_id];
+            bool heap_full = heap_full_vec_[core_id];
+            LOG(INFO) << "ccs " << core_id << " memory usage report, committed "
+                      << committed << ", allocated " << allocated
+                      << ", frag ratio " << std::setprecision(2)
+                      << 100 * (static_cast<float>(committed - allocated) /
+                                committed)
+                      << " , heap full: " << heap_full;
+        }
     }
 
 private:
@@ -2438,7 +2461,9 @@ private:
     std::condition_variable cv_;
     std::atomic<size_t> finish_cnt_;
     size_t shard_cnt_;
-    std::vector<uint64_t> memory_usage_kb_vec_;
+    std::vector<uint64_t> memory_allocated_vec_;
+    std::vector<uint64_t> memory_committed_vec_;
+    std::vector<bool> heap_full_vec_;
     NodeGroupId cc_ng_id_;
 };
 
@@ -2664,178 +2689,242 @@ private:
     CcHandlerResult<RangeScanSliceResult> *hd_res_{nullptr};
 };
 
-struct DefragHeapCc : public CcRequestBase
+struct DefragShardHeapCc : public CcRequestBase
 {
 public:
-    DefragHeapCc() = delete;
-    ~DefragHeapCc() = default;
+    DefragShardHeapCc() = delete;
+    ~DefragShardHeapCc() = default;
 
-    DefragHeapCc(const TableName &table_name,
-                 const uint64_t &node_group_id,
-                 const int64_t &node_group_term,
-                 const uint16_t &core_cnt,
-                 const uint16_t &enqueued_core_cnt,
-                 const TxNumber &txn,
-                 const size_t &scan_batch_size,
-                 const uint64_t &schema_version)
-        : table_name_(&table_name),
-          node_group_id_(node_group_id),
-          node_group_term_(node_group_term),
-          core_cnt_(core_cnt),
-          unfinished_cnt_(enqueued_core_cnt),
-          scan_batch_size_(scan_batch_size),
-          schema_version_(schema_version),
-          mux_(),
-          cv_()
+    explicit DefragShardHeapCc(size_t scan_batch_size)
+        : scan_batch_size_(scan_batch_size), node_groups_(), tables_()
     {
-        tx_number_ = txn;
-        for (size_t i = 0; i < core_cnt; i++)
-        {
-            pause_pos_.emplace_back();
-            defrag_cnt_.emplace_back(0);
-            lock_cnt_.emplace_back(0);
-            kv_load_cnt_.emplace_back(0);
-            ckpt_cnt_.emplace_back(0);
-            non_frag_cnt_.emplace_back(0);
-            total_cnt_.emplace_back(0);
-            ccmp_key_defraged_.emplace_back(false);
-        }
-    };
+    }
 
-    bool ValidTermCheck()
+    DefragShardHeapCc(const DefragShardHeapCc &other) = delete;
+
+    DefragShardHeapCc(DefragShardHeapCc &&other)
+        : scan_batch_size_(other.scan_batch_size_),
+          node_groups_(std::move(other.node_groups_)),
+          tables_(std::move(other.tables_)),
+          err_(other.err_),
+          current_node_group_idx_(other.current_node_group_idx_),
+          current_table_idx_(other.current_table_idx_),
+          pause_pos_(std::move(other.pause_pos_)),
+          defrag_cnt_(other.defrag_cnt_),
+          lock_cnt_(other.lock_cnt_),
+          kv_load_cnt_(other.kv_load_cnt_),
+          ckpt_cnt_(other.ckpt_cnt_),
+          non_frag_cnt_(other.non_frag_cnt_),
+          total_cnt_(other.total_cnt_),
+          ccmp_key_defraged_(other.ccmp_key_defraged_),
+          run_count_(other.run_count_)
     {
-        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-        if (cc_ng_term < 0 || cc_ng_term != node_group_term_)
-        {
-            return false;
-        }
-        else
-        {
-            return true;
-        }
+    }
+
+    void Reset(std::vector<std::pair<uint32_t, int64_t>> node_groups)
+    {
+        assert(node_groups.size() > 0);
+        node_groups_ = std::move(node_groups);
+        current_node_group_idx_ = 0;
+        current_table_idx_ = -1;
+        err_ = CcErrorCode::NO_ERROR;
+
+        pause_pos_ = {TxKey(), false};
+        defrag_cnt_ = 0;
+        lock_cnt_ = 0;
+        kv_load_cnt_ = 0;
+        ckpt_cnt_ = 0;
+        non_frag_cnt_ = 0;
+        total_cnt_ = 0;
+        ccmp_key_defraged_ = false;
+        run_count_ = 0;
     }
 
     bool Execute(CcShard &ccs) override
     {
-        if (!ValidTermCheck())
+        run_count_++;
+        // dequeue wait list if heap is not full anymore every 20 scan batch
+        if (run_count_ % 20 == 0 && !ccs.GetShardHeap()->Full())
         {
-            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            ccs.DequeueWaitList();
+        }
+
+        if (static_cast<size_t>(current_node_group_idx_) < node_groups_.size())
+        {
+            auto &[current_node_group_id, current_node_group_term] =
+                node_groups_[current_node_group_idx_];
+
+            // check leader term of current node group
+            int64_t cc_ng_term =
+                Sharder::Instance().LeaderTerm(current_node_group_id);
+            if (cc_ng_term < 0 || cc_ng_term != current_node_group_term)
+            {
+                // move to process next node group if term not matched
+                tables_.clear();
+                current_table_idx_ = -1;
+                current_node_group_idx_++;
+                ccs.Enqueue(this);
+                return false;
+            }
+
+            // init tables for current node group
+            if (current_table_idx_ == -1)
+            {
+                std::unordered_map<TableName, bool> tables =
+                    ccs.GetCatalogTableNameSnapshot(current_node_group_id);
+                for (auto &table : tables)
+                {
+                    if (table.first.IsMeta())
+                    {
+                        continue;
+                    }
+                    tables_.push_back(table.first);
+                }
+                current_table_idx_ = 0;
+            }
+        }
+        else
+        {
+            // this is the end of the defrag heap cc scan
+            ccs.SetDefragHeapCcOnFly(false);
+            // deque cc request in wait list after
+            // defragmentation
+            ccs.DequeueWaitList();
+
+            int64_t allocated, committed;
+            mi_thread_stats(&allocated, &committed);
+            LOG(INFO) << "Memory state after defragmentation in ccs "
+                      << ccs.core_id_
+                      << ", total comitted memory: " << committed
+                      << ", actual used memory " << allocated << ", frag ratio "
+                      << std::setprecision(2)
+                      << 100 * (static_cast<float>(committed - allocated) /
+                                committed);
             return false;
         }
 
-        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
+        // if current table is drain, then move to next table
+        if (IsCurrentTableDrained())
+        {
+            if (static_cast<size_t>(current_table_idx_) < tables_.size())
+            {
+                if (total_cnt_ > 0)
+                {
+                    float defrag_ratio =
+                        static_cast<float>(defrag_cnt_) / total_cnt_;
+                    LOG(INFO) << "Defragmentation table "
+                              << tables_.at(current_table_idx_).String()
+                              << " finished on core " << ccs.core_id_
+                              << ", defrag count: " << defrag_cnt_
+                              << ", lock count: " << lock_cnt_
+                              << ", ckpt count: " << ckpt_cnt_
+                              << ", kv load count: " << kv_load_cnt_
+                              << ", non frag count: " << non_frag_cnt_
+                              << ", total count: " << total_cnt_
+                              << std::setprecision(2)
+                              << ", defrag ratio: " << 100 * defrag_ratio;
+                }
+                defrag_cnt_ = 0;
+                lock_cnt_ = 0;
+                ckpt_cnt_ = 0;
+                kv_load_cnt_ = 0;
+                non_frag_cnt_ = 0;
+                total_cnt_ = 0;
+                current_table_idx_++;
+            }
+
+            // if run out of tables
+            if (static_cast<size_t>(current_table_idx_) == tables_.size())
+            {
+                tables_.clear();
+                current_table_idx_ = -1;
+                current_node_group_idx_++;
+            }
+
+            // reset table state
+            ccmp_key_defraged_ = false;
+            pause_pos_ = {TxKey(), false};
+            ccs.Enqueue(this);
+            return false;
+        }
+
+        auto &table_name = tables_.at(current_table_idx_);
+
+        CcMap *ccm =
+            ccs.GetCcm(table_name, node_groups_[current_node_group_idx_].first);
         // if ccm is not exist anymore for some reason, just skip it
-        if (ccm == nullptr)
+        if (ccm != nullptr)
         {
-            SetFinish(ccs.core_id_);
-            return false;
+            ccm->Execute(*this);
         }
-
-        ccm->Execute(*this);
+        else
+        // if ccm if dropped, move to next table
+        {
+            pause_pos_ = {TxKey(), true};
+            current_table_idx_++;
+            ccs.Enqueue(this);
+        }
 
         return false;
     }
 
     void SetError(CcErrorCode err)
     {
-        std::lock_guard<std::mutex> lk(mux_);
         err_ = err;
-        --unfinished_cnt_;
-        if (unfinished_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
     }
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
-        std::lock_guard<std::mutex> lk(mux_);
         err_ = err_code;
-        --unfinished_cnt_;
-        if (unfinished_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
     }
 
     bool IsError()
     {
-        std::lock_guard<std::mutex> lk(mux_);
         return err_ != CcErrorCode::NO_ERROR;
     }
 
     CcErrorCode ErrorCode()
     {
-        std::lock_guard<std::mutex> lk(mux_);
         return err_;
     }
 
-    void SetFinish(size_t core_id)
+    bool IsCurrentTableDrained() const
     {
-        std::unique_lock<std::mutex> lk(mux_);
-        --unfinished_cnt_;
-        if (unfinished_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
+        return pause_pos_.second;
     }
 
-    bool IsDrained(size_t core_idx) const
+    uint32_t CurrentNodeGroupId()
     {
-        return pause_pos_[core_idx].second;
+        return node_groups_[current_node_group_idx_].first;
     }
 
-    uint32_t NodeGroupId()
+    std::pair<TxKey, bool> &PausePos()
     {
-        return node_group_id_;
+        return pause_pos_;
     }
 
-    void Wait()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
-    }
+    const size_t scan_batch_size_;
 
-    void Reset()
-    {
-        std::lock_guard<std::mutex> lk(mux_);
-        unfinished_cnt_ = core_cnt_;
-        for (size_t i = 0; i < core_cnt_; i++)
-        {
-            pause_pos_.emplace_back();
-        }
-        err_ = CcErrorCode::NO_ERROR;
-    }
-
-    std::pair<LruEntry *, bool> &PausePos(size_t core_idx)
-    {
-        return pause_pos_[core_idx];
-    }
-
-    const TableName *table_name_;
-    const uint64_t node_group_id_{0};
-    const int64_t node_group_term_{0};
-    const uint16_t core_cnt_{0};
-    uint32_t unfinished_cnt_;
-    const size_t scan_batch_size_{0};
-
-    std::vector<std::pair<LruEntry *, bool>> pause_pos_;
-    std::vector<size_t> defrag_cnt_;
-    std::vector<size_t> lock_cnt_;
-    std::vector<size_t> kv_load_cnt_;
-    std::vector<size_t> ckpt_cnt_;
-    std::vector<size_t> non_frag_cnt_;
-    std::vector<size_t> total_cnt_;
-    std::vector<bool> ccmp_key_defraged_;
-    // keep schema vesion after acquire read lock on catalog, to prevent the
-    // concurrency issue with Truncate Table, detail ref to tx issue #1130
-    // TODO(xxx) general solution for #1130
-    const uint64_t schema_version_{0};
-
+    std::vector<std::pair<uint32_t, int64_t>> node_groups_;
+    std::vector<TableName> tables_;
     CcErrorCode err_{CcErrorCode::NO_ERROR};
-    std::mutex mux_;
-    std::condition_variable cv_;
+    // the node groups
+    int32_t current_node_group_idx_{0};
+    // the table of current node groups being defragmented while this defrag cc
+    // is in flying
+    int32_t current_table_idx_{-1};
+
+    std::pair<TxKey, bool> pause_pos_;
+    size_t defrag_cnt_{0};
+    size_t lock_cnt_{0};
+    size_t kv_load_cnt_{0};
+    size_t ckpt_cnt_{0};
+    size_t non_frag_cnt_{0};
+    size_t total_cnt_{0};
+    bool ccmp_key_defraged_{0};
+    // count the executed times
+    size_t run_count_{0};
 };
 
 struct DataSyncScanCc : public CcRequestBase

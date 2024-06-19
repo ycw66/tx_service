@@ -5859,72 +5859,35 @@ public:
     }
 #endif
 
-    bool Execute(DefragHeapCc &req) override
+    bool Execute(DefragShardHeapCc &req) override
     {
-        size_t vec_idx = shard_->core_id_;
-        if (req.IsDrained(vec_idx))
-        {
-            // scan is already finished on this core
-            req.SetFinish(vec_idx);
-            return false;
-        }
-
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            return false;
-        }
-
-        if (table_schema_->Version() != req.schema_version_)
-        {
-            LOG(WARNING)
-                << "Table schema version mismatched for defragment heap "
-                   "scan, table name: "
-                << req.table_name_->String()
-                << " ,scan carried version: " << req.schema_version_
-                << " ,ccmap version: " << table_schema_->Version();
-            // yield util version matched
-            shard_->Enqueue(&req);
-            return false;
-        }
-
-        auto &pause_pos = req.PausePos(vec_idx);
-        auto &defrag_cnt = req.defrag_cnt_[vec_idx];
-        auto &lock_cnt = req.lock_cnt_[vec_idx];
-        auto &kv_load_cnt = req.kv_load_cnt_[vec_idx];
-        auto &ckpt_cnt = req.ckpt_cnt_[vec_idx];
-        auto &no_frag_cnt = req.non_frag_cnt_[vec_idx];
-        auto &total_cnt = req.total_cnt_[vec_idx];
-        std::vector<bool>::reference ccmp_key_defraged =
-            req.ccmp_key_defraged_[vec_idx];
+        auto &pause_pos = req.PausePos();
+        auto &defrag_cnt = req.defrag_cnt_;
+        auto &lock_cnt = req.lock_cnt_;
+        auto &kv_load_cnt = req.kv_load_cnt_;
+        auto &ckpt_cnt = req.ckpt_cnt_;
+        auto &no_frag_cnt = req.non_frag_cnt_;
+        auto &total_cnt = req.total_cnt_;
+        bool &ccmp_key_defraged = req.ccmp_key_defraged_;
 
         mi_heap_t *heap = mi_heap_get_default();
         // Defrag the keys in ccmp at first
         if (!ccmp_key_defraged)
         {
             typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator it;
-            if (pause_pos.first == nullptr)
+            TxKey &resume_tx_key = pause_pos.first;
+            if (resume_tx_key.KeyPtr() == nullptr)
             {
                 it = ccmp_.begin();
             }
             else
             {
-                CcEntry<KeyT, ValueT> *pause_entry =
-                    static_cast<CcEntry<KeyT, ValueT> *>(pause_pos.first);
-                CcPage<KeyT, ValueT> *ccp = static_cast<CcPage<KeyT, ValueT> *>(
-                    pause_entry->GetCcPage());
-                size_t idx_in_page = ccp->FindEntry(pause_entry);
-                KeyT &key = ccp->keys_[idx_in_page];
-                it = ccmp_.upper_bound(key);
+                const KeyT *resume_key = resume_tx_key.GetKey<KeyT>();
+                it = ccmp_.upper_bound(*resume_key);
                 if (it != ccmp_.begin())
                 {
                     it--;
                 }
-                ReleaseCceLock(pause_entry->GetKeyLock(),
-                               pause_entry,
-                               req.Txn(),
-                               cc_ng_id_);
             }
 
             // defrag ccmap key
@@ -5941,28 +5904,13 @@ public:
             if (it == ccmp_.end())
             {
                 ccmp_key_defraged = true;
-                pause_pos = {nullptr, false};
+                pause_pos = {TxKey(), false};
             }
             else
             {
-                // if this is batch pause, pause on the 1st ccentry of the
-                // CcPage
-                assert(pause_pos.second == false);
-                CcPage<KeyT, ValueT> &ccp = it->second;
-                assert(ccp.entries_.size() > 0);
-                CcEntry<KeyT, ValueT> *cce = ccp.entries_.at(0).get();
-                pause_pos.first = cce;
-                pause_pos.second = false;
-                bool add_intent = cce->GetOrCreateKeyLock(shard_, this, &ccp)
-                                      .AcquireReadIntent(req.Txn());
-                assert(add_intent);
-                (void) add_intent;
-                shard_->UpsertLockHoldingTx(req.Txn(),
-                                            req.node_group_term_,
-                                            cce,
-                                            false,
-                                            cc_ng_id_,
-                                            table_name_.Type());
+                const KeyT &key = it->first;
+                TxKey pause_key(&key);
+                pause_pos = {pause_key.Clone(), false};
             }
 
             shard_->Enqueue(&req);
@@ -5973,22 +5921,18 @@ public:
             Iterator it;
             Iterator end_it = End();
 
-            if (pause_pos.first == nullptr)
+            TxKey &resume_tx_key = pause_pos.first;
+            if (resume_tx_key.KeyPtr() == nullptr)
             {
                 it = Begin();
                 it++;
             }
             else
             {
-                CcEntry<KeyT, ValueT> *pause_entry =
-                    static_cast<CcEntry<KeyT, ValueT> *>(pause_pos.first);
-                CcPage<KeyT, ValueT> *ccp = static_cast<CcPage<KeyT, ValueT> *>(
-                    pause_entry->GetCcPage());
-                it = Iterator(pause_entry, ccp, &neg_inf_);
-                ReleaseCceLock(pause_entry->GetKeyLock(),
-                               pause_entry,
-                               req.Txn(),
-                               cc_ng_id_);
+                const KeyT *resume_key = resume_tx_key.GetKey<KeyT>();
+                std::pair<Iterator, ScanType> resume_pair =
+                    ForwardScanStart(*resume_key, true);
+                it = resume_pair.first;
             }
 
             for (size_t scan_cnt = 0;
@@ -6058,33 +6002,18 @@ public:
 
             if (it == end_it)
             {
-                // deque cc request in wait list after
-                // defragmentation
-                shard_->DequeueWaitList();
-                pause_pos = {nullptr, true};
-                // scan data drained
-                req.SetFinish(vec_idx);
+                pause_pos = {TxKey(), true};
             }
             else
             {
                 // set the pause_key_ to mark resume position
                 assert(pause_pos.second == false);
-                pause_pos.first = it->second;
+                TxKey pause_key(it->first);
+                pause_pos.first = pause_key.Clone();
                 pause_pos.second = false;
-                bool add_intent =
-                    it->second->GetOrCreateKeyLock(shard_, this, it.GetPage())
-                        .AcquireReadIntent(req.Txn());
-                assert(add_intent);
-                (void) add_intent;
-                shard_->UpsertLockHoldingTx(req.Txn(),
-                                            req.node_group_term_,
-                                            it->second,
-                                            false,
-                                            cc_ng_id_,
-                                            table_name_.Type());
-
-                shard_->Enqueue(&req);
             }
+
+            shard_->Enqueue(&req);
         }
         return false;
     }

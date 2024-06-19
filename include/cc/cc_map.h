@@ -50,7 +50,7 @@ struct KickoutCcEntryCc;
 struct ApplyCc;
 struct UploadTxCommandsCc;
 struct UploadBatchCc;
-struct DefragHeapCc;
+struct DefragShardHeapCc;
 
 enum struct ScanType : uint8_t
 {
@@ -149,7 +149,7 @@ public:
     virtual bool Execute(UploadBatchCc &req) = 0;
     virtual bool Execute(ApplyCc &req) = 0;
     virtual bool Execute(UploadTxCommandsCc &req) = 0;
-    virtual bool Execute(DefragHeapCc &req) = 0;
+    virtual bool Execute(DefragShardHeapCc &req) = 0;
 
     virtual size_t size() const = 0;
 

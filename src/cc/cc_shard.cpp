@@ -132,6 +132,9 @@ CcShard::CcShard(uint16_t core_id,
     }
 
     last_read_ts_ = Now();
+
+    // init defrag heap cc
+    defrag_heap_cc_ = std::make_unique<DefragShardHeapCc>(16);
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
@@ -754,9 +757,8 @@ void CcShard::VerifyLruList()
  * @brief Kick out freeable entries from ccmap.
  *
  * @return the number of freed entries in ccmap.
- *         if heap fragmentation reachs 20%
  */
-std::pair<size_t, bool> CcShard::Clean()
+size_t CcShard::Clean()
 {
     LruPage *ccp = clean_start_ccp_ ? clean_start_ccp_ : head_ccp_.lru_next_;
     size_t free_cnt = 0;
@@ -774,8 +776,39 @@ std::pair<size_t, bool> CcShard::Clean()
              static_cast<double>(heap_commit)) < 0.8)
         {
             heap_fragmented = true;
-            // if heap fragmentation happen, trigger defragment
-            local_shards_.TriggerShardsHeapDefragment();
+            // if heap fragmentation happen and no flying defrag heap cc,
+            // trigger defragment
+            if (!defrag_heap_cc_on_fly_)
+            {
+                defrag_heap_cc_on_fly_ = true;
+                std::vector<std::pair<uint32_t, int64_t>> node_groups_with_term;
+                std::vector<uint32_t> node_groups =
+                    Sharder::Instance().LocalNodeGroups();
+                for (auto node_group : node_groups)
+                {
+                    int64_t leader_term =
+                        Sharder::Instance().LeaderTerm(node_group);
+                    if (leader_term < 0)
+                    {
+                        continue;
+                    }
+                    node_groups_with_term.emplace_back(node_group, leader_term);
+                }
+
+                defrag_heap_cc_->Reset(std::move(node_groups_with_term));
+
+                LOG(INFO) << "Found memory fragementation in ccs " << core_id_
+                          << ", total comitted memory: " << heap_commit
+                          << ", actual used memory " << heap_alloc
+                          << ", frag ratio " << std::setprecision(2)
+                          << 100 *
+                                 (static_cast<float>(heap_commit - heap_alloc) /
+                                  heap_commit)
+                          << ", start defragmentation, node groups size: "
+                          << defrag_heap_cc_->node_groups_.size();
+
+                Enqueue(defrag_heap_cc_.get());
+            }
             break;
         }
         // merge and removal might happen during Clean so ccp and ccp->lru_next_
@@ -795,7 +828,7 @@ std::pair<size_t, bool> CcShard::Clean()
         NotifyCkpt();
     }
 
-    return {free_cnt, heap_fragmented};
+    return free_cnt;
 }
 
 /**
@@ -1867,6 +1900,13 @@ bool CcShardHeap::TryHeapCollect(bool force)
     {
         return false;
     }
+}
+
+std::unordered_map<TableName, bool> CcShard::GetCatalogTableNameSnapshot(
+    NodeGroupId cc_ng_id)
+{
+    uint64_t ckpt_ts = Now();
+    return local_shards_.GetCatalogTableNameSnapshot(cc_ng_id, ckpt_ts);
 }
 
 }  // namespace txservice

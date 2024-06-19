@@ -53,6 +53,7 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
         ccs->Enqueue(&ckpt_req);
     }
     ckpt_req.Wait();
+    ckpt_req.ShardMemoryUsageReport();
 
     uint64_t ckpt_ts = UINT64_MAX;
     ckpt_ts = ckpt_req.GetCkptTs();
