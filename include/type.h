@@ -495,7 +495,7 @@ inline static TableName cluster_config_ccm_name{
 
 #ifdef ON_KEY_OBJECT
 // Set buckets count to be the same as the slots count.
-inline static const uint16_t total_range_buckets = 0x3FFF;
+inline static const uint16_t total_range_buckets = 0x4000;
 #else
 inline static const uint16_t total_range_buckets = 4096;
 #endif
