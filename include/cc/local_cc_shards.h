@@ -23,6 +23,7 @@
 
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
+#include "cc_entry.h"
 #include "cc_shard.h"
 #include "data_sync_task.h"
 #include "error_messages.h"
@@ -762,6 +763,39 @@ public:
         }
         store_range->UpdateLastAccessedTs(ClockTs());
         return store_range->AddKey(key, core_id);
+    }
+
+    void EnqueueUpdateSliceTask(uint64_t ts,
+                                uint32_t ng_id,
+                                int64_t ng_term,
+                                TableName table_name,
+                                const TableSchema *schema,
+                                StoreRange *range,
+                                StoreSlice *slice,
+                                size_t start_idx,
+                                size_t end_idx,
+                                const std::vector<FlushRecord> &flush_vec,
+                                std::mutex &mux,
+                                std::condition_variable &cv,
+                                size_t &finish_cnt,
+                                bool &fail)
+    {
+        std::unique_lock<std::mutex> worker_lk(slice_update_worker_ctx_.mux_);
+        pending_slice_work_.emplace_back(ng_id,
+                                         ng_term,
+                                         ts,
+                                         table_name,
+                                         schema,
+                                         flush_vec,
+                                         range,
+                                         slice,
+                                         start_idx,
+                                         end_idx,
+                                         mux,
+                                         cv,
+                                         finish_cnt,
+                                         fail);
+        slice_update_worker_ctx_.cv_.notify_one();
     }
 
     template <typename KeyT>

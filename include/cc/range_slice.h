@@ -738,7 +738,7 @@ protected:
     // range size before it is flushed to kv. So we used a lower load factor to
     // reduce collision. An add collision might result in the whole key cache
     // being invalidated which is very expensive.
-    std::vector<std::unique_ptr<cuckoofilter::CuckooFilter<size_t, 4>>>
+    std::vector<std::unique_ptr<cuckoofilter::CuckooFilter<size_t, 12>>>
         key_cache_;
 
     friend class StoreSlice;
@@ -902,7 +902,7 @@ public:
             slice->SetKeyCacheValidity(core_id, false);
         }
         key_cache_[core_id] =
-            std::make_unique<cuckoofilter::CuckooFilter<size_t, 4>>(
+            std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
                 StoreRange::range_max_size *
                 StoreRange::key_cache_default_load_factor / 200 /
                 key_cache_.size());
@@ -1116,6 +1116,7 @@ public:
             bool found = ContainsKey(search_key, shard_id);
             if (!found)
             {
+                CollectCacheHit(*cc_shard);
                 // If the key is not found in range, directly return and skip
                 // loading slice from kv
                 pin_status = RangeSliceOpStatus::KeyNotExists;
@@ -1282,10 +1283,6 @@ public:
         }
         if (init || slice->IsValidInKeyCache(core_id))
         {
-            if (!init && slice->IsLoadingKeyCache(core_id))
-            {
-                LOG(INFO) << "slice " << slice << ", core " << core_id;
-            }
             assert(init || !slice->IsLoadingKeyCache(core_id));
             cuckoofilter::Status status = key_cache_[core_id]->Add(key.Hash());
             if (status == cuckoofilter::Status::Ok)

@@ -137,7 +137,7 @@ StoreRange::StoreRange(uint32_t partition_id,
             // Assume each record is 200 bytes, calculate the size of the key
             // cache.
             key_cache_.push_back(
-                std::make_unique<cuckoofilter::CuckooFilter<size_t, 4>>(
+                std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
                     StoreRange::range_max_size *
                     StoreRange::key_cache_default_load_factor / 200 /
                     core_cnt));
@@ -351,6 +351,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     CcShard *notify_cc_shard = local_cc_shards_.GetCcShard(0);
 
     uint8_t unused_prefetch_size = 0;
+    int sleep_time = 0;
 
     while (true)
     {
@@ -382,14 +383,14 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             // There is a data store error when loading the slice, retry
             // until succeed. sleep for a second before retrying so that we
             // don't consume too much data store traffic
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::seconds(sleep_time));
         }
         else if (status == RangeSliceOpStatus::Retry)
         {
             LOG(INFO) << "Waiting 1s for the prepare statement when loading "
                       << "the slice of table: " << table_name.Trace()
                       << " with slice start key: ";
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::seconds(sleep_time));
         }
         else
         {
@@ -404,7 +405,8 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                << table_name.StringView();
                     // sleep for a second before retrying so that we don't
                     // consume too much data store traffic
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    std::this_thread::sleep_for(
+                        std::chrono::seconds(sleep_time));
                 }
                 else if (notify_cc.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
                 {
@@ -419,6 +421,10 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                     return false;
                 }
             }
+        }
+        if (sleep_time < 10)
+        {
+            sleep_time += 2;
         }
         notify_cc.Reset();
     }

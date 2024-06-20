@@ -115,7 +115,7 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     size_t total_free = 0;
     while (true)
     {
-        auto [free_cnt, heap_fragmented] = shard.Clean();
+        auto free_cnt = shard.Clean();
         shard.VerifyLruList();
         if (free_cnt == 0)
         {

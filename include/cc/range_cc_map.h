@@ -537,6 +537,12 @@ public:
                         this->table_name_, req.NodeGroupId(), tx_key));
             assert(old_entry != nullptr);
             TemplateRangeInfo<KeyT> *old_info = old_entry->TypedRangeInfo();
+            NodeGroupId range_owner =
+                shard_
+                    ->GetRangeOwner(
+                        upload_range_rec->GetRangeInfo()->PartitionId(),
+                        this->cc_ng_id_)
+                    ->BucketOwner();
 
             if (shard_->core_id_ == 0)
             {
@@ -562,12 +568,7 @@ public:
                 // as the slice keys in the new ranges.
                 std::vector<SliceInitInfo> new_slice_info;
                 bool split_range_res;
-                NodeGroupId range_owner =
-                    shard_
-                        ->GetRangeOwner(
-                            upload_range_rec->GetRangeInfo()->PartitionId(),
-                            this->cc_ng_id_)
-                        ->BucketOwner();
+
                 if (range_owner != this->cc_ng_id_)
                 {
                     // For remote node groups, we won't bother initializing
@@ -724,7 +725,8 @@ public:
             }
 
             // Invalidate key cache of this range on this core
-            if (txservice_enable_key_cache && this->table_name_.IsBase())
+            if (txservice_enable_key_cache && this->table_name_.IsBase() &&
+                range_owner == this->cc_ng_id_)
             {
                 old_entry->TypedStoreRange()->InvalidateKeyCache(
                     shard_->core_id_);

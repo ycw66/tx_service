@@ -20,6 +20,7 @@
 #include "error_messages.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
+#include "range_slice.h"
 #include "remote_type.h"
 #include "rpc_closure.h"
 #include "sharder.h"
@@ -53,7 +54,12 @@ LocalCcShards::LocalCcShards(
     metrics::CommonLabels common_labels,
     std::unordered_map<TableName, std::string> *prebuilt_tables,
     std::function<void(std::string_view, std::string_view)> publish_func)
-    : range_slice_memory_limit_(((uint64_t) MB(memory_limit_mb)) / 20),
+    : range_slice_memory_limit_(
+          ((uint64_t) MB(memory_limit_mb)) /
+          (txservice_enable_key_cache
+               ? 10
+               : 20)),  // If key cache is included in range slice mem use 10%,
+                        // otherwise 5%
       store_hd_(store_hd),
       node_id_(node_id),
       timer_terminate_(false),
@@ -3745,25 +3751,20 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
             // data store, hand it off to the worker and move on
             // to the next slice.
             slice_load_cnt++;
-            {
-                std::unique_lock<std::mutex> worker_lk(
-                    slice_update_worker_ctx_.mux_);
-                pending_slice_work_.emplace_back(node_group_id,
-                                                 node_group_term,
-                                                 data_sync_ts,
-                                                 table_name,
-                                                 schema,
-                                                 flush_batch,
-                                                 store_range,
-                                                 curr_slice,
-                                                 slice_start_idx,
-                                                 slice_end_idx,
-                                                 work_sender_mux,
-                                                 work_sender_cv,
-                                                 slice_update_done,
-                                                 fail);
-                slice_update_worker_ctx_.cv_.notify_one();
-            }
+            EnqueueUpdateSliceTask(data_sync_ts,
+                                   node_group_id,
+                                   node_group_term,
+                                   table_name,
+                                   schema,
+                                   store_range,
+                                   curr_slice,
+                                   slice_start_idx,
+                                   slice_end_idx,
+                                   flush_batch,
+                                   work_sender_mux,
+                                   work_sender_cv,
+                                   slice_update_done,
+                                   fail);
         }
         batch_it = slice_end_it;
         slice_start_idx = slice_end_idx;
@@ -4104,7 +4105,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                 if (data_sync_vec->size())
                 {
 #ifdef RANGE_PARTITION_ENABLED
-                    // Update the slice size in data store.l
+                    // Update the slice size in data store.
                     while (!UpdateStoreSlice(table_name,
                                              data_sync_ts,
                                              node_group,

@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -173,10 +176,9 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        if ((hd_result_.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED ||
-             hd_result_.ErrorCode() ==
-                 CcErrorCode::REQUESTED_NODE_NOT_LEADER) &&
-            retry_num_ >= 0)
+        if (hd_result_.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED ||
+            hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+            hd_result_.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
         {
             // The read request was directed to a non-leader node. Updates
             // the leader cache.
@@ -423,7 +425,6 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
                           "or leader change, txn: "
                        << txm->TxNumber();
             write_entry->cce_addr_.SetCce(0, -1, 0);
-            continue;
         }
         else if (acquire_key_res.commit_ts_ == 0)
         {
@@ -437,7 +438,6 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
             // during TransactionExecution::Abort().
             write_entry->cce_addr_.SetCce(0, -1, 0);
             addr.SetTerm(-1);
-            continue;
         }
         else
         {
@@ -462,13 +462,20 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
 
         for (auto &[forward_shard_code, cce_addr] : write_entry->forward_addr_)
         {
-            const AcquireKeyResult &acquire_key_res =
-                acquire_key_vec[res_idx++];
-            const CcEntryAddr &addr = acquire_key_res.cce_addr_;
+            AcquireKeyResult &acquire_key_res = acquire_key_vec[res_idx++];
+            CcEntryAddr &addr = acquire_key_res.cce_addr_;
             term = addr.Term();
             if (term < 0)
             {
                 cce_addr.SetCce(0, -1, 0);
+            }
+            else if (acquire_key_res.commit_ts_ == 0)
+            {
+                // acqurie write failed on forward addr.
+                cce_addr.SetCce(0, -1, 0);
+                // Set term to -1 so that post write will not be sent to this
+                // addr.
+                addr.SetTerm(-1);
             }
             else
             {
@@ -1371,8 +1378,10 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
              slice_hd_result_.IsFinished())
     {
         if (slice_hd_result_.ErrorCode() ==
+                CcErrorCode::PIN_RANGE_SLICE_FAILED ||
+            slice_hd_result_.ErrorCode() ==
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
-            slice_hd_result_.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED)
+            slice_hd_result_.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
         {
             if (slice_hd_result_.ErrorCode() ==
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER)
@@ -3845,8 +3854,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                 while (!scan_data_drained)
                                 {
                                     for (size_t i = 0;
-                                         i < Sharder::Instance()
-                                                 .GetLocalCcShardsCount();
+                                         i < local_cc_shards.Count();
                                          i++)
                                     {
                                         local_cc_shards.EnqueueToCcShard(
@@ -4046,6 +4054,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         auto batch_it = data_sync_vec->begin();
                         size_t slice_start_idx = 0;
                         size_t slice_end_idx = 0;
+                        std::mutex mux;
+                        std::condition_variable cv;
+                        size_t finish_cnt = 0;
+                        size_t update_cnt = 0;
+                        bool update_fail = false;
 
                         while (batch_it != data_sync_vec->end())
                         {
@@ -4134,25 +4147,39 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                             if (slice_delta_size > 0 &&
                                 slice_size > StoreSlice::slice_upper_bound)
                             {
-                                if (!store_range_->UpdateSliceSpec(
-                                        curr_slice,
-                                        table_name,
-                                        table_schema,
-                                        node_group,
-                                        tx_term,
-                                        ckpt_ts,
-                                        *data_sync_vec,
-                                        slice_start_idx,
-                                        slice_end_idx))
-                                {
-                                    hd_res.SetError(
-                                        CcErrorCode::NG_TERM_CHANGED);
-                                    return;
-                                }
+                                update_cnt++;
+                                local_cc_shards.EnqueueUpdateSliceTask(
+                                    ckpt_ts,
+                                    node_group,
+                                    tx_term,
+                                    table_name,
+                                    table_schema,
+                                    store_range_,
+                                    curr_slice,
+                                    slice_start_idx,
+                                    slice_end_idx,
+                                    *data_sync_vec,
+                                    mux,
+                                    cv,
+                                    finish_cnt,
+                                    update_fail);
                             }
 
                             batch_it = slice_end_it;
                             slice_start_idx = slice_end_idx;
+                        }
+
+                        {
+                            std::unique_lock<std::mutex> slice_task_lk(mux);
+                            cv.wait(slice_task_lk,
+                                    [&finish_cnt, &update_cnt]
+                                    { return update_cnt == finish_cnt; });
+                            if (update_fail)
+                            {
+                                hd_res.SetError(CcErrorCode::NG_TERM_CHANGED);
+                                LOG(INFO) << "update slice failed";
+                                return;
+                            }
                         }
 
                         hd_res.SetFinished();
