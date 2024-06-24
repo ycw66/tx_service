@@ -5333,17 +5333,16 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
     }
     else if (hd_result_.IsFinished())
     {
-        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
-        {
-            // The request was directed to a non-leader node. Updates the
-            // leader cache.
-            Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
-            if (retry_num_ > 0)
-            {
-                ReRunOp(txm);
-                return;
-            }
-        }
+        CODE_FAULT_INJECTOR("ObjectCommandOp_NodeNotLeader", {
+            LOG(INFO) << "FaultInject  ObjectCommandOp_NodeNotLeader";
+            hd_result_.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            FaultInject::Instance().InjectFault("ObjectCommandOp_NodeNotLeader",
+                                                "remove");
+        });
+        // If ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER, it can not
+        // retry, because we cannot know if the command has executed or not,
+        // some commands will lead to unpredictable result, for example lpop
+        // rpush.
         txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut() && !hd_result_.Value().is_local_)
