@@ -647,22 +647,18 @@ public:
      * "commit_ts" of CcEntry to "archives_"; false - not move the payload ,
      * just copy "payload_status" and "commit_ts". For "PkIndex", we should set
      * it to "true", for "SkIndex", we should set it to "false".
-     *
-     * @return New memory usage caused by archive
      */
-    size_t ArchiveBeforeUpdate(TableType tbl_type)
+    void ArchiveBeforeUpdate(TableType tbl_type)
     {
         const RecordStatus rec_status = PayloadStatus();
         if (rec_status == RecordStatus::Unknown)
         {
-            return 0;
+            return;
         }
 
-        size_t mem_usage = 0;
         if (archives_ == nullptr)
         {
             archives_ = std::make_unique<std::list<VersionRecord<ValueT>>>();
-            mem_usage += sizeof(*archives_);
         }
 
         const uint64_t commit_ts = CommitTs();
@@ -680,27 +676,22 @@ public:
         {
             archives_->emplace_front(nullptr, commit_ts, rec_status);
         }
-        mem_usage += sizeof(VersionResultRecord<ValueT>);
-        return mem_usage;
     }
 
     /**
      * @brief Add a batch of historical versions.
      *@param v_recs versions descending ordered by commit_ts
-     * @return New memory usage caused by archive
      */
-    size_t AddArchiveRecords(std::vector<VersionTxRecord> &v_recs)
+    void AddArchiveRecords(std::vector<VersionTxRecord> &v_recs)
     {
         if (v_recs.size() == 0)
         {
-            return 0;
+            return;
         }
 
-        size_t mem_usage = 0U;
         if (archives_ == nullptr)
         {
             archives_ = std::make_unique<std::list<VersionRecord<ValueT>>>();
-            mem_usage += sizeof(*archives_);
         }
 
         auto it = archives_->begin();
@@ -720,27 +711,22 @@ public:
                 it->payload_status_ = vrec.record_status_;
                 it->payload_.reset(
                     static_cast<ValueT *>(vrec.record_.release()));
-
-                mem_usage += it->MemUsage();
             }
             it++;
         }
-        return mem_usage;
     }
 
-    size_t AddArchiveRecord(std::shared_ptr<ValueT> payload_ptr,
-                            RecordStatus payload_status,
-                            uint64_t commit_ts)
+    void AddArchiveRecord(std::shared_ptr<ValueT> payload_ptr,
+                          RecordStatus payload_status,
+                          uint64_t commit_ts)
     {
         if (commit_ts == 1U && payload_status == RecordStatus::Deleted)
         {
-            return 0;
+            return;
         }
-        size_t mem_usage = 0U;
         if (archives_ == nullptr)
         {
             archives_ = std::make_unique<std::list<VersionRecord<ValueT>>>();
-            mem_usage += sizeof(*archives_);
         }
 
         auto it = archives_->begin();
@@ -757,10 +743,7 @@ public:
             it->commit_ts_ = commit_ts;
             it->payload_status_ = payload_status;
             it->payload_ = payload_ptr;
-            mem_usage += it->MemUsage();
         }
-
-        return mem_usage;
     }
 
     /**
@@ -769,26 +752,23 @@ public:
      * 'oldest_active_tx_ts'.
      * eg:  achives[10,8,4,3,1], oldest_active_tx_ts= 5;
      * after kicking out, archives will be [10,8,4].
-     *
-     * @return mem usage of archive records kicked out
      */
-    size_t KickOutArchiveRecords(uint64_t oldest_active_tx_ts)
+    void KickOutArchiveRecords(uint64_t oldest_active_tx_ts)
     {
         if (archives_ == nullptr)
         {
-            return 0;
+            return;
         }
 
         if (CommitTs() <= oldest_active_tx_ts)
         {
-            size_t mem_usage = GetArchiveMemUsage();
             archives_.reset(nullptr);
-            return mem_usage;
+            return;
         }
 
         if (archives_->size() <= 1)
         {
-            return 0;
+            return;
         }
 
         auto it = archives_->begin();
@@ -801,17 +781,10 @@ public:
         }
         if (it == archives_->end())
         {
-            return 0;
+            return;
         }
         it++;
-        size_t mem_usage = 0U;
-        for (auto it1 = it; it1 != archives_->end(); it1++)
-        {
-            mem_usage += it1->MemUsage();
-        }
         archives_->erase(it, archives_->end());
-
-        return mem_usage;
     }
 
     size_t GetArchiveMemUsage() const

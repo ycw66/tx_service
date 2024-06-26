@@ -475,6 +475,7 @@ message ReadRequest {
     CcProtocolType protocol = 10;
     bool is_for_write = 11;
     bool is_covering_keys = 12;
+    bool point_read_on_miss = 13;
 }
 
 message ReadResponse {

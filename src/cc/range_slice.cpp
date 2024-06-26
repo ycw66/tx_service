@@ -529,7 +529,11 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     uint64_t post_flush_size = slice->PostCkptSize();
     assert(post_flush_size != UINT64_MAX);
     uint32_t subslice_cnt =
-        post_flush_size / (StoreSlice::slice_upper_bound * 0.8) + 1;
+        post_flush_size / (StoreSlice::slice_upper_bound * 0.5);
+    if (subslice_cnt < 2)
+    {
+        subslice_cnt = 2;
+    }
     uint32_t avg_subslice_size = post_flush_size / subslice_cnt;
     std::vector<SliceChangeInfo> split_keys;
     split_keys.reserve(subslice_cnt);
@@ -687,7 +691,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
 
         slice_lk.unlock();
         slice.fetch_slice_cc_->LoadRequest()->start_ = metrics::Clock::now();
-        store::DataStoreHandler::LoadRangeSliceStatus kv_load_status =
+        store::DataStoreHandler::DataStoreOpStatus kv_load_status =
             store_hd->LoadRangeSlice(tbl_name,
                                      kv_info,
                                      partition_id_,
@@ -702,9 +706,9 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
 
         switch (kv_load_status)
         {
-        case store::DataStoreHandler::LoadRangeSliceStatus::Success:
+        case store::DataStoreHandler::DataStoreOpStatus::Success:
             return LoadSliceStatus::Success;
-        case store::DataStoreHandler::LoadRangeSliceStatus::Retry:
+        case store::DataStoreHandler::DataStoreOpStatus::Retry:
             // Put the ccrequests back to txprocessor queue except the first
             // one which will be put back to txprocessor queue by the caller.
             for (size_t i = 1; i < slice.cc_queue_.size(); ++i)

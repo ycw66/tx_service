@@ -1746,7 +1746,8 @@ void TransactionExecution::Process(ReadOperation &read)
                               read.iso_level_,
                               read.protocol_,
                               read.read_tx_req_->is_for_write_,
-                              is_covering_keys);
+                              is_covering_keys,
+                              read.read_tx_req_->point_read_on_cache_miss_);
 
             if (!read.hd_result_.Value().is_local_)
             {
@@ -6680,7 +6681,9 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
                           batch_read_op.hd_result_vec_[idx],
                           iso_level,
                           protocol_,
-                          batch_read_op.batch_read_tx_req_->is_for_write_);
+                          batch_read_op.batch_read_tx_req_->is_for_write_,
+                          false,
+                          true);
     }
 
     StartTiming();

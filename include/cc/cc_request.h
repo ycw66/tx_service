@@ -1085,6 +1085,17 @@ private:
 struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>
 {
 public:
+    enum BlockType
+    {
+        NotBlocked,
+        BlockByLock,
+        BlockByKvFetch,
+        // If CcEntry's CommitTs is less than read_ts when do
+        // "PkReadCorrespondingSk" or "SnapshotRead", there must be a
+        // PostWriteCc request has not done, then, this read should wait until
+        // it is completed.
+        BlockByPostWrite
+    };
     ReadCc()
         : key_ptr_(nullptr),
           key_str_(nullptr),
@@ -1150,6 +1161,37 @@ public:
         return true;
     }
 
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        if (BlockedBy() == BlockByKvFetch)
+        {
+            // Aborted by data store error, release the acquired lock on cce.
+            LruEntry *entry = CcePtr();
+            assert(entry->PayloadStatus() == RecordStatus::Unknown);
+            LockType lk_type = Result()->Value().lock_type_;
+            LruPage *page = entry->GetCcPage();
+            Ccm()->ReleaseCceLock(
+                entry->GetKeyLock(),
+                entry,
+                Txn(),
+                NodeGroupId(),
+                lk_type == LockType::NoLock ? LockType::ReadIntent : lk_type);
+
+            if (entry->IsFree())
+            {
+                // cce is useless since the status is unknown. CleanEntry will
+                // remove the cce if there's no lock on it.
+                Ccm()->CleanEntry(entry, page);
+            }
+        }
+        bool finished = res_->SetError(err_code);
+
+        if (finished)
+        {
+            Free();
+        }
+    }
+
     void Reset(const TableName *tn,
                const TxKey *key,
                uint32_t key_shard_code,
@@ -1164,7 +1206,8 @@ public:
                bool is_for_write = false,
                bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr,
-               bool is_in_recovering = false)
+               bool is_in_recovering = false,
+               bool point_read_on_miss = false)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -1181,9 +1224,10 @@ public:
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = true;
-        is_wait_for_post_write_ = false;
         is_in_recovering_ = is_in_recovering;
         is_covering_keys_ = is_covering_keys;
+        point_read_on_cache_miss_ = point_read_on_miss;
+        blk_type_ = NotBlocked;
 
         ccm_ = nullptr;
         if (res->Value().cce_addr_.CcePtr() != 0)
@@ -1209,7 +1253,8 @@ public:
                CcProtocol protocol,
                bool is_for_write = false,
                bool is_covering_keys = false,
-               std::vector<VersionTxRecord> *archives = nullptr)
+               std::vector<VersionTxRecord> *archives = nullptr,
+               bool point_read_on_miss = false)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -1226,9 +1271,10 @@ public:
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = false;
-        is_wait_for_post_write_ = false;
         is_in_recovering_ = false;
         is_covering_keys_ = is_covering_keys;
+        point_read_on_cache_miss_ = point_read_on_miss;
+        blk_type_ = NotBlocked;
 
         ccm_ = nullptr;
         if (res->Value().cce_addr_.CcePtr() != 0)
@@ -1254,7 +1300,8 @@ public:
                CcProtocol protocol,
                bool is_for_write = false,
                bool is_covering_keys = false,
-               std::vector<VersionTxRecord> *archives = nullptr)
+               std::vector<VersionTxRecord> *archives = nullptr,
+               bool point_read_on_miss = false)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -1271,9 +1318,10 @@ public:
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = true;
-        is_wait_for_post_write_ = false;
         is_in_recovering_ = false;
         is_covering_keys_ = is_covering_keys;
+        point_read_on_cache_miss_ = point_read_on_miss;
+        blk_type_ = NotBlocked;
 
         ccm_ = nullptr;
         if (res->Value().cce_addr_.CcePtr() != 0)
@@ -1361,16 +1409,6 @@ public:
         return is_local_;
     }
 
-    void SetIsWaitForPostWrite(bool is_wait)
-    {
-        is_wait_for_post_write_ = is_wait;
-    }
-
-    bool IsWaitForPostWrite() const
-    {
-        return is_wait_for_post_write_;
-    }
-
     bool IsInRecovering() const
     {
         return is_in_recovering_;
@@ -1379,6 +1417,21 @@ public:
     bool IsCoveringKeys() const
     {
         return is_covering_keys_;
+    }
+
+    bool PointReadOnCacheMiss() const
+    {
+        return point_read_on_cache_miss_;
+    }
+
+    BlockType BlockedBy() const
+    {
+        return blk_type_;
+    }
+
+    void SetBlockType(BlockType blk)
+    {
+        blk_type_ = blk;
     }
 
 private:
@@ -1408,14 +1461,13 @@ private:
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
     bool is_local_{true};
-    // If CcEntry's CommitTs is less than read_ts when do
-    // "PkReadCorrespondingSk" or "SnapshotRead", there must be a PostWriteCc
-    // request has not done, then, this read should wait until it is completed.
-    bool is_wait_for_post_write_{false};
+
     // Is issued in a recovering process
     bool is_in_recovering_{false};
     // Reserved for unique sk read
     bool is_covering_keys_{false};
+    bool point_read_on_cache_miss_{false};
+    BlockType blk_type_{BlockType::NotBlocked};
 
     std::vector<VersionTxRecord> *archives_{nullptr};
 };
@@ -4996,6 +5048,37 @@ public:
         cce_ptr_ = nullptr;
         block_type_ = ApplyBlockType::NoBlocking;
         apply_and_commit_ = commit;
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        if (block_type_ == ApplyBlockType::BlockOnFetch)
+        {
+            // Aborted by data store error, release the acquired lock on cce.
+            LruEntry *entry = CcePtr();
+            assert(entry->PayloadStatus() == RecordStatus::Unknown);
+            LockType lk_type = Result()->Value().lock_acquired_;
+            LruPage *page = entry->GetCcPage();
+            Ccm()->ReleaseCceLock(
+                entry->GetKeyLock(),
+                entry,
+                Txn(),
+                NodeGroupId(),
+                lk_type == LockType::NoLock ? LockType::ReadIntent : lk_type);
+
+            if (entry->IsFree())
+            {
+                // cce is useless since the status is unknown. CleanEntry will
+                // remove the cce if there's no lock on it.
+                Ccm()->CleanEntry(entry, page);
+            }
+        }
+        bool finished = res_->SetError(err_code);
+
+        if (finished)
+        {
+            Free();
+        }
     }
 
     bool IsLocal() const

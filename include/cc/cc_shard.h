@@ -32,6 +32,7 @@
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "sharder.h"
+#include "store/data_store_handler.h"
 #include "system_handler.h"
 #include "tentry.h"
 #include "tx_service_common.h"
@@ -645,7 +646,8 @@ public:
                      CcMap *ccm,
                      NodeGroupId cc_ng_id,
                      int64_t cc_ng_term,
-                     CcRequestBase *requester);
+                     CcRequestBase *requester,
+                     int32_t range_id = -1);
     void RemoveFetchRecordRequest(LruEntry *cce);
 
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,

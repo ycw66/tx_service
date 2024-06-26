@@ -813,7 +813,8 @@ public:
                                RangeSliceOpStatus &pin_status,
                                bool force_load,
                                uint8_t prefetch_size,
-                               bool check_key_cache = false)
+                               bool check_key_cache = false,
+                               bool no_load_on_miss = false)
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -885,7 +886,8 @@ public:
                                       pin_status,
                                       last_pinned_slice,
                                       check_key_cache,
-                                      cc_shard->core_id_);
+                                      cc_shard->core_id_,
+                                      no_load_on_miss);
     }
 
     template <typename KeyT>

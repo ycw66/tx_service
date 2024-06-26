@@ -1,5 +1,7 @@
 #include "cc/cc_shard.h"
 
+#include <bthread/remote_task_queue.h>
+
 #include <chrono>  // std::chrono
 #include <cstdint>
 #include <string>
@@ -13,6 +15,7 @@
 #include "error_messages.h"
 #include "range_slice.h"
 #include "sharder.h"  // Sharder
+#include "store/data_store_handler.h"
 #include "tx_start_ts_collector.h"
 
 namespace txservice
@@ -1211,7 +1214,8 @@ void CcShard::FetchRecord(const TableName &table_name,
                           CcMap *ccm,
                           NodeGroupId cc_ng_id,
                           int64_t cc_ng_term,
-                          CcRequestBase *requester)
+                          CcRequestBase *requester,
+                          int32_t range_id)
 {
     auto tab_it = fetch_record_reqs_.try_emplace(cce,
                                                  &table_name,
@@ -1221,13 +1225,21 @@ void CcShard::FetchRecord(const TableName &table_name,
                                                  ccm,
                                                  *this,
                                                  cc_ng_id,
-                                                 cc_ng_term);
+                                                 cc_ng_term,
+                                                 range_id);
     FetchRecordCc *fetch_req = &(tab_it.first->second);
 
     fetch_req->AddRequester(requester);
     if (fetch_req->RequesterCount() == 1)
     {
-        local_shards_.store_hd_->FetchRecord(fetch_req);
+        auto res = local_shards_.store_hd_->FetchRecord(fetch_req);
+        if (res == store::DataStoreHandler::DataStoreOpStatus::Retry)
+        {
+            // Remove fetch req
+            RemoveFetchRecordRequest(cce);
+            // Renqueue the requester to retry.
+            Enqueue(core_id_, requester);
+        }
     }
 }
 

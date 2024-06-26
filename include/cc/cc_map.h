@@ -159,12 +159,15 @@ public:
         bool *is_success = nullptr) = 0;
     virtual void Clean() = 0;
 
-    virtual void BackFill(LruEntry *cce,
+    virtual void CleanEntry(LruEntry *entry, LruPage *page) = 0;
+
+    virtual bool BackFill(LruEntry *cce,
                           uint64_t commit_ts,
                           RecordStatus status,
                           std::unique_ptr<TxRecord> rec_uptr)
     {
         assert(false);
+        return false;
     }
 
     /**
@@ -311,5 +314,7 @@ protected:
      */
     uint64_t schema_ts_{1};
     const TableSchema *table_schema_;
+    friend struct ReadCc;
+    friend struct ApplyCc;
 };
 }  // namespace txservice

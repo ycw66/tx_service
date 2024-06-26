@@ -60,7 +60,7 @@ struct DataStoreSearchCond
 class DataStoreHandler
 {
 public:
-    enum struct LoadRangeSliceStatus
+    enum struct DataStoreOpStatus
     {
         Success = 0,
         Retry,
@@ -154,7 +154,7 @@ public:
                       const txservice::TableSchema *table_schema) = 0;
 
     // Fetch record from datastore asynchronously.
-    virtual void FetchRecord(FetchRecordCc *fetch_cc)
+    virtual DataStoreOpStatus FetchRecord(FetchRecordCc *fetch_cc)
     {
         assert(false);
     }
@@ -185,13 +185,13 @@ public:
             &sample_pool_map,
         uint64_t version) = 0;
 
-    virtual LoadRangeSliceStatus LoadRangeSlice(
+    virtual DataStoreOpStatus LoadRangeSlice(
         const TableName &table_name,
         const KVCatalogInfo *kv_info,
         uint32_t partition_id,
         LoadRangeSliceRequest *load_slice_req)
     {
-        return LoadRangeSliceStatus::Error;
+        return DataStoreOpStatus::Error;
     }
 
     virtual bool UpdateRangeSlices(

@@ -197,6 +197,7 @@ public:
                   uint64_t ts = 0,
                   bool is_covering_keys = false,
                   bool is_recovering = false,
+                  bool point_read_on_cache_miss = false,
                   const std::function<void()> *yield_fptr = nullptr,
                   const std::function<void()> *resume_fptr = nullptr,
                   TransactionExecution *txm = nullptr)
@@ -210,7 +211,8 @@ public:
           read_local_(read_local),
           ts_(ts),
           is_covering_keys_(is_covering_keys),
-          is_recovering_(is_recovering)
+          is_recovering_(is_recovering),
+          point_read_on_cache_miss_(point_read_on_cache_miss)
     {
     }
 
@@ -222,7 +224,8 @@ public:
              bool read_local = false,
              uint64_t ts = 0,
              bool is_covering_keys = false,
-             bool is_recovering = false)
+             bool is_recovering = false,
+             bool point_read_on_cache_miss = false)
     {
         tab_name_ = tab_name;
         key_ = key;
@@ -234,6 +237,7 @@ public:
         ts_ = ts;
         is_covering_keys_ = is_covering_keys;
         is_recovering_ = is_recovering;
+        point_read_on_cache_miss_ = point_read_on_cache_miss;
     }
 
     void Set(const TableName *tab_name,
@@ -244,7 +248,8 @@ public:
              bool read_local = false,
              uint64_t ts = 0,
              bool is_covering_keys = false,
-             bool is_recovering = false)
+             bool is_recovering = false,
+             bool point_read_on_cache_miss = false)
     {
         tab_name_ = tab_name;
         key_str_ = key_str;
@@ -256,6 +261,7 @@ public:
         ts_ = ts;
         is_covering_keys_ = is_covering_keys;
         is_recovering_ = is_recovering;
+        point_read_on_cache_miss_ = point_read_on_cache_miss;
     }
 
     const TableName *tab_name_;
@@ -298,6 +304,8 @@ public:
     // rely on candidate leader term instead of current term to decide
     // if node is valid leader.
     bool is_recovering_;
+
+    bool point_read_on_cache_miss_;
 };
 
 struct ReadOutsideTxRequest

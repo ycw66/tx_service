@@ -216,7 +216,8 @@ public:
                       IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                       CcProtocol proto = CcProtocol::OCC,
                       bool is_for_write = false,
-                      bool is_covering_keys = false) = 0;
+                      bool is_covering_keys = false,
+                      bool point_read_on_miss = false) = 0;
 
     /**
      * @brief Brings the previously-read key's record into the cc map for

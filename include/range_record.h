@@ -559,7 +559,10 @@ public:
                 init_key_cache,
                 empty_range);
 
-        range_slices->InitSlices(std::move(slices));
+        if (!empty_range)
+        {
+            range_slices->InitSlices(std::move(slices));
+        }
         range_slices_ = std::move(range_slices);
     }
 

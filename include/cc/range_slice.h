@@ -81,7 +81,16 @@ enum struct RangeSliceOpStatus
      * ng on recover.
      */
     NotOwner,
+    /**
+     * @brief The slice is not fully cached but after querying the key cache,
+     * the key is not found in the slice.
+     */
     KeyNotExists,
+    /**
+     * @brief Only will be used if skip_load_on_miss is true. This means the
+     * slice is partially cached.
+     */
+    NotPinned,
     Error,
 };
 
@@ -727,17 +736,27 @@ protected:
     // safely evicted from memory.
     std::atomic_uint32_t pins_{0};
 
-    // A key cache that caches all keys in this range. It is used if we cannot
-    // find a key in cc map. We will query for the key in this cache to make
-    // sure that the key exists in kv before loading the slice from kv.
-    // We maintain a cache for each core to reduce contention.
-    // We only maintain key cache for primary key for now. By assuming 200 bytes
-    // per row for pk table, and a load factor of 0.5, we can get the max size
-    // of each cuckoo filter is max_range_size / 200 / core_cnt * 2. The load
-    // factor is set to 0.5 since the size of a range can grow larger than max
-    // range size before it is flushed to kv. So we used a lower load factor to
-    // reduce collision. An add collision might result in the whole key cache
-    // being invalidated which is very expensive.
+    // A key cache that caches 1) All keys in ccm (including deleted keys) 2)
+    // All visible keys in kv store (does not include deleted keys). It is used
+    // if we cannot find a key in cc map. We will query for the key in this
+    // cache to make sure that the key exists in kv before loading the slice
+    // from kv. We maintain a cache for each core to reduce contention. We only
+    // maintain key cache for primary key for now. By assuming 200 bytes per row
+    // for pk table, and a load factor of 0.5, we can get the max size of each
+    // cuckoo filter is max_range_size / 200 / core_cnt * 2. The load factor is
+    // set to 0.5 since the size of a range can grow larger than max range size
+    // before it is flushed to kv. So we used a lower load factor to reduce
+    // collision. An add collision might result in the whole key cache being
+    // invalidated which is very expensive. A 12 bits long fingerprint for each
+    // key leads to a 0.1% false positive rate for the key cache.
+
+    // The cache is updated when 1) whenever a new key is inserted into ccm, we
+    // will add the key to key cache. 2) when a deleted key is removed from ccm,
+    // this means this key has been inserted into key cache when its inserted
+    // into ccm, but does not exist in kv, so we need to remove it from key
+    // cache. Removing keys from cache when they are evicted reduces the number
+    // of look ups to find the slice of the key since we can evict the keys in
+    // batch.
     std::vector<std::unique_ptr<cuckoofilter::CuckooFilter<size_t, 12>>>
         key_cache_;
 
@@ -998,8 +1017,8 @@ public:
         RangeSliceOpStatus &pin_status,
         const StoreSlice *&last_pinned_slice,
         bool check_key_cache = false,
-        uint16_t shard_id = 0  // only used if check_key_cache = true
-    )
+        uint16_t shard_id = 0,  // only used if check_key_cache = true
+        bool no_load_on_miss = false)
     {
         // A shared lock on the range to prevent concurrent splitting or merging
         // of slices.
@@ -1111,80 +1130,97 @@ public:
             pins_.fetch_add(pin_slice_cnt, std::memory_order_release);
             return RangeSliceId(this, slice);
         }
-        else if (check_key_cache && slice->IsValidInKeyCache(shard_id))
+        else if (check_key_cache)
         {
-            bool found = ContainsKey(search_key, shard_id);
-            if (!found)
+            if (slice->IsValidInKeyCache(shard_id))
             {
-                CollectCacheHit(*cc_shard);
-                // If the key is not found in range, directly return and skip
-                // loading slice from kv
-                pin_status = RangeSliceOpStatus::KeyNotExists;
-                return RangeSliceId(this, slice);
+                bool found = ContainsKey(search_key, shard_id);
+                if (!found)
+                {
+                    CollectCacheHit(*cc_shard);
+                    // If the key is not found in range, directly return and
+                    // skip loading slice from kv
+                    pin_status = RangeSliceOpStatus::KeyNotExists;
+                    return RangeSliceId(this, slice);
+                }
+                // If key is found in range key cache, the key must exist in kv
+                // store. Load slice from kv to get the value.
             }
-            // If key is found in range key cache, the key must exist in kv
-            // store. Load slice from kv to get the value.
+            else
+            {
+                // If this slice can use key cache but the key cache is not
+                // intialized, always load slice from kv to initialize the key
+                // cache.
+                no_load_on_miss = false;
+            }
         }
         last_pinned_slice = nullptr;
 
         // collect metrics: slice cache miss
         CollectCacheMiss(*cc_shard);
 
-        LoadSliceStatus load_ret = LoadSlice(tbl_name,
-                                             ng_term,
-                                             *slice,
-                                             key_schema,
-                                             rec_schema,
-                                             schema_ts,
-                                             snapshot_ts,
-                                             kv_info,
-                                             cc_request,
-                                             cc_shard,
-                                             store_hd,
-                                             force_load,
-                                             slice_lk);
-        switch (load_ret)
+        if (!no_load_on_miss)
         {
-        case LoadSliceStatus::Success:
-            pin_status = RangeSliceOpStatus::BlockedOnLoad;
-            break;
-        case LoadSliceStatus::Delay:
-            pin_status = RangeSliceOpStatus::Delay;
-            break;
-        case LoadSliceStatus::Retry:
-            pin_status = RangeSliceOpStatus::Retry;
-            break;
-        default:
-            pin_status = RangeSliceOpStatus::Error;
-            break;
-        }
-
-        slice_lk.unlock();
-
-        size_t sid = slice_idx + 1;
-        for (size_t fid = 0; fid < prefetch_size && sid < slices_.size();
-             ++fid, ++sid)
-        {
-            StoreSlice *prefetch_slice = slices_[sid].get();
-            std::unique_lock<std::mutex> prefetch_lk(
-                prefetch_slice->slice_mux_);
-
-            if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
+            LoadSliceStatus load_ret = LoadSlice(tbl_name,
+                                                 ng_term,
+                                                 *slice,
+                                                 key_schema,
+                                                 rec_schema,
+                                                 schema_ts,
+                                                 snapshot_ts,
+                                                 kv_info,
+                                                 cc_request,
+                                                 cc_shard,
+                                                 store_hd,
+                                                 force_load,
+                                                 slice_lk);
+            switch (load_ret)
             {
-                LoadSlice(tbl_name,
-                          ng_term,
-                          *prefetch_slice,
-                          key_schema,
-                          rec_schema,
-                          schema_ts,
-                          snapshot_ts,
-                          kv_info,
-                          nullptr,
-                          cc_shard,
-                          store_hd,
-                          false,
-                          prefetch_lk);
+            case LoadSliceStatus::Success:
+                pin_status = RangeSliceOpStatus::BlockedOnLoad;
+                break;
+            case LoadSliceStatus::Delay:
+                pin_status = RangeSliceOpStatus::Delay;
+                break;
+            case LoadSliceStatus::Retry:
+                pin_status = RangeSliceOpStatus::Retry;
+                break;
+            default:
+                pin_status = RangeSliceOpStatus::Error;
+                break;
             }
+            slice_lk.unlock();
+            size_t sid = slice_idx + 1;
+            for (size_t fid = 0; fid < prefetch_size && sid < slices_.size();
+                 ++fid, ++sid)
+            {
+                StoreSlice *prefetch_slice = slices_[sid].get();
+                std::unique_lock<std::mutex> prefetch_lk(
+                    prefetch_slice->slice_mux_);
+
+                if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
+                {
+                    LoadSlice(tbl_name,
+                              ng_term,
+                              *prefetch_slice,
+                              key_schema,
+                              rec_schema,
+                              schema_ts,
+                              snapshot_ts,
+                              kv_info,
+                              nullptr,
+                              cc_shard,
+                              store_hd,
+                              false,
+                              prefetch_lk);
+                }
+            }
+        }
+        else
+        {
+            slice_lk.unlock();
+            pin_status = RangeSliceOpStatus::NotPinned;
+            assert(prefetch_size == 0);
         }
 
         return RangeSliceId(this, slice);

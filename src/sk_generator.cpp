@@ -1195,6 +1195,7 @@ void SkGenerator::UploadBatchWorker()
             }
             else if (res_code == CcErrorCode::OUT_OF_MEMORY ||
                      res_code == CcErrorCode::DATA_STORE_ERR ||
+                     res_code == CcErrorCode::PIN_RANGE_SLICE_FAILED ||
                      res_code ==
                          CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT)
             {

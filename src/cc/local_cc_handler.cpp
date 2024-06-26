@@ -409,7 +409,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      IsolationLevel iso_level,
                                      CcProtocol proto,
                                      bool is_for_write,
-                                     bool is_covering_keys)
+                                     bool is_covering_keys,
+                                     bool point_read_on_miss)
 {
     hres.Value().rec_ = &record;
     uint32_t cc_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
@@ -439,7 +440,10 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                    iso_level,
                    proto,
                    is_for_write,
-                   is_covering_keys);
+                   is_covering_keys,
+                   nullptr,
+                   false,
+                   point_read_on_miss);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
@@ -463,7 +467,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                         iso_level,
                         proto,
                         is_for_write,
-                        is_covering_keys);
+                        is_covering_keys,
+                        point_read_on_miss);
     }
 }
 

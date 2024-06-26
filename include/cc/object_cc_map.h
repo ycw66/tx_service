@@ -333,6 +333,7 @@ public:
                                         cc_ng_id_,
                                         ng_term,
                                         &req);
+
                     req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
 
                     if (metrics::enable_cache_hit_rate)
@@ -1382,7 +1383,7 @@ public:
         }
     }
 
-    void BackFill(LruEntry *entry,
+    bool BackFill(LruEntry *entry,
                   uint64_t commit_ts,
                   RecordStatus status,
                   std::unique_ptr<TxRecord> rec_uptr) override
@@ -1447,6 +1448,8 @@ public:
                 }
             }
         }
+
+        return true;
     }
 
 private:

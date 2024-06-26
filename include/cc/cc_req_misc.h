@@ -706,7 +706,8 @@ public:
                   CcMap *ccm,
                   CcShard &ccs,
                   NodeGroupId cc_ng_id,
-                  int64_t cc_ng_term);
+                  int64_t cc_ng_term,
+                  int32_t range_id_ = -1);
     ~FetchRecordCc() = default;
 
     bool Execute(CcShard &ccs) override;
@@ -722,6 +723,8 @@ public:
     RecordStatus rec_status_{RecordStatus::Unknown};
     std::unique_ptr<TxRecord> rec_{nullptr};
     int error_code_{0};
+    // Only used in range partition
+    int range_id_;
 };
 
 // This cc request is used to convert parallel access on ccmap/samplepool into

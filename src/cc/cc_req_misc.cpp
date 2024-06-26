@@ -703,13 +703,15 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              CcMap *ccm,
                              CcShard &ccs,
                              NodeGroupId cc_ng_id,
-                             int64_t cc_ng_term)
+                             int64_t cc_ng_term,
+                             int32_t range_id)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(tbl_name),
       table_schema_(tbl_schema),
       tx_key_(std::move(tx_key)),
       cce_(cce),
-      ccm_(ccm)
+      ccm_(ccm),
+      range_id_(range_id)
 {
 }
 
@@ -723,7 +725,15 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 
         if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
         {
-            ccm_->BackFill(cce_, rec_ts_, rec_status_, std::move(rec_));
+            bool succ =
+                ccm_->BackFill(cce_, rec_ts_, rec_status_, std::move(rec_));
+
+            if (!succ)
+            {
+                // Retry if backfill failed.
+                ccs.Enqueue(ccs.core_id_, this);
+                return false;
+            }
 
             for (CcRequestBase *req : requesters_)
             {
