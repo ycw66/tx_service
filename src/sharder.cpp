@@ -301,7 +301,7 @@ int Sharder::Init(
                       << hm_port_;
             std::string log_path = local_path + "/cc_ng";
             if (execl(hm_bin_path->c_str(),
-                      "monograph_raft_hm",
+                      "host_manager",
                       hm_ip_.c_str(),
                       std::to_string(hm_port_).c_str(),
                       log_path.c_str(),

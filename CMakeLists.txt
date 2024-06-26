@@ -264,10 +264,10 @@ SET(RaftHM_SOURCES
     )
 
 include_directories(${HOST_MANAGER_INCLUDE_DIR})
-add_executable(monograph_raft_hm ${RaftHM_SOURCES})
-target_link_libraries(monograph_raft_hm  ${HOST_MANAGER_LINK_LIB})
+add_executable(host_manager ${RaftHM_SOURCES})
+target_link_libraries(host_manager  ${HOST_MANAGER_LINK_LIB})
 
-install(TARGETS monograph_raft_hm
+install(TARGETS host_manager
         RUNTIME DESTINATION bin)
 
 
