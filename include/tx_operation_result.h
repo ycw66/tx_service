@@ -2,7 +2,7 @@
 
 #include <atomic>
 #include <memory>  //unique_ptr
-#include <mutex>
+#include <shared_mutex>
 #include <utility>
 
 #include "cc/cc_entry.h"
@@ -315,14 +315,14 @@ struct RangeScanSliceResult
 
     void Reset()
     {
-        std::unique_lock<std::mutex> lk(last_key_mux_);
+        std::unique_lock<std::shared_mutex> lk(last_key_mux_);
         last_key_set_ = false;
         last_key_ = TxKey();
     }
 
     const TxKey *SetLastKey(TxKey key)
     {
-        std::unique_lock<std::mutex> lk(last_key_mux_);
+        std::unique_lock<std::shared_mutex> lk(last_key_mux_);
         if (!last_key_set_)
         {
             last_key_ = std::move(key);
@@ -337,7 +337,7 @@ struct RangeScanSliceResult
                                                 SlicePosition slice_pos)
     {
         bool success = false;
-        std::unique_lock<std::mutex> lk(last_key_mux_);
+        std::unique_lock<std::shared_mutex> lk(last_key_mux_);
         if (!last_key_set_)
         {
             // If the slice position is the last or the first, this is the last
@@ -365,7 +365,7 @@ struct RangeScanSliceResult
 
     std::pair<const TxKey *, bool> PeekLastKey() const
     {
-        std::unique_lock<std::mutex> lk(last_key_mux_);
+        std::shared_lock<std::shared_mutex> lk(last_key_mux_);
         if (last_key_set_)
         {
             return {&last_key_, true};
@@ -378,7 +378,7 @@ struct RangeScanSliceResult
 
     TxKey MoveLastKey()
     {
-        std::unique_lock<std::mutex> lk(last_key_mux_);
+        std::unique_lock<std::shared_mutex> lk(last_key_mux_);
         last_key_set_ = false;
         return std::move(last_key_);
     }
@@ -403,7 +403,7 @@ struct RangeScanSliceResult
     bool is_local_{true};
 
     bool last_key_set_{false};
-    mutable std::mutex last_key_mux_;
+    mutable std::shared_mutex last_key_mux_;
 };
 
 struct ScanNextResult

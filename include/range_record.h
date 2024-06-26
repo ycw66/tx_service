@@ -463,6 +463,16 @@ public:
         }
     }
 
+    std::unique_lock<std::shared_mutex> UniqueLockGuard()
+    {
+        return std::unique_lock<std::shared_mutex>(mux_);
+    }
+
+    std::shared_lock<std::shared_mutex> SharedLockGuard()
+    {
+        return std::shared_lock<std::shared_mutex>(mux_);
+    }
+
     void FetchRangeSlices(const TableName &range_tbl_name,
                           CcRequestBase *requester,
                           NodeGroupId ng_id,
@@ -484,7 +494,6 @@ protected:
 
     template <typename KeyT>
     friend class RangeCcMap;
-    friend class LocalCcShards;
     friend struct FetchRangeSlicesReq;
 };
 
@@ -632,19 +641,6 @@ public:
     void SetVersion(uint64_t version) override
     {
         range_info_.version_ts_ = version;
-    }
-
-    bool KickoutKeyInSlice(const KeyT &key,
-                           bool remove_from_key_cache,
-                           uint16_t core_id)
-    {
-        std::shared_lock<std::shared_mutex> lk(mux_);
-        if (range_slices_ != nullptr)
-        {
-            return range_slices_->KickoutSlice(
-                key, remove_from_key_cache, core_id);
-        }
-        return true;
     }
 
     const KeyT *RangeStartKey() const

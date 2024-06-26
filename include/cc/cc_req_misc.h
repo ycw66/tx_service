@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -346,7 +347,7 @@ public:
             std::move(key), std::move(record), version_ts, is_deleted);
     }
 
-    std::vector<SliceDataItem> &SliceData()
+    std::deque<SliceDataItem> &SliceData()
     {
         return slice_data_;
     }
@@ -415,7 +416,7 @@ public:
 private:
     const TableName *table_name_;
 
-    std::vector<SliceDataItem> slice_data_;
+    std::deque<SliceDataItem> slice_data_;
     const Schema *key_schema_;
     const Schema *rec_schema_;
     const uint64_t schema_ts_;
@@ -472,7 +473,7 @@ public:
 
     bool Execute(CcShard &ccs) override;
 
-    std::vector<SliceDataItem> &SliceData(uint16_t core_id)
+    std::deque<SliceDataItem> &SliceData(uint16_t core_id)
     {
         assert(core_id < partitioned_slice_data_.size());
         return partitioned_slice_data_[core_id];
@@ -554,7 +555,7 @@ private:
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 
     std::vector<size_t> next_idxs_;
-    std::vector<std::vector<SliceDataItem>> partitioned_slice_data_;
+    std::vector<std::deque<SliceDataItem>> partitioned_slice_data_;
     LoadRangeSliceRequest load_slice_req_;
     InitKeyCacheCc init_cc_;
 

@@ -580,6 +580,8 @@ public:
     const BucketInfo *GetBucketInfo(uint16_t bucket_id,
                                     NodeGroupId ng_id) const;
 
+    BucketInfo *GetBucketInfo(uint16_t bucket_id, NodeGroupId ng_id);
+
     NodeGroupId GetBucketOwner(const uint16_t bucket_id,
                                const NodeGroupId ng_id) const;
 

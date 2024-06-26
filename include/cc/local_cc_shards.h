@@ -754,7 +754,7 @@ public:
             // key cache does not exist for this range.
             return RangeSliceOpStatus::Error;
         }
-        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
+        auto range_lk = range_entry->SharedLockGuard();
         TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
         if (!store_range)
         {
@@ -833,7 +833,7 @@ public:
             pin_status = RangeSliceOpStatus::BlockedOnLoad;
             return RangeSliceId();
         }
-        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
+        auto range_lk = range_entry->SharedLockGuard();
         TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
         if (store_range == nullptr)
         {
@@ -927,7 +927,7 @@ public:
             pin_status = RangeSliceOpStatus::BlockedOnLoad;
             return RangeSliceId();
         }
-        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
+        auto range_lk = range_entry->SharedLockGuard();
         TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
         if (store_range == nullptr)
         {
@@ -1072,48 +1072,6 @@ public:
         const TableName &table_name, NodeGroupId ng_id);
 
     template <typename KeyT>
-    bool KickoutKeyInSlice(const TableName &tbl_name,
-                           const NodeGroupId ng_id,
-                           const KeyT &key,
-                           bool kickout_from_key_cache,
-                           uint16_t core_id)
-    {
-        std::shared_lock<std::shared_mutex> s_lk(meta_data_mux_);
-
-        TableName range_tbl_name(tbl_name.StringView(),
-                                 TableType::RangePartition);
-        TxKey tx_key(&key);
-        TemplateTableRangeEntry<KeyT> *entry =
-            static_cast<TemplateTableRangeEntry<KeyT> *>(
-                GetTableRangeEntryInternal(range_tbl_name, ng_id, tx_key));
-        if (entry == nullptr)
-        {
-            return true;
-        }
-        else
-        {
-            bool res =
-                entry->KickoutKeyInSlice(key, kickout_from_key_cache, core_id);
-            if (res
-                // TODO(liunyl): enable this after cluser scale is added.
-                // && DuringClusterScale()
-                // TODO(lzx): enable it when add "sending range data feature".
-            )
-            {
-                // If the key is kicked out, we need to update the bucket info
-                // to disallow upload batch cc since we might already
-                // have kicked out newer version from cc map.
-                BucketInfo *bucket_info = GetBucketInfoInternal(
-                    Sharder::Instance().MapRangeIdToBucketId(
-                        entry->GetRangeInfo()->PartitionId()),
-                    ng_id);
-                bucket_info->SetAcceptsUploadBatch(false);
-            }
-            return res;
-        }
-    }
-
-    template <typename KeyT>
     void KickoutKeyInBucket(const TableName &tbl_name,
                             const NodeGroupId ng_id,
                             const KeyT &key)
@@ -1176,6 +1134,9 @@ public:
 
     const BucketInfo *GetBucketInfo(const uint16_t bucket_id,
                                     const NodeGroupId ng_id) const;
+
+    BucketInfo *GetBucketInfo(const uint16_t bucket_id,
+                              const NodeGroupId ng_id);
 
     NodeGroupId GetBucketOwner(const uint16_t bucket_id,
                                const NodeGroupId ng_id) const;

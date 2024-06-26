@@ -4587,7 +4587,7 @@ public:
     }
 
     template <typename KeyT>
-    bool IsCleanTarget(const KeyT &key, const LruEntry *entry)
+    bool IsCleanTarget(const KeyT &key, const LruEntry *entry) const
     {
         switch (clean_type_)
         {
@@ -4637,7 +4637,7 @@ public:
         }
     }
 
-    bool CanBeCleaned(const LruEntry *entry)
+    bool CanBeCleaned(const LruEntry *entry) const
     {
         switch (clean_type_)
         {

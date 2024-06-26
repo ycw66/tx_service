@@ -1559,14 +1559,13 @@ struct CcPage : public LruPage
     }
 
     /**
-     * Find lower bound of key, requiring key is in the range of this page's
-     * [front, back].
+     * Find lower bound of the key. Return lower bound the the key, or return
+     * keys_.size() if all keys is less than key.
      * @param key
-     * @return
+     * @return index for the lower bound of the key.
      */
     size_t LowerBound(const KeyT &key) const
     {
-        assert(!keys_.empty() && keys_.front() <= key && key <= keys_.back());
         size_t target_idx =
             std::lower_bound(keys_.begin(), keys_.end(), key) - keys_.begin();
         return target_idx;

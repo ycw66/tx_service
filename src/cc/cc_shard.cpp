@@ -1162,6 +1162,11 @@ const BucketInfo *CcShard::GetBucketInfo(uint16_t bucket_id,
     return local_shards_.GetBucketInfo(bucket_id, ng_id);
 }
 
+BucketInfo *CcShard::GetBucketInfo(uint16_t bucket_id, NodeGroupId ng_id)
+{
+    return local_shards_.GetBucketInfo(bucket_id, ng_id);
+}
+
 NodeGroupId CcShard::GetBucketOwner(uint16_t bucket_id, NodeGroupId ng_id) const
 {
     return local_shards_.GetBucketOwner(bucket_id, ng_id);
