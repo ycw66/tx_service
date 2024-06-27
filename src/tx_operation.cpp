@@ -1795,24 +1795,33 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
         }
         txm->PostProcess(*this);
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(4))
+    else if (hd_result_.LocalRefCnt() == 0)
     {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
-            "Forward.IsTimeOut",
-            txm,
-            [txm]() -> std::string
-            {
-                return std::string(",\"tx_number\":")
-                    .append(std::to_string(txm->TxNumber()))
-                    .append(",\"term\":")
-                    .append(std::to_string(txm->TxTerm()));
-            });
-
-        bool force_error = hd_result_.ForceError();
-        if (force_error)
+        bool timeout = false;
+        if (txm->IsTimeOut(4) && hd_result_.SetResultByTimeoutThread())
         {
-            txm->PostProcess(*this);
+            timeout = true;
+        }
+
+        if (timeout)
+        {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "Forward.IsTimeOut",
+                txm,
+                [txm]() -> std::string
+                {
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(txm->TxNumber()))
+                        .append(",\"term\":")
+                        .append(std::to_string(txm->TxTerm()));
+                });
+
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+            }
         }
     }
 }

@@ -313,6 +313,8 @@ void CcStreamReceiver::PreProcessScanResp(
     // No more data.
     if (all_remote_core_no_more_data)
     {
+        hd_res->DecreaseCurrentHandlingResponse();
+
         if (msg->error_code() != 0)
         {
             hd_res->SetError(
@@ -426,6 +428,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.remote_ack_cnt_->fetch_sub(1);
             }
 
+            hd_res->DecreaseCurrentHandlingResponse();
+
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
         }
@@ -467,12 +471,15 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_res.commit_ts_ = cc_res.commit_ts();
+                // call `DecreaseCurrentHandlingResponse` before `SetFinished`
+                hd_res->DecreaseCurrentHandlingResponse();
                 hd_res->SetFinished();
             }
             else
             {
                 acq_res.last_vali_ts_ = 0;
                 acq_res.commit_ts_ = 0;
+                hd_res->DecreaseCurrentHandlingResponse();
             }
         }
 
@@ -530,6 +537,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
+            hd_res->DecreaseCurrentHandlingResponse();
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
         }
@@ -553,6 +561,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_all_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_all_res.commit_ts_ = cc_res.commit_ts();
+            }
+
+            hd_res->DecreaseCurrentHandlingResponse();
+
+            if (!cc_res.is_ack())
+            {
                 hd_res->SetFinished();
             }
         }
@@ -654,6 +668,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             conflicting_txs.AddConflictingTx(cc_res.txs(i));
         }
 
+        hd_res->DecreaseCurrentHandlingResponse();
+
         if (cc_res.error_code() != 0)
         {
             hd_res->SetError(
@@ -705,6 +721,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
 
         const PostprocessResponse &cc_res = msg->post_resp();
+
+        hd_res->DecreaseCurrentHandlingResponse();
 
         if (cc_res.error_code() != 0)
         {
@@ -781,6 +799,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (read_res.error_code() != 0)
         {
+            hd_res->DecreaseCurrentHandlingResponse();
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(read_res.error_code()));
         }
@@ -811,6 +830,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 read_result.ts_ = read_res.ts();
                 read_result.lock_type_ =
                     ToLocalType::ConvertLockType(read_res.lock_type());
+            }
+
+            hd_res->DecreaseCurrentHandlingResponse();
+
+            if (!read_res.is_ack())
+            {
                 hd_res->SetFinished();
             }
         }
@@ -1016,6 +1041,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res->Value().cc_node_terms_[ng_id] = term;
         }
 
+        hd_res->DecreaseCurrentHandlingResponse();
+
         if (scan_open_res.error_code() != 0)
         {
             hd_res->SetError(
@@ -1120,6 +1147,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
         }
 
+        hd_res->DecreaseCurrentHandlingResponse();
+
         if (scan_next_res.error_code() != 0)
         {
             hd_res->SetError(
@@ -1190,6 +1219,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 break;
             }
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
 
         const ReloadCacheResponse &reload_resp = msg->reload_cache_resp();
         if (reload_resp.error_code() != 0)
@@ -1291,6 +1322,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 break;
             }
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
 
         const AnalyzeTableAllResponse &analyze_resp =
             msg->analyze_table_all_resp();
@@ -1559,6 +1592,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 break;
             }
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
 
         // Handle the result.
         const KickoutDataResponse &cc_resp = msg->kickout_data_resp();

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <utility>
@@ -61,14 +62,12 @@ public:
 
     void SetRemoteFinished()
     {
-        result_status_.fetch_sub(1, std::memory_order_acquire);
         remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
         SetFinished();
     }
 
     void SetRemoteError(CcErrorCode err_code)
     {
-        result_status_.fetch_sub(1, std::memory_order_acquire);
         remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
         SetError(err_code);
     }
@@ -149,7 +148,12 @@ public:
         is_blocking_ = false;
 #endif
         is_finished_.store(false, std::memory_order_release);
-        result_status_.store(0, std::memory_order_release);
+
+        // Reset `result_status_` to `0` if `result_status_` == `-1 (Timeout)
+        // Otherwise, Nothing to do.
+        int32_t expect = -1;
+        result_status_.compare_exchange_strong(
+            expect, expect + 1, std::memory_order_release);
     }
 
     void ResetTxm(TransactionExecution *txm)

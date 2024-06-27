@@ -2647,6 +2647,8 @@ public:
         // recycle message.
         if (unfinished_cnt_.fetch_sub(1, std::memory_order_release) == 1)
         {
+            hd_res_->DecreaseCurrentHandlingResponse();
+
             if (resp_msg_->error_code() != 0)
             {
                 hd_res_->SetError(remote::ToLocalType::ConvertCcErrorCode(
