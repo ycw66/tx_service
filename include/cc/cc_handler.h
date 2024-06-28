@@ -531,6 +531,13 @@ public:
                                  CcHandlerResultBase *hres,
                                  ResultTemplateType type) = 0;
 
+    virtual void BlockAcquireAllCcReqCheck(uint32_t ng_id,
+                                           uint64_t tx_number,
+                                           int64_t tx_term,
+                                           uint16_t command_id,
+                                           std::vector<CcEntryAddr> &cce_addr,
+                                           CcHandlerResultBase *hres) = 0;
+
     /**
      * @brief Kickout the ccentrise that are between start_key and
      * end_key from ccmap.

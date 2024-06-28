@@ -1961,3 +1961,29 @@ void txservice::LocalCcHandler::BlockCcReqCheck(uint64_t tx_number,
                                    type);
     }
 }
+
+void txservice::LocalCcHandler::BlockAcquireAllCcReqCheck(
+    uint32_t ng_id,
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    std::vector<CcEntryAddr> &cce_addrs,
+    CcHandlerResultBase *hres)
+{
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    // If the ccrequest is in same node, it is not need to check. We think one
+    // node is stable and and it will always ok or the entire process crash.
+    if (dest_node_id != cc_shards_.node_id_)
+    {
+#ifdef EXT_TX_PROC_ENABLED
+        hres->SetToBlock();
+#endif
+        remote_hd_.BlockAcquireAllCcReqCheck(cc_shards_.node_id_,
+                                             ng_id,
+                                             tx_number,
+                                             tx_term,
+                                             command_id,
+                                             cce_addrs,
+                                             hres);
+    }
+}

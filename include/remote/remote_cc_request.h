@@ -60,7 +60,7 @@ public:
     RemoteAcquireAll(const RemoteAcquireAll &rhs) = delete;
     RemoteAcquireAll(RemoteAcquireAll &&rhs) = delete;
     void Reset(std::unique_ptr<CcMessage> input_msg);
-    void Acknowledge(int64_t term);
+
     uint64_t handler_addr()
     {
         if (input_msg_)
@@ -73,6 +73,35 @@ public:
         }
     }
 
+    void TryAcknowledge(int64_t term = -1,
+                        uint32_t node_group_id = 0,
+                        uint32_t core_id = 0,
+                        uint64_t cce_ptr = 0)
+    {
+        if (Protocol() == CcProtocol::Locking)
+        {
+            std::lock_guard<std::mutex> lk(mux_);
+            core_cnt_ -= 1;
+
+            if (term != -1)
+            {
+                auto &cce_addr = cce_addrs_.emplace_back();
+                cce_addr.SetNodeGroupId(node_group_id);
+                cce_addr.SetCce(cce_ptr, term, core_id);
+            }
+
+            if (core_cnt_ == 0 && !cce_addrs_.empty())
+            {
+                Acknowledge();
+            }
+        }
+    }
+
+    void SetCoreCnt(size_t core_cnt)
+    {
+        core_cnt_ = core_cnt;
+    }
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -80,7 +109,11 @@ private:
     TableName remote_table_name_{empty_sv, TableType::Primary};
     KeyType key_type_{KeyType::Normal};
 
+    size_t core_cnt_{0};
+    std::vector<CcEntryAddr> cce_addrs_;
     CcHandlerResult<AcquireAllResult> cc_res_{nullptr};
+
+    void Acknowledge();
 };
 
 struct RemotePostRead : public PostReadCc
@@ -702,12 +735,17 @@ public:
     virtual ~RemoteBlockReqCheckCc() = default;
     RemoteBlockReqCheckCc(const RemoteBlockReqCheckCc &rhs) = delete;
     RemoteBlockReqCheckCc(RemoteBlockReqCheckCc &&rhs) = delete;
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg, size_t unfinished_cnt);
     bool Execute(CcShard &ccs) override;
 
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
+
+    std::mutex mux_;
+    size_t unfinish_core_cnt_{0};
+    bool term_changed_{false};
+    bool all_finished_{true};
     CcStreamSender *hd_{nullptr};
 };
 

@@ -254,6 +254,14 @@ public:
                          CcHandlerResultBase *hres,
                          ResultTemplateType type);
 
+    void BlockAcquireAllCcReqCheck(uint32_t src_node_id,
+                                   uint32_t node_group_id,
+                                   uint64_t tx_number,
+                                   int64_t tx_term,
+                                   uint16_t command_id,
+                                   std::vector<CcEntryAddr> &cce_addr,
+                                   CcHandlerResultBase *hres);
+
     /**
      * @brief Kickout the ccentrise whose commit_ts less than @@ckpt_ts from
      * ccmap.

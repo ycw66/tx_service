@@ -26,7 +26,8 @@ enum class AckStatus : unsigned char
 enum class ResultTemplateType
 {
     AcquireKeyResult = 1,
-    ReadKeyResult
+    ReadKeyResult,
+    AcquireAllResult
 };
 
 struct AcquireKeyResult
@@ -55,6 +56,8 @@ struct AcquireAllResult
      *
      */
     CcEntryAddr local_cce_addr_;
+
+    std::vector<CcEntryAddr> blocked_remote_cce_addr_;
     std::atomic<int32_t> *remote_ack_cnt_{nullptr};
 };
 

@@ -806,6 +806,13 @@ public:
                 {
                     MoveRequest(&req, core_id);
                 }
+
+                if (!req.IsLocal() && req.Protocol() == CcProtocol::Locking)
+                {
+                    remote::RemoteAcquireAll &remote_req =
+                        static_cast<remote::RemoteAcquireAll &>(req);
+                    remote_req.SetCoreCnt(shard_->core_cnt_);
+                }
             }
 
             if (req.IsInsert())
@@ -885,6 +892,20 @@ public:
             CcProtocol cc_proto = req.Protocol();
             CcOperation cc_op = req.CcOp();
 
+            auto try_ack_for_remote_req = [&req](int64_t term = -1,
+                                                 uint32_t node_group_id = 0,
+                                                 uint32_t core_id = 0,
+                                                 uint64_t cce_addr = 0)
+            {
+                if (!req.IsLocal() && req.Protocol() == CcProtocol::Locking)
+                {
+                    remote::RemoteAcquireAll &remote_req =
+                        static_cast<remote::RemoteAcquireAll &>(req);
+                    remote_req.TryAcknowledge(
+                        term, node_group_id, core_id, cce_addr);
+                }
+            };
+
             // On execution resumption, the write lock has been acquired when
             // being unblocked.
             if (!resume)
@@ -930,9 +951,15 @@ public:
                     acquire_all_result.node_term_ = ng_term;
                 }
 
+                if (!resume)
+                {
+                    try_ack_for_remote_req();
+                }
+
                 CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireAllCc", {
                     LOG(INFO) << "FaultInject  "
                                  "term_TemplateCcMap_Execute_AcquireAllCc";
+
                     return hd_res->SetError(
                         CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 });
@@ -944,11 +971,12 @@ public:
                 // If the request comes from a remote node, sends
                 // acknowledgement to the sender when the request is
                 // blocked.
-                if (!req.IsLocal())
+                if (!resume)
                 {
-                    remote::RemoteAcquireAll &remote_req =
-                        static_cast<remote::RemoteAcquireAll &>(req);
-                    remote_req.Acknowledge(ng_term);
+                    try_ack_for_remote_req(ng_term,
+                                           ng_id,
+                                           shard_->core_id_,
+                                           reinterpret_cast<uint64_t>(cce_ptr));
                 }
 
                 return false;

@@ -307,6 +307,7 @@ message CceAddr_msg {
     }
     int64 term = 3;
     uint32 core_id = 4;
+    uint32 node_group_id = 5;
 }
 
 enum IsolationType {
@@ -429,6 +430,7 @@ message AcquireAllResponse {
     int64 node_term = 4;
     // The response is an acknowledgement or the result
     bool is_ack = 5;
+    repeated CceAddr_msg ack_cce_addr = 6;
 }
 
 message ValidateRequest {
@@ -777,7 +779,7 @@ message AbortTransactionResponse {
 message BlockedCcReqCheckRequest {
     uint32 src_node_id = 1;
     uint32 node_group_id = 2;
-    CceAddr_msg cce_addr = 3;
+    repeated CceAddr_msg cce_addr = 3;
     // CcHandlerResult template type
     uint32 result_temp_type = 4;
 }

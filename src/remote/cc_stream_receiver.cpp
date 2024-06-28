@@ -8,6 +8,7 @@
 #include "sharder.h"
 #include "statistics.h"
 #include "tx_execution.h"
+#include "tx_operation_result.h"
 #include "tx_trace.h"
 
 namespace txservice
@@ -561,6 +562,19 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_all_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_all_res.commit_ts_ = cc_res.commit_ts();
+            }
+            else
+            {
+                acq_all_res.blocked_remote_cce_addr_.clear();
+                for (const auto &ack_cce_addr : cc_res.ack_cce_addr())
+                {
+                    auto &cce_addr =
+                        acq_all_res.blocked_remote_cce_addr_.emplace_back();
+                    cce_addr.SetNodeGroupId(ack_cce_addr.node_group_id());
+                    cce_addr.SetCce(ack_cce_addr.cce_ptr(),
+                                    ack_cce_addr.term(),
+                                    ack_cce_addr.core_id());
+                }
             }
 
             hd_res->DecreaseCurrentHandlingResponse();
@@ -1477,9 +1491,17 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         LOG(INFO) << "RECEIVED check block";
         RemoteBlockReqCheckCc *req = blocked_req_check_pool_.NextRequest();
-        uint32_t core_id = msg->blocked_check_req().cce_addr().core_id();
-        req->Reset(std::move(msg));
-        local_shards_.EnqueueCcRequest(core_id, req);
+        CcMessage *msg_raw_ptr = msg.get();
+
+        req->Reset(std::move(msg),
+                   msg_raw_ptr->blocked_check_req().cce_addr_size());
+
+        for (const auto &cce_addr : msg_raw_ptr->blocked_check_req().cce_addr())
+        {
+            uint32_t core_id = cce_addr.core_id();
+            local_shards_.EnqueueCcRequest(core_id, req);
+        }
+
         break;
     }
     case CcMessage::MessageType::
@@ -1519,6 +1541,22 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             CcHandlerResult<ReadKeyResult> *hd_res =
                 reinterpret_cast<CcHandlerResult<ReadKeyResult> *>(
+                    msg->handler_addr());
+            AckStatus status = (AckStatus) resp.req_status();
+            LOG(INFO) << "status " << (int) status;
+            if (status == AckStatus::ErrorTerm)
+            {
+                hd_res->SetError(CcErrorCode::NG_TERM_CHANGED);
+            }
+            else if (status == AckStatus::Finished)
+            {
+                hd_res->SetError(CcErrorCode::REQUEST_LOST);
+            }
+        }
+        else if (type == ResultTemplateType::AcquireAllResult)
+        {
+            CcHandlerResult<AcquireAllResult> *hd_res =
+                reinterpret_cast<CcHandlerResult<AcquireAllResult> *>(
                     msg->handler_addr());
             AckStatus status = (AckStatus) resp.req_status();
             LOG(INFO) << "status " << (int) status;

@@ -295,6 +295,11 @@ public:
         (void) res;
     }
 
+    void UnsetByTimeoutThread()
+    {
+        result_status_.store(0, std::memory_order_release);
+    }
+
     /**
      * @brief Forces the handler result to an error state.
      *

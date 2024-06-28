@@ -212,18 +212,34 @@ void ReadOperation::Forward(TransactionExecution *txm)
     }
     else if (!hd_result_.Value().is_local_)
     {
-        bool timeout = false;
-        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
-        {
-            timeout = true;
-        }
-
+        bool fault_inject = false;
         CODE_FAULT_INJECTOR("read_operation_timeout", {
             LOG(INFO) << "FaultInject  read_operation_timeout";
-            timeout = true;
+            fault_inject = true;
             FaultInject::Instance().InjectFault("read_operation_timeout",
                                                 "remove");
         });
+
+        bool timeout = false;
+
+        if (!fault_inject)
+        {
+            if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+            {
+                timeout = true;
+            }
+        }
+        else
+        {
+            // Note: Only test will enter this branch
+            // Loop until set timeout flag successfully
+            while (!hd_result_.SetResultByTimeoutThread())
+            {
+                LOG(INFO) << "Retry to SetResultByTimeoutThread, Only test "
+                             "will enter this branch";
+            }
+            timeout = true;
+        }
 
         if (cce_addr.Term() < 0 && timeout)
         {
@@ -269,6 +285,9 @@ void ReadOperation::Forward(TransactionExecution *txm)
                 cce_addr,
                 &hd_result_,
                 ResultTemplateType::ReadKeyResult);
+            // Unset timeout status. So the cc_stream_reciver can handle
+            // response.
+            hd_result_.UnsetByTimeoutThread();
         }
     }
     // TODO: for locking-based protocols, even though the tx may be blocked
@@ -515,19 +534,36 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
     }
     else
     {
-        bool timeout = false;
-        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
-        {
-            timeout = true;
-        }
+        bool fault_inject = false;
         CODE_FAULT_INJECTOR("acquire_operation_timeout", {
             LOG(INFO)
                 << "FaultInject  acquire_operation_timeout remote_ack_cnt_:"
                 << remote_ack_cnt_;
-            timeout = true;
+            fault_inject = true;
             FaultInject::Instance().InjectFault("acquire_operation_timeout",
                                                 "remove");
         });
+
+        bool timeout = false;
+
+        if (!fault_inject)
+        {
+            if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+            {
+                timeout = true;
+            }
+        }
+        else
+        {
+            // Note: Only test will enter this branch
+            // Loop until set timeout flag successfully
+            while (!hd_result_.SetResultByTimeoutThread())
+            {
+                LOG(INFO) << "Retry to SetResultByTimeoutThread, Only test "
+                             "will enter this branch";
+            }
+            timeout = true;
+        }
 
         if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 && timeout)
         {
@@ -566,6 +602,9 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
                         ResultTemplateType::AcquireKeyResult);
                 }
             }
+            // Unset timeout status. So the cc_stream_reciver can handle
+            // response.
+            hd_result_.UnsetByTimeoutThread();
         }
     }
 }
@@ -881,6 +920,7 @@ void ValidateOperation::Forward(TransactionExecution *txm)
         {
             txm->PostProcess(*this);
         }
+
         // Else, all post-read requests finish normally, meaning the tx has
         // been moved from the waiting queue to the execution queue. Does
         // not forword the tx now, as it will be re-executed when the tx
@@ -1733,6 +1773,40 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
         }
 
         txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut())
+    {
+        for (size_t hd_idx = 0; hd_idx < hd_results_.size(); ++hd_idx)
+        {
+            auto &hd_res = hd_results_[hd_idx];
+            if (hd_res.IsFinished())
+            {
+                continue;
+            }
+
+            if (!hd_res.SetResultByTimeoutThread())
+            {
+                continue;
+            }
+
+            AcquireAllResult &ac_res = hd_results_[hd_idx].Value();
+
+            if (ac_res.node_term_ > 0 &&
+                !ac_res.blocked_remote_cce_addr_.empty())
+            {
+                uint32_t node_group_id = hd_idx / keys_.size();
+                // Check the liveness of remote node
+                txm->cc_handler_->BlockAcquireAllCcReqCheck(
+                    node_group_id,
+                    txm->TxNumber(),
+                    txm->TxTerm(),
+                    txm->CommandId(),
+                    ac_res.blocked_remote_cce_addr_,
+                    &hd_results_[hd_idx]);
+            }
+
+            hd_res.UnsetByTimeoutThread();
+        }
     }
 }
 
@@ -5314,33 +5388,7 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
         txm->Process(*this);
     }
 
-    const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
-    if (cce_addr.Term() < 0 && txm->IsTimeOut() &&
-        hd_result_.SetResultByTimeoutThread())
-    {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
-            "Forward.Term<0.IsTimeout",
-            txm,
-            (
-                [txm]() -> std::string
-                {
-                    return std::string(",\"tx_number\":")
-                        .append(std::to_string(txm->TxNumber()))
-                        .append(",\"term\":")
-                        .append(std::to_string(txm->TxTerm()));
-                }));
-        // For non-blocking concurrency control protocols, the object command is
-        // expected to return instantly. For 2PL, if the request is blocked, the
-        // cc node will send an acknowledgement to update the key's term. In
-        // either case, if the object's term is not set, the tx has not received
-        // any response or acknowledgement from the key's cc node group. The
-        // request is forced to be errored upon timeout.
-        // TODO(zkl): ForceError, delete ccrequest
-        //        hd_result_.ForceError();
-        //        txm->PostProcess(*this);
-    }
-    else if (hd_result_.IsFinished())
+    if (hd_result_.IsFinished())
     {
         CODE_FAULT_INJECTOR("ObjectCommandOp_NodeNotLeader", {
             LOG(INFO) << "FaultInject  ObjectCommandOp_NodeNotLeader";
@@ -5353,46 +5401,63 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
         // some commands will lead to unpredictable result, for example lpop
         // rpush.
         txm->PostProcess(*this);
+        return;
     }
-    else if (txm->IsTimeOut() && !hd_result_.Value().is_local_)
-    {
-        if (cce_addr.Term() < 0)
-        {
-            TX_TRACE_ACTION_WITH_CONTEXT(
-                this,
-                "Forward.Term<0.IsTimeout",
-                txm,
-                (
-                    [txm]() -> std::string
-                    {
-                        return std::string(",\"tx_number\":")
-                            .append(std::to_string(txm->TxNumber()))
-                            .append(",\"term\":")
-                            .append(std::to_string(txm->TxTerm()));
-                    }));
-            // For non-blocking concurrency control protocols, the object
-            // command is expected to return instantly. For 2PL, if the request
-            // is blocked, the cc node will send an acknowledgement to update
-            // the key's term. In either case, if the object's term is not set,
-            // the tx has not received any response or acknowledgement from the
-            // key's cc node group. The request is forced to be errored upon
-            // timeout.
 
-            bool force_error = hd_result_.ForceError();
-            if (force_error)
-            {
-                txm->PostProcess(*this);
-            }
-        }
-        else if (cce_addr.Term() > 0)
+    if (!hd_result_.Value().is_local_)
+    {
+        bool timeout = false;
+        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
         {
-            txm->cc_handler_->BlockCcReqCheck(
-                txm->TxNumber(),
-                txm->TxTerm(),
-                txm->CommandId(),
-                cce_addr,
-                &hd_result_,
-                ResultTemplateType::ReadKeyResult);
+            timeout = true;
+        }
+
+        const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
+
+        if (timeout)
+        {
+            if (cce_addr.Term() < 0)
+            {
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    this,
+                    "Forward.Term<0.IsTimeout",
+                    txm,
+                    (
+                        [txm]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(txm->TxNumber()))
+                                .append(",\"term\":")
+                                .append(std::to_string(txm->TxTerm()));
+                        }));
+                // For non-blocking concurrency control protocols, the object
+                // command is expected to return instantly. For 2PL, if the
+                // request is blocked, the cc node will send an acknowledgement
+                // to update the key's term. In either case, if the object's
+                // term is not set, the tx has not received any response or
+                // acknowledgement from the key's cc node group. The request is
+                // forced to be errored upon timeout.
+
+                bool force_error = hd_result_.ForceError();
+                if (force_error)
+                {
+                    txm->PostProcess(*this);
+                }
+            }
+            else if (cce_addr.Term() > 0)
+            {
+                txm->cc_handler_->BlockCcReqCheck(
+                    txm->TxNumber(),
+                    txm->TxTerm(),
+                    txm->CommandId(),
+                    cce_addr,
+                    &hd_result_,
+                    ResultTemplateType::ReadKeyResult);
+
+                // Unset timeout status. So the cc_stream_reciver can handle
+                // response.
+                hd_result_.UnsetByTimeoutThread();
+            }
         }
     }
 }
@@ -5834,6 +5899,10 @@ void CmdForwardAcquireWriteOp::Forward(TransactionExecution *txm)
                         ResultTemplateType::AcquireKeyResult);
                 }
             }
+
+            // Unset timeout status. So the cc_stream_reciver can handle
+            // response.
+            hd_result_.UnsetByTimeoutThread();
         }
     }
 }
@@ -8352,6 +8421,9 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                         cce_addr,
                         &hd_result,
                         ResultTemplateType::ReadKeyResult);
+                    // Unset timeout status. So the cc_stream_reciver can handle
+                    // response.
+                    hd_result.UnsetByTimeoutThread();
                 }
             }
         }

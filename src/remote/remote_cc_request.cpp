@@ -179,6 +179,7 @@ void txservice::remote::RemoteAcquireAll::Reset(
 {
     assert(input_msg->has_acquire_all_req());
 
+    core_cnt_ = Sharder::Instance().GetLocalCcShardsCount();
     cc_res_.Reset();
 
     output_msg_.clear_tx_number();
@@ -224,10 +225,9 @@ void txservice::remote::RemoteAcquireAll::Reset(
     }
 }
 
-void txservice::remote::RemoteAcquireAll::Acknowledge(int64_t term)
+void txservice::remote::RemoteAcquireAll::Acknowledge()
 {
-    // All cores will try to Acknowledge, so we need mutex protection here.
-    std::lock_guard<std::mutex> lk(mux_);
+    assert(!cce_addrs_.empty());
 
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
@@ -239,7 +239,18 @@ void txservice::remote::RemoteAcquireAll::Acknowledge(int64_t term)
     acquire_all_resp->set_is_ack(true);
     acquire_all_resp->set_error_code(
         ToRemoteType::ConvertCcErrorCode(CcErrorCode::NO_ERROR));
-    acquire_all_resp->set_node_term(term);
+    acquire_all_resp->set_node_term(cce_addrs_.at(0).Term());
+
+    acquire_all_resp->clear_ack_cce_addr();
+    auto *mutable_cce_addrs = acquire_all_resp->mutable_ack_cce_addr();
+    for (size_t idx = 0; idx < cce_addrs_.size(); ++idx)
+    {
+        CceAddr_msg *addr_msg = mutable_cce_addrs->Add();
+        addr_msg->set_cce_ptr(cce_addrs_[idx].CcePtr());
+        addr_msg->set_term(cce_addrs_[idx].Term());
+        addr_msg->set_core_id(cce_addrs_[idx].CoreId());
+        addr_msg->set_node_group_id(cce_addrs_[idx].NodeGroupId());
+    }
 
     const AcquireAllRequest &req = input_msg_->acquire_all_req();
     hd_->SendMessageToNode(req.src_node_id(), output_msg_);
@@ -1594,7 +1605,7 @@ bool txservice::remote::RemoteAbortTransactionCc::Execute(CcShard &ccs)
 }
 
 void txservice::remote::RemoteBlockReqCheckCc::Reset(
-    std::unique_ptr<CcMessage> input_msg)
+    std::unique_ptr<CcMessage> input_msg, size_t unfinish_core_cnt)
 {
     assert(input_msg->has_blocked_check_req());
 
@@ -1603,6 +1614,10 @@ void txservice::remote::RemoteBlockReqCheckCc::Reset(
     output_msg_.clear_acquire_resp();
 
     input_msg_ = std::move(input_msg);
+
+    unfinish_core_cnt_ = unfinish_core_cnt;
+    term_changed_ = false;
+    all_finished_ = true;
 
     if (hd_ == nullptr)
     {
@@ -1613,30 +1628,37 @@ void txservice::remote::RemoteBlockReqCheckCc::Reset(
 bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
 {
     const BlockedCcReqCheckRequest &req = input_msg_->blocked_check_req();
-    const CceAddr_msg &caddr = req.cce_addr();
     AckStatus status = AckStatus::Unknown;
-
-    if (!Sharder::Instance().CheckLeaderTerm(req.node_group_id(), caddr.term()))
+    for (const auto &caddr : req.cce_addr())
     {
-        status = AckStatus::ErrorTerm;
-    }
-    else
-    {
-        LruEntry *lru_entry = nullptr;
-        if (caddr.entry_ptr_case() == CceAddr_msg::EntryPtrCase::kInsertPtr)
+        if (caddr.core_id() == ccs.core_id_)
         {
-            lru_entry = reinterpret_cast<LruEntry *>(caddr.insert_ptr());
-        }
-        else
-        {
-            lru_entry = reinterpret_cast<LruEntry *>(caddr.cce_ptr());
-        }
+            if (!Sharder::Instance().CheckLeaderTerm(req.node_group_id(),
+                                                     caddr.term()))
+            {
+                status = AckStatus::ErrorTerm;
+            }
+            else
+            {
+                LruEntry *lru_entry = nullptr;
+                if (caddr.entry_ptr_case() ==
+                    CceAddr_msg::EntryPtrCase::kInsertPtr)
+                {
+                    lru_entry =
+                        reinterpret_cast<LruEntry *>(caddr.insert_ptr());
+                }
+                else
+                {
+                    lru_entry = reinterpret_cast<LruEntry *>(caddr.cce_ptr());
+                }
 
-        NonBlockingLock *lock = lru_entry->GetKeyLock();
-        if (lock != nullptr)
-        {
-            bool b = lock->FindQueueRequest(input_msg_->tx_number());
-            status = (b ? AckStatus::BlockQueue : AckStatus::Finished);
+                NonBlockingLock *lock = lru_entry->GetKeyLock();
+                if (lock != nullptr)
+                {
+                    bool b = lock->FindQueueRequest(input_msg_->tx_number());
+                    status = (b ? AckStatus::BlockQueue : AckStatus::Finished);
+                }
+            }
         }
     }
 
@@ -1646,21 +1668,52 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
         FaultInject::Instance().InjectFault("block_req_term_changed", "remove");
     });
 
-    output_msg_.set_type(tr::CcMessage::MessageType::
-                             CcMessage_MessageType_BlockedCcReqCheckResponse);
+    assert(status != AckStatus::Unknown);
 
-    output_msg_.set_tx_number(input_msg_->tx_number());
-    output_msg_.set_handler_addr(input_msg_->handler_addr());
-    output_msg_.set_tx_term(input_msg_->tx_term());
-    output_msg_.set_command_id(input_msg_->command_id());
+    std::lock_guard<std::mutex> lk(mux_);
+    assert(unfinish_core_cnt_ > 0);
+    unfinish_core_cnt_--;
 
-    BlockedCcReqCheckResponse *resp = output_msg_.mutable_blocked_check_resp();
-    resp->set_req_status((int32_t) status);
-    resp->set_result_temp_type(
-        input_msg_->blocked_check_req().result_temp_type());
+    if (status == AckStatus::ErrorTerm)
+    {
+        term_changed_ = true;
+    }
+    else if (status == AckStatus::BlockQueue)
+    {
+        all_finished_ = false;
+    }
 
-    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
-    hd_->RecycleCcMsg(std::move(input_msg_));
+    // last core finished
+    if (unfinish_core_cnt_ == 0)
+    {
+        output_msg_.set_type(
+            tr::CcMessage::MessageType::
+                CcMessage_MessageType_BlockedCcReqCheckResponse);
+
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+
+        AckStatus req_status = AckStatus::BlockQueue;
+        if (term_changed_)
+        {
+            req_status = AckStatus::ErrorTerm;
+        }
+        else if (all_finished_)
+        {
+            req_status = AckStatus::Finished;
+        }
+
+        BlockedCcReqCheckResponse *resp =
+            output_msg_.mutable_blocked_check_resp();
+        resp->set_req_status((int32_t) req_status);
+        resp->set_result_temp_type(
+            input_msg_->blocked_check_req().result_temp_type());
+
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    }
     return true;
 }
 

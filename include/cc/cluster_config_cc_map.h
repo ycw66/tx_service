@@ -48,6 +48,7 @@ public:
         AcquireAllResult &acquire_all_result = hd_res->Value();
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+
         if (ng_term < 0)
         {
             hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
@@ -137,11 +138,17 @@ public:
             // If the request comes from a remote node, sends
             // acknowledgement to the sender when the request is
             // blocked.
-            if (!req.IsLocal())
+            if (!resume && !req.IsLocal())
             {
                 remote::RemoteAcquireAll &remote_req =
                     static_cast<remote::RemoteAcquireAll &>(req);
-                remote_req.Acknowledge(ng_term);
+
+                remote_req.SetCoreCnt(1);
+                remote_req.TryAcknowledge(
+                    ng_term,
+                    ng_id,
+                    shard_->core_id_,
+                    reinterpret_cast<uint64_t>(&cc_entry));
             }
 
             return false;

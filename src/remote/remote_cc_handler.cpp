@@ -837,7 +837,9 @@ void txservice::remote::RemoteCcHandler::BlockCcReqCheck(
     req->set_result_temp_type((uint32_t) type);
 
     req->set_node_group_id(cce_addr.NodeGroupId());
-    CceAddr_msg *cce_addr_msg = req->mutable_cce_addr();
+
+    req->clear_cce_addr();
+    CceAddr_msg *cce_addr_msg = req->add_cce_addr();
     if (cce_addr.CcePtr() != 0)
     {
         cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
@@ -852,6 +854,52 @@ void txservice::remote::RemoteCcHandler::BlockCcReqCheck(
     }
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, hres);
+}
+
+void txservice::remote::RemoteCcHandler::BlockAcquireAllCcReqCheck(
+    uint32_t src_node_id,
+    uint32_t node_group_id,
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    std::vector<CcEntryAddr> &cce_addrs,
+    CcHandlerResultBase *hres)
+{
+    CcMessage send_msg;
+
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_BlockedCcReqCheckRequest);
+    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(hres));
+    send_msg.set_tx_term(tx_term);
+    send_msg.set_command_id(command_id);
+    send_msg.set_tx_number(tx_number);
+
+    BlockedCcReqCheckRequest *req = send_msg.mutable_blocked_check_req();
+    req->set_src_node_id(src_node_id);
+    req->set_result_temp_type((uint32_t) ResultTemplateType::AcquireAllResult);
+
+    req->set_node_group_id(node_group_id);
+
+    req->clear_cce_addr();
+
+    for (const auto &addr : cce_addrs)
+    {
+        CceAddr_msg *cce_addr_msg = req->add_cce_addr();
+        if (addr.CcePtr() != 0)
+        {
+            cce_addr_msg->set_cce_ptr(addr.CcePtr());
+            cce_addr_msg->set_term(addr.Term());
+            cce_addr_msg->set_core_id(addr.CoreId());
+        }
+        else
+        {
+            cce_addr_msg->set_insert_ptr(addr.InsertPtr());
+            cce_addr_msg->set_term(addr.Term());
+            cce_addr_msg->set_core_id(addr.CoreId());
+        }
+    }
+
+    stream_sender_.SendMessageToNg(node_group_id, send_msg, hres);
 }
 
 void txservice::remote::RemoteCcHandler::KickoutData(
