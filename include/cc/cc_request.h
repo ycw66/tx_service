@@ -197,6 +197,7 @@ public:
                 ccm_ = ccm;
             }
             assert(ccm != nullptr);
+            assert(ccs.core_id_ == ccm->shard_->core_id_);
             return ccm->Execute(*typed_req);
         }
         else
@@ -204,6 +205,7 @@ public:
             // non parallel request which is executed again, e.g. initial
             // execution blocked by lock.
             assert(ccm_ != nullptr);
+            assert(ccs.core_id_ == ccm_->shard_->core_id_);
             return ccm_->Execute(*typed_req);
         }
     }

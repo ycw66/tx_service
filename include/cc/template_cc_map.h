@@ -9503,6 +9503,7 @@ protected:
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
         cce_addr->set_term(ng_term);
+        cce_addr->set_core_id(shard_->LocalCoreId());
         // For remote scans, the returned cc entries' node group ID is
         // set on the sender side when the sender receives the response.
 

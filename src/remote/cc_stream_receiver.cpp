@@ -1030,6 +1030,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 for (int idx = 0; idx < cache_msg.scan_tuple_size(); ++idx)
                 {
                     const ScanTuple_msg &tuple_msg = cache_msg.scan_tuple(idx);
+                    assert(tuple_msg.cce_addr().core_id() == core_id);
+
                     term = tuple_msg.cce_addr().term();
 
                     RecordStatus rec_status =
