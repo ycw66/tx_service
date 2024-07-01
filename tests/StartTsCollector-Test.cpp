@@ -53,6 +53,9 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
         std::pair<std::string, uint32_t>("checkpointer_interval", 10));
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("checkpointer_delay_seconds", 0));
+    tx_service_conf.insert(
+        std::pair<std::string, uint32_t>("enable_shard_heap_defragment", 0));
+
     tx_service_conf.insert(std::pair<std::string, uint32_t>(
         "collect_active_tx_ts_interval_seconds", 2));
     tx_service_conf.insert(
