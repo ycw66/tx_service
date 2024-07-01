@@ -775,8 +775,9 @@ size_t CcShard::Clean()
            ccp != &tail_ccp_)
     {
         // if heap fragmentation exceed threshold, stop clean
-        if ((static_cast<double>(heap_alloc) /
-             static_cast<double>(heap_commit)) < 0.8)
+        if (local_shards_.enable_shard_heap_defragment_ &&
+            ((static_cast<double>(heap_alloc) /
+              static_cast<double>(heap_commit)) < 0.8))
         {
             heap_fragmented = true;
             // if heap fragmentation happen and no flying defrag heap cc,
@@ -1805,8 +1806,15 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
         *commit = committed;
     }
 
-    return allocated >= (int64_t) memory_limit_ ||
-           committed > (memory_limit_ * 1.1);
+    if (cc_shard_->local_shards_.enable_shard_heap_defragment_)
+    {
+        return allocated >= (int64_t) memory_limit_ ||
+               committed > (memory_limit_ * 1.1);
+    }
+    else
+    {
+        return allocated >= (int64_t) memory_limit_;
+    }
 }
 
 std::unordered_map<TableName, bool> CcShard::GetCatalogTableNameSnapshot(

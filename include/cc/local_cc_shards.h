@@ -183,7 +183,8 @@ public:
         metrics::CommonLabels common_labels = {},
         std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr,
         std::function<void(std::string_view, std::string_view)> publish_func =
-            nullptr);
+            nullptr,
+        bool enable_shard_heap_defragment = false);
 
     ~LocalCcShards();
 
@@ -543,7 +544,8 @@ public:
         std::vector<TableRangeEntry *> new_entries;
 
         std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
-        mi_override_thread(table_ranges_thread_id_);
+        bool is_override_thd = mi_is_override_thread();
+        mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
         mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
         bool range_slice_mem_full = TableRangesMemoryFull();
@@ -606,8 +608,15 @@ public:
                     std::move(*slice_keys), range_ng, table_name.IsBase());
             }
 
-            mi_restore_default_thread_id();
             mi_heap_set_default(prev_heap);
+            if (is_override_thd)
+            {
+                mi_override_thread(prev_thd);
+            }
+            else
+            {
+                mi_restore_default_thread_id();
+            }
 
             return new_range_ptr;
         }
@@ -1826,10 +1835,14 @@ private:
     // For cluster Publish message
     std::function<void(std::string_view, std::string_view)> publish_func_;
 
+    // If enable/disable shard heap defragment
+    bool enable_shard_heap_defragment_{false};
+
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
     friend class Checkpointer;
     friend class txservice::fault::ReplayService;
     friend class CcShard;
+    friend class CcShardHeap;
 };
 }  // namespace txservice

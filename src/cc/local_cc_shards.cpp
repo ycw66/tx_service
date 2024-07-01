@@ -53,7 +53,8 @@ LocalCcShards::LocalCcShards(
     metrics::MetricsRegistry *metrics_registry,
     metrics::CommonLabels common_labels,
     std::unordered_map<TableName, std::string> *prebuilt_tables,
-    std::function<void(std::string_view, std::string_view)> publish_func)
+    std::function<void(std::string_view, std::string_view)> publish_func,
+    bool enable_shard_heap_defragment)
     : range_slice_memory_limit_(
           ((uint64_t) MB(memory_limit_mb)) /
           (txservice_enable_key_cache
@@ -95,7 +96,8 @@ LocalCcShards::LocalCcShards(
       flush_data_worker_ctx_(std::min(static_cast<int>(core_cnt), 10)),
 #endif
       statistics_worker_ctx_(1),
-      publish_func_(publish_func)
+      publish_func_(publish_func),
+      enable_shard_heap_defragment_(enable_shard_heap_defragment)
 {
     using namespace std::chrono_literals;
     uint64_t ts_base = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -783,7 +785,8 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
 
     std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
-    mi_override_thread(table_ranges_thread_id_);
+    bool is_override_thd = mi_is_override_thread();
+    mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
     mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
     // Init table ranges
@@ -853,7 +856,14 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     }
 
     mi_heap_set_default(prev_heap);
-    mi_restore_default_thread_id();
+    if (is_override_thd)
+    {
+        mi_override_thread(prev_thd);
+    }
+    else
+    {
+        mi_restore_default_thread_id();
+    }
 }
 
 void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id)
@@ -986,7 +996,9 @@ void LocalCcShards::KickoutRangeSlices()
                         {
                             std::unique_lock<std::mutex> heap_lk(
                                 table_ranges_heap_mux_);
-                            mi_override_thread(GetTableRangesHeapThreadId());
+                            bool is_override_thd = mi_is_override_thread();
+                            mi_threadid_t prev_thd = mi_override_thread(
+                                GetTableRangesHeapThreadId());
                             mi_heap_t *prev_heap =
                                 mi_heap_set_default(GetTableRangesHeap());
 
@@ -994,7 +1006,14 @@ void LocalCcShards::KickoutRangeSlices()
 
                             bool has_enough_mem = HasEnoughTableRangesMemory();
                             mi_heap_set_default(prev_heap);
-                            mi_restore_default_thread_id();
+                            if (is_override_thd)
+                            {
+                                mi_override_thread(prev_thd);
+                            }
+                            else
+                            {
+                                mi_restore_default_thread_id();
+                            }
                             if (has_enough_mem)
                             {
                                 // We've cleaned up enough memory space.
@@ -1028,14 +1047,24 @@ void LocalCcShards::KickoutRangeSlices()
         if (entry->IsStoreRangeFree())
         {
             std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
-            mi_override_thread(GetTableRangesHeapThreadId());
+            bool is_override_thd = mi_is_override_thread();
+            mi_threadid_t prev_thd =
+                mi_override_thread(GetTableRangesHeapThreadId());
             mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
 
             entry->DropStoreRange();
 
             bool has_enough_mem = HasEnoughTableRangesMemory();
             mi_heap_set_default(prev_heap);
-            mi_restore_default_thread_id();
+            if (is_override_thd)
+            {
+                mi_override_thread(prev_thd);
+            }
+            else
+            {
+                mi_restore_default_thread_id();
+            }
+
             if (has_enough_mem)
             {
                 // We've cleaned up enough memory space.
@@ -1716,14 +1745,23 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                     {
                         std::unique_lock<std::mutex> heap_lk(
                             table_ranges_heap_mux_);
-                        mi_override_thread(GetTableRangesHeapThreadId());
+                        bool is_override_thd = mi_is_override_thread();
+                        mi_threadid_t prev_thd =
+                            mi_override_thread(GetTableRangesHeapThreadId());
                         mi_heap_t *prev_heap =
                             mi_heap_set_default(GetTableRangesHeap());
 
                         entry->DropStoreRange();
 
                         mi_heap_set_default(prev_heap);
-                        mi_restore_default_thread_id();
+                        if (is_override_thd)
+                        {
+                            mi_override_thread(prev_thd);
+                        }
+                        else
+                        {
+                            mi_restore_default_thread_id();
+                        }
                     }
                     else
                     {

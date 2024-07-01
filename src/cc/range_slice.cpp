@@ -603,7 +603,9 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
 
         std::unique_lock<std::mutex> heap_lk(
             local_cc_shards_.table_ranges_heap_mux_);
-        mi_override_thread(local_cc_shards_.GetTableRangesHeapThreadId());
+        bool is_override_thd = mi_is_override_thread();
+        mi_threadid_t prev_thd =
+            mi_override_thread(local_cc_shards_.GetTableRangesHeapThreadId());
         mi_heap_t *prev_heap =
             mi_heap_set_default(local_cc_shards_.GetTableRangesHeap());
 
@@ -611,7 +613,14 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
 
         bool range_slice_mem_full = local_cc_shards_.TableRangesMemoryFull();
         mi_heap_set_default(prev_heap);
-        mi_restore_default_thread_id();
+        if (is_override_thd)
+        {
+            mi_override_thread(prev_thd);
+        }
+        else
+        {
+            mi_restore_default_thread_id();
+        }
         heap_lk.unlock();
 
         slice->to_alter_ = false;

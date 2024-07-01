@@ -1088,7 +1088,8 @@ public:
 
                     std::unique_lock<std::mutex> heap_lk(
                         shard_->local_shards_.table_ranges_heap_mux_);
-                    mi_override_thread(
+                    bool is_override_thd = mi_is_override_thread();
+                    mi_threadid_t prev_thd = mi_override_thread(
                         shard_->local_shards_.GetTableRangesHeapThreadId());
                     mi_heap_t *prev_heap = mi_heap_set_default(
                         shard_->local_shards_.GetTableRangesHeap());
@@ -1098,7 +1099,14 @@ public:
                         this->table_name_.IsBase());
 
                     mi_heap_set_default(prev_heap);
-                    mi_restore_default_thread_id();
+                    if (is_override_thd)
+                    {
+                        mi_override_thread(prev_thd);
+                    }
+                    else
+                    {
+                        mi_restore_default_thread_id();
+                    }
                     heap_lk.unlock();
                     old_table_range_entry->RangeSlices()->Lock();
                 }

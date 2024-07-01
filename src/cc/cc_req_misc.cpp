@@ -275,7 +275,9 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
 
         std::unique_lock<std::mutex> heap_lk(shards->table_ranges_heap_mux_);
-        mi_override_thread(shards->GetTableRangesHeapThreadId());
+        bool is_override_thd = mi_is_override_thread();
+        mi_threadid_t prev_thd =
+            mi_override_thread(shards->GetTableRangesHeapThreadId());
         mi_heap_t *prev_heap =
             mi_heap_set_default(shards->GetTableRangesHeap());
 
@@ -284,7 +286,14 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         bool range_slice_mem_full = shards->TableRangesMemoryFull();
 
         mi_heap_set_default(prev_heap);
-        mi_restore_default_thread_id();
+        if (is_override_thd)
+        {
+            mi_override_thread(prev_thd);
+        }
+        else
+        {
+            mi_restore_default_thread_id();
+        }
         heap_lk.unlock();
 
         for (auto [req, ccs] : requesters_)

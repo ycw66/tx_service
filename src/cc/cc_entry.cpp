@@ -63,12 +63,6 @@ void LruEntry::SetCommitTsPayloadStatus(uint64_t ts, RecordStatus status)
     {
         commit_ts_and_status_ = (ts << 8) | stat;
     }
-    else
-    {
-        DLOG(WARNING) << "SetCommitTsPayloadStatus for cce: " << this
-                      << " fail, ts: " << ts
-                      << " is smaller than current committs: " << curr_ts;
-    }
 }
 
 bool LruEntry::IsFree() const
