@@ -257,8 +257,11 @@ public:
     const std::function<void()> *ReleaseResumeFunc()
     {
 #if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        allow_resume_call_ = false;
-        return resume_func_;
+        if (allow_resume_call_)
+        {
+            allow_resume_call_ = false;
+            return resume_func_;
+        }
 #else
         return nullptr;
 #endif

@@ -821,6 +821,16 @@ size_t CcShard::Clean()
         free_cnt += freed;
         ccp = next;
     }
+#else
+    ccp = head_ccp_.lru_next_;
+    while (ccp != &tail_ccp_)
+    {
+        // merge and removal might happen during Clean so ccp and ccp->lru_next_
+        // might change
+        auto [freed, next] = ccp->parent_map_->CleanPageAndReBalance(ccp);
+        free_cnt += freed;
+        ccp = next;
+    }
 #endif
     clean_start_ccp_ = ccp;
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <absl/container/btree_map.h>
 #include <butil/time.h>
 
 #include <algorithm>  // std::max
@@ -51,6 +52,9 @@ namespace txservice
 template <typename KeyT, typename ValueT>
 class TemplateCcMap : public CcMap
 {
+    using BtreeMapIterator = typename absl::
+        btree_map<KeyT, std::unique_ptr<CcPage<KeyT, ValueT>>>::iterator;
+
 public:
     TemplateCcMap() = delete;
     TemplateCcMap(const TemplateCcMap &rhs) = delete;
@@ -5964,7 +5968,7 @@ public:
         // Defrag the keys in ccmp at first
         if (!ccmp_key_defraged)
         {
-            typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator it;
+            BtreeMapIterator it;
             TxKey &resume_tx_key = pause_pos.first;
             if (resume_tx_key.KeyPtr() == nullptr)
             {
@@ -7460,9 +7464,15 @@ public:
         assert(entry->IsFree());
         CcPage<KeyT, ValueT> *ccpage =
             static_cast<CcPage<KeyT, ValueT> *>(page);
-        const KeyT old_page_key(ccpage->FirstKey());
+        auto page_it = ccmp_.end();
+        if (ccpage->Entry(0) == static_cast<CcEntry<KeyT, ValueT> *>(entry))
+        {
+            // The page's first key is cleaned, needs to locate the page
+            // position to update the map.
+            page_it = ccmp_.find(ccpage->FirstKey());
+        }
         ccpage->Remove(static_cast<CcEntry<KeyT, ValueT> *>(entry));
-        RebalancePage(ccpage, old_page_key, true);
+        RebalancePage(ccpage, page_it, true);
     }
 
     /**
@@ -7492,8 +7502,8 @@ public:
         // clean page
         CcPage<KeyT, ValueT> *page =
             static_cast<CcPage<KeyT, ValueT> *>(lru_page);
-        const KeyT old_page_key(page->FirstKey());
-        bool success = CleanPage(page, free_cnt, kickout_cc);
+        auto page_it = ccmp_.end();
+        bool success = CleanPage(page, page_it, free_cnt, kickout_cc);
 
         // Output the operation result if the caller care it.
         if (is_success != nullptr)
@@ -7502,7 +7512,7 @@ public:
         }
 
         LruPage *next_page =
-            RebalancePage(page, old_page_key, success, kickout_cc == nullptr);
+            RebalancePage(page, page_it, success, kickout_cc == nullptr);
 
         size_ -= free_cnt;
         if (free_cnt > 0)
@@ -7517,7 +7527,7 @@ public:
     {
         for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
-            CcPage<KeyT, ValueT> &page = it->second;
+            CcPage<KeyT, ValueT> &page = *it->second;
             if (page.lru_next_ != nullptr)
             {
                 shard_->DetachLru(&page);
@@ -7534,7 +7544,7 @@ public:
     }
 
     LruPage *RebalancePage(CcPage<KeyT, ValueT> *page,
-                           const KeyT &old_page_key,
+                           BtreeMapIterator &page_it,
                            bool success,
                            bool use_lru_list = true)
     {
@@ -7555,154 +7565,168 @@ public:
             {
                 shard_->DetachLru(page);
             }
-            ccmp_.erase(old_page_key);
-        }
-        else if (page->Size() >= CcPage<KeyT, ValueT>::merge_threshold_)
-        {
-            // page is still half full, no redistribution or merge
-            // needed
-            auto page_it = ccmp_.find(old_page_key);
             assert(page_it != ccmp_.end());
-            TryUpdatePageKey(page_it);
-
-            if (!use_lru_list && !success)
-            {
-                // If the caller care the clean status, reset the value
-                // of
-                // @@next_page depending on the clean result:
-                // 1) When the current page has been cleaned
-                // successfully, there is no need to reset the value of
-                // @@next_page. 2) When this current page has not been
-                // cleaned successfully, should set the current page as
-                // the next_page.
-                next_page = page;
-            }
+            ccmp_.erase(page_it);
         }
         else
         {
-            // redistribute or merge page with its siblings
-            CcPage<KeyT, ValueT> *prev = page->prev_page_;
-            CcPage<KeyT, ValueT> *next = page->next_page_;
-            bool can_borrow_from_prev =
-                prev != &neg_inf_page_ &&
-                page->Size() + prev->Size() >
-                    CcPage<KeyT, ValueT>::split_threshold_;
-            bool can_borrow_from_next =
-                next != &pos_inf_page_ &&
-                page->Size() + next->Size() >
-                    CcPage<KeyT, ValueT>::split_threshold_;
-            bool can_merge_with_prev =
-                prev != &neg_inf_page_ &&
-                page->Size() + prev->Size() <=
-                    CcPage<KeyT, ValueT>::split_threshold_;
-            bool can_merge_with_next =
-                next != &pos_inf_page_ &&
-                page->Size() + next->Size() <=
-                    CcPage<KeyT, ValueT>::split_threshold_;
-            if (can_borrow_from_prev || can_borrow_from_next)
+            if (page_it != ccmp_.end())
             {
-                // map needs to be updated through iterator
-                auto page_it = ccmp_.find(old_page_key);
-                // the two pages whose entries need to be redistributed
-                // are identified by page1 and page2, page1 is the page
-                // with smaller key
-                auto page1_it = page_it;
-                auto page2_it = page_it;
-                if (can_borrow_from_prev)
-                {
-                    // borrow entries from previous page
-                    page1_it--;
-                }
-                else if (can_borrow_from_next)
-                {
-                    // borrow entries from next page
-                    page2_it++;
-                }
+                // page_it is set, which means the page's first key has been
+                // removed when cleaning the page
+                TryUpdatePageKey(page_it);
+            }
 
-                RedistributeBetweenPages(page1_it, page2_it);
+            if (page->Size() >= CcPage<KeyT, ValueT>::merge_threshold_)
+            {
+                // page is still half full, no redistribution or merge
+                // needed
 
-                if (!use_lru_list &&
-                    ((success && page == &page1_it->second) || !success))
+                if (!use_lru_list && !success)
                 {
-                    // If the caller care the clean status, reset the
-                    // value of
+                    // If the caller care the clean status, reset the value
+                    // of
                     // @@next_page depending on the clean result:
                     // 1) When the current page has been cleaned
-                    // successfully, if borrow from the next(that's mean
-                    // page == page1), should set the current page as
-                    // the @@next_page. 2) When this current page has
-                    // not been cleaned successfully, should return the
-                    // current page as the
-                    // @@next_page.
+                    // successfully, there is no need to reset the value of
+                    // @@next_page. 2) When this current page has not been
+                    // cleaned successfully, should set the current page as
+                    // the next_page.
                     next_page = page;
-                }
-            }
-            else if (can_merge_with_prev || can_merge_with_next)
-            {
-                // map needs to be updated through iterator
-                auto page_it = ccmp_.find(old_page_key);
-                // the two pages to be merged are identified by page1
-                // and page2, page1 is the page with smaller key
-                auto page1_it = page_it;
-                auto page2_it = page_it;
-
-                bool real_merge_with_prev = false;
-                if (can_merge_with_prev)
-                {
-                    real_merge_with_prev = true;
-                    // merge `page` with its previous page
-                    page1_it--;
-                }
-                else if (can_merge_with_next)
-                {
-                    // merge `page` with its next page
-                    page2_it++;
-                }
-
-                CcPage<KeyT, ValueT> *merged_page = &page1_it->second;
-                CcPage<KeyT, ValueT> *discarded_page = &page2_it->second;
-
-                if (use_lru_list && next_page == discarded_page)
-                {
-                    // For this case, the next page to be cleaned comes
-                    // from the lru list. The next_page is current
-                    // page's lru_next_, and if the next_page ==
-                    // discarded_page, the discarded_page must be the
-                    // next page of the current page, that is to say,
-                    // the current page will merge with the next. So the
-                    // current page must equal to the merged page, and
-                    // should set the
-                    // @@next_page is merged page.
-                    assert(page == merged_page);
-                    next_page = merged_page;
-                }
-
-                // merge page1 and page2
-                MergePages(page1_it, page2_it, page);
-
-                if (!use_lru_list)
-                {
-                    // For this case, should set the value of
-                    // @@next_page depending on the clean result: 1)
-                    // When the current page has been cleaned
-                    // successfully, if merged with previous page, set
-                    // the value is the merged_page's next_page_; if
-                    // merged with next page, set the value is the
-                    // merged_page itself. 2) When the current page has
-                    // not been cleaned successfully. Should set the
-                    // value is the merged_page itself no matter merged
-                    // with previous page or merged with next page.
-                    next_page = (real_merge_with_prev && success)
-                                    ? merged_page->next_page_
-                                    : merged_page;
                 }
             }
             else
             {
-                assert(!page->Empty());
-                auto page_it = ccmp_.find(old_page_key);
-                assert(page_it != ccmp_.end());
-                TryUpdatePageKey(page_it);
+                // redistribute or merge page with its siblings
+                CcPage<KeyT, ValueT> *prev = page->prev_page_;
+                CcPage<KeyT, ValueT> *next = page->next_page_;
+                bool can_borrow_from_prev =
+                    prev != &neg_inf_page_ &&
+                    page->Size() + prev->Size() >
+                        CcPage<KeyT, ValueT>::split_threshold_;
+                bool can_borrow_from_next =
+                    next != &pos_inf_page_ &&
+                    page->Size() + next->Size() >
+                        CcPage<KeyT, ValueT>::split_threshold_;
+                bool can_merge_with_prev =
+                    prev != &neg_inf_page_ &&
+                    page->Size() + prev->Size() <=
+                        CcPage<KeyT, ValueT>::split_threshold_;
+                bool can_merge_with_next =
+                    next != &pos_inf_page_ &&
+                    page->Size() + next->Size() <=
+                        CcPage<KeyT, ValueT>::split_threshold_;
+                if (can_borrow_from_prev || can_borrow_from_next)
+                {
+                    // map needs to be updated through iterator after
+                    // redistribution
+                    if (page_it == ccmp_.end())
+                    {
+                        page_it = ccmp_.find(page->FirstKey());
+                    }
+                    // the two pages whose entries need to be redistributed
+                    // are identified by page1 and page2, page1 is the page
+                    // with smaller key
+                    auto page1_it = page_it;
+                    auto page2_it = page_it;
+                    if (can_borrow_from_prev)
+                    {
+                        // borrow entries from previous page
+                        --page1_it;
+                    }
+                    else if (can_borrow_from_next)
+                    {
+                        // borrow entries from next page
+                        ++page2_it;
+                        assert(page2_it != ccmp_.end());
+                    }
+
+                    RedistributeBetweenPages(page1_it, page2_it);
+
+                    bool page_needs_reclean =
+                        !can_borrow_from_prev && can_borrow_from_next;
+                    if (!use_lru_list &&
+                        ((success && page_needs_reclean) || !success))
+                    {
+                        // If the caller care the clean status, reset the
+                        // value of
+                        // @@next_page depending on the clean result:
+                        // 1) When the current page has been cleaned
+                        // successfully, if borrow from the next(that's mean
+                        // page == page1), should set the current page as
+                        // the @@next_page. 2) When this current page has
+                        // not been cleaned successfully, should return the
+                        // current page as the
+                        // @@next_page.
+                        next_page = page;
+                    }
+                }
+                else if (can_merge_with_prev || can_merge_with_next)
+                {
+                    // map needs to be updated through iterator after
+                    // redistribution
+                    if (page_it == ccmp_.end())
+                    {
+                        page_it = ccmp_.find(page->FirstKey());
+                    }
+                    // the two pages to be merged are identified by page1
+                    // and page2, page1 is the page with smaller key
+                    auto page1_it = page_it;
+                    auto page2_it = page_it;
+
+                    bool real_merge_with_prev = false;
+                    if (can_merge_with_prev)
+                    {
+                        real_merge_with_prev = true;
+                        // merge `page` with its previous page
+                        --page1_it;
+                    }
+                    else if (can_merge_with_next)
+                    {
+                        // merge `page` with its next page
+                        ++page2_it;
+                        assert(page2_it != ccmp_.end());
+                    }
+
+                    CcPage<KeyT, ValueT> *merged_page = page1_it->second.get();
+                    CcPage<KeyT, ValueT> *discarded_page =
+                        page2_it->second.get();
+
+                    if (use_lru_list && next_page == discarded_page)
+                    {
+                        // For this case, the next page to be cleaned comes
+                        // from the lru list. The next_page is current
+                        // page's lru_next_, and if the next_page ==
+                        // discarded_page, the discarded_page must be the
+                        // next page of the current page, that is to say,
+                        // the current page will merge with the next. So the
+                        // current page must equal to the merged page, and
+                        // should set the
+                        // @@next_page is merged page.
+                        assert(page == merged_page);
+                        next_page = merged_page;
+                    }
+
+                    // merge page1 and page2
+                    MergePages(page1_it, page2_it);
+
+                    if (!use_lru_list)
+                    {
+                        // For this case, should set the value of
+                        // @@next_page depending on the clean result: 1)
+                        // When the current page has been cleaned
+                        // successfully, if merged with previous page, set
+                        // the value is the merged_page's next_page_; if
+                        // merged with next page, set the value is the
+                        // merged_page itself. 2) When the current page has
+                        // not been cleaned successfully. Should set the
+                        // value is the merged_page itself no matter merged
+                        // with previous page or merged with next page.
+                        next_page = (real_merge_with_prev && success)
+                                        ? merged_page->next_page_
+                                        : merged_page;
+                    }
+                }
             }
         }
 
@@ -7752,7 +7776,14 @@ public:
         for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
             const KeyT &page_key = it->first;
-            CcPage<KeyT, ValueT> *page = &it->second;
+            CcPage<KeyT, ValueT> *page = it->second.get();
+            if (page_key != page->FirstKey())
+            {
+                DLOG(FATAL)
+                    << "error page: " << page
+                    << " map key: " << page_key.ToString()
+                    << ", page first key: " << page->FirstKey().ToString();
+            }
             assert(page_key == page->FirstKey());
             // This silences the -Wunused-but-set-variable warning
             // without any runtime overhead.
@@ -8351,8 +8382,10 @@ protected:
             // ccmap is empty, insert a page
             const KeyT *search_key = static_cast<const KeyT *>(
                 slice_items[first_index].key_.KeyPtr());
-            std::tie(target_iter, inserted) = ccmp_.try_emplace(
-                *search_key, this, &neg_inf_page_, &pos_inf_page_);
+            std::tie(target_iter, inserted) =
+                ccmp_.try_emplace(*search_key,
+                                  std::make_unique<CcPage<KeyT, ValueT>>(
+                                      this, &neg_inf_page_, &pos_inf_page_));
             assert(inserted);
         }
         else
@@ -8367,7 +8400,7 @@ protected:
             }
         }
 
-        target_page = &target_iter->second;
+        target_page = target_iter->second.get();
 
         bool is_emplace = false;
         std::vector<KeyT> new_keys;
@@ -8424,14 +8457,13 @@ protected:
 
                     if (target_iter == ccmp_.end())
                     {
-                        target_iter =
-                            ccmp_.try_emplace(target_iter,
-                                              *target_key,
-                                              this,
-                                              target_page,
-                                              target_page->next_page_);
+                        target_iter = ccmp_.try_emplace(
+                            target_iter,
+                            *target_key,
+                            std::make_unique<CcPage<KeyT, ValueT>>(
+                                this, target_page, target_page->next_page_));
                     }
-                    target_page = &target_iter->second;
+                    target_page = target_iter->second.get();
                     continue;
                 }
 
@@ -8475,14 +8507,13 @@ protected:
                     if (target_iter == ccmp_.end())
                     {
                         // create a new page
-                        target_iter =
-                            ccmp_.try_emplace(target_iter,
-                                              *target_key,
-                                              this,
-                                              target_page,
-                                              target_page->next_page_);
+                        target_iter = ccmp_.try_emplace(
+                            target_iter,
+                            *target_key,
+                            std::make_unique<CcPage<KeyT, ValueT>>(
+                                this, target_page, target_page->next_page_));
                     }
-                    target_page = &target_iter->second;
+                    target_page = target_iter->second.get();
                 }
 
                 if (target_page->Full())
@@ -8499,15 +8530,16 @@ protected:
                         new_page_keys, new_page_entries, new_last_commit_ts);
 
                     const KeyT &key_of_new_page = *new_page_keys.begin();
-                    auto new_page_it =
-                        ccmp_.try_emplace(target_iter,
-                                          key_of_new_page,
-                                          this,
-                                          std::move(new_page_keys),
-                                          std::move(new_page_entries),
-                                          target_page,
-                                          target_page->next_page_);
-                    CcPage<KeyT, ValueT> *new_page = &new_page_it->second;
+                    auto new_page_it = ccmp_.try_emplace(
+                        target_iter,
+                        key_of_new_page,
+                        std::make_unique<CcPage<KeyT, ValueT>>(
+                            this,
+                            std::move(new_page_keys),
+                            std::move(new_page_entries),
+                            target_page,
+                            target_page->next_page_));
+                    CcPage<KeyT, ValueT> *new_page = new_page_it->second.get();
                     new_page->last_dirty_commit_ts_ = new_last_commit_ts;
 
                     for (auto &cce : new_page->entries_)
@@ -8528,10 +8560,20 @@ protected:
                             target_page->last_access_ts_;
                     }
 
+                    // Iterators are invalidated after split. Find the target
+                    // page.
                     if (new_page->FirstKey() <= *target_key)
                     {
                         target_iter = new_page_it;
                         target_page = new_page;
+                    }
+                    else
+                    {
+                        target_iter = --new_page_it;
+                        target_page = target_iter->second.get();
+                        assert(target_iter->first == target_page->FirstKey());
+                        assert(target_iter->second->LastKey() <
+                               new_page->FirstKey());
                     }
                 }
 
@@ -8628,7 +8670,9 @@ protected:
             }
             // ccmap is empty, insert a page
             auto [it, inserted] =
-                ccmp_.try_emplace(key, this, &neg_inf_page_, &pos_inf_page_);
+                ccmp_.try_emplace(key,
+                                  std::make_unique<CcPage<KeyT, ValueT>>(
+                                      this, &neg_inf_page_, &pos_inf_page_));
             assert(inserted);
             // This silences the -Wunused-but-set-variable warning
             // without any runtime overhead.
@@ -8638,12 +8682,14 @@ protected:
         // First locate target page, then find or emplace `key` in the
         // page.
         auto ub_it = ccmp_.upper_bound(key);
+        assert(ub_it == ccmp_.end() || key < ub_it->first);
         auto target_it = ub_it;
         if (target_it != ccmp_.begin())
         {
-            target_it--;
+            --target_it;
+            assert(target_it->first <= key);
         }
-        CcPage<KeyT, ValueT> *target_page = &target_it->second;
+        CcPage<KeyT, ValueT> *target_page = target_it->second.get();
 
         size_t idx_in_page = target_page->Find(key);
         if (idx_in_page < target_page->Size())
@@ -8660,18 +8706,42 @@ protected:
 
         // not found, emplace key into target page, split the page if
         // it's full
-        if (target_page->Full() && target_page->LastKey() < key)
+        if (target_page->Full())
         {
-            // target page is full, choose the next page if `key` can be
-            // inserted into next page
-            target_it++;
-            if (target_it == ccmp_.end())
+            // target page is full, choose the next or previous page if `key`
+            // can be inserted into them
+            if (target_page->LastKey() < key)
             {
-                // create a new page
-                target_it = ccmp_.try_emplace(
-                    target_it, key, this, target_page, target_page->next_page_);
+                // choose the next page
+                target_it++;
+                if (target_it == ccmp_.end())
+                {
+                    // create the next page
+                    target_it = ccmp_.try_emplace(
+                        target_it,
+                        key,
+                        std::make_unique<CcPage<KeyT, ValueT>>(
+                            this, target_page, target_page->next_page_));
+                }
             }
-            target_page = &target_it->second;
+            else if (key < target_page->FirstKey())
+            {
+                // choose the previous page
+                if (target_it == ccmp_.begin())
+                {
+                    // create the previous page
+                    target_it = ccmp_.try_emplace(
+                        target_it,
+                        key,
+                        std::make_unique<CcPage<KeyT, ValueT>>(
+                            this, target_page->prev_page_, target_page));
+                }
+                else
+                {
+                    --target_it;
+                }
+            }
+            target_page = target_it->second.get();
         }
 
         if (target_page->Full())
@@ -8685,14 +8755,18 @@ protected:
                 new_page_keys, new_page_entries, new_last_commit_ts);
 
             const KeyT &key_of_new_page = *new_page_keys.begin();
-            auto new_page_it = ccmp_.try_emplace(target_it,
-                                                 key_of_new_page,
-                                                 this,
-                                                 std::move(new_page_keys),
-                                                 std::move(new_page_entries),
-                                                 target_page,
-                                                 target_page->next_page_);
-            CcPage<KeyT, ValueT> *new_page = &new_page_it->second;
+
+            auto new_page_it =
+                ccmp_.try_emplace(target_it,
+                                  key_of_new_page,
+                                  std::make_unique<CcPage<KeyT, ValueT>>(
+                                      this,
+                                      std::move(new_page_keys),
+                                      std::move(new_page_entries),
+                                      target_page,
+                                      target_page->next_page_));
+            CcPage<KeyT, ValueT> *new_page = new_page_it->second.get();
+            assert(new_page_it->first == new_page->FirstKey());
             new_page->last_dirty_commit_ts_ = new_last_commit_ts;
 
             for (auto &cce : new_page->entries_)
@@ -8712,10 +8786,18 @@ protected:
                 new_page->last_access_ts_ = target_page->last_access_ts_;
             }
 
+            // Iterators are invalidated after split. Find the target page.
             if (new_page->FirstKey() <= key)
             {
                 target_it = new_page_it;
                 target_page = new_page;
+            }
+            else
+            {
+                target_it = --new_page_it;
+                target_page = target_it->second.get();
+                assert(target_it->first == target_page->FirstKey());
+                assert(target_it->second->LastKey() < new_page->FirstKey());
             }
         }
 
@@ -8873,12 +8955,12 @@ protected:
         auto pg_it2 = lb_it;
         if (pg_it2 != ccmp_.end())
         {
-            page2 = &pg_it2->second;
+            page2 = pg_it2->second.get();
         }
         if (pg_it1 != ccmp_.begin())
         {
-            pg_it1--;
-            page1 = &pg_it1->second;
+            --pg_it1;
+            page1 = pg_it1->second.get();
         }
         // now we have the order:
         // neg_inf < page1(if exist)->FirstKey() < key <= page2(if
@@ -8923,12 +9005,12 @@ protected:
         auto pg_it2 = ub_it;
         if (pg_it2 != ccmp_.end())
         {
-            page2 = &pg_it2->second;
+            page2 = pg_it2->second.get();
         }
         if (pg_it1 != ccmp_.begin())
         {
-            pg_it1--;
-            page1 = &pg_it1->second;
+            --pg_it1;
+            page1 = pg_it1->second.get();
         }
         // now we have the order:
         // neg_inf <= page1(if exist)->FirstKey() <= key < page2(if
@@ -9088,7 +9170,7 @@ protected:
             }
             else
             {
-                ub_it--;
+                --ub_it;
                 // now, ub_it is the greatest entry equal to or less
                 // than `key`
 
@@ -9116,7 +9198,7 @@ protected:
             else
             {
                 // starting from the gap and key of entry before lb_it
-                lb_it--;
+                --lb_it;
                 return std::make_pair(lb_it, ScanType::ScanBoth);
             }
         }
@@ -9596,10 +9678,9 @@ protected:
         return true;
     }
 
-    void TryUpdatePageKey(
-        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page_it)
+    void TryUpdatePageKey(BtreeMapIterator &page_it)
     {
-        CcPage<KeyT, ValueT> &page = page_it->second;
+        CcPage<KeyT, ValueT> &page = *page_it->second;
         if (page_it->first != page.FirstKey())
         {
             auto node_handle = ccmp_.extract(page_it);
@@ -9607,6 +9688,7 @@ protected:
             node_handle.key() = std::move(new_key);
             auto insert_res = ccmp_.insert(std::move(node_handle));
             assert(insert_res.inserted);
+            assert(insert_res.position->first == page.FirstKey());
             page_it = insert_res.position;
         }
     }
@@ -9614,8 +9696,10 @@ protected:
     struct CleanGuard
     {
     public:
-        explicit CleanGuard(CcPage<KeyT, ValueT> *page)
+        explicit CleanGuard(CcPage<KeyT, ValueT> *page,
+                            BtreeMapIterator &page_it)
             : page_(page),
+              page_it_(page_it),
               idx_in_page_(0),
               key_insert_it_(page->keys_.begin()),
               entry_insert_it_(page->entries_.begin())
@@ -9677,6 +9761,7 @@ protected:
 
     public:
         CcPage<KeyT, ValueT> *page_{nullptr};
+        BtreeMapIterator &page_it_;
         size_t idx_in_page_{0};
 
     private:
@@ -9689,8 +9774,9 @@ protected:
 
     struct CleanGuardWithoutKickoutCc : public CleanGuard
     {
-        explicit CleanGuardWithoutKickoutCc(CcPage<KeyT, ValueT> *page)
-            : CleanGuard(page)
+        explicit CleanGuardWithoutKickoutCc(CcPage<KeyT, ValueT> *page,
+                                            BtreeMapIterator &page_it)
+            : CleanGuard(page, page_it)
         {
         }
 
@@ -9733,8 +9819,9 @@ protected:
     {
     public:
         CleanGuardWithKickoutCc(CcPage<KeyT, ValueT> *page,
+                                BtreeMapIterator &page_it,
                                 const KickoutCcEntryCc *kickout_cc)
-            : CleanGuard(page),
+            : CleanGuard(page, page_it),
               kickout_cc_(kickout_cc),
               need_invalidate_lock_term_(
                   DeduceNeedInvalidateLockTerm(kickout_cc->GetCleanType())),
@@ -9816,8 +9903,9 @@ protected:
      * Clean page and return the last_read_ts of page.
      *
      * @param page
+     * @param page_it the position of page in ccmp_. If page's first key is
+     * deleted, page_it needs to be set to update the map.
      * @param free_cnt
-     * @param clean_type
      * @return The bool value stand for the clean status, if return
      * false, it mean that the target ccentry can not be clean, the
      * caller should retry the kickout request. Currently, only when
@@ -9825,18 +9913,20 @@ protected:
      * status.
      */
     bool CleanPage(CcPage<KeyT, ValueT> *page,
+                   BtreeMapIterator &page_it,
                    size_t &free_cnt,
                    KickoutCcEntryCc *kickout_cc = nullptr)
     {
         std::unique_ptr<CleanGuard> clean_guard;
         if (kickout_cc)
         {
-            clean_guard =
-                std::make_unique<CleanGuardWithKickoutCc>(page, kickout_cc);
+            clean_guard = std::make_unique<CleanGuardWithKickoutCc>(
+                page, page_it, kickout_cc);
         }
         else
         {
-            clean_guard = std::make_unique<CleanGuardWithoutKickoutCc>(page);
+            clean_guard =
+                std::make_unique<CleanGuardWithoutKickoutCc>(page, page_it);
         }
 
         CleanPage(clean_guard.get());
@@ -9856,7 +9946,11 @@ protected:
             auto range_entry = static_cast<TemplateTableRangeEntry<KeyT> *>(
                 shard_->GetTableRangeEntry(
                     table_name_, cc_ng_id_, TxKey(&key)));
-            assert(range_entry);
+            if (range_entry == nullptr)
+            {
+                CleanOrphanKey(clean_guard);
+                continue;
+            }
 
             auto range_entry_lk = range_entry->SharedLockGuard();
 
@@ -9943,6 +10037,13 @@ protected:
                                 key, shard_->core_id_, store_slice);
                         }
 
+                        if (idx == 0)
+                        {
+                            // The page's first key is cleaned, needs to locate
+                            // the page position to update the map.
+                            clean_guard->page_it_ = ccmp_.find(key);
+                        }
+
                         clean_guard->Clean(*shard_, cc_ng_id_, cce.get());
                     }
                     else
@@ -9989,6 +10090,12 @@ protected:
 
         if (is_clean_target && can_be_cleaned)
         {
+            if (idx_in_page == 0)
+            {
+                // The page's first key is cleaned, needs to locate the page
+                // position to update the map.
+                clean_guard->page_it_ = ccmp_.find(key);
+            }
             clean_guard->Clean(*shard_, cc_ng_id_, cce.get());
         }
         else
@@ -10024,6 +10131,13 @@ protected:
                         table_name_, cc_ng_id_, key);
                 }
 
+                if (idx == 0)
+                {
+                    // The page's first key is cleaned, needs to locate the page
+                    // position to update the map.
+                    clean_guard->page_it_ = ccmp_.find(key);
+                }
+
                 clean_guard->Clean(*shard_, cc_ng_id_, cce.get());
             }
             else
@@ -10047,12 +10161,14 @@ protected:
      * @param page2_last_read_ts
      * @return
      */
-    void RedistributeBetweenPages(
-        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
-        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page2_it)
+    void RedistributeBetweenPages(BtreeMapIterator &page1_it,
+                                  BtreeMapIterator &page2_it)
     {
-        CcPage<KeyT, ValueT> &page1 = page1_it->second;
-        CcPage<KeyT, ValueT> &page2 = page2_it->second;
+        CcPage<KeyT, ValueT> &page1 = *page1_it->second;
+        CcPage<KeyT, ValueT> &page2 = *page2_it->second;
+        assert(page1.next_page_ == &page2 && &page1 == page2.prev_page_);
+        assert(page1_it->first == page1.FirstKey());
+        assert(page2_it->first == page2.FirstKey());
 
         if (page1.Size() > page2.Size())
         {
@@ -10067,11 +10183,11 @@ protected:
 
             // Updates the parent page of the locks of the to-be-moved
             // entries.
-            for (auto page1_it = page1.entries_.begin() + move_pos;
-                 page1_it != page1.entries_.end();
-                 ++page1_it)
+            for (auto entry_it = page1.entries_.begin() + move_pos;
+                 entry_it != page1.entries_.end();
+                 ++entry_it)
             {
-                (*page1_it)->UpdateCcPage(&page2);
+                (*entry_it)->UpdateCcPage(&page2);
             }
 
             page2.entries_.insert(
@@ -10096,11 +10212,11 @@ protected:
 
             // Updates the parent page of the locks of the to-be-moved
             // entries.
-            for (auto page2_it = page2.entries_.begin();
-                 page2_it != page2.entries_.begin() + move_idx;
-                 ++page2_it)
+            for (auto entry_it = page2.entries_.begin();
+                 entry_it != page2.entries_.begin() + move_idx;
+                 ++entry_it)
             {
-                (*page2_it)->UpdateCcPage(&page1);
+                (*entry_it)->UpdateCcPage(&page1);
             }
 
             page1.entries_.insert(
@@ -10145,8 +10261,10 @@ protected:
             }());
 
         // update page key in the map
-        TryUpdatePageKey(page1_it);
+        assert(page1_it->first == page1.FirstKey());
+        assert(page2_it->first != page2.FirstKey());
         TryUpdatePageKey(page2_it);
+        assert(page2_it->second.get() == &page2);
 
         // update LRU list
         // after redistribution, the two pages should be seen as one in
@@ -10183,20 +10301,16 @@ protected:
      *
      * @param page1_it The iterator to the merged page
      * @param page2_it The iterator to the discarded page
-     * @param page
      */
-    void MergePages(
-        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
-        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page2_it,
-        CcPage<KeyT, ValueT> *page)
+    void MergePages(BtreeMapIterator &page1_it, BtreeMapIterator &page2_it)
     {
-        CcPage<KeyT, ValueT> *page1 = &page1_it->second;
-        CcPage<KeyT, ValueT> *page2 = &page2_it->second;
+        CcPage<KeyT, ValueT> *page1 = page1_it->second.get();
+        CcPage<KeyT, ValueT> *page2 = page2_it->second.get();
 
         auto merged_page_it = page1_it;
         auto discarded_page_it = page2_it;
-        CcPage<KeyT, ValueT> *merged_page = &merged_page_it->second;
-        CcPage<KeyT, ValueT> *discarded_page = &discarded_page_it->second;
+        CcPage<KeyT, ValueT> *merged_page = merged_page_it->second.get();
+        CcPage<KeyT, ValueT> *discarded_page = discarded_page_it->second.get();
 
         // merge the key vector and entry vector
         std::vector<KeyT> merged_keys = std::move(page1->keys_);
@@ -10290,14 +10404,10 @@ protected:
         merged_page->last_dirty_commit_ts_ =
             std::max(merged_page->last_dirty_commit_ts_,
                      discarded_page->last_dirty_commit_ts_);
+
         // remove discarded page from the map
+        // note that all iterators are invalid after the erasion
         ccmp_.erase(discarded_page_it);
-        // modify merged page's key in the map
-        if (merged_page->FirstKey() != merged_page_it->first)
-        {
-            // merged page key has changed
-            TryUpdatePageKey(merged_page_it);
-        }
     }
 
     CcPage<KeyT, ValueT> *PageNegInf()
@@ -10310,7 +10420,7 @@ protected:
         return &pos_inf_page_;
     }
 
-    std::map<KeyT, CcPage<KeyT, ValueT>> ccmp_;
+    absl::btree_map<KeyT, std::unique_ptr<CcPage<KeyT, ValueT>>> ccmp_;
     CcPage<KeyT, ValueT> neg_inf_page_, pos_inf_page_;
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
     size_t size_{};

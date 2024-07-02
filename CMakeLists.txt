@@ -16,6 +16,10 @@ if ( MSVC )
     set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} /W3")
 endif()
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
+
 option(USE_ROCKSDB_LOG_STATE "Whether use rocksdb log state or in-memory log state" ON)
 message(NOTICE "USE_ROCKSDB_LOG_STATE : ${USE_ROCKSDB_LOG_STATE}")
 option(WITH_ROCKSDB_CLOUD "RocksDB Cloud storage backend, S3 or GCS")
@@ -56,7 +60,9 @@ if (USE_ROCKSDB_LOG_STATE)
   endif()
   add_compile_definitions(USE_ROCKSDB_LOG_STATE)
 endif()
-	   
+
+add_subdirectory(abseil-cpp)
+
 find_package(Protobuf REQUIRED)
 find_package(GFLAGS REQUIRED)
 find_package(OpenSSL REQUIRED)
@@ -137,6 +143,7 @@ SET(METRICS_SERVICE_SOURCE_DIR ${CMAKE_SOURCE_DIR}/../mono_metrics)
 
 set(INCLUDE_DIR
     ${TX_SERVICE_SOURCE_DIR}/include
+    ${TX_SERVICE_SOURCE_DIR}/abseil-cpp
     ${TX_SERVICE_SOURCE_DIR}/include/cc
     ${TX_SERVICE_SOURCE_DIR}/include/remote
     ${TX_SERVICE_SOURCE_DIR}/include/fault

@@ -1421,7 +1421,7 @@ struct CcPage : public LruPage
      */
     size_t Find(const KeyT &key) const
     {
-        if (keys_.size() > 0 && keys_.back() < key)
+        if (keys_.empty() || key < keys_.front() || keys_.back() < key)
         {
             // not found
             return keys_.size();

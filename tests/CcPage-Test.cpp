@@ -99,7 +99,7 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     for (size_t i = 0; i < MAP_NUM; i++)
     {
         auto &cc_map = *ccmaps[i];
-        PrepareCcMap(cc_map, MAP_SIZE, tables[i], false);
+        PrepareCcMap(cc_map, MAP_SIZE, tables[i], i & 1);
     }
 
     for (auto &up : ccmaps)
@@ -115,7 +115,7 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     size_t total_free = 0;
     while (true)
     {
-        auto free_cnt = shard.Clean();
+        size_t free_cnt = shard.Clean();
         shard.VerifyLruList();
         if (free_cnt == 0)
         {
