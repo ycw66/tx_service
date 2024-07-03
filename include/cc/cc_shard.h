@@ -685,7 +685,7 @@ public:
      * @param ng_id
      * @param schema_ts
      */
-    void TruncateCcm(const TableName &table_name,
+    bool TruncateCcm(const TableName &table_name,
                      NodeGroupId ng_id,
                      const TableSchema *table_schema,
                      uint64_t schema_ts);

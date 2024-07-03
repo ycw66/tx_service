@@ -21,6 +21,7 @@
 #include "tx_operation_result.h"
 #include "tx_record.h"
 #include "tx_service_metrics.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -552,6 +553,45 @@ struct PostWriteAllOp : public TransactionOperation
     PostWriteType write_type_{PostWriteType::PrepareCommit};
 };
 
+struct KickoutDataOp : public TransactionOperation
+{
+    KickoutDataOp(TransactionExecution *txm);
+    void Reset();
+    void ResetHandlerTxm(TransactionExecution *txm);
+    void Forward(TransactionExecution *txm) override;
+
+    const TableName *table_name_{nullptr};
+    NodeGroupId node_group_;
+    TxKey start_key_;
+    TxKey end_key_;
+
+    int32_t range_id_{INT32_MAX};
+    uint64_t range_version_{UINT64_MAX};
+    CleanType clean_type_{CleanType::CleanRangeData};
+    // Clean ts for the kickout cc. Only valid if clean type is
+    // CleanForAlterTable.
+    uint64_t clean_ts_{0};
+    // Target buckets for kickout cc. Only valid if clean type is
+    // CleanBucketData.
+    std::vector<uint16_t> *bucket_ids_{nullptr};
+    CcHandlerResult<Void> hd_result_;
+};
+
+struct KickoutDataAllOp : public TransactionOperation
+{
+    explicit KickoutDataAllOp(TransactionExecution *txm);
+    void Reset(uint32_t ng_cnt, size_t table_cnt);
+    void Clear();
+    void ResetHandlerTxm(TransactionExecution *txm);
+    void Forward(TransactionExecution *txm) override;
+
+    // To handle multi tables.
+    std::vector<const TableName *> table_names_;
+    uint64_t commit_ts_{0};
+    CleanType clean_type_{CleanType::CleanForAlterTable};
+    CcHandlerResult<Void> hd_result_;
+};
+
 struct DsUpsertTableOp : public TransactionOperation
 {
     DsUpsertTableOp() = delete;
@@ -691,6 +731,13 @@ struct UpsertTableOp : public SchemaOp
      *
      */
     WriteToLogOp commit_log_op_;
+
+    /**
+     * @brief Truncate ccmap on all node groups
+     *
+     */
+    KickoutDataAllOp truncate_table_op_;
+
     /**
      * @brief Removes write locks in all nodes. If the schema operation
      * succeeds, also installs the new schema in all nodes.
@@ -783,30 +830,6 @@ struct FlushDataOp : public TransactionOperation
     std::vector<TxKey> *mv_vec_{nullptr};
     CcHandlerResult<Void> hd_result_;
     bool during_range_split{false};
-};
-
-struct KickoutDataOp : public TransactionOperation
-{
-    KickoutDataOp(TransactionExecution *txm);
-    void Reset();
-    void ResetHandlerTxm(TransactionExecution *txm);
-    void Forward(TransactionExecution *txm) override;
-
-    const TableName *table_name_{nullptr};
-    NodeGroupId node_group_;
-    TxKey start_key_;
-    TxKey end_key_;
-
-    int32_t range_id_{INT32_MAX};
-    uint64_t range_version_{UINT64_MAX};
-    CleanType clean_type_{CleanType::CleanRangeData};
-    // Clean ts for the kickout cc. Only valid if clean type is
-    // CleanForAlterTable.
-    uint64_t clean_ts_{0};
-    // Target buckets for kickout cc. Only valid if clean type is
-    // CleanBucketData.
-    std::vector<uint16_t> *bucket_ids_{nullptr};
-    CcHandlerResult<Void> hd_result_;
 };
 
 struct SplitFlushRangeOp : public CompositeTransactionOperation

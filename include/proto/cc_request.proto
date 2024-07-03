@@ -380,8 +380,10 @@ enum SlicePosition {
 
 enum CleanType {
     CleanRangeData = 0;
-    CleanBucketData = 1;
-    CleanForAlterTable = 2;
+    CleanRangeDataForMigration = 1;
+    CleanBucketData = 2;
+    CleanForAlterTable = 3;
+    CleanForTruncateTable = 4;
 }
 
 message AcquireRequest {

@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "cc_entry.h"
@@ -7541,6 +7542,39 @@ public:
 
         size_ = 0;
         ccmp_.clear();
+    }
+
+    bool CleanBatchPages(size_t clean_page_cnt) override
+    {
+        size_t cnt = 0;
+        auto it = ccmp_.begin();
+        while (it != ccmp_.end() && cnt < clean_page_cnt)
+        {
+            CcPage<KeyT, ValueT> *page = it->second.get();
+            if (page->lru_next_ != nullptr)
+            {
+                shard_->DetachLru(page);
+            }
+
+            for (auto &cce : page->entries_)
+            {
+                cce->ClearLocks(*shard_, cc_ng_id_);
+            }
+
+            size_ -= page->Size();
+            cnt += 1;
+
+            it = ccmp_.erase(it);
+        }
+
+        if (it != ccmp_.end())
+        {
+            // More data
+            return false;
+        }
+
+        assert(size_ == 0);
+        return true;
     }
 
     LruPage *RebalancePage(CcPage<KeyT, ValueT> *page,

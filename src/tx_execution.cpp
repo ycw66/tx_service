@@ -6493,8 +6493,8 @@ void TransactionExecution::Process(KickoutDataAllOp &kickout_data_all_op)
                 tx_term_,
                 command_id_.load(std::memory_order_relaxed),
                 kickout_data_all_op.hd_result_,
-                CleanType::CleanForAlterTable,
-                0,
+                kickout_data_all_op.clean_type_,
+                nullptr,
                 nullptr,
                 nullptr,
                 kickout_data_all_op.commit_ts_);

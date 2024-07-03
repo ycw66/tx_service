@@ -553,36 +553,9 @@ public:
         {
             if (req.OpType() == OperationType::TruncateTable)
             {
-                // A remote tx is allowed to acquire write intents/locks and
-                // drop a table, even if the table's schema has not been
-                // initialized at this node. The earlier acquiring-write-intent
-                // request creates a schema cc entry in the catalog cc map and a
-                // node-level schema view. The version timestamp of the schema
-                // is 0, if the schema is uninitialized (null). Or, the current
-                // schema must not be null.
-                assert(catalog_entry->Version() == 0 || old_schema != nullptr);
-                assert(new_schema->Version() == catalog_entry->DirtyVersion());
-                shard_->TruncateCcm(table_key->Name(),
-                                    req.NodeGroupId(),
-                                    new_schema,
-                                    catalog_entry->DirtyVersion());
-
-                if (old_schema != nullptr)
-                {
-                    std::vector<TableName> index_names =
-                        old_schema->IndexNames();
-                    for (const TableName &index_name : index_names)
-                    {
-                        shard_->CleanCcm(index_name, req.NodeGroupId());
-#ifdef RANGE_PARTITION_ENABLED
-                        // Drop range table if exist
-                        TableName index_range_table_name{
-                            index_name.StringView(), TableType::RangePartition};
-                        shard_->DropCcm(index_range_table_name,
-                                        req.NodeGroupId());
+#ifndef ON_KEY_OBJECT
+                assert(false && "Only implement for redis");
 #endif
-                    }
-                }
             }
             else if (req.OpType() == OperationType::DropTable)
             {

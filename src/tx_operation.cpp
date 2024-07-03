@@ -2074,6 +2074,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
       reset_sequence_record_op_(txm),
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
+      truncate_table_op_(txm),
       post_all_lock_op_(txm),
       clean_log_op_(txm),
       read_cluster_result_(txm)
@@ -2110,6 +2111,10 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
     post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+
+    truncate_table_op_.Clear();
+    truncate_table_op_.clean_type_ = CleanType::CleanForTruncateTable;
+    truncate_table_op_.table_names_.push_back(&table_key_.Name());
 
     TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
     TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
@@ -2427,8 +2432,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (op_type_ == OperationType::DropTable ||
-                 op_type_ == OperationType::TruncateTable)
+        else if (op_type_ == OperationType::DropTable)
         {
             // Clear write set before commit dirty schema.
             txm->rw_set_.ClearTable(table_key_.Name());
@@ -2440,6 +2444,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             op_ = &post_all_lock_op_;
             txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
+        }
+        else if (op_type_ == OperationType::TruncateTable)
+        {
+            LOG(INFO)
+                << "UpsertTableOp: Clean all ccmap on all node groups, txn: "
+                << txm->TxNumber();
+            truncate_table_op_.commit_ts_ = txm->CommitTs();
+            assert(truncate_table_op_.clean_type_ ==
+                   CleanType::CleanForTruncateTable);
+            op_ = &truncate_table_op_;
+            txm->PushOperation(&truncate_table_op_);
+            txm->Process(truncate_table_op_);
         }
         else if (op_type_ == OperationType::CreateTable &&
                  catalog_rec_.DirtySchema()->HasAutoIncrement())
@@ -2715,6 +2731,41 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
         }
     }
+    else if (op_ == &truncate_table_op_)
+    {
+        assert(op_type_ == OperationType::TruncateTable);
+        if (truncate_table_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                LOG(ERROR)
+                    << "UpsertTableOp: failed to truncate table, err code: "
+                    << (int) truncate_table_op_.hd_result_.ErrorCode()
+                    << ", err msg: " << truncate_table_op_.hd_result_.ErrorMsg()
+                    << ", txn: " << txm->TxNumber() << ", keep retrying";
+                op_ = &truncate_table_op_;
+                txm->PushOperation(&truncate_table_op_);
+                txm->Process(truncate_table_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+
+            return;
+        }
+
+        // Clear write set before commit dirty schema.
+        txm->rw_set_.ClearTable(table_key_.Name());
+        txm->rw_set_.ClearReadSet(table_key_.Name());
+
+        // For DROP TABLE and TRUNCATE TABLE, the data store operation
+        // happens after all write locks are acquired and commit log is
+        // flushed.
+        op_ = &post_all_lock_op_;
+        txm->PushOperation(&post_all_lock_op_);
+        txm->Process(post_all_lock_op_);
+    }
     else if (op_ == &post_all_lock_op_)
     {
         if (!txm->CheckLeaderTerm())
@@ -2930,6 +2981,10 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
 
+    truncate_table_op_.Clear();
+    truncate_table_op_.table_names_.push_back(&table_key_.Name());
+    truncate_table_op_.clean_type_ = CleanType::CleanForTruncateTable;
+
     // reset cc_handler_res txm
     read_cluster_result_.ResetTxm(txm);
     acquire_all_intent_op_.ResetHandlerTxm(txm);
@@ -2941,6 +2996,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     reset_sequence_record_op_.ResetHandlerTxm(txm);
     acquire_all_lock_op_.ResetHandlerTxm(txm);
     commit_log_op_.ResetHandlerTxm(txm);
+    truncate_table_op_.ResetHandlerTxm(txm);
     post_all_lock_op_.ResetHandlerTxm(txm);
     clean_log_op_.ResetHandlerTxm(txm);
 
@@ -3262,6 +3318,74 @@ void KickoutDataOp::Forward(TransactionExecution *txm)
         }
 
         txm->PostProcess(*this);
+    }
+}
+
+KickoutDataAllOp::KickoutDataAllOp(TransactionExecution *txm) : hd_result_(txm)
+{
+}
+
+void KickoutDataAllOp::Reset(uint32_t ng_cnt, size_t table_cnt)
+{
+    hd_result_.Reset();
+    hd_result_.SetRefCnt(ng_cnt * table_cnt);
+}
+
+void KickoutDataAllOp::Clear()
+{
+    table_names_.clear();
+}
+
+void KickoutDataAllOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
+}
+
+void KickoutDataAllOp::Forward(TransactionExecution *txm)
+{
+    // Start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        // If leader-transferred, do not need to kickout data any more.
+        if (hd_result_.IsError() &&
+            hd_result_.ErrorCode() != CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
+            hd_result_.ErrorCode() != CcErrorCode::TX_NODE_NOT_LEADER)
+        {
+            if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+        txm->PostProcess(*this);
+        return;
+    }
+
+    if (txm->IsTimeOut(10) && hd_result_.SetResultByTimeoutThread())
+    {
+        LOG(WARNING) << "Kickout data all operation timeout 10s";
+        if (txm->CheckLeaderTerm() && retry_num_ > 0)
+        {
+            LOG(WARNING) << "ReRun this operation with the retry number: "
+                         << retry_num_;
+            ReRunOp(txm);
+            return;
+        }
+        else
+        {
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                LOG(WARNING) << "Force error for this operation";
+                txm->PostProcess(*this);
+            }
+        }
     }
 }
 

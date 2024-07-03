@@ -7,20 +7,6 @@
 
 namespace txservice
 {
-struct KickoutDataAllOp : public TransactionOperation
-{
-    explicit KickoutDataAllOp(TransactionExecution *txm);
-    void Reset(uint32_t ng_cnt, size_t table_cnt);
-    void Clear();
-    void ResetHandlerTxm(TransactionExecution *txm);
-    void Forward(TransactionExecution *txm) override;
-
-    // To handle multi tables.
-    std::vector<const TableName *> table_names_;
-    uint64_t commit_ts_{0};
-    CcHandlerResult<Void> hd_result_;
-};
-
 struct UpsertTableIndexOp : public SchemaOp
 {
     UpsertTableIndexOp() = delete;

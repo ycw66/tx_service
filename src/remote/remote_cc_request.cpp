@@ -1763,7 +1763,8 @@ void txservice::remote::RemoteKickoutCcEntry::Reset(
                             ToLocalType::ConvertCcTableType(req.table_type()));
 
     size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
-    assert(req.clean_type() == remote::CleanType::CleanForAlterTable);
+    assert(req.clean_type() == remote::CleanType::CleanForAlterTable ||
+           req.clean_type() == remote::CleanType::CleanForTruncateTable);
     KickoutCcEntryCc::Reset(table_name_,
                             req.node_group_id(),
                             core_cnt,
@@ -1771,7 +1772,7 @@ void txservice::remote::RemoteKickoutCcEntry::Reset(
                             (txservice::CleanType) req.clean_type(),
                             nullptr,
                             nullptr,
-                            0,
+                            nullptr,
                             req.clean_ts());
 
     input_msg_ = std::move(input_msg);

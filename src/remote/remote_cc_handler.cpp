@@ -931,7 +931,8 @@ void txservice::remote::RemoteCcHandler::KickoutData(
         ToRemoteType::ConvertTableType(table_name.Type()));
     kickout_data_req->set_node_group_id(ng_id);
     kickout_data_req->set_clean_ts(clean_ts);
-    assert(clean_type == txservice::CleanType::CleanForAlterTable);
+    assert(clean_type == txservice::CleanType::CleanForAlterTable ||
+           clean_type == txservice::CleanType::CleanForTruncateTable);
     kickout_data_req->set_clean_type((txservice::remote::CleanType) clean_type);
 
     // Send message

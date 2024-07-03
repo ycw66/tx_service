@@ -46,6 +46,7 @@
 #include "sharder.h"
 #include "statistics.h"
 #include "tx_command.h"
+#include "tx_id.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "type.h"
@@ -4525,7 +4526,8 @@ public:
           range_version_(range_version),
           start_key_(start_key),
           end_key_(end_key),
-          unfinished_cnt_(core_cnt)
+          unfinished_cnt_(core_cnt),
+          err_code_(CcErrorCode::NO_ERROR)
     {
         table_name_ = &table_name;
         node_group_id_ = ng_id;
@@ -4556,6 +4558,7 @@ public:
         node_group_id_ = ng_id;
         res_ = res;
         unfinished_cnt_ = core_cnt;
+        err_code_ = CcErrorCode::NO_ERROR;
         bucket_ids_ = bucket_ids;
         clean_type_ = clean_type;
         clean_ts_ = clean_ts;
@@ -4572,8 +4575,19 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         if (ng_term < 0)
         {
-            Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
+            return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        }
+
+        if (clean_type_ == CleanType::CleanForTruncateTable)
+        {
+            if (!CleanForTruncateTable(ccs))
+            {
+                // Yield
+                ccs.Enqueue(ccs.LocalCoreId(), this);
+                return false;
+            }
+
+            return SetFinish();
         }
 
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -4635,11 +4649,27 @@ public:
         {
             if (res_)
             {
-                res_->SetFinished();
+                CcErrorCode err_code =
+                    err_code_.load(std::memory_order_relaxed);
+                if (err_code == CcErrorCode::NO_ERROR)
+                {
+                    res_->SetFinished();
+                }
+                else
+                {
+                    res_->SetError(err_code);
+                }
             }
             return true;
         }
         return false;
+    }
+
+    bool SetError(CcErrorCode err_code)
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        err_code_.store(err_code, std::memory_order_release);
+        return SetFinish();
     }
 
     template <typename KeyT>
@@ -4710,6 +4740,25 @@ public:
         }
     }
 
+    bool CleanForTruncateTable(CcShard &ccs)
+    {
+        assert(clean_type_ == CleanType::CleanForTruncateTable);
+        // UpsertTableOp has acquired write lock on catalog. We can safely
+        // access catalog_entry
+        CatalogEntry *catalog_entry =
+            ccs.GetCatalog(*table_name_, node_group_id_);
+        if (catalog_entry != nullptr &&
+            catalog_entry->DirtyVersion() == clean_ts_)
+        {
+            return ccs.TruncateCcm(*table_name_,
+                                   node_group_id_,
+                                   catalog_entry->dirty_schema_.get(),
+                                   catalog_entry->DirtyVersion());
+        }
+
+        return true;
+    }
+
     CleanType GetCleanType() const
     {
         return clean_type_;
@@ -4719,8 +4768,9 @@ private:
     CleanType clean_type_;
     // Target buckets to be cleaned if clean type is CleanBucketData.
     std::vector<uint16_t> *bucket_ids_{nullptr};
-    // kickout all cce with commit ts <= clean_ts_ if clean type is
-    // CleanForAlterTable.
+    // 1. CleanForAlterTable: kickout all cce with commit ts <= clean_ts_
+    // 2. CleanForTruncateTable: the commit ts of UpsertTableOp. We truncate ccm
+    // only if catalog_entry->DirtyVersion() == clean_ts_.
     uint64_t clean_ts_{0};
     // Only used by migration
     int32_t range_id_{INT32_MAX};
@@ -4730,6 +4780,7 @@ private:
     const TxKey *end_key_{nullptr};
     std::vector<TxKey> resume_key_;
     std::atomic_uint16_t unfinished_cnt_{0};
+    std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
 };
 
 struct PostFlushDataCc : public CcRequestBase

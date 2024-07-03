@@ -92,7 +92,12 @@ enum struct CleanType
      * large than 1, that is to say not the initial entry, 3) is free, that is
      * to say, the ccentry has been checkpointed and have no lock on it.
      */
-    CleanForAlterTable
+    CleanForAlterTable,
+    /**
+     * This is used to clean all data during truncate table operation. Also need
+     * to update table schema.
+     */
+    CleanForTruncateTable
 };
 
 class CcShard;
@@ -160,6 +165,8 @@ public:
     virtual void Clean() = 0;
 
     virtual void CleanEntry(LruEntry *entry, LruPage *page) = 0;
+
+    virtual bool CleanBatchPages(size_t clean_page_cnt) = 0;
 
     virtual bool BackFill(LruEntry *cce,
                           uint64_t commit_ts,

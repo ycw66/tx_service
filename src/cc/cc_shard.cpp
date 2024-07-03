@@ -1401,7 +1401,7 @@ void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)
     }
 }
 
-void CcShard::TruncateCcm(const txservice::TableName &table_name,
+bool CcShard::TruncateCcm(const txservice::TableName &table_name,
                           txservice::NodeGroupId ng_id,
                           const TableSchema *table_schema,
                           uint64_t schema_ts)
@@ -1413,7 +1413,13 @@ void CcShard::TruncateCcm(const txservice::TableName &table_name,
         if (native_it != native_ccms_.end())
         {
             auto &ccm = native_it->second;
-            ccm->Clean();
+            if (!ccm->CleanBatchPages(32))
+            {
+                // Yield
+                return false;
+            }
+
+            // No more data. Update schema timestamps
             ccm->SetTableSchema(table_schema);
             ccm->SetSchemaTs(schema_ts);
             DLOG(INFO) << "Truncate ccm on shard: " << core_id_
@@ -1432,7 +1438,13 @@ void CcShard::TruncateCcm(const txservice::TableName &table_name,
             if (it != ccms.end())
             {
                 auto &ccm = it->second;
-                ccm->Clean();
+                if (!ccm->CleanBatchPages(32))
+                {
+                    // Has more data. Yield to avoid blocking txprocessor
+                    return false;
+                }
+
+                // No more data. Update schema timestamps
                 ccm->SetTableSchema(table_schema);
                 ccm->SetSchemaTs(schema_ts);
                 DLOG(INFO) << "Truncate ccm on shard: " << core_id_
@@ -1442,6 +1454,8 @@ void CcShard::TruncateCcm(const txservice::TableName &table_name,
             }
         }
     }
+
+    return true;
 }
 
 /**
