@@ -434,9 +434,22 @@ struct InitKeyCacheCc : public CcRequestBase
 public:
     static constexpr size_t MaxScanBatchSize = 64;
     InitKeyCacheCc() = delete;
-    InitKeyCacheCc(FillStoreSliceCc &fill_cc, uint16_t core_cnt)
-        : fill_cc_(fill_cc), unfinished_cnt_(core_cnt)
+    InitKeyCacheCc(StoreRange *range,
+                   StoreSlice *slice,
+                   uint16_t core_cnt,
+                   const TableName *tbl_name,
+                   int64_t term,
+                   NodeGroupId ng_id)
+        : tbl_name_(
+              tbl_name->String(),
+              TableType::Primary),  // key cache is only used on primary table
+          term_(term),
+          ng_id_(ng_id),
+          range_(range),
+          slice_(slice),
+          unfinished_cnt_(core_cnt)
     {
+        assert(tbl_name->IsBase());
         pause_pos_.resize(core_cnt);
     }
     bool Execute(CcShard &ccs) override;
@@ -447,7 +460,11 @@ public:
     TxKey &PauseKey(uint16_t core_id);
 
 private:
-    FillStoreSliceCc &fill_cc_;
+    const TableName tbl_name_;
+    int64_t term_;
+    NodeGroupId ng_id_;
+    StoreRange *range_;
+    StoreSlice *slice_;
     std::atomic<uint16_t> unfinished_cnt_{0};
     std::vector<TxKey> pause_pos_;
 };
@@ -557,7 +574,6 @@ private:
     std::vector<size_t> next_idxs_;
     std::vector<std::deque<SliceDataItem>> partitioned_slice_data_;
     LoadRangeSliceRequest load_slice_req_;
-    InitKeyCacheCc init_cc_;
 
     StoreSlice &range_slice_;
     StoreRange &range_;
@@ -575,7 +591,8 @@ public:
                      StoreSlice *slice,
                      StoreRange *range,
                      std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vec,
-                     size_t core_cnt);
+                     size_t core_cnt,
+                     uint64_t ckpt_ts);
 
     bool Execute(CcShard &ccs) override;
 
@@ -668,6 +685,11 @@ public:
         err_code_ = CcErrorCode::NO_ERROR;
     }
 
+    uint64_t CkptTs() const
+    {
+        return ckpt_ts_;
+    }
+
     std::chrono::time_point<std::chrono::steady_clock> load_start_;
 
     std::vector<size_t> item_vec_size_;
@@ -678,6 +700,7 @@ private:
     StoreSlice *slice_;
     StoreRange *range_;
     std::vector<size_t> slice_first_idxs_;
+    uint64_t ckpt_ts_;
 
     std::vector<std::pair<TxKey, bool>> pause_keys_;
     std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vecs_;

@@ -207,7 +207,7 @@ public:
         uint16_t bucket_id = slot_id % total_range_buckets;
         return bucket_id;
 #else
-        return (hash_code >> 10) % total_range_buckets;
+        return hash_code % total_range_buckets;
 #endif
     }
 

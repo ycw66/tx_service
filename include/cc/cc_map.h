@@ -51,6 +51,9 @@ struct ApplyCc;
 struct UploadTxCommandsCc;
 struct UploadBatchCc;
 struct DefragShardHeapCc;
+struct UploadRangeSlicesCc;
+struct UploadBatchSlicesCc;
+struct UpdateKeyCacheCc;
 
 enum struct ScanType : uint8_t
 {
@@ -155,6 +158,9 @@ public:
     virtual bool Execute(ApplyCc &req) = 0;
     virtual bool Execute(UploadTxCommandsCc &req) = 0;
     virtual bool Execute(DefragShardHeapCc &req) = 0;
+    virtual bool Execute(UploadRangeSlicesCc &req) = 0;
+    virtual bool Execute(UploadBatchSlicesCc &req) = 0;
+    virtual bool Execute(UpdateKeyCacheCc &req) = 0;
 
     virtual size_t size() const = 0;
 

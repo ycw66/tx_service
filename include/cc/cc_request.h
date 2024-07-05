@@ -1093,6 +1093,7 @@ public:
         NotBlocked,
         BlockByLock,
         BlockByKvFetch,
+        BlockByKeyCache,
         // If CcEntry's CommitTs is less than read_ts when do
         // "PkReadCorrespondingSk" or "SnapshotRead", there must be a
         // PostWriteCc request has not done, then, this read should wait until
@@ -1166,7 +1167,8 @@ public:
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
-        if (BlockedBy() == BlockByKvFetch)
+        assert(blk_type_ != BlockByKeyCache);
+        if (blk_type_ == BlockByKvFetch)
         {
             // Aborted by data store error, release the acquired lock on cce.
             LruEntry *entry = CcePtr();
@@ -4895,6 +4897,104 @@ public:
         archive_vec_per_core_;
 };
 
+struct UpdateKeyCacheCc : public CcRequestBase
+{
+    static const size_t BatchSize = 256;
+    UpdateKeyCacheCc(const TableName &tbl_name,
+                     int64_t ng_term,
+                     uint32_t ng_id,
+                     std::vector<std::vector<FlushRecord *>> &&key_vecs,
+                     StoreRange *range)
+        : table_name_(tbl_name),
+          ng_term_(ng_term),
+          node_group_id_(ng_id),
+          key_vecs_(std::move(key_vecs)),
+          store_range_(range),
+          unfinished_core_(key_vecs_.size())
+    {
+        assert(table_name_.Type() == TableType::Primary);
+        pause_idx_.resize(key_vecs_.size(), 0);
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (ng_term < 0)
+        {
+            SetFinish();
+            return false;
+        }
+
+        if (key_vecs_[ccs.core_id_].empty())
+        {
+            SetFinish();
+            return false;
+        }
+
+        CcMap *ccm = ccs.GetCcm(table_name_, node_group_id_);
+
+        if (ccm == nullptr)
+        {
+            // Fetch/Get Catalog is based on base table name, but Get
+            // ccmap is based on the real table name, for example, index
+            // should get the corresponding sk_ccmap.
+            assert(!table_name_.IsMeta());
+            const CatalogEntry *catalog_entry =
+                ccs.InitCcm(table_name_, node_group_id_, ng_term_, this);
+            if (catalog_entry == nullptr)
+            {
+                // The local node does not contain the table's schema
+                // instance. The FetchCatalog() method will send an
+                // async request toward the data store to fetch the
+                // catalog. After fetching is finished, this cc request
+                // is re-enqueued for re-execution.
+                return false;
+            }
+            else
+            {
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    // The local node (LocalCcShards) contains a schema
+                    // instance, which indicates that the table has been
+                    // dropped. No need to update the key cache.
+                    SetFinish();
+                    return false;
+                }
+
+                ccm = ccs.GetCcm(table_name_, node_group_id_);
+            }
+        }
+        ccm->Execute(*this);
+
+        return false;
+    }
+
+    void SetFinish()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (--unfinished_core_ == 0)
+        {
+            cv_.notify_one();
+        }
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return unfinished_core_ == 0; });
+    }
+
+    const TableName &table_name_;
+    int64_t ng_term_;
+    uint32_t node_group_id_;
+    std::vector<std::vector<FlushRecord *>> key_vecs_;
+    StoreRange *store_range_;
+    std::vector<size_t> pause_idx_;
+    std::mutex mux_;
+    std::condition_variable cv_;
+    size_t unfinished_core_;
+};
+
 struct GetTableLastCommitTsCc : public CcRequestBase
 {
     GetTableLastCommitTsCc() = delete;
@@ -5427,7 +5527,7 @@ public:
                bthread::ConditionVariable &req_cv,
                size_t &finished_req_cnt,
                CcErrorCode &req_result,
-               bool is_persisted)
+               UploadBatchType data_type)
     {
         table_name_ = &table_name;
         node_group_id_ = ng_id;
@@ -5444,7 +5544,7 @@ public:
         err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         paused_pos_.clear();
         paused_pos_.resize(core_cnt, {});
-        is_persisted_ = is_persisted;
+        data_type_ = data_type;
     }
 
     void Reset(const TableName &table_name,
@@ -5456,8 +5556,7 @@ public:
                bthread::Mutex &req_mux,
                bthread::ConditionVariable &req_cv,
                size_t &finished_req_cnt,
-               bool is_persisted)
-
+               UploadBatchType data_type)
     {
         table_name_ = &table_name;
         node_group_id_ = ng_id;
@@ -5474,7 +5573,7 @@ public:
         err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         paused_pos_.clear();
         paused_pos_.resize(core_cnt, {});
-        is_persisted_ = is_persisted;
+        data_type_ = data_type;
     }
 
     bool ValidTermCheck()
@@ -5548,6 +5647,7 @@ public:
                 *req_result_ = res;
             }
             req_cv_->notify_one();
+
             return true;
         }
         return false;
@@ -5567,6 +5667,7 @@ public:
                 *req_result_ = err_code_.load(std::memory_order_relaxed);
             }
             req_cv_->notify_one();
+
             return true;
         }
         return false;
@@ -5639,9 +5740,9 @@ public:
         return start_key_idx_;
     }
 
-    bool IsPersisted() const
+    UploadBatchType Kind()
     {
-        return is_persisted_;
+        return data_type_;
     }
 
 private:
@@ -5668,7 +5769,533 @@ private:
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
     // key index, key offset, record offset, ts offset, record status offset
     std::vector<std::tuple<size_t, size_t, size_t, size_t, size_t>> paused_pos_;
-    bool is_persisted_{false};
+
+    UploadBatchType data_type_{UploadBatchType::SkIndexData};
+};
+
+struct UploadRangeSlicesCc : public CcRequestBase
+{
+    static constexpr uint16_t MaxParseBatchSize = 64;
+
+public:
+    UploadRangeSlicesCc() = default;
+    ~UploadRangeSlicesCc() = default;
+
+    UploadRangeSlicesCc(const UploadRangeSlicesCc &rhs) = delete;
+    UploadRangeSlicesCc(UploadRangeSlicesCc &&rhs) = delete;
+    void Reset(const TableName &table_name,
+               NodeGroupId ng_id,
+               int32_t partition_id,
+               uint64_t version_ts,
+               int32_t new_partition_id,
+               const std::string *new_slices_keys,
+               const std::string *new_slices_sizes,
+               const std::string *new_slices_status,
+               uint32_t slices_num,
+               int64_t ng_term = INIT_TERM)
+    {
+        table_name_ = &table_name;
+        node_group_id_ = ng_id;
+        partition_id_ = partition_id;
+        version_ts_ = version_ts;
+        new_partition_id_ = new_partition_id;
+        new_slices_keys_ = new_slices_keys;
+        new_slices_sizes_ = new_slices_sizes;
+        new_slices_status_ = new_slices_status;
+        slices_cnt_ = slices_num;
+        ng_term_ = ng_term;
+
+        parse_offset_ = {0, 0, 0};
+    }
+
+    bool ValidTermCheck()
+    {
+        std::unique_lock<bthread::Mutex> lk(mutex_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (ng_term_ < 0)
+        {
+            ng_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != ng_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
+        }
+
+        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
+        if (ccm == nullptr)
+        {
+            assert(table_name_->Type() == TableType::RangePartition);
+
+            // Get original table name for the range table name
+            const TableName base_table_name{table_name_->GetBaseTableNameSV(),
+                                            TableType::Primary};
+            const CatalogEntry *catalog_entry =
+                ccs.GetCatalog(base_table_name, node_group_id_);
+            if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
+            {
+                ccs.FetchCatalog(
+                    base_table_name, node_group_id_, ng_term_, this);
+                return false;
+            }
+            TableSchema *table_schema = catalog_entry->schema_.get();
+
+            // The request is toward a special cc map that contains a
+            // table's range meta data.
+            std::map<TxKey, TableRangeEntry::uptr> *ranges =
+                ccs.GetTableRangesForATable(*table_name_, node_group_id_);
+            if (ranges != nullptr)
+            {
+                ccs.CreateOrUpdateRangeCcMap(*table_name_,
+                                             table_schema,
+                                             node_group_id_,
+                                             table_schema->Version());
+                ccm = ccs.GetCcm(*table_name_, node_group_id_);
+            }
+            else
+            {
+                // The local node does not contain the table's ranges.
+                // The FetchTableRanges() method will send an async
+                // request toward the data store to fetch the table's
+                // ranges and initializes the table's range cc map.
+                // After fetching is finished, this cc request is
+                // re-enqueued for re-execution.
+                ccs.FetchTableRanges(
+                    *table_name_, this, node_group_id_, ng_term_);
+                return false;
+            }
+        }
+
+        assert(ccm != nullptr);
+        return ccm->Execute(*this);
+    }
+
+    void SetError(CcErrorCode err_code)
+    {
+        std::unique_lock<bthread::Mutex> lk(mutex_);
+        finish_ = true;
+        err_code_ = err_code;
+        cv_.notify_one();
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        DLOG(ERROR) << "Abort this upload range slices request with error: "
+                    << CcErrorMessage(err_code);
+
+        SetError(err_code);
+    }
+
+    void SetFinish()
+    {
+        std::unique_lock<bthread::Mutex> lk(mutex_);
+        finish_ = true;
+        cv_.notify_one();
+    }
+
+    void Wait()
+    {
+        std::unique_lock<bthread::Mutex> lk(mutex_);
+        while (!finish_)
+        {
+            cv_.wait(lk);
+        }
+    }
+
+    uint32_t NodeGroupId() const
+    {
+        return node_group_id_;
+    }
+
+    int64_t CcNgTerm() const
+    {
+        return ng_term_;
+    }
+
+    const TableName *GetTableName() const
+    {
+        return table_name_;
+    }
+
+    int32_t RangeId() const
+    {
+        return partition_id_;
+    }
+
+    int32_t NewRangeId() const
+    {
+        return new_partition_id_;
+    }
+
+    uint64_t VersionTs() const
+    {
+        return version_ts_;
+    }
+
+    const std::string &NewSlicesKeys() const
+    {
+        return *new_slices_keys_;
+    }
+
+    const std::string &NewSlicesSizes() const
+    {
+        return *new_slices_sizes_;
+    }
+
+    const std::string &NewSlicesStatus() const
+    {
+        return *new_slices_status_;
+    }
+
+    uint32_t NewSlicesCount() const
+    {
+        return slices_cnt_;
+    }
+
+    CcErrorCode ErrorCode() const
+    {
+        return err_code_;
+    }
+
+    void SetParseOffset(size_t keys_off, size_t sizes_off, size_t status_off)
+    {
+        std::get<0>(parse_offset_) = keys_off;
+        std::get<1>(parse_offset_) = sizes_off;
+        std::get<2>(parse_offset_) = status_off;
+    }
+
+    const std::tuple<size_t, size_t, size_t> &ParseOffsets() const
+    {
+        return parse_offset_;
+    }
+
+    std::vector<SliceInitInfo> &Slices()
+    {
+        return new_slices_;
+    }
+
+private:
+    const TableName *table_name_{nullptr};
+    uint32_t node_group_id_{0};
+    int64_t ng_term_{INIT_TERM};
+
+    int32_t partition_id_;
+    uint64_t version_ts_;
+    int32_t new_partition_id_;
+
+    const std::string *new_slices_keys_{nullptr};
+    // serialized type of size is uint32_t
+    const std::string *new_slices_sizes_{nullptr};
+    // serialized type of status is int8_t
+    const std::string *new_slices_status_{nullptr};
+    uint32_t slices_cnt_{0};
+
+    std::tuple<size_t, size_t, size_t> parse_offset_{0, 0, 0};
+
+    std::vector<SliceInitInfo> new_slices_{};
+
+    bthread::Mutex mutex_;
+    bthread::ConditionVariable cv_;
+    bool finish_{false};
+    CcErrorCode err_code_{CcErrorCode::NO_ERROR};
+};
+
+// upload multi slices data in one batch to future owner when splitting range.
+struct UploadBatchSlicesCc : public CcRequestBase
+{
+    using WriteEntryTuple = std::tuple<const std::string &,
+                                       const std::string &,
+                                       const std::string &,
+                                       const std::string &>;
+    struct SliceUpdation
+    {
+        uint32_t range_{UINT32_MAX};
+        uint32_t new_range_{UINT32_MAX};
+        // Slices index in new range.
+        std::vector<uint32_t> slice_idxs_{};
+        uint64_t version_ts_{UINT64_MAX};
+    };
+
+    static constexpr size_t MaxParseBatchSize = 64;
+    static constexpr size_t MaxEmplaceBatchSize = 64;
+
+public:
+    UploadBatchSlicesCc() = default;
+    ~UploadBatchSlicesCc() = default;
+
+    UploadBatchSlicesCc(const UploadBatchSlicesCc &rhs) = delete;
+    UploadBatchSlicesCc(UploadBatchSlicesCc &&rhs) = delete;
+
+    void Reset(const TableName &table_name,
+               txservice::NodeGroupId ng_id,
+               int64_t &ng_term,
+               size_t core_cnt,
+               const WriteEntryTuple &entry_tuple,
+               std::shared_ptr<SliceUpdation> slice_info)
+    {
+        table_name_ = &table_name;
+        node_group_id_ = ng_id;
+        node_group_term_ = &ng_term;
+        core_cnt_ = core_cnt;
+        partitioned_slice_data_.resize(core_cnt);
+        next_idxs_.resize(core_cnt);
+        for (size_t i = 0; i < core_cnt; i++)
+        {
+            next_idxs_[i] = 0;
+        }
+
+        entry_tuples_ = &entry_tuple;
+        slices_info_ = slice_info;
+
+        unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
+        err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+    }
+
+    bool ValidTermCheck()
+    {
+        std::lock_guard<bthread::Mutex> req_lk(req_mux_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (*node_group_term_ < 0)
+        {
+            *node_group_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != *node_group_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        }
+
+        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
+        if (ccm == nullptr)
+        {
+            assert(!table_name_->IsMeta());
+            const CatalogEntry *catalog_entry = ccs.InitCcm(
+                *table_name_, node_group_id_, *node_group_term_, this);
+            if (catalog_entry == nullptr)
+            {
+                // The local node does not contain the table's schema
+                // instance. The FetchCatalog() method will send an
+                // async request toward the data store to fetch the
+                // catalog. After fetching is finished, this cc request
+                // is re-enqueued for re-execution.
+                return false;
+            }
+            else
+            {
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    // The local node (LocalCcShards) contains a schema
+                    // instance, which indicates that the table has been
+                    // dropped. Returns the request with an error.
+                    return SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                }
+
+                ccm = ccs.GetCcm(*table_name_, node_group_id_);
+            }
+        }
+
+        assert(ccm != nullptr);
+        return ccm->Execute(*this);
+    }
+
+    std::pair<bool, std::shared_ptr<SliceUpdation>> SetFinish()
+    {
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            std::unique_lock<bthread::Mutex> req_lk(req_mux_);
+
+            req_cv_.notify_one();
+
+            return {true, slices_info_};
+        }
+        return {false, nullptr};
+    }
+
+    bool SetError(CcErrorCode err_code)
+    {
+        CcErrorCode no_error = CcErrorCode::NO_ERROR;
+        err_code_.compare_exchange_strong(
+            no_error, err_code, std::memory_order_acq_rel);
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            std::unique_lock<bthread::Mutex> req_lk(req_mux_);
+
+            req_cv_.notify_one();
+
+            return true;
+        }
+        return false;
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        DLOG(ERROR) << "Abort this uploadbatch request with error: "
+                    << CcErrorMessage(err_code);
+        if (SetError(err_code))
+        {
+            Free();
+        }
+    }
+
+    void Wait()
+    {
+        std::unique_lock<bthread::Mutex> lk(req_mux_);
+        while (unfinished_cnt_ != 0)
+        {
+            req_cv_.wait(lk);
+        }
+    }
+
+    int64_t CcNgTerm() const
+    {
+        return *node_group_term_;
+    }
+
+    uint32_t NodeGroupId() const
+    {
+        return node_group_id_;
+    }
+
+    CcErrorCode ErrorCode() const
+    {
+        return err_code_.load(std::memory_order_relaxed);
+    }
+
+    const WriteEntryTuple *EntryTuple() const
+    {
+        return entry_tuples_;
+    }
+
+    void SetParseOffset(size_t key_off,
+                        size_t rec_off,
+                        size_t ts_off,
+                        size_t status_off)
+    {
+        std::get<0>(parse_offset_) = key_off;
+        std::get<1>(parse_offset_) = rec_off;
+        std::get<2>(parse_offset_) = ts_off;
+        std::get<3>(parse_offset_) = status_off;
+    }
+
+    const std::tuple<size_t, size_t, size_t, size_t> &ParsePosition() const
+    {
+        return parse_offset_;
+    }
+
+    uint64_t DirtyVersion()
+    {
+        return slices_info_->version_ts_;
+    }
+
+    uint32_t RangeId() const
+    {
+        return slices_info_->range_;
+    }
+
+    uint32_t NewRangeId() const
+    {
+        return slices_info_->new_range_;
+    }
+
+    bool Parsed() const
+    {
+        return parsed_;
+    }
+    void SetParsed()
+    {
+        parsed_.store(true, std::memory_order_release);
+    }
+
+    void AddDataItem(TxKey key,
+                     std::unique_ptr<txservice::TxRecord> &&record,
+                     uint64_t version_ts,
+                     bool is_deleted)
+    {
+        size_t hash = key.Hash();
+        // Uses the lower 10 bits of the hash code to shard the key across
+        // CPU cores at this node.
+        uint16_t core_code = hash & 0x3FF;
+        uint16_t core_id = core_code % core_cnt_;
+
+        partitioned_slice_data_[core_id].emplace_back(
+            std::move(key), std::move(record), version_ts, is_deleted);
+    }
+
+    size_t NextIndex(size_t core_idx) const
+    {
+        size_t next_idx = next_idxs_[core_idx];
+        assert(next_idx <= partitioned_slice_data_[core_idx].size());
+        return next_idx;
+    }
+
+    void SetNextIndex(size_t core_idx, size_t index)
+    {
+        assert(index <= partitioned_slice_data_[core_idx].size());
+        next_idxs_[core_idx] = index;
+    }
+
+    // Notice: these data items belong to multi slices.
+    std::deque<SliceDataItem> &SliceData(uint16_t core_id)
+    {
+        assert(core_id < partitioned_slice_data_.size());
+        return partitioned_slice_data_[core_id];
+    }
+
+private:
+    uint16_t core_cnt_;
+    const TableName *table_name_{nullptr};
+    uint32_t node_group_id_{0};
+    int64_t *node_group_term_{nullptr};
+
+    // std::vector<uint32_t> slice_sizes_;
+    const WriteEntryTuple *entry_tuples_{nullptr};
+
+    std::shared_ptr<SliceUpdation> slices_info_{nullptr};
+
+    // key offset, record offset, ts offset, record status offset
+    // when parse items
+    std::tuple<size_t, size_t, size_t, size_t> parse_offset_{0, 0, 0, 0};
+    // parse items on one core, then put the req to other cores.
+    std::atomic_bool parsed_{false};
+
+    std::vector<std::deque<SliceDataItem>> partitioned_slice_data_;
+    // pause position when emplace keys into ccmap in batches
+    std::vector<size_t> next_idxs_;
+
+    bthread::Mutex req_mux_{};
+    bthread::ConditionVariable req_cv_{};
+    // size_t finished_req_cnt_{nullptr};
+    // CcErrorCode req_result_{nullptr};
+    // This two variables may be accessed by multi-cores.
+    std::atomic<size_t> unfinished_cnt_{0};
+    std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
 };
 
 }  // namespace txservice

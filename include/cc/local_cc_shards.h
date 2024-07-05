@@ -527,6 +527,168 @@ public:
         uint32_t node_group_id,
         int64_t tx_term);
 
+    template <typename KeyT>
+    std::vector<const TemplateTableRangeEntry<KeyT> *> SplitTableRange(
+        const TableName &table_name,
+        NodeGroupId ng_id,
+        TemplateTableRangeEntry<KeyT> *old_entry)
+    {
+        std::vector<const TemplateTableRangeEntry<KeyT> *> new_range_entries;
+        assert(old_entry != nullptr);
+        TemplateRangeInfo<KeyT> *old_info = old_entry->TypedRangeInfo();
+        size_t new_range_cnt = old_info->NewKey()->size();
+        NodeGroupId range_owner =
+            GetRangeOwner(old_info->PartitionId(), ng_id)->BucketOwner();
+
+        if (range_owner == ng_id)
+        {
+            // Store range is pinned during range split so we don't need mutex
+            // on range entry.
+            TemplateStoreRange<KeyT> *old_store_range =
+                old_entry->TypedStoreRange();
+            assert(old_store_range);
+            const TxKey &tx_key = old_info->NewKey()->front();
+            // Split the StoreRange struct in old TableRangeEntry and get
+            // the removed slice keys and sizes. These keys will be reused
+            // as the slice keys in the new ranges.
+            std::vector<SliceInitInfo> new_slice_info;
+
+            // Acquire meta lock since table_ranges_ is not consistent during
+            // split.
+            std::unique_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+            bool split_range_res = old_store_range->SplitRange(
+                tx_key.GetKey<KeyT>(), new_slice_info);
+            if (!split_range_res)
+            {
+                // split fails
+                return new_range_entries;
+            }
+            if (new_slice_info.empty())
+            {
+                // If all current slices should stay in old range,
+                // assign empty slice for new range
+                for (const TxKey &new_key : *old_info->NewKey())
+                {
+                    const KeyT *new_range_start = new_key.GetKey<KeyT>();
+                    new_slice_info.emplace_back(
+                        TxKey(std::make_unique<KeyT>(*new_range_start)),
+                        0,
+                        SliceStatus::FullyCached);
+                }
+            }
+            // Create new range entries in local cc shard
+            size_t cur_slice_idx = 0;
+            for (uint new_range_idx = 0; new_range_idx < new_range_cnt;
+                 new_range_idx++)
+            {
+                std::vector<SliceInitInfo> cur_range_slices;
+                // First slice start key will reuse the new range start
+                // key, so we can just pass in nullptr.
+                std::unique_ptr<KeyT> range_start_key =
+                    new_slice_info[cur_slice_idx].key_.MoveKey<KeyT>();
+
+                cur_range_slices.emplace_back(
+                    std::move(new_slice_info.at(cur_slice_idx)));
+                cur_slice_idx++;
+                // Move the range slices that falls into the new range.
+                while (cur_slice_idx != new_slice_info.size() &&
+                       (new_range_idx + 1 == new_range_cnt ||
+                        new_slice_info.at(cur_slice_idx).key_ <
+                            old_info->NewKey()->at(new_range_idx + 1)))
+                {
+                    cur_range_slices.emplace_back(
+                        std::move(new_slice_info.at(cur_slice_idx++)));
+                }
+
+                if (new_range_idx < new_range_cnt - 1 &&
+                    cur_slice_idx == new_slice_info.size())
+                {
+                    // If we run out of slice before we reach last new
+                    // range, insert an empty slice for the next new
+                    // range
+                    for (size_t idx = new_range_idx + 1; idx < new_range_cnt;
+                         ++idx)
+                    {
+                        const TxKey &tx_key = old_info->NewKey()->at(idx);
+                        const KeyT *r_start = tx_key.GetKey<KeyT>();
+
+                        new_slice_info.emplace_back(
+                            TxKey(std::make_unique<KeyT>(*r_start)),
+                            0,
+                            SliceStatus::FullyCached);
+                    }
+                }
+                assert(
+                    [&]()
+                    {
+                        const TxKey &tx_key =
+                            old_info->NewKey()->at(new_range_idx);
+                        return *range_start_key == *tx_key.GetKey<KeyT>();
+                    }());
+
+                const TemplateTableRangeEntry<KeyT> *new_range =
+                    CreateTableRange(
+                        table_name,
+                        ng_id,
+                        old_info->NewPartitionId()->at(new_range_idx),
+                        *range_start_key,
+                        old_info->DirtyTs(),
+                        &cur_range_slices,
+                        false);
+                new_range_entries.push_back(new_range);
+            }
+        }
+        else
+        {
+            std::unique_ptr<std::pair<
+                bool,
+                std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>
+                new_range_slices = old_entry->ReleaseDirtyRangeSlices();
+            // Acquire meta lock since table_ranges_ is not consistent during
+            // split.
+            std::unique_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+            for (size_t i = 0; i < new_range_cnt; i++)
+            {
+                const TxKey &tx_key = old_info->NewKey()->at(i);
+                const KeyT *range_start = tx_key.GetKey<KeyT>();
+
+                // During splitting, new ranges' slices info was
+                // uploaded on their new owner and cached in
+                // TableRangeEntry::dirty_range_slices_.
+                // Then, just copy them to the new ranges.
+                std::vector<SliceInitInfo> *slices_keys = nullptr;
+                if (new_range_slices != nullptr)
+                {
+                    NodeGroupId new_range_owner =
+                        GetRangeOwnerInternal(old_info->NewPartitionId()->at(i),
+                                              ng_id)
+                            ->BucketOwner();
+                    if (new_range_owner == ng_id)
+                    {
+                        auto tmp_it = new_range_slices->second.find(
+                            old_info->NewPartitionId()->at(i));
+                        if (tmp_it != new_range_slices->second.end())
+                        {
+                            slices_keys = &(tmp_it->second);
+                        }
+                    }
+                }
+
+                const TemplateTableRangeEntry<KeyT> *new_range =
+                    CreateTableRange(table_name,
+                                     ng_id,
+                                     old_info->NewPartitionId()->at(i),
+                                     *range_start,
+                                     old_info->DirtyTs(),
+                                     slices_keys,
+                                     false);
+
+                new_range_entries.push_back(new_range);
+            }
+        }
+        return new_range_entries;
+    }
+
     /**
      * @brief Create a new table range entry and fill current range info with
      * given partition id and start key.
@@ -538,17 +700,15 @@ public:
         int32_t partition_id,
         const KeyT &start_key,
         uint64_t version,
-        std::vector<SliceInitInfo> *slice_keys = nullptr)
+        std::vector<SliceInitInfo> *slice_keys = nullptr,
+        bool need_meta_lk = true)
     {
-        std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+        std::unique_lock<std::shared_mutex> lk(meta_data_mux_, std::defer_lock);
+        if (need_meta_lk)
+        {
+            lk.lock();
+        }
         std::vector<TableRangeEntry *> new_entries;
-
-        std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
-        bool is_override_thd = mi_is_override_thread();
-        mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
-        mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
-
-        bool range_slice_mem_full = TableRangesMemoryFull();
 
         std::map<TxKey, TableRangeEntry::uptr> *ranges =
             GetTableRangesForATableInternal(table_name, ng_id);
@@ -558,6 +718,12 @@ public:
         NodeGroupId range_ng =
             GetRangeOwnerInternal(partition_id, ng_id)->BucketOwner();
 
+        std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
+        bool is_override_thd = mi_is_override_thread();
+        mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
+        mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
+
+        bool range_slice_mem_full = TableRangesMemoryFull();
         TxKey range_tx_key(&start_key);
         auto range_it = ranges->find(range_tx_key);
         if (range_it == ranges->end())
@@ -644,7 +810,14 @@ public:
             range_entry->UpdateRangeEntry(version, std::move(range_slices));
         }
 
-        mi_restore_default_thread_id();
+        if (is_override_thd)
+        {
+            mi_override_thread(prev_thd);
+        }
+        else
+        {
+            mi_restore_default_thread_id();
+        }
         mi_heap_set_default(prev_heap);
 
         return static_cast<TemplateTableRangeEntry<KeyT> *>(
@@ -1006,6 +1179,71 @@ public:
     uint64_t CountSlices(const TableName &table_name,
                          const NodeGroupId ng_id,
                          const NodeGroupId local_ng_id) const;
+
+    /**
+     * @brief add dirty range slices info into
+     * TemplateTableRangeEntry::dirty_range_slices_.
+     * @return true if "dirty_ts" match, otherwise false.
+     */
+    template <typename KeyT>
+    bool UploadDirtyRangeSlices(const TableName &range_table_name,
+                                const NodeGroupId ng_id,
+                                int32_t range_id,
+                                uint64_t dirty_ts,
+                                int32_t new_range_id,
+                                std::vector<SliceInitInfo> &&new_slices)
+    {
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        TemplateTableRangeEntry<KeyT> *range_entry =
+            static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(range_table_name, ng_id, range_id));
+        assert(range_entry != nullptr);
+        return range_entry->UploadDirtyRangeSlices(
+            new_range_id, dirty_ts, std::move(new_slices));
+    }
+
+    template <typename KeyT>
+    void UpdateDirtyRangeSlice(const TableName &table_name,
+                               const NodeGroupId ng_id,
+                               uint32_t old_range,
+                               uint32_t new_range,
+                               const std::vector<uint32_t> &slice_idxs,
+                               uint64_t dirty_version,
+                               SliceStatus status)
+    {
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        TableName range_table_name(table_name.StringView(),
+                                   TableType::RangePartition);
+        // TxKey tx_key(&slice_key);
+        TemplateTableRangeEntry<KeyT> *range_entry =
+            static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(range_table_name, ng_id, old_range));
+        assert(range_entry != nullptr);
+
+        range_entry->UpdateDirtyRangeSlice(
+            new_range, slice_idxs, dirty_version, status);
+    }
+
+    /**
+     * @brief check whether dirty range data was kicked out
+     */
+    template <typename KeyT>
+    bool AcceptsDirtyRangeData(const TableName &table_name,
+                               const NodeGroupId ng_id,
+                               uint32_t old_range,
+                               uint64_t dirty_version)
+    {
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        TableName range_table_name(table_name.StringView(),
+                                   TableType::RangePartition);
+
+        TemplateTableRangeEntry<KeyT> *range_entry =
+            static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(range_table_name, ng_id, old_range));
+        assert(range_entry != nullptr);
+
+        return range_entry->AcceptsDirtyRangeData(dirty_version);
+    }
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 

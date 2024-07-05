@@ -106,6 +106,18 @@ public:
         ::txservice::remote::PubBucketsMigratingResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void UploadRangeSlices(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::UploadRangeSlicesRequest *request,
+        ::txservice::remote::UploadRangeSlicesResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void UploadBatchSlices(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::UploadBatchSlicesRequest *request,
+        ::txservice::remote::UploadBatchResponse *response,
+        ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

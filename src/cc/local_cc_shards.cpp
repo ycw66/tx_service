@@ -3466,7 +3466,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                             req_ptr->set_table_type(
                                 remote::ToRemoteType::ConvertTableType(
                                     table_name.Type()));
-                            req_ptr->set_is_persisted(true);
+                            req_ptr->set_kind(
+                                remote::UploadBatchKind::DIRTY_BUCKET_DATA);
                             req_ptr->set_batch_size(0);
                             // keys
                             req_ptr->clear_keys();
@@ -3927,6 +3928,10 @@ void LocalCcShards::SplitFlushRange(
         }
     }
 
+    DLOG(INFO) << "Begin to do range split flush, range_id:"
+               << range_entry->GetRangeInfo()->PartitionId()
+               << ", new range count:" << new_range_ids.size()
+               << ", data size:" << range_split_task->data_sync_vec_->size();
     SplitFlushTxRequest split_req(table_name,
                                   table_schema,
                                   range_entry->RangeSlices(),

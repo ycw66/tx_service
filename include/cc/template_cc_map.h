@@ -1479,7 +1479,8 @@ public:
                 }
                 else
                 {
-                    assert(req.BlockedBy() == ReadCc::BlockByKvFetch);
+                    assert(req.BlockedBy() == ReadCc::BlockByKvFetch ||
+                           req.BlockedBy() == ReadCc::BlockByKeyCache);
                     if (hd_res->Value().lock_type_ == LockType::NoLock)
                     {
                         // If the req does not put a lock on the cce, a read
@@ -1629,11 +1630,6 @@ public:
                     if (pin_status == RangeSliceOpStatus::Successful ||
                         pin_status == RangeSliceOpStatus::KeyNotExists)
                     {
-                        // Key does not exist after quering slice info. Mark the
-                        // key as deleted.
-                        cce->SetCommitTsPayloadStatus(1U,
-                                                      RecordStatus::Deleted);
-                        cce->SetCkptTs(1U);
                         // Inserting a new key to ccm, add to key cache too
                         if (txservice_enable_key_cache && table_name_.IsBase())
                         {
@@ -1642,14 +1638,51 @@ public:
                                     slice_id.Range());
                             auto res = range->AddKey(
                                 *look_key, shard_->core_id_, slice_id.Slice());
-                            // Retry only happens if SliceStatus ==
-                            // BeingLoaded
-                            // && KeyCache.BeingLoaded(), in which
-                            // case the pin would never return
-                            // success or key not exists.
-                            assert(res != RangeSliceOpStatus::Retry);
-                            (void) res;
+                            if (res == RangeSliceOpStatus::Error)
+                            {
+                                // Key cache is invalidated due to collision.
+                                // Try to add the cached slices back to the key
+                                // cache.
+                                range->InitKeyCache(
+                                    &table_name_, cc_ng_id_, ng_term);
+                            }
+                            else if (res == RangeSliceOpStatus::Retry)
+                            {
+                                if (pin_status ==
+                                    RangeSliceOpStatus::Successful)
+                                {
+                                    slice_id.Unpin();
+                                }
+                                if (acquired_lock == LockType::NoLock)
+                                {
+                                    std::tie(acquired_lock, err_code) =
+                                        AcquireCceKeyLock(cce,
+                                                          ccp,
+                                                          cce->PayloadStatus(),
+                                                          &req,
+                                                          ng_id,
+                                                          ng_term,
+                                                          tx_term,
+                                                          LockType::ReadIntent,
+                                                          cc_op,
+                                                          iso_lvl,
+                                                          cc_proto,
+                                                          req.ReadTimestamp());
+                                    assert(acquired_lock ==
+                                               LockType::ReadIntent &&
+                                           err_code == CcErrorCode::NO_ERROR);
+                                }
+                                req.SetBlockType(ReadCc::BlockByKeyCache);
+
+                                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                                return false;
+                            }
                         }
+                        // Key does not exist after quering slice info. Mark the
+                        // key as deleted.
+                        cce->SetCommitTsPayloadStatus(1U,
+                                                      RecordStatus::Deleted);
+                        cce->SetCkptTs(1U);
 
                         if (pin_status == RangeSliceOpStatus::Successful)
                         {
@@ -6829,6 +6862,7 @@ public:
                 ++map_end_it;
             }
         }
+        assert(!end_key || !start_key || *start_key < *end_key);
 
         TemplateStoreRange<KeyT> *range =
             static_cast<TemplateStoreRange<KeyT> *>(&req.Range());
@@ -6965,7 +6999,7 @@ public:
             {
                 ckpt_idx++;
             }
-            else
+            else if (cce->CommitTs() <= req.CkptTs())
             {
                 int32_t data_store_size = cce->data_store_size_;
                 if (data_store_size == INT32_MAX)
@@ -7098,6 +7132,33 @@ public:
         }
     }
 
+    bool Execute(UpdateKeyCacheCc &req) override
+    {
+        TemplateStoreRange<KeyT> *range =
+            static_cast<TemplateStoreRange<KeyT> *>(req.store_range_);
+        assert(range != nullptr);
+        const std::vector<FlushRecord *> &keys =
+            req.key_vecs_[shard_->core_id_];
+        size_t &key_idx = req.pause_idx_[shard_->core_id_];
+        assert(key_idx < keys.size());
+        size_t end_idx =
+            std::min(key_idx + UpdateKeyCacheCc::BatchSize, keys.size());
+
+        range->DeleteKeysInRange(keys, key_idx, end_idx, shard_->core_id_);
+
+        key_idx = end_idx;
+        if (key_idx == keys.size())
+        {
+            req.SetFinish();
+        }
+        else
+        {
+            shard_->Enqueue(&req);
+        }
+
+        return false;
+    }
+
     bool Execute(UploadBatchCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -7132,10 +7193,7 @@ public:
         size_t ts_offset = std::get<3>(resume_pos);
         size_t status_offset = std::get<4>(resume_pos);
         size_t hash = 0;
-#ifdef RANGE_PARTITION_ENABLED
-        RangeSliceId current_slice_id;
-        const KeyT *slice_end_key = nullptr;
-#endif
+
         Iterator it;
         CcEntry<KeyT, ValueT> *cce;
         const KeyT *write_key = nullptr;
@@ -7213,100 +7271,11 @@ public:
                 continue;
             }
 
-#ifdef RANGE_PARTITION_ENABLED
-            if (current_slice_id.Slice() != nullptr && *slice_end_key <= *key)
-            {
-                // Move to next slice.
-                current_slice_id.Unpin();
-                current_slice_id.Reset();
-            }
-            if (current_slice_id.Slice() == nullptr)
-            {
-                RangeSliceOpStatus pin_status;
-                current_slice_id = shard_->local_shards_.PinRangeSlice(
-                    table_name_,
-                    req.NodeGroupId(),
-                    req.CcNgTerm(),
-                    KeySchema(),
-                    RecordSchema(),
-                    schema_ts_,
-                    table_schema_->GetKVCatalogInfo(),
-                    *key,
-                    true,
-                    &req,
-                    shard_,
-                    pin_status,
-                    false,
-                    0);
-                if (pin_status == RangeSliceOpStatus::Successful)
-                {
-                    const TemplateStoreSlice<KeyT> *typed_slice =
-                        static_cast<const TemplateStoreSlice<KeyT> *>(
-                            current_slice_id.Slice());
-                    slice_end_key = typed_slice->EndKey();
-                    assert(slice_end_key != nullptr);
-                }
-                else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
-                {
-                    // set the paused key.
-                    req.SetPausedPosition(shard_->core_id_,
-                                          key_pos,
-                                          key_offset,
-                                          rec_offset,
-                                          ts_offset,
-                                          status_offset);
-                    return false;
-                }
-                else if (pin_status == RangeSliceOpStatus::Retry)
-                {
-                    // set the paused key
-                    req.SetPausedPosition(shard_->core_id_,
-                                          key_pos,
-                                          key_offset,
-                                          rec_offset,
-                                          ts_offset,
-                                          status_offset);
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
-                }
-                else if (pin_status == RangeSliceOpStatus::Delay)
-                {
-                    if (current_slice_id.Range()->HasLock())
-                    {
-                        return req.SetError(CcErrorCode::OUT_OF_MEMORY);
-                    }
-                    else
-                    {
-                        // set the paused key
-                        req.SetPausedPosition(shard_->core_id_,
-                                              key_pos,
-                                              key_offset,
-                                              rec_offset,
-                                              ts_offset,
-                                              status_offset);
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        return false;
-                    }
-                }
-                else
-                {
-                    return req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                }
-            }
-#endif
             it = FindEmplace(*key);
             cce = it->second;
             cc_page = it.GetPage();
             if (cce == nullptr)
             {
-#ifdef RANGE_PARTITION_ENABLED
-                if (current_slice_id.Slice() != nullptr)
-                {
-                    current_slice_id.Unpin();
-                    current_slice_id.Reset();
-                }
-#endif
-
                 DLOG(WARNING) << "!!!WARNING!!! UploadBatchCc OOM on core: "
                               << shard_->core_id_ << ". Txn: " << req.Txn()
                               << ", table name: " << this->table_name_.Trace();
@@ -7319,32 +7288,6 @@ public:
                 return req.SetError(CcErrorCode::OUT_OF_MEMORY);
             }
             write_key = it->first;
-
-#ifdef RANGE_PARTITION_ENABLED
-            if (cce->PayloadStatus() == RecordStatus::Unknown)
-            {
-                // After pin slice, the key with Unknown status must not
-                // existed.
-                RecordStatus new_status = RecordStatus::Deleted;
-                cce->SetCommitTsPayloadStatus(1U, new_status);
-                cce->SetCkptTs(1U);
-                cce->data_store_size_ = 0;
-            }
-            else
-            {
-                // So far, UploadBatchCc is use exclusively for
-                // secondary key encoded by primary key during add index
-                // txm. If the target key already exists, it must be
-                // newer than this encoded key, so the old value should
-                // be discarded directly.
-                assert(cce->CommitTs() > 1 && cce->CommitTs() >= commit_ts);
-                key_offset = next_key_offset;
-                rec_offset = next_rec_offset;
-                ts_offset = next_ts_offset;
-                status_offset = next_status_offset;
-                continue;
-            }
-#endif
 
             assert(commit_ts > 1);
             if (cce->CommitTs() >= commit_ts)
@@ -7393,8 +7336,15 @@ public:
             }
 
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
-            if (req.IsPersisted())
+            if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
+#ifndef ON_KEY_OBJECT
+                uint32_t rec_store_size =
+                    rec_status == RecordStatus::Deleted
+                        ? 0
+                        : write_key->Size() + commit_val->Size();
+                cce->data_store_size_ = rec_store_size;
+#endif
                 cce->SetCkptTs(commit_ts);
             }
             DLOG_IF(INFO, TRACE_OCC_ERR)
@@ -7436,13 +7386,141 @@ public:
             shard_->Enqueue(shard_->LocalCoreId(), &req);
             return false;
         }
-#ifdef RANGE_PARTITION_ENABLED
-        if (current_slice_id.Slice() != nullptr)
-        {
-            current_slice_id.Unpin();
-        }
-#endif
+
         return req.SetFinish();
+    }
+
+    bool Execute(UploadBatchSlicesCc &req) override
+    {
+#ifndef RANGE_PARTITION_ENABLED
+        assert(false);
+        return true;
+#else
+
+        if (!shard_->local_shards_.template AcceptsDirtyRangeData<KeyT>(
+                table_name_, cc_ng_id_, req.RangeId(), req.DirtyVersion()))
+        {
+            LOG(INFO) << "Refuse to receive remote records for cache, range "
+                      << req.RangeId();
+            return req.SetError(CcErrorCode::UPLOAD_BATCH_REJECTED);
+        }
+
+        if (!req.Parsed())
+        {
+            auto entry_tuples = req.EntryTuple();
+            KeyT decoded_key;
+            ValueT decoded_rec;
+            uint64_t commit_ts = 0;
+            RecordStatus rec_status = RecordStatus::Normal;
+
+            auto [key_offset, rec_offset, ts_offset, status_offset] =
+                req.ParsePosition();
+
+            auto [key_str, rec_str, ts_str, status_str] = *entry_tuples;
+
+            for (uint32_t cnt = 0;
+                 cnt < UploadBatchSlicesCc::MaxParseBatchSize &&
+                 key_offset < key_str.size();
+                 cnt++)
+            {
+                // deserialize key
+                decoded_key.Deserialize(
+                    key_str.data(), key_offset, KeySchema());
+
+                // deserialize commit ts
+                commit_ts = *((uint64_t *) (ts_str.data() + ts_offset));
+                ts_offset += sizeof(uint64_t);
+
+                // deserialize record status
+                rec_status =
+                    *((RecordStatus *) (status_str.data() + status_offset));
+                status_offset += sizeof(RecordStatus);
+
+                if (rec_status == RecordStatus::Normal)
+                {
+                    // deserialize rec
+                    decoded_rec.Deserialize(rec_str.data(), rec_offset);
+                    req.AddDataItem(
+                        TxKey(std::make_unique<KeyT>(std::move(decoded_key))),
+                        std::make_unique<ValueT>(std::move(decoded_rec)),
+                        commit_ts,
+                        false);
+                }
+                else
+                {
+                    req.AddDataItem(
+                        TxKey(std::make_unique<KeyT>(std::move(decoded_key))),
+                        nullptr,
+                        commit_ts,
+                        true);
+                }
+            }
+
+            if (key_offset < key_str.size())
+            {
+                // Parsed one batch
+                req.SetParseOffset(
+                    key_offset, rec_offset, ts_offset, status_offset);
+
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
+            }
+            else
+            {
+                // Parsed all records
+                req.SetParsed();
+
+                // Emplace key on all cores
+                for (size_t core = 0; core < shard_->core_cnt_; ++core)
+                {
+                    if (core != shard_->core_id_)
+                    {
+                        shard_->Enqueue(shard_->core_id_, core, &req);
+                    }
+                }
+            }
+
+        }  // end-parsed
+
+        std::deque<SliceDataItem> &slice_vec = req.SliceData(shard_->core_id_);
+
+        size_t index = req.NextIndex(shard_->core_id_);
+        size_t last_index = std::min(
+            index + UploadBatchSlicesCc::MaxEmplaceBatchSize, slice_vec.size());
+
+        bool success = BatchFillSlice(slice_vec, false, index, last_index);
+
+        if (!success)
+        {
+            req.SetError(CcErrorCode::OUT_OF_MEMORY);
+            return false;
+        }
+
+        if (last_index == slice_vec.size())
+        {
+            auto [finish_res, slices_info] = req.SetFinish();
+            if (finish_res)
+            {
+                assert(slices_info != nullptr);
+                shard_->local_shards_.template UpdateDirtyRangeSlice<KeyT>(
+                    table_name_,
+                    cc_ng_id_,
+                    slices_info->range_,
+                    slices_info->new_range_,
+                    slices_info->slice_idxs_,
+                    slices_info->version_ts_,
+                    SliceStatus::FullyCached);
+            }
+        }
+        else
+        {
+            index = last_index;
+            req.SetNextIndex(shard_->core_id_, index);
+            shard_->Enqueue(shard_->LocalCoreId(), &req);
+        }
+        return false;
+
+#endif
     }
 
     bool Execute(ApplyCc &req) override
@@ -7452,6 +7530,12 @@ public:
 
     bool Execute(UploadTxCommandsCc &req) override
     {
+        return true;
+    }
+
+    bool Execute(UploadRangeSlicesCc &req) override
+    {
+        assert(false);
         return true;
     }
 
@@ -8373,6 +8457,28 @@ protected:
             // might be newer. Only overwrite if in memory version is
             // newer.
             const uint64_t cce_version = cce->CommitTs();
+            if (cce_version < data_item.version_ts_)
+            {
+                if (data_item.is_deleted_)
+                {
+                    cce->payload_ = nullptr;
+                }
+                else
+                {
+                    if (cce->payload_.use_count() == 1)
+                    {
+                        *(cce->payload_) = *record;
+                    }
+                    else
+                    {
+                        cce->payload_ = std::make_shared<ValueT>(*record);
+                    }
+                }
+                RecordStatus status = data_item.is_deleted_
+                                          ? RecordStatus::Deleted
+                                          : RecordStatus::Normal;
+                cce->SetCommitTsPayloadStatus(data_item.version_ts_, status);
+            }
             if (cce_version > 1 && data_item.version_ts_ < cce_version &&
                 shard->EnableMvcc())
             {
@@ -8387,23 +8493,7 @@ protected:
                 // already cached in memory.
                 return;
             }
-            if (cce->payload_.use_count() == 1)
-            {
-                *(cce->payload_) = *record;
-            }
-            else
-            {
-                cce->payload_ = std::make_shared<ValueT>(*record);
-            }
-#else
-            assert(false);
-            cce->payload_.reset(
-                static_cast<ValueT *>(record->Clone().release()));
 #endif
-
-            RecordStatus status = data_item.is_deleted_ ? RecordStatus::Deleted
-                                                        : RecordStatus::Normal;
-            cce->SetCommitTsPayloadStatus(data_item.version_ts_, status);
             cce->SetCkptTs(data_item.version_ts_);
         };
 
@@ -8864,8 +8954,8 @@ protected:
             static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
         assert(ccp != nullptr);
         const ValueT *rec_ptr = static_cast<const ValueT *>(rec_uptr.get());
-#ifdef RANGE_PARTITION_ENABLED
         const uint64_t cce_version = cce->CommitTs();
+#ifdef RANGE_PARTITION_ENABLED
         if (cce->data_store_size_ == INT32_MAX)
         {
             cce->data_store_size_ =
@@ -8876,16 +8966,20 @@ protected:
 #endif
         cce->SetCkptTs(commit_ts);
 
-        if (cce->PayloadStatus() == RecordStatus::Unknown)
+        if (cce_version < commit_ts)
         {
 #ifdef RANGE_PARTITION_ENABLED
-            if (txservice_enable_key_cache && table_name_.IsBase())
+            if (txservice_enable_key_cache && table_name_.IsBase() &&
+                status == RecordStatus::Deleted &&
+                cce->PayloadStatus() == RecordStatus::Unknown)
             {
                 CcEntry<KeyT, ValueT> *cce =
                     static_cast<CcEntry<KeyT, ValueT> *>(entry);
                 CcPage<KeyT, ValueT> *ccp =
                     static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
-                // Addking a new key to the ccm, add it to key cache too.
+                // Addking a new key to the ccm. If the key is in Normal rec
+                // status, it should already be in the key cache. Only add it if
+                // it's in DELETED.
                 auto res = shard_->local_shards_.AddKeyToKeyCache(
                     table_name_,
                     cc_ng_id_,
@@ -9785,6 +9879,13 @@ protected:
             return last_commit_ts_;
         }
 
+        // Returns true if the key should be removed from key cache regardless
+        // of rec status.
+        virtual bool RemoveFromKeyCache() const
+        {
+            return false;
+        }
+
     protected:
         void Reserve(KeyT &&key, std::unique_ptr<CcEntry<KeyT, ValueT>> &&cce)
         {
@@ -9899,6 +10000,13 @@ protected:
             return need_invalidate_lock_term_;
         }
 
+        bool RemoveFromKeyCache() const override
+        {
+            // When kicking data that no longer belongs to this range,
+            // we should remove the key regardless of its rec status.
+            return kickout_cc_->GetCleanType() == CleanType::CleanRangeData;
+        }
+
     private:
         static bool DeduceNeedInvalidateLockTerm(CleanType type)
         {
@@ -9993,7 +10101,7 @@ protected:
             if (store_range)
             {
                 bool kickout_any = CleanPageInRange(store_range, clean_guard);
-
+                range_entry->SetAcceptsDirtyRangeData(false);
                 if (kickout_any)
                 {
                     // If the key is kicked out, we need to update the bucket
@@ -10019,6 +10127,7 @@ protected:
                           CleanGuard *clean_guard)
     {
         bool kickout_any = false;
+        bool remove_from_key_cache = clean_guard->RemoveFromKeyCache();
 
         CcPage<KeyT, ValueT> *page = clean_guard->page_;
         size_t &idx_in_page = clean_guard->idx_in_page_;
@@ -10061,11 +10170,10 @@ protected:
                         // because we always search for key in ccmap first
                         // before trying to query the key cache. Remove the key
                         // from key cache if the key is in deleted status.
-                        bool remove_from_key_cache =
-                            txservice_enable_key_cache &&
+                        if (txservice_enable_key_cache &&
                             table_name_.IsBase() &&
-                            cce->PayloadStatus() == RecordStatus::Deleted;
-                        if (remove_from_key_cache)
+                            (remove_from_key_cache ||
+                             cce->PayloadStatus() == RecordStatus::Deleted))
                         {
                             store_range->DeleteKey(
                                 key, shard_->core_id_, store_slice);

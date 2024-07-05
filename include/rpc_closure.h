@@ -107,7 +107,8 @@ public:
                        bool retry_on_timeout)
         : post_lambda_(post_lambda),
           upload_timeout_(upload_timeout),
-          retry_on_timeout_(retry_on_timeout)
+          retry_on_timeout_(retry_on_timeout),
+          eagain_wait_ms_(100)
     {
     }
     ~UploadBatchClosure() = default;
@@ -127,6 +128,31 @@ public:
                        << request_.node_group_id()
                        << ", with Error code: " << cntl_.ErrorCode()
                        << ". Error Msg: " << cntl_.ErrorText();
+            if (cntl_.ErrorCode() == brpc::EOVERCROWDED ||
+                cntl_.ErrorCode() == EAGAIN)
+            {
+                if (eagain_wait_ms_ > 2000)
+                {
+                    LOG(WARNING)
+                        << "upload_batch_closure: retried too many times "
+                           "after eagain.";
+                    return;
+                }
+                bthread_usleep(1000 * eagain_wait_ms_);
+                eagain_wait_ms_ *= 2;
+
+                self_guard.release();
+                // Retry if timeout.
+                LOG(INFO)
+                    << "Retry after EOVERCROWDED UploadBatch service of ng#"
+                    << request_.node_group_id();
+                cntl_.Reset();
+                response_.Clear();
+                remote::CcRpcService_Stub stub(channel_.get());
+                cntl_.set_timeout_ms(upload_timeout_);
+                stub.UploadBatch(&cntl_, &request_, &response_, this);
+                return;
+            }
             if (cntl_.ErrorCode() == brpc::ERPCTIMEDOUT && retry_on_timeout_)
             {
                 self_guard.release();
@@ -141,13 +167,19 @@ public:
                 return;
             }
             Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
-            post_lambda_(CcErrorCode::REQUEST_LOST, 0);
+            if (post_lambda_)
+            {
+                post_lambda_(CcErrorCode::REQUEST_LOST, 0);
+            }
         }
         else
         {
             CcErrorCode err_code =
                 remote::ToLocalType::ConvertCcErrorCode(response_.error_code());
-            post_lambda_(err_code, response_.ng_term());
+            if (post_lambda_)
+            {
+                post_lambda_(err_code, response_.ng_term());
+            }
         }
         channel_ = nullptr;
     }
@@ -178,6 +210,21 @@ public:
         return channel_.get();
     }
 
+    void SetPostLambda(std::function<void(CcErrorCode, int32_t)> post_lambda)
+    {
+        post_lambda_ = post_lambda;
+    }
+
+    uint16_t TimeoutValue() const
+    {
+        return upload_timeout_;
+    }
+
+    uint32_t NodeId() const
+    {
+        return node_id_;
+    }
+
 private:
     brpc::Controller cntl_;
     remote::UploadBatchRequest request_;
@@ -187,6 +234,8 @@ private:
     std::shared_ptr<brpc::Channel> channel_;
     uint32_t node_id_;
     bool retry_on_timeout_{false};
+
+    uint16_t eagain_wait_ms_{100};
 };
 
 class GenerateSkFromPkClosure : public ::google::protobuf::Closure
@@ -475,6 +524,146 @@ private:
                        bool &is_last_scanned_key_str,
                        size_t batch_range_cnt,
                        uint32_t &actual_task_cnt)> &dispatch_func_;
+};
+
+class UploadBatchSlicesClosure : public ::google::protobuf::Closure
+{
+public:
+    UploadBatchSlicesClosure(
+        std::function<void(CcErrorCode, int32_t)> post_lambda,
+        uint16_t upload_timeout,
+        bool retry_on_timeout)
+        : post_lambda_(post_lambda),
+          upload_timeout_(upload_timeout),
+          retry_on_timeout_(retry_on_timeout),
+          eagain_wait_ms_(100)
+    {
+    }
+    ~UploadBatchSlicesClosure() = default;
+
+    UploadBatchSlicesClosure(const UploadBatchSlicesClosure &rhs) = delete;
+    UploadBatchSlicesClosure(UploadBatchSlicesClosure &&rhs) = delete;
+
+    // Run() will be called when rpc request is processed by cc node service.
+    void Run() override
+    {
+        // Free closure on exit
+        std::unique_ptr<UploadBatchSlicesClosure> self_guard(this);
+        if (cntl_.Failed())
+        {
+            // RPC failed.
+            LOG(ERROR) << "Failed for UploadBatchSlices RPC request of ng#"
+                       << request_.node_group_id()
+                       << ", with Error code: " << cntl_.ErrorCode()
+                       << ". Error Msg: " << cntl_.ErrorText();
+            if (cntl_.ErrorCode() == brpc::EOVERCROWDED ||
+                cntl_.ErrorCode() == EAGAIN)
+            {
+                if (eagain_wait_ms_ > 2000)
+                {
+                    LOG(WARNING)
+                        << "upload_batch_closure: retried too many times "
+                           "after eagain.";
+                    return;
+                }
+                bthread_usleep(1000 * eagain_wait_ms_);
+                eagain_wait_ms_ *= 2;
+
+                self_guard.release();
+                // Retry if timeout.
+                LOG(INFO) << "Retry after EOVERCROWDED UploadBatchSlices "
+                             "service of ng#"
+                          << request_.node_group_id();
+                cntl_.Reset();
+                response_.Clear();
+                remote::CcRpcService_Stub stub(channel_.get());
+                cntl_.set_timeout_ms(upload_timeout_);
+                stub.UploadBatchSlices(&cntl_, &request_, &response_, this);
+                return;
+            }
+            if (cntl_.ErrorCode() == brpc::ERPCTIMEDOUT && retry_on_timeout_)
+            {
+                self_guard.release();
+                // Retry if timeout.
+                DLOG(INFO) << "Retry UploadBatchSlices service of ng#"
+                           << request_.node_group_id();
+                cntl_.Reset();
+                response_.Clear();
+                remote::CcRpcService_Stub stub(channel_.get());
+                cntl_.set_timeout_ms(upload_timeout_);
+                stub.UploadBatchSlices(&cntl_, &request_, &response_, this);
+                return;
+            }
+            Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
+            if (post_lambda_)
+            {
+                post_lambda_(CcErrorCode::REQUEST_LOST, 0);
+            }
+        }
+        else
+        {
+            CcErrorCode err_code =
+                remote::ToLocalType::ConvertCcErrorCode(response_.error_code());
+            if (post_lambda_)
+            {
+                post_lambda_(err_code, response_.ng_term());
+            }
+        }
+        channel_ = nullptr;
+    }
+
+    brpc::Controller *Controller()
+    {
+        return &cntl_;
+    }
+
+    remote::UploadBatchResponse *UploadBatchResponse()
+    {
+        return &response_;
+    }
+
+    remote::UploadBatchSlicesRequest *UploadBatchRequest()
+    {
+        return &request_;
+    }
+
+    void SetChannel(uint32_t node_id, std::shared_ptr<brpc::Channel> channel)
+    {
+        node_id_ = node_id;
+        channel_ = channel;
+    }
+
+    brpc::Channel *Channel()
+    {
+        return channel_.get();
+    }
+
+    void SetPostLambda(std::function<void(CcErrorCode, int32_t)> post_lambda)
+    {
+        post_lambda_ = post_lambda;
+    }
+
+    uint16_t TimeoutValue() const
+    {
+        return upload_timeout_;
+    }
+
+    uint32_t NodeId() const
+    {
+        return node_id_;
+    }
+
+private:
+    brpc::Controller cntl_;
+    remote::UploadBatchSlicesRequest request_;
+    remote::UploadBatchResponse response_;
+    std::function<void(CcErrorCode, int32_t)> post_lambda_;
+    uint16_t upload_timeout_{0};
+    std::shared_ptr<brpc::Channel> channel_;
+    uint32_t node_id_;
+    bool retry_on_timeout_{false};
+
+    uint16_t eagain_wait_ms_{100};
 };
 
 }  // namespace txservice

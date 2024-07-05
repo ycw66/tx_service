@@ -437,6 +437,16 @@ public:
         return cache_validity_[core_id] & (1 << 1);
     }
 
+    void InitKeyCache(StoreRange *range,
+                      const TableName *tbl_name,
+                      NodeGroupId ng_id,
+                      int64_t term);
+
+    InitKeyCacheCc *InitKeyCacheRequest()
+    {
+        return init_key_cache_cc_.get();
+    }
+
 protected:
     bool IsRecentLoad() const;
 
@@ -457,6 +467,7 @@ protected:
     bool to_alter_{false};
 
     std::unique_ptr<FillStoreSliceCc> fetch_slice_cc_{nullptr};
+    std::unique_ptr<InitKeyCacheCc> init_key_cache_cc_{nullptr};
 
     /**
      * @brief A queue of cc requests waiting for the slice to be loaded into
@@ -487,6 +498,7 @@ protected:
     friend class StoreRange;
     template <typename KeyT>
     friend class TemplateStoreRange;
+    friend struct InitKeyCacheCc;
 };
 
 template <typename KeyT>
@@ -551,10 +563,10 @@ public:
         1024 * 1024;  // 1MB range size for testing range split
 #else
     static constexpr uint32_t range_max_size =
-        536870912;  // 512 * 1024 * 1024 = 512MB
+        268435456;  // 256 * 1024 * 1024 = 256MB
 #endif
 
-    static constexpr float_t key_cache_default_load_factor = 0.7;
+    static constexpr float_t key_cache_default_load_factor = 0.5;
 
     static constexpr float_t new_range_load_factor = 0.1;
 
@@ -666,6 +678,12 @@ public:
         return last_accessed_ts_.load(std::memory_order_relaxed);
     }
 
+    std::string KeyCacheInfo(uint16_t core_id) const
+    {
+        assert(core_id < key_cache_.size());
+        return key_cache_[core_id]->Info();
+    }
+
 protected:
     enum struct LoadSliceStatus
     {
@@ -697,6 +715,7 @@ protected:
 
     void CollectCacheHit(CcShard &ccs);
     void CollectCacheMiss(CcShard &ccs);
+    bool SetLastInitKeyCacheTs();
 
     /**
      * @brief The partition ID of the range.
@@ -748,7 +767,8 @@ protected:
     // before it is flushed to kv. So we used a lower load factor to reduce
     // collision. An add collision might result in the whole key cache being
     // invalidated which is very expensive. A 12 bits long fingerprint for each
-    // key leads to a 0.1% false positive rate for the key cache.
+    // key leads to a 0.1% false positive rate for the key cache. Overall the
+    // key cache will consume about 1.5% memory size of the range.
 
     // The cache is updated when 1) whenever a new key is inserted into ccm, we
     // will add the key to key cache. 2) when a deleted key is removed from ccm,
@@ -759,6 +779,7 @@ protected:
     // batch.
     std::vector<std::unique_ptr<cuckoofilter::CuckooFilter<size_t, 12>>>
         key_cache_;
+    std::atomic<uint64_t> last_init_key_cache_time_{0};
 
     friend class StoreSlice;
     friend struct TableRangeEntry;
@@ -922,7 +943,7 @@ public:
         }
         key_cache_[core_id] =
             std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
-                StoreRange::range_max_size *
+                StoreRange::range_max_size /
                 StoreRange::key_cache_default_load_factor / 200 /
                 key_cache_.size());
     }
@@ -969,6 +990,12 @@ public:
             else if ((*slice)->FillCcRequest() != nullptr)
             {
                 DLOG(INFO) << "slice loading from data store when trying to "
+                              "split range";
+                return false;
+            }
+            else if ((*slice)->InitKeyCacheRequest() != nullptr)
+            {
+                DLOG(INFO) << "slice initing key cache when trying to "
                               "split range";
                 return false;
             }
@@ -1146,7 +1173,7 @@ public:
                 // If key is found in range key cache, the key must exist in kv
                 // store. Load slice from kv to get the value.
             }
-            else
+            else if (!slice->IsLoadingKeyCache(shard_id))
             {
                 // If this slice can use key cache but the key cache is not
                 // intialized, always load slice from kv to initialize the key
@@ -1272,21 +1299,6 @@ public:
         return new_range_keys;
     }
 
-    bool KickoutSlice(const KeyT &kickout_key,
-                      bool remove_from_key_cache,
-                      uint16_t core_id)
-    {
-        std::shared_lock<std::shared_mutex> s_lk(mux_);
-        size_t slice_idx = SearchSlice(kickout_key, true);
-        bool ret = slices_[slice_idx]->Kickout();
-        if (ret && remove_from_key_cache)
-        {
-            // If kickout is success, remove this key from key cache.
-            DeleteKey(kickout_key, core_id, slices_[slice_idx].get());
-        }
-        return ret;
-    }
-
     void DeleteKey(const KeyT &key, uint16_t core_id, StoreSlice *slice)
     {
         if (slice == nullptr)
@@ -1299,8 +1311,11 @@ public:
             cuckoofilter::Status status =
                 key_cache_[core_id]->Delete(key.Hash());
             // We should not try to delete a non-existing key.
+            if (status == cuckoofilter::Status::NotFound)
+            {
+                LOG(ERROR) << "Deleting a non-existing key from key cache.";
+            }
             assert(status != cuckoofilter::Status::NotFound);
-            (void) status;
         }
         // Delete key is not going to be called if slice is being loaded, so
         // we don't need to worry about concurrent key cache initialization.
@@ -1327,7 +1342,7 @@ public:
             }
             else
             {
-                assert(cuckoofilter::Status::NotEnoughSpace);
+                assert(status == cuckoofilter::Status::NotEnoughSpace);
                 // Add failed, we need to invalidate the filter.
                 InvalidateKeyCache(core_id);
                 return RangeSliceOpStatus::Error;
@@ -1342,6 +1357,23 @@ public:
         {
             // cache is not valid, no op
             return RangeSliceOpStatus::Successful;
+        }
+    }
+
+    void InitKeyCache(const TableName *tbl_name,
+                      NodeGroupId ng_id,
+                      int64_t term)
+    {
+        if (!SetLastInitKeyCacheTs())
+        {
+            // Just initialized recently but already invalidated. The range in
+            // memory might not fit into the key cache.
+            return;
+        }
+        std::shared_lock<std::shared_mutex> lk(mux_);
+        for (auto &slice : slices_)
+        {
+            slice->InitKeyCache(this, tbl_name, ng_id, term);
         }
     }
 
@@ -1387,6 +1419,48 @@ public:
         }
 
         return updated;
+    }
+
+    void DeleteKeysInRange(const std::vector<FlushRecord *> &keys,
+                           size_t start_idx,
+                           size_t end_idx,
+                           uint16_t core_id)
+    {
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        assert(end_idx <= keys.size());
+        const KeyT *typed_key = keys[start_idx]->Key().GetKey<KeyT>();
+        size_t slice_idx = SearchSlice(*typed_key, true);
+        TemplateStoreSlice<KeyT> *slice = slices_[slice_idx].get();
+        auto lower_bound_cmp = [](const FlushRecord *rec, const TxKey &key)
+        { return rec->Key() < key; };
+        auto key_it = keys.begin() + start_idx;
+        auto slice_end_it =
+            slice->EndTxKey().KeyPtr() == RangeEndTxKey().KeyPtr()
+                ? keys.end()
+                : std::lower_bound(
+                      key_it, keys.end(), slice->EndTxKey(), lower_bound_cmp);
+        while (start_idx < end_idx)
+        {
+            while (key_it == slice_end_it)
+            {
+                // We should not enter here if the slice is already the last
+                // slice.
+                assert(slice_idx < slices_.size() - 1);
+                slice = slices_[++slice_idx].get();
+                // Find the next slice to update.
+                slice_end_it =
+                    slice->EndTxKey().KeyPtr() == RangeEndTxKey().KeyPtr()
+                        ? keys.end()
+                        : std::lower_bound(key_it,
+                                           keys.end(),
+                                           slice->EndTxKey(),
+                                           lower_bound_cmp);
+            }
+
+            DeleteKey(*(*key_it)->Key().GetKey<KeyT>(), core_id, slice);
+            key_it++;
+            start_idx++;
+        }
     }
 
 private:

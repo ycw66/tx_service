@@ -993,7 +993,7 @@ public:
             }
 
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
-            if (req.IsPersisted())
+            if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
                 cce->SetCkptTs(commit_ts);
             }
@@ -1087,7 +1087,6 @@ public:
 
         if (commit_ts > 0)
         {
-            DLOG(INFO) << "---UploadTxCommandsCc";
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
 

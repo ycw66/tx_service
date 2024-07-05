@@ -389,7 +389,8 @@ public:
 #ifndef RANGE_PARTITION_ENABLED
         shard_->SetBucketMigrating(is_bucket_migrating);
 #endif
-
+        (void)
+            is_bucket_migrating;  // Silence compiler warning in range partition
         if (locked)
         {
             auto lock_pair = AcquireCceKeyLock(&neg_inf_,

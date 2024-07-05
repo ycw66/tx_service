@@ -999,6 +999,7 @@ private:
     void ForceToFinish(TransactionExecution *txm);
     void ClearDataSyncVec();
     void ClearInfos();
+    std::vector<SplitRangeInfo> GenSplittedRangeInfos();
 };
 
 // To remove remainder records' lock when scan close

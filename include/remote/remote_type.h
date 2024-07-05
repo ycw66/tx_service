@@ -186,6 +186,21 @@ public:
             return remote::SlicePosition::Middle;
         }
     }
+
+    static remote::UploadBatchKind ConvertUploadBatchType(
+        txservice::UploadBatchType data_type)
+    {
+        switch (data_type)
+        {
+        case UploadBatchType::SkIndexData:
+            return remote::UploadBatchKind::SK_DATA;
+        case UploadBatchType::DirtyBucketData:
+            return remote::UploadBatchKind::DIRTY_BUCKET_DATA;
+        default:
+            assert(false);
+            return remote::UploadBatchKind::SK_DATA;
+        }
+    }
 };
 
 class ToLocalType
@@ -358,6 +373,21 @@ public:
             return txservice::SlicePosition::LastSlice;
         default:
             return txservice::SlicePosition::Middle;
+        }
+    }
+
+    static txservice::UploadBatchType ConvertUploadBatchType(
+        remote::UploadBatchKind kind)
+    {
+        switch (kind)
+        {
+        case remote::UploadBatchKind::SK_DATA:
+            return UploadBatchType::SkIndexData;
+        case remote::UploadBatchKind::DIRTY_BUCKET_DATA:
+            return UploadBatchType::DirtyBucketData;
+        default:
+            assert(false);
+            return UploadBatchType::SkIndexData;
         }
     }
 };

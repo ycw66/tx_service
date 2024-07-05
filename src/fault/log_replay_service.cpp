@@ -102,7 +102,9 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                     RecoverTxTask task = recover_tx_queue_.front();
                     recover_tx_queue_.pop_front();
                     lk.unlock();
-                    LOG(INFO) << "replay service processes a RecoverTx task";
+                    LOG(INFO)
+                        << "replay service processes a RecoverTx task, txn: "
+                        << task.tx_number_;
                     ProcessRecoverTxTask(task);
                     continue;
                 }

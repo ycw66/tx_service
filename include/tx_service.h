@@ -979,7 +979,14 @@ public:
         txservice_skip_kv = skip_kv;
         if (conf.find("enable_key_cache") != conf.end())
         {
-            txservice_enable_key_cache = conf.at("enable_key_cache");
+            if (enable_mvcc && conf.at("enable_key_cache"))
+            {
+                LOG(WARNING) << "Txservice key cache is disabled due to "
+                                "incompatibility with MVCC.";
+            }
+            // Key cache is only available in non-mvcc mode.
+            txservice_enable_key_cache =
+                conf.at("enable_key_cache") && !enable_mvcc;
         }
     }
 

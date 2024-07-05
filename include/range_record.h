@@ -656,6 +656,117 @@ public:
         return TxKey(RangeStartKey());
     }
 
+    bool UploadDirtyRangeSlices(int32_t new_partition_id,
+                                uint64_t dirty_ts,
+                                std::vector<SliceInitInfo> &&new_slices)
+    {
+        std::lock_guard<std::shared_mutex> entry_lk(mux_);
+
+        if (range_info_.IsDirty() && dirty_ts == range_info_.DirtyTs())
+        {
+            if (dirty_range_slices_ == nullptr)
+            {
+                dirty_range_slices_ = std::make_unique<std::pair<
+                    bool,
+                    std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>();
+                dirty_range_slices_->first = true;
+            }
+            DLOG(INFO) << "Received new range slices info, range_id:"
+                       << range_info_.PartitionId()
+                       << ", new_range_id:" << new_partition_id;
+            dirty_range_slices_->second.try_emplace(new_partition_id,
+                                                    std::move(new_slices));
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    void UpdateDirtyRangeSlice(int32_t new_partition_id,
+                               const std::vector<uint32_t> &slice_idxs,
+                               uint64_t dirty_version,
+                               SliceStatus status)
+    {
+        assert(status == SliceStatus::FullyCached);
+        std::shared_lock<std::shared_mutex> entry_lk(mux_);
+        if (range_info_.IsDirty() && DirtyVersion() == dirty_version &&
+            dirty_range_slices_ != nullptr)
+        {
+            assert(range_info_.IsDirty());
+            if (!dirty_range_slices_->first)
+            {
+                // this range data has been kicked, don't update slices
+                // status.
+                DLOG(INFO) << "Skip update dirty range slice status for range "
+                              "keys was ever kicked.";
+
+                return;
+            }
+
+            assert(new_partition_id >= 0);
+
+            std::unordered_map<int32_t, std::vector<SliceInitInfo>>
+                &range_slices = dirty_range_slices_->second;
+            assert(range_slices.find(new_partition_id) != range_slices.end());
+
+            std::vector<SliceInitInfo> &slices =
+                range_slices.at(new_partition_id);
+
+            for (size_t i = 0; i < slice_idxs.size(); i++)
+            {
+                slices[slice_idxs[i]].status_ = status;
+            }
+            return;
+        }
+        else
+        {
+            LOG(WARNING) << "UpdateDirtyRangeSlice: dirty range#"
+                         << new_partition_id << " has been installed.";
+        }
+    }
+
+    bool AcceptsDirtyRangeData(uint64_t dirty_version)
+    {
+        std::shared_lock<std::shared_mutex> entry_lk(mux_);
+        if (dirty_range_slices_ != nullptr && DirtyVersion() == dirty_version)
+        {
+            return dirty_range_slices_->first;
+        }
+        return false;
+    }
+
+    void SetAcceptsDirtyRangeData(bool accept)
+    {
+        if (dirty_range_slices_ != nullptr)
+        {
+            dirty_range_slices_->first = accept;
+        }
+    }
+
+    std::unique_ptr<
+        std::pair<bool,
+                  std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>
+    ReleaseDirtyRangeSlices()
+    {
+        std::lock_guard<std::shared_mutex> entry_lk(mux_);
+        if (dirty_range_slices_ != nullptr && !dirty_range_slices_->first)
+        {
+            auto &map_ref = dirty_range_slices_->second;
+            for (auto it = map_ref.begin(); it != map_ref.end(); it++)
+            {
+                auto &slices = it->second;
+                for (auto &slice : slices)
+                {
+                    slice.status_ = SliceStatus::PartiallyCached;
+                }
+            }
+        }
+
+        return std::move(dirty_range_slices_);
+    }
+
 private:
     TemplateRangeInfo<KeyT> range_info_;
 
@@ -666,6 +777,12 @@ private:
     // 1. StoreRange is pinned.
     // 2. mutex lock is acquried on TableRangeEntry.mux_.
     std::unique_ptr<TemplateStoreRange<KeyT>> range_slices_{nullptr};
+
+    // (accept_data, {new_range_id->[slices_info,...], ...})
+    std::unique_ptr<
+        std::pair<bool,
+                  std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>
+        dirty_range_slices_{nullptr};
 };
 
 struct RangeRecord : public TxRecord

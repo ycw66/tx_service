@@ -120,6 +120,34 @@ bool StoreSlice::IsRecentLoad() const
     return delta < 4000000;
 }
 
+void StoreSlice::InitKeyCache(StoreRange *range,
+                              const TableName *tbl_name,
+                              NodeGroupId ng_id,
+                              int64_t term)
+{
+    std::lock_guard<std::mutex> lk(slice_mux_);
+    if (status_ == SliceStatus::FullyCached && !init_key_cache_cc_)
+    {
+        // Pin the range so that the StoreRange won't be evicted.
+        range->pins_.fetch_add(1, std::memory_order_acquire);
+        // Pin the slice so that it won't be kicked out during key cache init.
+        pins_++;
+        init_key_cache_cc_ =
+            std::make_unique<InitKeyCacheCc>(range,
+                                             this,
+                                             range->local_cc_shards_.Count(),
+                                             tbl_name,
+                                             term,
+                                             ng_id);
+        uint16_t core_cnt = range->local_cc_shards_.Count();
+        for (uint16_t core_id = 0; core_id < core_cnt; core_id++)
+        {
+            Sharder::Instance().GetLocalCcShards()->EnqueueToCcShard(
+                core_id, init_key_cache_cc_.get());
+        }
+    }
+}
+
 StoreRange::StoreRange(uint32_t partition_id,
                        NodeGroupId range_owner,
                        LocalCcShards &cc_shards,
@@ -138,7 +166,7 @@ StoreRange::StoreRange(uint32_t partition_id,
             // cache.
             key_cache_.push_back(
                 std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
-                    StoreRange::range_max_size *
+                    StoreRange::range_max_size /
                     StoreRange::key_cache_default_load_factor / 200 /
                     core_cnt));
         }
@@ -471,8 +499,13 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             ckpt_size);
     }
 
-    GetPostCkptSlice post_ckpt_slice(
-        table_name, ng_id, slice, this, ckpt_cce_raw_ptr_vecs_inmut, core_cnt);
+    GetPostCkptSlice post_ckpt_slice(table_name,
+                                     ng_id,
+                                     slice,
+                                     this,
+                                     ckpt_cce_raw_ptr_vecs_inmut,
+                                     core_cnt,
+                                     flush_ts);
 
     while (!scan_data_drained)
     {
@@ -650,6 +683,24 @@ bool StoreRange::UpdateRangeSlicesInStore(const TableName &table_name,
                                        Slices(),
                                        partition_id_,
                                        range_version);
+}
+
+bool StoreRange::SetLastInitKeyCacheTs()
+{
+    // If the range key cache is just initialized in the last 10s, do not try
+    // to reinitialize it. The in memory range might be too big to fit into the
+    // key cache, in which case we should avoid spamming InitializeKeyCache.
+    uint64_t last_ts =
+        last_init_key_cache_time_.load(std::memory_order_acquire);
+    if (last_ts + 10000000 < local_cc_shards_.ClockTs() &&
+        last_init_key_cache_time_.compare_exchange_strong(
+            last_ts, local_cc_shards_.ClockTs(), std::memory_order_acq_rel))
+    {
+        return true;
+    }
+
+    // last ts just updated by another thread
+    return false;
 }
 
 StoreRange::LoadSliceStatus StoreRange::LoadSlice(

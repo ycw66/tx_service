@@ -529,7 +529,8 @@ public:
         }
         else if (req.CommitType() == PostWriteType::PostCommit)
         {
-            std::vector<const TemplateRangeInfo<KeyT> *> new_range_infos;
+            std::vector<const TemplateTableRangeEntry<KeyT> *>
+                new_range_entries;
             TxKey tx_key(target_key);
             TemplateTableRangeEntry<KeyT> *old_entry =
                 static_cast<TemplateTableRangeEntry<KeyT> *>(
@@ -563,132 +564,29 @@ public:
                     return true;
                 }
 
-                // Split the StoreRange struct in old TableRangeEntry and get
-                // the removed slice keys and sizes. These keys will be reused
-                // as the slice keys in the new ranges.
-                std::vector<SliceInitInfo> new_slice_info;
-                bool split_range_res;
-
-                if (range_owner != this->cc_ng_id_)
+                // Update the table range map in local cc shards.
+                new_range_entries = shard_->local_shards_.SplitTableRange(
+                    this->table_name_, this->cc_ng_id_, old_entry);
+                if (new_range_entries.empty())
                 {
-                    // For remote node groups, we won't bother initializing
-                    // range slices for new ranges. They will be loaded from
-                    // data store on read.
-                    for (size_t i = 0; i < old_info->new_key_.size(); i++)
-                    {
-                        const TxKey &tx_key = old_info->new_key_.at(i);
-                        const KeyT *range_start = tx_key.GetKey<KeyT>();
-
-                        const TemplateTableRangeEntry<KeyT> *new_range =
-                            shard_->local_shards_.CreateTableRange(
-                                this->table_name_,
-                                this->cc_ng_id_,
-                                old_info->new_partition_id_.at(i),
-                                *range_start,
-                                old_info->dirty_ts_,
-                                nullptr);
-                        new_range_infos.push_back(new_range->TypedRangeInfo());
-                    }
+                    // Range split failed due to slice pinned or being
+                    // loaded, yield and retry
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
                 }
-                else
+
+                if (txservice_enable_key_cache && this->table_name_.IsBase())
                 {
-                    // For local node group, fill the range slice info for new
-                    // ranges. These new slice specs is currently stored in the
-                    // splitting range, so just copy them to the new ranges to
-                    // avoid further data store read.
-                    TemplateStoreRange<KeyT> *old_store_range =
-                        old_entry->TypedStoreRange();
-                    const TxKey &tx_key = old_info->new_key_.front();
-                    split_range_res = old_store_range->SplitRange(
-                        tx_key.GetKey<KeyT>(), new_slice_info);
-                    if (!split_range_res)
+                    // try to init the key cache for new range if it
+                    // lands on this ng
+                    for (auto new_range : new_range_entries)
                     {
-                        // If split fails due to slice is pinned or is loading
-                        // retry later.
-                        assert(new_slice_info.empty());
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        return false;
-                    }
-                    if (new_slice_info.empty())
-                    {
-                        // If all current slices should stay in old range,
-                        // assign empty slice for new range
-                        for (const TxKey &new_key : old_info->new_key_)
+                        auto new_store_range = new_range->TypedStoreRange();
+                        if (new_store_range)
                         {
-                            const KeyT *new_range_start =
-                                new_key.GetKey<KeyT>();
-                            new_slice_info.emplace_back(
-                                TxKey(std::make_unique<KeyT>(*new_range_start)),
-                                0,
-                                SliceStatus::FullyCached);
+                            new_store_range->InitKeyCache(
+                                &this->table_name_, this->cc_ng_id_, ng_term);
                         }
-                    }
-
-                    // Create new range entries in local cc shard
-                    size_t cur_slice_idx = 0;
-                    for (uint new_range_idx = 0;
-                         new_range_idx < old_info->new_partition_id_.size();
-                         new_range_idx++)
-                    {
-                        std::vector<SliceInitInfo> cur_range_slices;
-                        // First slice start key will reuse the new range start
-                        // key, so we can just pass in nullptr.
-                        std::unique_ptr<KeyT> range_start_key =
-                            new_slice_info[cur_slice_idx].key_.MoveKey<KeyT>();
-
-                        cur_range_slices.emplace_back(
-                            std::move(new_slice_info.at(cur_slice_idx)));
-                        cur_slice_idx++;
-                        // Move the range slices that falls into the new range.
-                        while (
-                            cur_slice_idx != new_slice_info.size() &&
-                            (new_range_idx + 1 == old_info->new_key_.size() ||
-                             new_slice_info.at(cur_slice_idx).key_ <
-                                 old_info->new_key_.at(new_range_idx + 1)))
-                        {
-                            cur_range_slices.emplace_back(
-                                std::move(new_slice_info.at(cur_slice_idx++)));
-                        }
-
-                        if (new_range_idx <
-                                old_info->new_partition_id_.size() - 1 &&
-                            cur_slice_idx == new_slice_info.size())
-                        {
-                            // If we run out of slice before we reach last new
-                            // range, insert an empty slice for the next new
-                            // range
-                            for (size_t idx = new_range_idx + 1;
-                                 idx < old_info->new_key_.size();
-                                 ++idx)
-                            {
-                                const TxKey &tx_key =
-                                    old_info->new_key_.at(idx);
-                                const KeyT *r_start = tx_key.GetKey<KeyT>();
-
-                                new_slice_info.emplace_back(
-                                    TxKey(std::make_unique<KeyT>(*r_start)),
-                                    0,
-                                    SliceStatus::FullyCached);
-                            }
-                        }
-                        assert(
-                            [&]()
-                            {
-                                const TxKey &tx_key =
-                                    old_info->new_key_[new_range_idx];
-                                return *range_start_key ==
-                                       *tx_key.GetKey<KeyT>();
-                            }());
-
-                        const TemplateTableRangeEntry<KeyT> *new_range =
-                            shard_->local_shards_.CreateTableRange(
-                                this->table_name_,
-                                this->cc_ng_id_,
-                                old_info->new_partition_id_.at(new_range_idx),
-                                *range_start_key,
-                                old_info->dirty_ts_,
-                                &cur_range_slices);
-                        new_range_infos.push_back(new_range->TypedRangeInfo());
                     }
                 }
 
@@ -697,7 +595,8 @@ public:
                 // deleted yet because we need to pass them to other cores to
                 // update range cc map.
                 old_info->CommitDirty();
-                old_entry->SetRangeEndKey(new_range_infos.front()->StartKey());
+                old_entry->SetRangeEndKey(
+                    new_range_entries.front()->RangeStartKey());
                 upload_range_rec->SetRangeInfo(old_info);
                 upload_range_rec->SetNewRangeOwnerRec(nullptr);
 
@@ -720,27 +619,19 @@ public:
                         static_cast<const TemplateTableRangeEntry<KeyT> *>(
                             shard_->GetTableRangeEntry(
                                 this->table_name_, this->cc_ng_id_, new_key));
-                    new_range_infos.push_back(range_entry->TypedRangeInfo());
+                    new_range_entries.push_back(range_entry);
                 }
             }
 
-            // Invalidate key cache of this range on this core
-            if (txservice_enable_key_cache && this->table_name_.IsBase() &&
-                range_owner == this->cc_ng_id_)
-            {
-                old_entry->TypedStoreRange()->InvalidateKeyCache(
-                    shard_->core_id_);
-            }
-
-            assert(new_range_infos.size());
+            assert(new_range_entries.size());
 
             // add new range entry to range cc map
             auto &new_range_owner_rec =
                 *target_cce->payload_->new_range_owner_rec_;
-            for (uint idx = 0; idx < new_range_infos.size(); idx++)
+            for (uint idx = 0; idx < new_range_entries.size(); idx++)
             {
                 const TemplateRangeInfo<KeyT> *new_range_info =
-                    new_range_infos.at(idx);
+                    new_range_entries.at(idx)->TypedRangeInfo();
                 const KeyT *start_key = new_range_info->StartKey();
                 auto it =
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
@@ -1261,6 +1152,76 @@ public:
             {
                 req.SetFinish();
             }
+        }
+
+        return false;
+    }
+
+    bool Execute(UploadRangeSlicesCc &req) override
+    {
+        const auto *key_schema = KeySchema();
+
+        std::vector<SliceInitInfo> &new_slices = req.Slices();
+        const std::string &slices_keys = req.NewSlicesKeys();
+        const char *buf = slices_keys.data();
+        size_t keys_len = slices_keys.size();
+
+        const std::string &slices_sizes = req.NewSlicesSizes();
+        const char *sizes_buf = slices_sizes.data();
+
+        const std::string &slices_status = req.NewSlicesStatus();
+        const char *status_buf = slices_status.data();
+
+        uint16_t parsed_count = 0;
+        auto [keys_offset, sizes_offset, status_offset] = req.ParseOffsets();
+
+        while (keys_offset < keys_len &&
+               parsed_count < UploadRangeSlicesCc::MaxParseBatchSize)
+        {
+            // slice start key
+            std::unique_ptr<KeyT> typed_key = std::make_unique<KeyT>();
+            typed_key->Deserialize(buf, keys_offset, key_schema);
+            // slice size
+            uint32_t slice_size =
+                *(reinterpret_cast<const uint32_t *>(sizes_buf + sizes_offset));
+            sizes_offset += sizeof(uint32_t);
+            SliceStatus status = static_cast<SliceStatus>(*(
+                reinterpret_cast<const int8_t *>(status_buf + status_offset)));
+            status_offset += sizeof(int8_t);
+
+            new_slices.emplace_back(
+                TxKey(std::move(typed_key)), slice_size, status);
+
+            parsed_count++;
+        }
+
+        if (keys_offset < keys_len)
+        {
+            req.SetParseOffset(keys_offset, sizes_offset, status_offset);
+            shard_->Enqueue(shard_->LocalCoreId(), &req);
+            return false;
+        }
+
+        if (new_slices.size() != req.NewSlicesCount())
+        {
+            LOG(WARNING) << "UploadRangeSlicesCc: slices size not match.";
+            assert(false);
+        }
+
+        bool res = shard_->local_shards_.template UploadDirtyRangeSlices<KeyT>(
+            *req.GetTableName(),
+            req.NodeGroupId(),
+            req.RangeId(),
+            req.VersionTs(),
+            req.NewRangeId(),
+            std::move(new_slices));
+        if (res)
+        {
+            req.SetFinish();
+        }
+        else
+        {
+            req.SetError(CcErrorCode::UPLOAD_BATCH_REJECTED);
         }
 
         return false;

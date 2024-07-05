@@ -142,6 +142,12 @@ message GenerateSkFromPkResponse
     repeated int64 ng_terms = 3;
 }
 
+enum UploadBatchKind 
+{
+    SK_DATA = 0;
+    DIRTY_BUCKET_DATA = 1;
+}
+
 message UploadBatchRequest
 {
     string table_name_str = 1;
@@ -153,7 +159,26 @@ message UploadBatchRequest
     bytes records = 7;
     bytes commit_ts = 8;
     bytes rec_status = 9;
-    bool is_persisted = 10;
+    UploadBatchKind kind = 10;
+}
+
+message UploadBatchSlicesRequest
+{
+    string table_name_str = 1;
+    CcTableType table_type = 2;
+    uint32 node_group_id = 3;
+    int64 node_group_term = 4;
+    // count of items in this batch
+    uint32 batch_size = 5;
+    bytes keys = 6;
+    bytes records = 7;
+    bytes commit_ts = 8;
+    bytes rec_status = 9;
+
+    int32 partition_id = 10;
+    int32 new_partition_id = 11;
+    repeated uint32 slices_idxs = 12;
+    uint64 version_ts = 13;
 }
 
 message UploadBatchResponse
@@ -191,6 +216,30 @@ message PubBucketsMigratingResponse
     bool success = 2;
 }
 
+message UploadRangeSlicesRequest
+{
+	uint32 node_group_id = 1;
+    int64 ng_term = 2;
+    string table_name_str = 3;
+    int32 old_partition_id = 4;
+    uint64 version_ts = 5;
+    int32 new_partition_id = 6;
+    // all keys serialized to one field.
+    bytes new_slices_keys = 7;
+    // [uint32_t,....]
+    bytes new_slices_sizes = 8;
+    // [int8_t,....]
+    bytes new_slices_status = 9;
+    uint32 new_slices_num = 10;
+}
+
+message UploadRangeSlicesResponse
+{
+    int64 ng_term = 1;
+    uint32 error_code = 2;
+}
+
+
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -210,7 +259,9 @@ service CcRpcService {
     rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);
     rpc GenerateSkFromPk(GenerateSkFromPkRequest) returns (GenerateSkFromPkResponse);
     rpc UploadBatch(UploadBatchRequest) returns (UploadBatchResponse);
+    rpc UploadBatchSlices(UploadBatchSlicesRequest) returns (UploadBatchResponse);
     rpc PublishBucketsMigrating(PubBucketsMigratingRequest) returns (PubBucketsMigratingResponse);
+    rpc UploadRangeSlices(UploadRangeSlicesRequest) returns (UploadRangeSlicesResponse);
 }
 
 message NodeConfigBuf

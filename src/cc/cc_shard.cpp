@@ -59,8 +59,9 @@ CcShard::CcShard(uint16_t core_id,
 {
     // memory_limit_ and log_limit_ are calculated at shard level.
 #ifdef RANGE_PARTITION_ENABLED
-    // reserve 5% for range slice info
-    memory_limit_ = (uint64_t) MB(node_memory_limit_mb) * 0.95;
+    // reserve 5% for range slice info, 10% for data sync heap, 5% for key cache
+    memory_limit_ = (uint64_t) MB(node_memory_limit_mb) *
+                    (txservice_enable_key_cache ? 0.9 : 0.95);
 #else
     memory_limit_ = (uint64_t) MB(node_memory_limit_mb);
 #endif
@@ -118,8 +119,8 @@ CcShard::CcShard(uint16_t core_id,
     if (metrics::enable_metrics)
     {
         meter_->Register(metrics::NAME_MEMORY_LIMIT, metrics::Type::Gauge);
-        meter_->Collect(metrics::NAME_MEMORY_LIMIT,
-                        MB(node_memory_limit_mb) / core_cnt_);
+        // 10% memory size is reserved for data sync scan
+        meter_->Collect(metrics::NAME_MEMORY_LIMIT, memory_limit_ * 0.9);
     }
 
     if (metrics::enable_cache_hit_rate)

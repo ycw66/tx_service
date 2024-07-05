@@ -836,7 +836,7 @@ void SkGenerator::UploadBatch(
                        req_cv,
                        finished_req_cnt,
                        res_code,
-                       false);
+                       UploadBatchType::SkIndexData);
 
         for (size_t core = 0; core < core_cnt; ++core)
         {
@@ -914,7 +914,7 @@ void SkGenerator::UploadBatch(
         req_ptr->set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
         size_t end_key_idx = start_key_idx + batch_size;
-        req_ptr->set_is_persisted(false);
+        req_ptr->set_kind(remote::UploadBatchKind::SK_DATA);
         req_ptr->set_batch_size(batch_size);
         // keys
         req_ptr->clear_keys();

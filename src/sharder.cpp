@@ -413,6 +413,7 @@ int Sharder::Init(
     return 0;
 }
 
+// Used on HashPartition
 uint16_t Sharder::ShardBucketIdToCoreIdx(uint16_t bucket_id)
 {
     return (bucket_id & 0x3FF) % local_shards_->Count();

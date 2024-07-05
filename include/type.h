@@ -541,6 +541,15 @@ enum struct WorkerStatus
     Terminated
 };
 
+enum struct UploadBatchType : int8_t
+{
+    // Upload SkIndex records by SkGenerator.
+    SkIndexData = 0,
+    // Upload the records to its bucket's new owner for cache during bucket
+    // migrating.
+    DirtyBucketData
+};
+
 struct WorkerThreadContext
 {
     explicit WorkerThreadContext(int worker_num)

@@ -1,6 +1,7 @@
 #include "remote/cc_node_service.h"
 
 #include "cc/local_cc_shards.h"
+#include "error_messages.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
 #include "sk_generator.h"
@@ -929,6 +930,8 @@ void CcNodeService::UploadBatch(
     TableType table_type =
         ToLocalType::ConvertCcTableType(request->table_type());
     TableName table_name = TableName(table_name_sv, table_type);
+    UploadBatchType data_type =
+        ToLocalType::ConvertUploadBatchType(request->kind());
 
     CODE_FAULT_INJECTOR("term_UploadBatch_Timeout", {
         // The rpc timeout.
@@ -971,7 +974,7 @@ void CcNodeService::UploadBatch(
               req_mux,
               req_cv,
               finished_req,
-              request->is_persisted());
+              data_type);
     for (size_t core = 0; core < core_cnt; ++core)
     {
         cc_shards->EnqueueToCcShard(core, &req);
@@ -987,7 +990,6 @@ void CcNodeService::UploadBatch(
 
     response->set_error_code(ToRemoteType::ConvertCcErrorCode(req.ErrorCode()));
     response->set_ng_term(req.CcNgTerm());
-
     DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
                << " finished with error: "
                << static_cast<uint32_t>(req.ErrorCode());
@@ -1030,6 +1032,121 @@ void CcNodeService::PublishBucketsMigrating(
 
     LOG(INFO) << "CcNodeService finish PublishBucketsMigrating RPC of #ng"
               << ng_id;
+}
+
+void CcNodeService::UploadRangeSlices(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::UploadRangeSlicesRequest *request,
+    ::txservice::remote::UploadRangeSlicesResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    std::string_view table_name_sv{request->table_name_str()};
+    TableName table_name = TableName(table_name_sv, TableType::RangePartition);
+    NodeGroupId ng_id = request->node_group_id();
+    int32_t old_partition_id = request->old_partition_id();
+    uint64_t version_ts = request->version_ts();
+    int32_t new_partition_id = request->new_partition_id();
+    const std::string &keys = request->new_slices_keys();
+    const std::string &sizes = request->new_slices_sizes();
+    const std::string &status = request->new_slices_status();
+    uint32_t keys_num = request->new_slices_num();
+
+    LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
+    size_t core_cnt = cc_shards->Count();
+    uint16_t rand_core = std::rand() % core_cnt;
+    // upload range slices info
+    UploadRangeSlicesCc req;
+    req.Reset(table_name,
+              ng_id,
+              old_partition_id,
+              version_ts,
+              new_partition_id,
+              &keys,
+              &sizes,
+              &status,
+              keys_num);
+    cc_shards->EnqueueToCcShard(rand_core, &req);
+    req.Wait();
+
+    response->set_ng_term(req.CcNgTerm());
+    response->set_error_code(ToRemoteType::ConvertCcErrorCode(req.ErrorCode()));
+
+    if (req.ErrorCode() != CcErrorCode::NO_ERROR)
+    {
+        LOG(INFO) << "CcNodeService finish UploadRangeSlices RPC of #ng"
+                  << ng_id << ", ng_term:" << req.CcNgTerm() << ", Range#"
+                  << old_partition_id << ", DirtyRange#" << new_partition_id
+                  << ", error_code:" << (int) req.ErrorCode();
+    }
+    else
+    {
+        DLOG(INFO) << "CcNodeService finish UploadRangeSlices RPC of #ng"
+                   << ng_id << ", ng_term:" << req.CcNgTerm() << ", Range#"
+                   << old_partition_id << ", DirtyRange#" << new_partition_id
+                   << ", error_code:" << (int) req.ErrorCode();
+    }
+}
+
+void CcNodeService::UploadBatchSlices(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::UploadBatchSlicesRequest *request,
+    ::txservice::remote::UploadBatchResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    // This object helps to call done->Run() in RAII style. If you need to
+    // process the request asynchronously, pass done_guard.release().
+    brpc::ClosureGuard done_guard(done);
+
+    NodeGroupId ng_id = request->node_group_id();
+    int64_t ng_term = request->node_group_term();
+
+    std::string_view table_name_sv{request->table_name_str()};
+    TableType table_type =
+        ToLocalType::ConvertCcTableType(request->table_type());
+    TableName table_name = TableName(table_name_sv, table_type);
+
+    LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
+    size_t core_cnt = cc_shards->Count();
+
+    auto write_entry_tuple =
+        UploadBatchSlicesCc::WriteEntryTuple(request->keys(),
+                                             request->records(),
+                                             request->commit_ts(),
+                                             request->rec_status());
+
+    auto slices_info = std::make_shared<UploadBatchSlicesCc::SliceUpdation>();
+    slices_info->range_ = request->partition_id();
+    slices_info->new_range_ = request->new_partition_id();
+    slices_info->version_ts_ = request->version_ts();
+    slices_info->slice_idxs_.resize(request->slices_idxs_size());
+    for (uint32_t i = 0; i < slices_info->slice_idxs_.size(); i++)
+    {
+        slices_info->slice_idxs_[i] = request->slices_idxs(i);
+    }
+
+    UploadBatchSlicesCc req;
+    req.Use();
+    req.Reset(
+        table_name, ng_id, ng_term, core_cnt, write_entry_tuple, slices_info);
+
+    // Select a core randomly to parse items. After parsed, this core will push
+    // the request to other cores to emplace keys.
+    uint16_t rand_core = std::rand() % core_cnt;
+    cc_shards->EnqueueToCcShard(rand_core, &req);
+    req.Wait();
+
+    CcErrorCode err = CcErrorCode::NO_ERROR;
+    if (req.ErrorCode() != CcErrorCode::NO_ERROR)
+    {
+        err = req.ErrorCode();
+    }
+
+    response->set_error_code(ToRemoteType::ConvertCcErrorCode(err));
+    response->set_ng_term(ng_term);
+    DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+               << " finished with error: " << static_cast<uint32_t>(err);
 }
 
 }  // namespace remote

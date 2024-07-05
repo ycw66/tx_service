@@ -157,6 +157,7 @@ public:
     virtual DataStoreOpStatus FetchRecord(FetchRecordCc *fetch_cc)
     {
         assert(false);
+        return DataStoreOpStatus::Error;
     }
 
     virtual bool FetchTable(const TableName &table_name,
