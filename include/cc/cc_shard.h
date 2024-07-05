@@ -687,8 +687,7 @@ public:
      */
     bool TruncateCcm(const TableName &table_name,
                      NodeGroupId ng_id,
-                     const TableSchema *table_schema,
-                     uint64_t schema_ts);
+                     uint64_t clean_ts);
 
     void CleanCcm(const TableName &table_name);
 

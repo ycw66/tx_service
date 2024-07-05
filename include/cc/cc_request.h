@@ -4743,20 +4743,8 @@ public:
     bool CleanForTruncateTable(CcShard &ccs)
     {
         assert(clean_type_ == CleanType::CleanForTruncateTable);
-        // UpsertTableOp has acquired write lock on catalog. We can safely
-        // access catalog_entry
-        CatalogEntry *catalog_entry =
-            ccs.GetCatalog(*table_name_, node_group_id_);
-        if (catalog_entry != nullptr &&
-            catalog_entry->DirtyVersion() == clean_ts_)
-        {
-            return ccs.TruncateCcm(*table_name_,
-                                   node_group_id_,
-                                   catalog_entry->dirty_schema_.get(),
-                                   catalog_entry->DirtyVersion());
-        }
 
-        return true;
+        return ccs.TruncateCcm(*table_name_, node_group_id_, clean_ts_);
     }
 
     CleanType GetCleanType() const

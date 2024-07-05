@@ -1403,8 +1403,7 @@ void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)
 
 bool CcShard::TruncateCcm(const txservice::TableName &table_name,
                           txservice::NodeGroupId ng_id,
-                          const TableSchema *table_schema,
-                          uint64_t schema_ts)
+                          uint64_t clean_ts)
 {
     if (ng_id == node_id_)
     {
@@ -1413,15 +1412,22 @@ bool CcShard::TruncateCcm(const txservice::TableName &table_name,
         if (native_it != native_ccms_.end())
         {
             auto &ccm = native_it->second;
+            if (ccm->SchemaTs() >= clean_ts)
+            {
+                return true;
+            }
+
             if (!ccm->CleanBatchPages(32))
             {
                 // Yield
                 return false;
             }
 
+            CatalogEntry *catalog_entry = GetCatalog(table_name, ng_id);
+            assert(catalog_entry->DirtyVersion() == clean_ts);
             // No more data. Update schema timestamps
-            ccm->SetTableSchema(table_schema);
-            ccm->SetSchemaTs(schema_ts);
+            ccm->SetTableSchema(catalog_entry->dirty_schema_.get());
+            ccm->SetSchemaTs(catalog_entry->DirtyVersion());
             DLOG(INFO) << "Truncate ccm on shard: " << core_id_
                        << ", set new table schema: " << ccm->GetTableSchema()
                        << ", schema ts: " << ccm->SchemaTs();
@@ -1438,15 +1444,23 @@ bool CcShard::TruncateCcm(const txservice::TableName &table_name,
             if (it != ccms.end())
             {
                 auto &ccm = it->second;
+                if (ccm->SchemaTs() >= clean_ts)
+                {
+                    return true;
+                }
+
                 if (!ccm->CleanBatchPages(32))
                 {
                     // Has more data. Yield to avoid blocking txprocessor
                     return false;
                 }
 
+                CatalogEntry *catalog_entry = GetCatalog(table_name, ng_id);
+                assert(catalog_entry->DirtyVersion() == clean_ts);
                 // No more data. Update schema timestamps
-                ccm->SetTableSchema(table_schema);
-                ccm->SetSchemaTs(schema_ts);
+                ccm->SetTableSchema(catalog_entry->dirty_schema_.get());
+                ccm->SetSchemaTs(catalog_entry->DirtyVersion());
+
                 DLOG(INFO) << "Truncate ccm on shard: " << core_id_
                            << ", set new table schema: "
                            << ccm->GetTableSchema()
