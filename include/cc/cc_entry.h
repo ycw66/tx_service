@@ -597,16 +597,10 @@ public:
         cc_lock_and_extra_->SetDirtyPayloadStatus(status);
     }
 
-    std::unique_ptr<ReplayTxnCmdList> ReplayCommandList()
+    ReplayTxnCmdList &ReplayCommandList()
     {
         assert(cc_lock_and_extra_ != nullptr);
         return cc_lock_and_extra_->ReplayCommandList();
-    }
-
-    void SetReplayCommandList(std::unique_ptr<ReplayTxnCmdList> replay_list)
-    {
-        assert(cc_lock_and_extra_ != nullptr);
-        cc_lock_and_extra_->SetReplayCommandList(std::move(replay_list));
     }
 
     bool HasReplayCommandList()

@@ -419,21 +419,16 @@ public:
         dirty_payload_status_ = status;
     }
 
-    std::unique_ptr<ReplayTxnCmdList> ReplayCommandList()
+    ReplayTxnCmdList &ReplayCommandList()
     {
-        return std::move(replay_cmd_list_);
-    }
-
-    void SetReplayCommandList(std::unique_ptr<ReplayTxnCmdList> replay_list)
-    {
-        replay_cmd_list_ = std::move(replay_list);
+        return replay_cmd_list_;
     }
 
     bool HasReplayCommandList()
     {
-        if (replay_cmd_list_ != nullptr)
+        if (!replay_cmd_list_.IsNull())
         {
-            assert(!replay_cmd_list_->txn_cmd_list_.empty());
+            assert(!replay_cmd_list_.txn_cmd_list_.empty());
             return true;
         }
         else
@@ -463,10 +458,10 @@ private:
     std::unique_ptr<TxObject> dirty_payload_;
     // status of temporary object
     RecordStatus dirty_payload_status_{RecordStatus::NonExistent};
-    std::unique_ptr<ReplayTxnCmdList> replay_cmd_list_;
     // blocked commands that wait to pop and execute after the conditions are
     // satisfied.
     CircularQueue<CcRequestBase *> queue_block_cmds_;
+    ReplayTxnCmdList replay_cmd_list_;
 #endif
 };
 

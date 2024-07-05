@@ -1000,20 +1000,19 @@ public:
 
             if (cce->HasReplayCommandList())
             {
-                std::unique_ptr<ReplayTxnCmdList> replay_cmd_list =
-                    cce->ReplayCommandList();
+                ReplayTxnCmdList &replay_cmd_list = cce->ReplayCommandList();
                 // Clear cmds with smaller version than uploaded version.
-                for (auto it = replay_cmd_list->txn_cmd_list_.begin();
-                     it != replay_cmd_list->txn_cmd_list_.end();)
+                for (auto it = replay_cmd_list.txn_cmd_list_.begin();
+                     it != replay_cmd_list.txn_cmd_list_.end();)
                 {
                     if (it->obj_version_ >= commit_ts)
                     {
                         break;
                     }
-                    it = replay_cmd_list->txn_cmd_list_.erase(it);
+                    it = replay_cmd_list.txn_cmd_list_.erase(it);
                 }
 
-                replay_cmd_list->cur_version_ = commit_ts;
+                replay_cmd_list.cur_version_ = commit_ts;
                 TryCommitReplayCommands(
                     cce->payload_, replay_cmd_list, commit_ts);
             }
@@ -1101,24 +1100,21 @@ public:
             TxnCmd txn_cmd(
                 obj_version, commit_ts, has_overwrite, std::move(cmd_list));
 
-            std::unique_ptr<ReplayTxnCmdList> replay_cmd_list =
-                cce->ReplayCommandList();
+            ReplayTxnCmdList &replay_cmd_list = cce->ReplayCommandList();
 
             // Emplace txn_cmd and try to commit all pending commands.
             uint64_t commit_version = cce->CommitTs();
             RecordStatus payload_status = cce->PayloadStatus();
-            EmplaceAndCommitReplayTxnCommand(cce->payload_,
-                                             replay_cmd_list,
-                                             txn_cmd,
-                                             commit_version,
-                                             payload_status);
-            cce->SetCommitTsPayloadStatus(commit_version, payload_status);
-
-            if (replay_cmd_list != nullptr)
+            if (txn_cmd.obj_version_ >= commit_version)
             {
-                // Passes the replay command list back to the cc entry.
-                cce->SetReplayCommandList(std::move(replay_cmd_list));
+                EmplaceAndCommitReplayTxnCommand(cce->payload_,
+                                                 replay_cmd_list,
+                                                 txn_cmd,
+                                                 commit_version,
+                                                 payload_status);
+                cce->SetCommitTsPayloadStatus(commit_version, payload_status);
             }
+
             // if replay_cmd_list is null, key_lock_extra_data will be recycled
             // when release lock.
 
@@ -1268,7 +1264,6 @@ public:
                                     ng_term,
                                     nullptr);
             }
-
             // extract command list
             const uint16_t cmd_cnt = *reinterpret_cast<decltype(cmd_cnt) *>(
                 log_blob.data() + offset);
@@ -1284,10 +1279,6 @@ public:
                 offset += cmd_len;
                 cmd_list.emplace_back(std::move(tx_cmd));
             }
-
-            TxnCmd txn_cmd(
-                obj_version, commit_ts, has_overwrite, std::move(cmd_list));
-
             bool acquired_extra_data = false;
             if (cce->GetKeyLock() == nullptr)
             {
@@ -1296,12 +1287,13 @@ public:
                 acquired_extra_data = true;
             }
 
-            std::unique_ptr<ReplayTxnCmdList> replay_cmd_list =
-                cce->ReplayCommandList();
-
             // Emplace txn_cmd and try to commit all pending commands.
             uint64_t current_version = cce->CommitTs();
             RecordStatus payload_status = cce->PayloadStatus();
+
+            ReplayTxnCmdList &replay_cmd_list = cce->ReplayCommandList();
+            TxnCmd txn_cmd(
+                obj_version, commit_ts, has_overwrite, std::move(cmd_list));
 
             if (txn_cmd.obj_version_ >= current_version)
             {
@@ -1317,8 +1309,7 @@ public:
                 DLOG(INFO)
                     << "discard TxnCmd with a version smaller than cur_ver";
             }
-
-            if (replay_cmd_list == nullptr)
+            if (replay_cmd_list.IsNull())
             {
                 // Recycles the lock if this and prior commands have been
                 // applied and there is no pending command.
@@ -1329,11 +1320,6 @@ public:
                     assert(lock_recycled);
                 }
                 (void) lock_recycled;
-            }
-            else
-            {
-                // Passes the replay command list back to the cc entry.
-                cce->SetReplayCommandList(std::move(replay_cmd_list));
             }
 
             // Must update dirty_commit_ts. Otherwise, this entry may be
@@ -1411,20 +1397,19 @@ public:
             // commit them.
             if (cce->HasReplayCommandList())
             {
-                std::unique_ptr<ReplayTxnCmdList> replay_cmd_list =
-                    cce->ReplayCommandList();
+                ReplayTxnCmdList &replay_cmd_list = cce->ReplayCommandList();
                 // Clear cmds with smaller version than kv version.
-                for (auto it = replay_cmd_list->txn_cmd_list_.begin();
-                     it != replay_cmd_list->txn_cmd_list_.end();)
+                for (auto it = replay_cmd_list.txn_cmd_list_.begin();
+                     it != replay_cmd_list.txn_cmd_list_.end();)
                 {
                     if (it->obj_version_ >= commit_ts)
                     {
                         break;
                     }
-                    it = replay_cmd_list->txn_cmd_list_.erase(it);
+                    it = replay_cmd_list.txn_cmd_list_.erase(it);
                 }
 
-                replay_cmd_list->cur_version_ = commit_ts;
+                replay_cmd_list.cur_version_ = commit_ts;
 
                 uint64_t commit_version = commit_ts;
                 TryCommitReplayCommands(
@@ -1434,16 +1419,11 @@ public:
                                                  : RecordStatus::Normal;
                 cce->SetCommitTsPayloadStatus(commit_version, commit_status);
 
-                if (replay_cmd_list == nullptr)
+                if (replay_cmd_list.IsNull())
                 {
                     // Recycles the lock if all the replay commands have been
                     // applied.
                     cce->RecycleKeyLock(*shard_);
-                }
-                else
-                {
-                    // Passes the replay command list back to the cc entry.
-                    cce->SetReplayCommandList(std::move(replay_cmd_list));
                 }
             }
         }

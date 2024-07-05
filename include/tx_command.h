@@ -232,6 +232,16 @@ struct ReplayTxnCmdList
     uint64_t cur_version_{1};
     std::vector<TxnCmd> txn_cmd_list_;
 
+    bool IsNull() const
+    {
+        return txn_cmd_list_.empty();
+    }
+
+    void Clear()
+    {
+        txn_cmd_list_.shrink_to_fit();
+    }
+
     void EmplaceTxnCmd(TxnCmd &txn_cmd)
     {
         auto cmp = [](const TxnCmd &lhs, const TxnCmd &rhs) -> bool
@@ -267,11 +277,11 @@ struct ReplayTxnCmdList
  */
 template <class T>
 void TryCommitReplayCommands(std::unique_ptr<T> &payload,
-                             std::unique_ptr<ReplayTxnCmdList> &replay_cmd_list,
+                             ReplayTxnCmdList &replay_cmd_list,
                              uint64_t &cur_ver)
 {
-    assert(replay_cmd_list != nullptr);
-    std::vector<TxnCmd> &txn_cmd_list = replay_cmd_list->txn_cmd_list_;
+    std::vector<TxnCmd> &txn_cmd_list = replay_cmd_list.txn_cmd_list_;
+    assert(!txn_cmd_list.empty());
     // iterate the list and apply the commands in version order
     for (auto it = txn_cmd_list.begin(); it != txn_cmd_list.end();)
     {
@@ -284,10 +294,6 @@ void TryCommitReplayCommands(std::unique_ptr<T> &payload,
         if (it->obj_version_ != cur_ver)
         {
             break;
-        }
-        if (it->has_del_)
-        {
-            payload = nullptr;
         }
         // apply the commands of this txn
         for (auto &cmd : it->cmd_list_)
@@ -313,8 +319,8 @@ void TryCommitReplayCommands(std::unique_ptr<T> &payload,
 
     if (txn_cmd_list.empty())
     {
-        DLOG(INFO) << "destruct replay_cmd_list_ on object: ";
-        replay_cmd_list = nullptr;
+        DLOG(INFO) << "destruct replay_cmd_list_ on object";
+        replay_cmd_list.Clear();
     }
     else
     {
@@ -331,22 +337,20 @@ void TryCommitReplayCommands(std::unique_ptr<T> &payload,
  * @param cur_ver
  */
 template <class T>
-void EmplaceAndCommitReplayTxnCommand(
-    std::unique_ptr<T> &payload,
-    std::unique_ptr<ReplayTxnCmdList> &replay_cmd_list,
-    TxnCmd &txn_cmd,
-    uint64_t &cur_ver,
-    RecordStatus &status)
+void EmplaceAndCommitReplayTxnCommand(std::unique_ptr<T> &payload,
+                                      ReplayTxnCmdList &replay_cmd_list,
+                                      TxnCmd &txn_cmd,
+                                      uint64_t &cur_ver,
+                                      RecordStatus &status)
 {
     bool waiting_for_fetch =
-        status == RecordStatus::Unknown && replay_cmd_list != nullptr;
-    if (replay_cmd_list == nullptr)
+        status == RecordStatus::Unknown && !replay_cmd_list.IsNull();
+    if (replay_cmd_list.IsNull())
     {
-        replay_cmd_list = std::make_unique<ReplayTxnCmdList>();
-        replay_cmd_list->cur_version_ = cur_ver;
+        replay_cmd_list.cur_version_ = cur_ver;
     }
 
-    replay_cmd_list->EmplaceTxnCmd(txn_cmd);
+    replay_cmd_list.EmplaceTxnCmd(txn_cmd);
 
     if (!waiting_for_fetch || txn_cmd.has_del_)
     {

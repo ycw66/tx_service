@@ -215,6 +215,7 @@ struct RemoteScanSliceCache
         cache_mem_size_ -= keys_.size() - key_off_vec_.back();
         cache_mem_size_ -= records_.size() - rec_off_vec_.back();
         assert(cache_mem_size_ <= cache_mem_size);
+        (void) cache_mem_size;
 
         key_ts_.pop_back();
         gap_ts_.pop_back();
