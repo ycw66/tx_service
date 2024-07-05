@@ -132,8 +132,10 @@ void SkGenerator::GenerateSkFromPk(TxKey start_key,
         std::unique_lock<std::mutex> upload_sender_lk(upload_sender_mux_);
         // Wait until no ongoing task.
         upload_sender_cv_.wait(upload_sender_lk,
-                               [this]()
-                               { return ongoing_upload_task_size_ == 0; });
+                               [this]() {
+                                   return ongoing_upload_task_size_ == 0 &&
+                                          pending_upload_task_size_ == 0;
+                               });
     }
     defer_unpin.reset();
     LOG(INFO) << "GenerateSkFromPk: Finished generate sk from range#"
@@ -298,8 +300,10 @@ void SkGenerator::RemoteGenerateSkFromPk(
         std::unique_lock<std::mutex> upload_sender_lk(upload_sender_mux_);
         // Wait until no ongoing task.
         upload_sender_cv_.wait(upload_sender_lk,
-                               [this]()
-                               { return ongoing_upload_task_size_ == 0; });
+                               [this]() {
+                                   return ongoing_upload_task_size_ == 0 &&
+                                          pending_upload_task_size_ == 0;
+                               });
     }
     defer_unpin.reset();
     LOG(INFO) << "RemoteGenerateSkFromPk: Finished generate sk from range#"
