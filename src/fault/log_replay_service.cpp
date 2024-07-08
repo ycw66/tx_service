@@ -574,7 +574,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         // If there are too many on the fly reqs, block until
         // all of them are done. This will push log service back
         // from sending too many log msgs that we cannot handle.
-        if (on_fly_cnt.load(std::memory_order_acquire) > 200000)
+        if (on_fly_cnt.load(std::memory_order_acquire) > 10000)
         {
             wait_for_on_the_fly = true;
         }
@@ -674,12 +674,12 @@ void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
 {
     size_t on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
     if (on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll ||
-        on_fly_cnt > 200000 && waiting_status == WaitingStatus::WaitForMany)
+        on_fly_cnt > 10000 && waiting_status == WaitingStatus::WaitForMany)
     {
         status.store(waiting_status, std::memory_order_relaxed);
         on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
         while (on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll ||
-               on_fly_cnt > 200000 &&
+               on_fly_cnt > 10000 &&
                    waiting_status == WaitingStatus::WaitForMany)
         {
             bthread_usleep(100);
