@@ -1696,6 +1696,25 @@ public:
                             // out before this read request finishes.
                             slice_id.Unpin();
                         }
+
+                        if (cc_op != CcOperation::ReadForWrite)
+                        {
+                            // If the read is not for update, there's no need
+                            // for any lock on it.
+                            if (acquired_lock != LockType::NoLock)
+                            {
+                                ReleaseCceLock(cce->GetKeyLock(),
+                                               cce,
+                                               req.Txn(),
+                                               req.NodeGroupId(),
+                                               acquired_lock);
+                                hd_res->Value().lock_type_ = LockType::NoLock;
+                            }
+                            hd_res->Value().ts_ = 1;
+                            hd_res->Value().rec_status_ = RecordStatus::Deleted;
+                            hd_res->SetFinished();
+                            return true;
+                        }
                     }
                     else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
                     {

@@ -674,8 +674,12 @@ public:
             DLOG(INFO) << "Received new range slices info, range_id:"
                        << range_info_.PartitionId()
                        << ", new_range_id:" << new_partition_id;
-            dirty_range_slices_->second.try_emplace(new_partition_id,
-                                                    std::move(new_slices));
+            auto ins_pair =
+                dirty_range_slices_->second.try_emplace(new_partition_id);
+            // overwrite old slice specs with the new one. If a range split
+            // fails during create sk, we might get different sk slice specs on
+            // recover.
+            ins_pair.first->second = std::move(new_slices);
             return true;
         }
         else

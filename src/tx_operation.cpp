@@ -4646,7 +4646,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     }
 
                                     TxKey slice_key = slice->StartTxKey();
-                                    assert(slice_data_it->Key() == slice_key);
+                                    assert(slice_key <= slice_data_it->Key());
                                     TxKey end_key = slice->EndTxKey();
                                     auto slice_end_it =
                                         std::lower_bound(slice_data_it,
