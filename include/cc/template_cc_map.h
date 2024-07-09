@@ -16,6 +16,7 @@
 
 #include "cc_entry.h"
 #include "cc_map.h"
+#include "cc_page_clean_guard.h"
 #include "cc_protocol.h"
 #include "cc_req_misc.h"
 #include "cc_request.h"
@@ -9840,226 +9841,6 @@ protected:
         }
     }
 
-    struct CleanGuard
-    {
-    public:
-        explicit CleanGuard(CcPage<KeyT, ValueT> *page,
-                            BtreeMapIterator &page_it)
-            : page_(page),
-              page_it_(page_it),
-              idx_in_page_(0),
-              key_insert_it_(page->keys_.begin()),
-              entry_insert_it_(page->entries_.begin())
-        {
-        }
-
-        virtual ~CleanGuard()
-        {
-            page_->keys_.erase(key_insert_it_, page_->keys_.end());
-            page_->entries_.erase(entry_insert_it_, page_->entries_.end());
-
-            // During range split kickout, we might clean cc entries that
-            // are still dirty from page. So the max dirty ts might
-            // decrease.
-            page_->last_dirty_commit_ts_ =
-                std::min(last_commit_ts_, page_->last_dirty_commit_ts_);
-        }
-
-        virtual bool CanBeCleaned(const CcEntry<KeyT, ValueT> *cce) const = 0;
-
-        virtual bool IsCleanTarget(const KeyT &key,
-                                   const CcEntry<KeyT, ValueT> *cce) const = 0;
-
-        virtual void Reserve(KeyT &&key,
-                             std::unique_ptr<CcEntry<KeyT, ValueT>> &&cce,
-                             bool is_clean_target) = 0;
-
-        virtual bool CleanSuccess() const = 0;
-
-        virtual bool NeedInvalidateLockTerm() const = 0;
-
-        void Clean(CcShard &ccs,
-                   NodeGroupId cc_ng_id,
-                   CcEntry<KeyT, ValueT> *cce)
-        {
-            // Check if the cce has any locks on it. If so recycle
-            // the lock entry before deleting cce.
-            cce->ClearLocks(ccs, cc_ng_id, NeedInvalidateLockTerm());
-            ++clean_cnt_;
-        }
-
-        size_t CleanCount() const
-        {
-            return clean_cnt_;
-        }
-
-        uint64_t LastCommitTs() const
-        {
-            return last_commit_ts_;
-        }
-
-        // Returns true if the key should be removed from key cache regardless
-        // of rec status.
-        virtual bool RemoveFromKeyCache() const
-        {
-            return false;
-        }
-
-    protected:
-        void Reserve(KeyT &&key, std::unique_ptr<CcEntry<KeyT, ValueT>> &&cce)
-        {
-            last_commit_ts_ = std::max(last_commit_ts_, cce->CommitTs());
-            *key_insert_it_++ = std::move(key);
-            *entry_insert_it_++ = std::move(cce);
-        }
-
-    public:
-        CcPage<KeyT, ValueT> *page_{nullptr};
-        BtreeMapIterator &page_it_;
-        size_t idx_in_page_{0};
-
-    private:
-        uint64_t last_commit_ts_{0};
-        decltype(page_->keys_.begin()) key_insert_it_;
-        decltype(page_->entries_.begin()) entry_insert_it_;
-
-        size_t clean_cnt_{0};
-    };
-
-    struct CleanGuardWithoutKickoutCc : public CleanGuard
-    {
-        explicit CleanGuardWithoutKickoutCc(CcPage<KeyT, ValueT> *page,
-                                            BtreeMapIterator &page_it)
-            : CleanGuard(page, page_it)
-        {
-        }
-
-        bool CanBeCleaned(const CcEntry<KeyT, ValueT> *cce) const
-        {
-            return cce->IsFree();
-        }
-
-        bool IsCleanTarget(const KeyT &key,
-                           const CcEntry<KeyT, ValueT> *cce) const
-        {
-            // If we're just doing regular page clean, all cce is specific clean
-            // target.
-            return true;
-        }
-        void Reserve(KeyT &&key,
-                     std::unique_ptr<CcEntry<KeyT, ValueT>> &&cce,
-                     bool is_clean_target)
-        {
-            assert(is_clean_target);
-            CleanGuard::Reserve(
-                std::forward<KeyT>(key),
-                std::forward<std::unique_ptr<CcEntry<KeyT, ValueT>>>(cce));
-        }
-
-        bool CleanSuccess() const
-        {
-            // If we're just doing regular page clean, clean_succecss is always
-            // true.
-            return true;
-        }
-
-        bool NeedInvalidateLockTerm() const
-        {
-            return false;
-        }
-    };
-
-    struct CleanGuardWithKickoutCc : public CleanGuard
-    {
-    public:
-        CleanGuardWithKickoutCc(CcPage<KeyT, ValueT> *page,
-                                BtreeMapIterator &page_it,
-                                const KickoutCcEntryCc *kickout_cc)
-            : CleanGuard(page, page_it),
-              kickout_cc_(kickout_cc),
-              need_invalidate_lock_term_(
-                  DeduceNeedInvalidateLockTerm(kickout_cc->GetCleanType())),
-              clean_success_(true)
-        {
-            assert(kickout_cc);
-        }
-
-        bool CanBeCleaned(const CcEntry<KeyT, ValueT> *cce) const override
-        {
-            return kickout_cc_->CanBeCleaned(cce);
-        }
-
-        bool IsCleanTarget(const KeyT &key,
-                           const CcEntry<KeyT, ValueT> *cce) const override
-        {
-            return kickout_cc_->IsCleanTarget(key, cce);
-        }
-
-        void Reserve(KeyT &&key,
-                     std::unique_ptr<CcEntry<KeyT, ValueT>> &&cce,
-                     bool is_clean_target) override
-        {
-            CleanGuard::Reserve(
-                std::forward<KeyT>(key),
-                std::forward<std::unique_ptr<CcEntry<KeyT, ValueT>>>(cce));
-
-            if (is_clean_target)
-            {
-                clean_success_ = false;
-            }
-        }
-
-        bool CleanSuccess() const override
-        {
-            return clean_success_;
-        }
-
-        bool NeedInvalidateLockTerm() const override
-        {
-            return need_invalidate_lock_term_;
-        }
-
-        bool RemoveFromKeyCache() const override
-        {
-            // When kicking data that no longer belongs to this range,
-            // we should remove the key regardless of its rec status.
-            return kickout_cc_->GetCleanType() == CleanType::CleanRangeData;
-        }
-
-    private:
-        static bool DeduceNeedInvalidateLockTerm(CleanType type)
-        {
-            if (type == CleanType::CleanRangeData ||
-                type == CleanType::CleanRangeDataForMigration ||
-                type == CleanType::CleanBucketData)
-            {
-                // If the ccentry that expect to clean still has lock on it,
-                // it must be that the owner of this lock has failed. The
-                // reason is that the lock owner must have acquired
-                // range/bucket read lock before accessing data in
-                // range/bucket. And if we're doing clean data on the
-                // range/bucket, that means the DDL has acquired write lock
-                // on this range/bucket on all ngs. So it must be that the
-                // data lock owner ng has failed and the read lock has
-                // expired. In this case invalidate the lock term so that if
-                // the failed node tries to access data with the deleted cce
-                // addr, we can reject the request.
-                return true;
-            }
-            else
-            {
-                return false;
-            }
-        }
-
-    private:
-        const KickoutCcEntryCc *kickout_cc_;
-
-        bool need_invalidate_lock_term_;
-
-        bool clean_success_;
-    };
-
     /**
      * Clean page and return the last_read_ts of page.
      *
@@ -10078,237 +9859,41 @@ protected:
                    size_t &free_cnt,
                    KickoutCcEntryCc *kickout_cc = nullptr)
     {
-        std::unique_ptr<CleanGuard> clean_guard;
+        bool success;
+
+        CcPageCleanGuard<KeyT, ValueT> *clean_guard;  // Allocate it on stack.
+        constexpr size_t buffer_size =
+            std::max(sizeof(CcPageCleanGuardWithKickoutCc<KeyT, ValueT>),
+                     sizeof(CcPageCleanGuardWithoutKickoutCc<KeyT, ValueT>));
+        char buffer[buffer_size] = {};
         if (kickout_cc)
         {
-            clean_guard = std::make_unique<CleanGuardWithKickoutCc>(
-                page, page_it, kickout_cc);
+            clean_guard = new (buffer) CcPageCleanGuardWithKickoutCc(
+                shard_, cc_ng_id_, table_name_, page, kickout_cc);
         }
         else
         {
-            clean_guard =
-                std::make_unique<CleanGuardWithoutKickoutCc>(page, page_it);
+            clean_guard = new (buffer) CcPageCleanGuardWithoutKickoutCc(
+                shard_, cc_ng_id_, table_name_, page);
         }
 
-        CleanPage(clean_guard.get());
+        shard_->local_shards_.KickoutPage(clean_guard);
+
+        // The above method has assigned those to-be-cleaned entries to nullptr.
+        if (page->entries_[0] == nullptr)
+        {
+            // The page's first key will be cleaned, needs to locate the page
+            // position to update the map.
+            const KeyT &key = page->keys_[0];
+            page_it = ccmp_.find(key);
+        }
+        clean_guard->Compact();
         free_cnt += clean_guard->CleanCount();
+        success = clean_guard->CleanSuccess();
 
-        return clean_guard->CleanSuccess();
+        std::destroy_at(buffer);
+        return success;
     }
-
-#ifdef RANGE_PARTITION_ENABLED
-    void CleanPage(CleanGuard *clean_guard)
-    {
-        CcPage<KeyT, ValueT> *page = clean_guard->page_;
-        size_t page_size = page->Size();
-        do
-        {
-            const KeyT &key = page->keys_[clean_guard->idx_in_page_];
-            auto range_entry = static_cast<TemplateTableRangeEntry<KeyT> *>(
-                shard_->GetTableRangeEntry(
-                    table_name_, cc_ng_id_, TxKey(&key)));
-            if (range_entry == nullptr)
-            {
-                CleanOrphanKey(clean_guard);
-                continue;
-            }
-
-            auto range_entry_lk = range_entry->SharedLockGuard();
-
-            auto store_range = static_cast<TemplateStoreRange<KeyT> *>(
-                range_entry->RangeSlices());
-            if (store_range)
-            {
-                bool kickout_any = CleanPageInRange(store_range, clean_guard);
-                range_entry->SetAcceptsDirtyRangeData(false);
-                if (kickout_any)
-                {
-                    // If the key is kicked out, we need to update the bucket
-                    // info to disallow upload batch cc since we might already
-                    // have kicked out newer version from cc map.
-                    uint32_t partition_id =
-                        range_entry->GetRangeInfo()->PartitionId();
-                    uint16_t bucket_id =
-                        Sharder::Instance().MapRangeIdToBucketId(partition_id);
-                    BucketInfo *bucket_info =
-                        shard_->GetBucketInfo(bucket_id, cc_ng_id_);
-                    bucket_info->SetAcceptsUploadBatch(false);
-                }
-            }
-            else
-            {
-                CleanOrphanKey(clean_guard);
-            }
-        } while (clean_guard->idx_in_page_ != page_size);
-    }
-
-    bool CleanPageInRange(TemplateStoreRange<KeyT> *store_range,
-                          CleanGuard *clean_guard)
-    {
-        bool kickout_any = false;
-        bool remove_from_key_cache = clean_guard->RemoveFromKeyCache();
-
-        CcPage<KeyT, ValueT> *page = clean_guard->page_;
-        size_t &idx_in_page = clean_guard->idx_in_page_;
-
-        const KeyT &range_end_key = *store_range->RangeEndKey();
-        size_t range_end_idx = page->LowerBound(range_end_key);
-
-        while (idx_in_page < range_end_idx)
-        {
-            const KeyT &start_key = page->keys_[idx_in_page];
-
-            auto store_slice = static_cast<TemplateStoreSlice<KeyT> *>(
-                store_range->FindSlice(TxKey(&start_key)));
-            assert(store_slice);
-
-            bool slice_kickable = store_slice->Kickout();
-
-            const KeyT &slice_end_key = *store_slice->EndKey();
-
-            size_t slice_end_idx = page->LowerBound(slice_end_key);
-            assert(slice_end_idx <= range_end_idx);
-
-            if (slice_kickable)
-            {
-                for (size_t idx = idx_in_page; idx < slice_end_idx; ++idx)
-                {
-                    KeyT &key = page->keys_[idx];
-                    std::unique_ptr<CcEntry<KeyT, ValueT>> &cce =
-                        page->entries_[idx];
-
-                    bool is_clean_target =
-                        clean_guard->IsCleanTarget(key, cce.get());
-                    bool can_be_cleaned = clean_guard->CanBeCleaned(cce.get());
-
-                    if (is_clean_target && can_be_cleaned)
-                    {
-                        // The key cache contains all keys in this range, but
-                        // when we delete a key from the range, the update is
-                        // delayed until the cce is removed from ccmap. This is
-                        // because we always search for key in ccmap first
-                        // before trying to query the key cache. Remove the key
-                        // from key cache if the key is in deleted status.
-                        if (txservice_enable_key_cache &&
-                            table_name_.IsBase() &&
-                            (remove_from_key_cache ||
-                             cce->PayloadStatus() == RecordStatus::Deleted))
-                        {
-                            store_range->DeleteKey(
-                                key, shard_->core_id_, store_slice);
-                        }
-
-                        if (idx == 0)
-                        {
-                            // The page's first key is cleaned, needs to locate
-                            // the page position to update the map.
-                            clean_guard->page_it_ = ccmp_.find(key);
-                        }
-
-                        clean_guard->Clean(*shard_, cc_ng_id_, cce.get());
-                    }
-                    else
-                    {
-                        clean_guard->Reserve(
-                            std::move(key), std::move(cce), is_clean_target);
-                    }
-                }
-            }
-            else
-            {
-                for (size_t idx = idx_in_page; idx < slice_end_idx; ++idx)
-                {
-                    KeyT &key = page->keys_[idx];
-                    std::unique_ptr<CcEntry<KeyT, ValueT>> &cce =
-                        page->entries_[idx];
-
-                    bool is_clean_target =
-                        clean_guard->IsCleanTarget(key, cce.get());
-
-                    clean_guard->Reserve(
-                        std::move(key), std::move(cce), is_clean_target);
-                }
-            }
-
-            idx_in_page = slice_end_idx;
-            kickout_any = kickout_any || slice_kickable;
-        }
-
-        return kickout_any;
-    }
-
-    void CleanOrphanKey(CleanGuard *clean_guard)
-    {
-        CcPage<KeyT, ValueT> *page = clean_guard->page_;
-        size_t &idx_in_page = clean_guard->idx_in_page_;
-
-        KeyT &key = page->keys_[idx_in_page];
-        std::unique_ptr<CcEntry<KeyT, ValueT>> &cce =
-            page->entries_[idx_in_page];
-
-        bool is_clean_target = clean_guard->IsCleanTarget(key, cce.get());
-        bool can_be_cleaned = clean_guard->CanBeCleaned(cce.get());
-
-        if (is_clean_target && can_be_cleaned)
-        {
-            if (idx_in_page == 0)
-            {
-                // The page's first key is cleaned, needs to locate the page
-                // position to update the map.
-                clean_guard->page_it_ = ccmp_.find(key);
-            }
-            clean_guard->Clean(*shard_, cc_ng_id_, cce.get());
-        }
-        else
-        {
-            clean_guard->Reserve(
-                std::move(key), std::move(cce), is_clean_target);
-        }
-
-        idx_in_page += 1;
-    }
-#else
-    void CleanPage(CleanGuard *clean_guard)
-    {
-        assert(clean_guard->idx_in_page_ == 0);
-
-        CcPage<KeyT, ValueT> *page = clean_guard->page_;
-        for (size_t idx = 0; idx < page->Size(); ++idx)
-        {
-            KeyT &key = page->keys_[idx];
-            std::unique_ptr<CcEntry<KeyT, ValueT>> &cce = page->entries_[idx];
-
-            bool is_clean_target = clean_guard->IsCleanTarget(key, cce.get());
-            bool can_be_cleaned = clean_guard->CanBeCleaned(cce.get());
-
-            if (is_clean_target && can_be_cleaned)
-            {
-                if (shard_->IsBucketsMigrating())
-                {
-                    // This will disallow this bucket from accepting upload
-                    // batch request during cluster scale since we might
-                    // already have kicked out newer version from cc map.
-                    shard_->local_shards_.KickoutKeyInBucket(
-                        table_name_, cc_ng_id_, key);
-                }
-
-                if (idx == 0)
-                {
-                    // The page's first key is cleaned, needs to locate the page
-                    // position to update the map.
-                    clean_guard->page_it_ = ccmp_.find(key);
-                }
-
-                clean_guard->Clean(*shard_, cc_ng_id_, cce.get());
-            }
-            else
-            {
-                clean_guard->Reserve(
-                    std::move(key), std::move(cce), is_clean_target);
-            }
-        }
-    }
-#endif
 
     /**
      * Redistribute entries between page1 and page2. This happens when

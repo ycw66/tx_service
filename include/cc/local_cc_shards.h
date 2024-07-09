@@ -24,6 +24,7 @@
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc_entry.h"
+#include "cc_page_clean_guard.h"
 #include "cc_shard.h"
 #include "data_sync_task.h"
 #include "error_messages.h"
@@ -936,7 +937,7 @@ public:
             // key cache does not exist for this range.
             return RangeSliceOpStatus::Error;
         }
-        auto range_lk = range_entry->SharedLockGuard();
+        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
         TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
         if (!store_range)
         {
@@ -1016,7 +1017,7 @@ public:
             pin_status = RangeSliceOpStatus::BlockedOnLoad;
             return RangeSliceId();
         }
-        auto range_lk = range_entry->SharedLockGuard();
+        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
         TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
         if (store_range == nullptr)
         {
@@ -1111,7 +1112,7 @@ public:
             pin_status = RangeSliceOpStatus::BlockedOnLoad;
             return RangeSliceId();
         }
-        auto range_lk = range_entry->SharedLockGuard();
+        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
         TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
         if (store_range == nullptr)
         {
@@ -1319,6 +1320,116 @@ public:
 
     std::shared_ptr<TableSchema> GetSharedTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
+
+#ifdef RANGE_PARTITION_ENABLED
+    /**
+     * @brief Kickout a page assigned by clean_guard.
+     *
+     * LocalCcShards doesn't want to expose meta_data_mux_, so the kickout
+     * detail have to be implemented at here.
+     *
+     * A key is not cleanable if the pin count of its belonged slice is not 0.
+     *
+     * Consider a page that contains three ranges, and each range contains three
+     * slices. To clean the page, the method iterate over ranges. And in each
+     * range, it iterate over slices. This is to reduce frequently searching for
+     * ranges and slices.
+     *
+     * |______._______._______|_______._______._______|_______._______._______|
+     */
+    template <typename KeyT, typename ValueT>
+    void KickoutPage(CcPageCleanGuard<KeyT, ValueT> *clean_guard)
+    {
+        const TableName &table_name = clean_guard->table_name_;
+        TableName range_table_name(table_name.StringView(),
+                                   TableType::RangePartition);
+        NodeGroupId cc_ng_id = clean_guard->cc_ng_id_;
+        CcPage<KeyT, ValueT> *page = clean_guard->page_;
+
+        size_t idx = 0;
+        size_t page_size = page->Size();
+        do
+        {
+            std::shared_lock<std::shared_mutex> meta_data_lk(meta_data_mux_);
+
+            const KeyT &key = page->keys_[idx];
+            auto &cce = page->entries_[idx];
+
+            // Clean next range.
+            auto range_entry = static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(
+                    range_table_name, cc_ng_id, TxKey(&key)));
+            if (range_entry == nullptr)
+            {
+                clean_guard->MarkCleanForOrphanKey(key, cce);
+                idx++;
+                continue;
+            }
+
+            // PinStoreRange: Prevent range_slices_from being kicked out.
+            auto store_range = static_cast<TemplateStoreRange<KeyT> *>(
+                range_entry->PinStoreRange());
+            if (store_range == nullptr)
+            {
+                clean_guard->MarkCleanForOrphanKey(key, cce);
+                idx++;
+                continue;
+            }
+
+            range_entry->SetAcceptsDirtyRangeData(false);
+
+            bool kickout_any = false;
+            idx = clean_guard->MarkCleanInRange(store_range, idx, kickout_any);
+            if (kickout_any)
+            {
+                // If the key is kicked out, we need to update the bucket
+                // info to disallow upload batch cc since we might already
+                // have kicked out newer version from cc map.
+                uint32_t partition_id =
+                    range_entry->GetRangeInfo()->PartitionId();
+                uint16_t bucket_id =
+                    Sharder::Instance().MapRangeIdToBucketId(partition_id);
+                BucketInfo *bucket_info =
+                    GetBucketInfoInternal(bucket_id, cc_ng_id);
+                bucket_info->SetAcceptsUploadBatch(false);
+            }
+
+            range_entry->UnPinStoreRange();
+        } while (idx != page_size);
+    }
+#else
+    template <typename KeyT, typename ValueT>
+    void KickoutPage(CcPageCleanGuard<KeyT, ValueT> *clean_guard)
+    {
+        const TableName &table_name = clean_guard->table_name_;
+        NodeGroupId cc_ng_id = clean_guard->cc_ng_id_;
+        CcPage<KeyT, ValueT> *page = clean_guard->page_;
+
+        size_t page_size = page->Size();
+        for (size_t idx = 0; idx < page_size; idx++)
+        {
+            const KeyT &key = page->keys_[idx];
+            auto &cce = page->entries_[idx];
+            clean_guard->MarkCleanForOrphanKey(key, cce);
+        }
+
+        if (clean_guard->cc_shard_->IsBucketsMigrating())
+        {
+            // This will disallow this bucket from accepting upload batch
+            // request during cluster scale since we might already have kicked
+            // out newer version from cc map.
+            for (size_t idx = 0; idx < page_size; ++idx)
+            {
+                const KeyT &key = page->keys_[idx];
+                const auto &cce = page->entries_[idx];
+                if (cce.get() == nullptr)
+                {
+                    KickoutKeyInBucket(table_name, cc_ng_id, key);
+                }
+            }
+        }
+    }
+#endif
 
     template <typename KeyT>
     void KickoutKeyInBucket(const TableName &tbl_name,

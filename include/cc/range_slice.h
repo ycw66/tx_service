@@ -904,6 +904,13 @@ public:
         return slices_[slice_idx].get();
     }
 
+    TemplateStoreSlice<KeyT> *FindSlice(const KeyT &key)
+    {
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        size_t slice_idx = SearchSlice(key, true);
+        return slices_[slice_idx].get();
+    }
+
     StoreSlice *FindSlice(size_t idx) override
     {
         std::shared_lock<std::shared_mutex> s_lk(mux_);

@@ -463,16 +463,6 @@ public:
         }
     }
 
-    std::unique_lock<std::shared_mutex> UniqueLockGuard()
-    {
-        return std::unique_lock<std::shared_mutex>(mux_);
-    }
-
-    std::shared_lock<std::shared_mutex> SharedLockGuard()
-    {
-        return std::shared_lock<std::shared_mutex>(mux_);
-    }
-
     void FetchRangeSlices(const TableName &range_tbl_name,
                           CcRequestBase *requester,
                           NodeGroupId ng_id,
@@ -494,6 +484,7 @@ protected:
 
     template <typename KeyT>
     friend class RangeCcMap;
+    friend class LocalCcShards;
     friend struct FetchRangeSlicesReq;
 };
 
