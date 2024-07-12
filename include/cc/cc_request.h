@@ -2453,7 +2453,7 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        std::unique_lock lk(mux_);
         ckpt_ts_ = std::min(ckpt_ts_, ccs.ActiveTxMinTs(cc_ng_id_));
         int64_t allocated, committed;
         bool full = ccs.GetShardHeap()->Full(&allocated, &committed);
@@ -2475,8 +2475,11 @@ public:
 
     void Wait()
     {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return finish_cnt_ == shard_cnt_; });
+        std::unique_lock lk(mux_);
+        while (finish_cnt_ != shard_cnt_)
+        {
+            cv_.wait(lk);
+        }
     }
 
     uint64_t GetCkptTs() const
@@ -2493,6 +2496,17 @@ public:
         }
         // return in kb
         return total_usage / 1024;
+    }
+
+    uint64_t GetMemCommited() const
+    {
+        uint64_t total_cmt = 0;
+        for (uint64_t shard_cmt : memory_committed_vec_)
+        {
+            total_cmt += shard_cmt;
+        }
+        // return in kb
+        return total_cmt / 1024;
     }
 
     void ShardMemoryUsageReport()
@@ -2514,8 +2528,8 @@ public:
 
 private:
     uint64_t ckpt_ts_;
-    std::mutex mux_;
-    std::condition_variable cv_;
+    bthread::Mutex mux_;
+    bthread::ConditionVariable cv_;
     std::atomic<size_t> finish_cnt_;
     size_t shard_cnt_;
     std::vector<uint64_t> memory_allocated_vec_;

@@ -196,6 +196,11 @@ struct MultiObjectTxCommand
         assert(false);
         return false;
     }
+
+    virtual bool IsBlockCommand()
+    {
+        return false;
+    }
 };
 
 // commands and information of the same txn
