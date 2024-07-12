@@ -376,6 +376,22 @@ CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)
     return *this;
 }
 
+CatalogRecord &CatalogRecord::operator=(CatalogRecord &&rhs)
+{
+    if (this == &rhs)
+    {
+        return *this;
+    }
+
+    schema_ = rhs.schema_;
+    dirty_schema_ = rhs.dirty_schema_;
+    schema_ts_ = rhs.schema_ts_;
+    schema_image_ = std::move(rhs.schema_image_);
+    dirty_schema_image_ = std::move(rhs.dirty_schema_image_);
+
+    return *this;
+}
+
 CatalogEntry::~CatalogEntry()
 {
     {

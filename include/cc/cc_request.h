@@ -2788,6 +2788,7 @@ public:
         current_table_idx_ = -1;
         err_ = CcErrorCode::NO_ERROR;
 
+        tables_.clear();
         pause_pos_ = {TxKey(), false};
         defrag_cnt_ = 0;
         lock_cnt_ = 0;
@@ -2801,6 +2802,9 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
+        mi_heap_t *df = mi_heap_get_default();
+        assert(df == ccs.GetShardHeap()->heap_);
+        assert(ccs.GetShardHeapThreadId() == mi_thread_id());
         run_count_++;
         // dequeue wait list if heap is not full anymore every 20 scan batch
         if (run_count_ % 20 == 0 && !ccs.GetShardHeap()->Full())
@@ -2838,6 +2842,10 @@ public:
                         continue;
                     }
                     tables_.push_back(table.first);
+                    // also need to defrag range cc map
+                    TableName range_table_name{table.first.String(),
+                                               TableType::RangePartition};
+                    tables_.push_back(std::move(range_table_name));
                 }
                 current_table_idx_ = 0;
             }
@@ -2859,6 +2867,8 @@ public:
                       << std::setprecision(2)
                       << 100 * (static_cast<float>(committed - allocated) /
                                 committed);
+            assert(df == ccs.GetShardHeap()->heap_);
+            assert(ccs.GetShardHeapThreadId() == mi_thread_id());
             return false;
         }
 
@@ -2871,17 +2881,22 @@ public:
                 {
                     float defrag_ratio =
                         static_cast<float>(defrag_cnt_) / total_cnt_;
-                    LOG(INFO) << "Defragmentation table "
-                              << tables_.at(current_table_idx_).String()
-                              << " finished on core " << ccs.core_id_
-                              << ", defrag count: " << defrag_cnt_
-                              << ", lock count: " << lock_cnt_
-                              << ", ckpt count: " << ckpt_cnt_
-                              << ", kv load count: " << kv_load_cnt_
-                              << ", non frag count: " << non_frag_cnt_
-                              << ", total count: " << total_cnt_
-                              << std::setprecision(2)
-                              << ", defrag ratio: " << 100 * defrag_ratio;
+                    DLOG(INFO) << "Defragmentation table "
+                               << tables_.at(current_table_idx_).String()
+                               << " table type: "
+                               << static_cast<int>(
+                                      tables_.at(current_table_idx_).Type())
+                               << " ngid: "
+                               << node_groups_[current_node_group_idx_].first
+                               << " finished on core " << ccs.core_id_
+                               << ", defrag count: " << defrag_cnt_
+                               << ", lock count: " << lock_cnt_
+                               << ", ckpt count: " << ckpt_cnt_
+                               << ", kv load count: " << kv_load_cnt_
+                               << ", non frag count: " << non_frag_cnt_
+                               << ", total count: " << total_cnt_
+                               << std::setprecision(2)
+                               << ", defrag ratio: " << 100 * defrag_ratio;
                 }
                 defrag_cnt_ = 0;
                 lock_cnt_ = 0;
@@ -2892,19 +2907,19 @@ public:
                 current_table_idx_++;
             }
 
+            // reset table state
+            ccmp_key_defraged_ = false;
+            pause_pos_ = {TxKey(), false};
+
             // if run out of tables
             if (static_cast<size_t>(current_table_idx_) == tables_.size())
             {
                 tables_.clear();
                 current_table_idx_ = -1;
                 current_node_group_idx_++;
+                ccs.Enqueue(this);
+                return false;
             }
-
-            // reset table state
-            ccmp_key_defraged_ = false;
-            pause_pos_ = {TxKey(), false};
-            ccs.Enqueue(this);
-            return false;
         }
 
         auto &table_name = tables_.at(current_table_idx_);
@@ -2915,12 +2930,13 @@ public:
         if (ccm != nullptr)
         {
             ccm->Execute(*this);
+            assert(df == ccs.GetShardHeap()->heap_);
+            assert(ccs.GetShardHeapThreadId() == mi_thread_id());
         }
         else
         // if ccm if dropped, move to next table
         {
             pause_pos_ = {TxKey(), true};
-            current_table_idx_++;
             ccs.Enqueue(this);
         }
 
@@ -3109,6 +3125,7 @@ public:
             SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
+        scan_count_++;
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
         if (ccm == nullptr)
         {
@@ -3295,6 +3312,8 @@ public:
     // force DataSync task flush out this batch of scaned data whatever other
     // criteria exists, e.g. scan mem is full
     bool force_flush_{false};
+
+    size_t scan_count_{0};
 
 private:
     const TableName *table_name_{nullptr};

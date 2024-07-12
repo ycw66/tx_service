@@ -522,6 +522,26 @@ void CcShard::DetachLru(LruPage *page)
     page->lru_next_ = nullptr;
 }
 
+// Replace the old_page with new_page in LRU after defrag recreating the cc page
+void CcShard::ReplaceLru(LruPage *old_page, LruPage *new_page)
+{
+    assert(old_page->lru_prev_ != nullptr && old_page->lru_next_ != nullptr);
+    LruPage *lru_prev = old_page->lru_prev_;
+    old_page->lru_prev_ = nullptr;
+    LruPage *lru_next = old_page->lru_next_;
+    old_page->lru_next_ = nullptr;
+    // If page is the head to start looking for cc entry to kickout, move
+    // the clean head to the next page
+    if (clean_start_ccp_ == old_page)
+    {
+        clean_start_ccp_ = new_page;
+    }
+    lru_prev->lru_next_ = new_page;
+    lru_next->lru_prev_ = new_page;
+    new_page->lru_next_ = lru_next;
+    new_page->lru_prev_ = lru_prev;
+}
+
 void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
 {
     // We should not add meta cc map page into lru list since they

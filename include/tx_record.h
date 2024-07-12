@@ -99,7 +99,7 @@ struct TxRecord
         return 0;
     }
 
-    virtual bool DefragIfNecessary(mi_heap_t *heap)
+    virtual bool NeedsDefrag(mi_heap_t *heap)
     {
         return false;
     }

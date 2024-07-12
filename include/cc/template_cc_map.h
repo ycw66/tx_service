@@ -5041,6 +5041,7 @@ public:
         // shard_->OverrideHeapThread();
         CcShardHeap *scan_heap = shard_->GetShardDataSyncScanHeap();
         mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+        assert(shard_->GetShardHeapThreadId() == mi_thread_id());
 
         // If the heap is full, we should stop exporting.
         std::pair<size_t, bool> export_size = {0, true};
@@ -5061,12 +5062,6 @@ public:
                                    ckpt_vec_size,
                                    export_base_table_record_if_need,
                                    skip_archived_key);
-
-            if (export_size.first > 0)
-            {
-                cce->SetBeingCkpt();
-            }
-
             export_size.second = false;
         }
 
@@ -5469,6 +5464,9 @@ public:
                         if (export_result.second)
                         {
                             is_scan_mem_full = true;
+                            DLOG(INFO) << "scan heap is full, core_id: "
+                                       << shard_->core_id_
+                                       << " ,scan count: " << req.scan_count_;
                             break;
                         }
                     }
@@ -5501,6 +5499,9 @@ public:
                 if (export_result.second)
                 {
                     is_scan_mem_full = true;
+                    DLOG(INFO)
+                        << "scan heap is full, core_id: " << shard_->core_id_
+                        << " ,scan count: " << req.scan_count_;
                     break;
                 }
             }
@@ -5654,6 +5655,7 @@ public:
                 {
                     // scan memory is full and there are
                     // data for flush
+                    req.force_flush_ = true;
                     req.SetFinish(shard_->core_id_);
                     return false;
                 }
@@ -6009,6 +6011,8 @@ public:
 
     bool Execute(DefragShardHeapCc &req) override
     {
+        mi_heap_t *heap = mi_heap_get_default();
+
         auto &pause_pos = req.PausePos();
         auto &defrag_cnt = req.defrag_cnt_;
         auto &lock_cnt = req.lock_cnt_;
@@ -6018,7 +6022,6 @@ public:
         auto &total_cnt = req.total_cnt_;
         bool &ccmp_key_defraged = req.ccmp_key_defraged_;
 
-        mi_heap_t *heap = mi_heap_get_default();
         // Defrag the keys in ccmp at first
         if (!ccmp_key_defraged)
         {
@@ -6045,7 +6048,65 @@ public:
             {
                 const KeyT &key = it->first;
                 TxKey tx_key(&key);
-                tx_key.DefragIfNecessary(heap);
+                if (tx_key.NeedsDefrag(heap))
+                {
+                    KeyT key_clone = key;
+
+                    // move out data from the old page,
+                    std::unique_ptr<CcPage<KeyT, ValueT>> old_cc_page_uptr =
+                        std::move(it->second);
+                    // remove the old cc page entry
+                    it = ccmp_.erase(it);
+
+                    float cc_page_utilization =
+                        mi_heap_page_utilization(heap, old_cc_page_uptr.get());
+
+                    if (!(cc_page_utilization < 0.8))
+                    {
+                        it = ccmp_.try_emplace(
+                            it, key_clone, std::move(old_cc_page_uptr));
+                    }
+                    else
+                    {
+                        // emplace new key/ccpage in the ccmp_
+                        it = ccmp_.try_emplace(
+                            it,
+                            key_clone,
+                            std::make_unique<CcPage<KeyT, ValueT>>(
+                                this,
+                                std::move(old_cc_page_uptr->keys_),
+                                std::move(old_cc_page_uptr->entries_),
+                                old_cc_page_uptr->prev_page_,
+                                old_cc_page_uptr->next_page_));
+
+                        // prepare for ~CcPage()
+                        old_cc_page_uptr->next_page_ = nullptr;
+                        old_cc_page_uptr->prev_page_ = nullptr;
+
+                        auto new_cc_page_ptr = it->second.get();
+                        assert(new_cc_page_ptr->keys_.size() != 0);
+                        new_cc_page_ptr->last_access_ts_ =
+                            old_cc_page_uptr->last_access_ts_;
+
+                        // replace old_cc_page_ptr with new_cc_page_ptr in LRU
+                        // list
+                        if (old_cc_page_uptr->lru_next_ != nullptr)
+                        {
+                            shard_->ReplaceLru(old_cc_page_uptr.get(),
+                                               new_cc_page_ptr);
+                        }
+                        else
+                        {
+                            shard_->UpdateLruList(new_cc_page_ptr, false);
+                        }
+
+                        // Update the page pointer in every cce which has lock
+                        for (auto &cce : new_cc_page_ptr->entries_)
+                        {
+                            cce->UpdateCcPage(new_cc_page_ptr);
+                        }
+                    }
+                }
                 it++;
             }
 
@@ -6063,9 +6124,9 @@ public:
 
             shard_->Enqueue(&req);
         }
-        // then defrag the cc page
         else
         {
+            // then defrag the cc page
             Iterator it;
             Iterator end_it = End();
 
@@ -6081,6 +6142,10 @@ public:
                 std::pair<Iterator, ScanType> resume_pair =
                     ForwardScanStart(*resume_key, true);
                 it = resume_pair.first;
+                if (it.GetPage() == &neg_inf_page_)
+                {
+                    it++;
+                }
             }
 
             for (size_t scan_cnt = 0;
@@ -6090,6 +6155,7 @@ public:
                 // defrag the keys_ and entries_ when enter a new page
                 if (it != end_it && it.GetIdxInPage() == 0)
                 {
+                    bool defraged = false;
                     auto current_page = it.GetPage();
                     float keys_utilization = mi_heap_page_utilization(
                         heap, current_page->keys_.data());
@@ -6101,7 +6167,8 @@ public:
                         {
                             new_keys.push_back(std::move(key));
                         }
-                        current_page->keys_ = std::move(new_keys);
+                        current_page->keys_.swap(new_keys);
+                        defraged = true;
                     }
 
                     float entries_utilization = mi_heap_page_utilization(
@@ -6115,7 +6182,13 @@ public:
                         {
                             new_entries.push_back(std::move(entry));
                         }
-                        current_page->entries_ = std::move(new_entries);
+                        current_page->entries_.swap(new_entries);
+                        defraged = true;
+                    }
+
+                    if (defraged)
+                    {
+                        it.UpdateCurrent();
                     }
                 }
 
@@ -6163,6 +6236,7 @@ public:
 
             shard_->Enqueue(&req);
         }
+
         return false;
     }
 
@@ -8282,68 +8356,74 @@ protected:
 
             // defrag key
             TxKey tx_key = TxKey(key);
-            defraged = tx_key.DefragIfNecessary(heap);
+            if (tx_key.NeedsDefrag(heap))
+            {
+                auto key_clone = std::make_unique<KeyT>(*key);
+                auto &keys = current_page_->keys_;
+                auto it = keys.begin() + idx_in_page_;
+                assert(it != keys.end());
+                it = keys.erase(it);
+                it = keys.emplace(it, std::move(*(key_clone.release())));
+                defraged = true;
+            }
 
             // defrag cce
             if (cce != nullptr)
             {
                 float cce_utilization = mi_heap_page_utilization(heap, cce);
-                if (cce_utilization < 0.8)
+                float payload_utilization = 1.0;
+                bool payload_needs_defrag = false;
+                TxRecord *payload =
+                    static_cast<TxRecord *>(cce->payload_.get());
+                if (payload != nullptr)
                 {
-                    auto cce_clone = cce->CloneForDefragment();
-                    cce = cce_clone.get();
-                    current_page_->entries_[idx_in_page_] =
-                        std::move(cce_clone);
+                    payload_utilization =
+                        mi_heap_page_utilization(heap, payload);
+                    payload_needs_defrag = payload->NeedsDefrag(heap);
+                }
+                if (cce_utilization < 0.8 || payload_utilization < 0.8 ||
+                    payload_needs_defrag)
+                {
+                    auto &entries = current_page_->entries_;
+                    auto it = entries.begin() + idx_in_page_;
+                    assert(it != entries.end());
+                    std::unique_ptr<CcEntry<KeyT, ValueT>> old_cce =
+                        std::move(*it);
+                    it = entries.erase(it);
+                    it = entries.emplace(
+                        it, std::make_unique<CcEntry<KeyT, ValueT>>());
+                    CcEntry<KeyT, ValueT> *cce_clone = it->get();
+                    old_cce->CloneForDefragment(cce_clone);
                     defraged = true;
-                    UpdateCurrent();
                 }
             }
 
-            // defrag cce payload
-            TxRecord *payload = static_cast<TxRecord *>(cce->payload_.get());
-            if (payload != nullptr)
+            // if key or cce is defraged, update current
+            if (defraged)
             {
-                float payload_utilization =
-                    mi_heap_page_utilization(heap, payload);
-                if (payload_utilization < 0.8)
-                {
-#ifdef ON_KEY_OBJECT
-                    cce->payload_ = std::make_unique<ValueT>(*cce->payload_);
-#else
-                    cce->payload_ = std::make_shared<ValueT>(*cce->payload_);
-#endif
-                    defraged = true;
-                }
-                else
-                {
-                    bool payload_defraged = payload->DefragIfNecessary(heap);
-                    if (payload_defraged)
-                    {
-                        defraged = true;
-                    }
-                }
+                UpdateCurrent();
+                key = const_cast<KeyT *>(current_.first);
+                cce = current_.second;
             }
 
 #ifndef ON_KEY_OBJECT
             if (cce->archives_ != nullptr)
             {
                 auto archives = cce->archives_.get();
+                // To defrag a list, we go through and defrag each node in the
+                // list
                 for (auto it = archives->begin(); it != archives->end(); ++it)
                 {
                     // try to defrag the list
                     void *archive_address = &(*it);
-                    if (mi_heap_page_utilization(heap, archive_address) < 0.8)
+                    bool vs_rec_need_defraged = it->NeedsDefrag(heap);
+                    if (mi_heap_page_utilization(heap, archive_address) < 0.8 ||
+                        vs_rec_need_defraged)
                     {
-                        auto value_copy = *it;
-                        auto next_it = std::next(it);
-                        archives->erase(it);
-                        it = archives->insert(next_it, value_copy);
-                        defraged = true;
-                    }
-
-                    bool vs_rec_defraged = it->DefragIfNecessary(heap);
-                    if (vs_rec_defraged)
-                    {
+                        auto old_vr = std::move(*it);
+                        it = archives->erase(it);
+                        it = archives->emplace(it);
+                        old_vr.CloneForDefragment(&(*it));
                         defraged = true;
                     }
                 }

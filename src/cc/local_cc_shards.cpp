@@ -3933,6 +3933,7 @@ void LocalCcShards::SplitFlushRange(
                << range_entry->GetRangeInfo()->PartitionId()
                << ", new range count:" << new_range_ids.size()
                << ", data size:" << range_split_task->data_sync_vec_->size();
+
     SplitFlushTxRequest split_req(table_name,
                                   table_schema,
                                   range_entry->RangeSlices(),

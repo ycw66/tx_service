@@ -443,9 +443,6 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
         int64_t term = addr.Term();
         if (term < 0)
         {
-            DLOG(INFO) << "txm fails to acquire write lock due to node crash "
-                          "or leader change, txn: "
-                       << txm->TxNumber();
             write_entry->cce_addr_.SetCce(0, -1, 0);
         }
         else if (acquire_key_res.commit_ts_ == 0)
@@ -4234,11 +4231,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                key_greater,
                                                true);
 
-                            // For archive vec we don't need to worry about
-                            // duplicate causing issue since we're not visiting
-                            // their cc entry. Also we cannot rely on key
-                            // compare to dedup archive vec since a key could
-                            // have multiple version of archive versions.
+                            //  For archive vec we don't need to worry about
+                            //  duplicate causing issue since we're not visiting
+                            //  their cc entry. Also we cannot rely on key
+                            //  compare to dedup archive vec since a key could
+                            //  have multiple version of archive versions.
                             assert(archive_vec->empty());
                             archive_vecs.push_back(
                                 std::move(*previous_archive_vec));
@@ -4413,8 +4410,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                  data_sync_vec->end(),
                                                  range_it->start_key_,
                                                  lower_bound_cmp);
-                            assert(range_start_data_it->Key() ==
-                                   range_it->start_key_);
+                            assert(!(range_start_data_it->Key() <
+                                     range_it->start_key_));
 
                             assert(local_cc_shards.GetRangeOwner(
                                        old_range_id, tx_ng_id) != nullptr);
@@ -4437,8 +4434,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                             for (; range_it != splitted_range_info.end();
                                  range_it++)
                             {
-                                assert(range_start_data_it->Key() ==
-                                       range_it->start_key_);
+                                assert(!(range_start_data_it->Key() <
+                                         range_it->start_key_));
                                 auto next_range_it = range_it + 1;
                                 auto range_end_data_it =
                                     next_range_it == splitted_range_info.end()

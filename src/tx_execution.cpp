@@ -3616,10 +3616,6 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
     }
     else if (acquire_write.hd_result_.IsError())
     {
-        DLOG(ERROR) << "AcquireWriteOperation failed for cc error:"
-                    << acquire_write.hd_result_.ErrorMsg() << "  "
-                    << static_cast<int>(acquire_write.hd_result_.ErrorCode())
-                    << "; txn: " << TxNumber();
         bool_resp_->SetErrorCode(
             ConvertCcError(acquire_write.hd_result_.ErrorCode()));
         Abort();

@@ -863,7 +863,7 @@ public:
 
     ~RangeRecord()
     {
-        if (is_info_owner_)
+        if (is_info_owner_ && range_info_uptr_)
         {
             range_info_uptr_.reset();
         }
@@ -1111,6 +1111,13 @@ public:
             mem_usage += range_info_uptr_->MemUsage();
         }
         return mem_usage;
+    }
+
+    bool NeedsDefrag(mi_heap_t *heap) override
+    {
+        assert(!is_info_owner_);
+        assert(!is_read_result_);
+        return false;
     }
 
     // Usually range_info_ is a raw pointer that points to range info in

@@ -482,14 +482,29 @@ public:
         return mem_usage_;
     }
 
-    bool DefragIfNecessary(mi_heap_t *heap)
+    bool NeedsDefrag(mi_heap_t *heap)
     {
+        bool defrag = false;
         TxRecord *payload = static_cast<TxRecord *>(payload_.get());
         if (payload != nullptr)
         {
-            return payload->DefragIfNecessary(heap);
+            defrag = payload->NeedsDefrag(heap);
         }
-        return false;
+        return defrag;
+    }
+
+    void CloneForDefragment(VersionRecord<ValueT> *clone)
+    {
+        clone->payload_status_ = payload_status_;
+        clone->commit_ts_ = commit_ts_;
+        if (payload_ != nullptr)
+        {
+            clone->payload_ = std::make_shared<ValueT>(*payload_);
+        }
+        else
+        {
+            clone->payload_ = nullptr;
+        }
     }
 };
 
@@ -517,6 +532,8 @@ public:
     CcEntry() = default;
 
     ~CcEntry() = default;
+
+    CcEntry(CcEntry<KeyT, ValueT> &other) = delete;
 
     size_t GetCcEntryMemUsage() const
     {
@@ -616,18 +633,26 @@ public:
     std::unique_ptr<std::list<VersionRecord<ValueT>>> archives_{nullptr};
 #endif
 
-    std::unique_ptr<CcEntry<KeyT, ValueT>> CloneForDefragment()
+    void CloneForDefragment(CcEntry<KeyT, ValueT> *clone)
     {
-        auto clone = std::make_unique<CcEntry<KeyT, ValueT>>();
         clone->commit_ts_and_status_ = commit_ts_and_status_;
         clone->cc_lock_and_extra_ = cc_lock_and_extra_;
-        clone->payload_ = std::move(payload_);
 #ifndef ON_KEY_OBJECT
+        if (payload_ != nullptr)
+        {
+            clone->payload_ = std::make_shared<ValueT>(*payload_);
+        }
+        else
+        {
+            assert(PayloadStatus() == RecordStatus::Deleted);
+            clone->payload_ = nullptr;
+        }
         clone->SetCkptTs(CkptTs());
         clone->data_store_size_ = data_store_size_;
         clone->archives_ = std::move(archives_);
+#else
+        clone->payload_ = std::make_unique<ValueT>(*payload_);
 #endif
-        return clone;
     }
 
     inline static size_t basic_mem_overhead_ = sizeof(CcEntry<KeyT, ValueT>);
@@ -993,6 +1018,7 @@ public:
             ref.CloneOrCopyKey(TxKey(&key));
             ref.cce_ =
                 const_cast<LruEntry *>(static_cast<const LruEntry *>(this));
+            ref.cce_->SetBeingCkpt();
 
             if (rec_status == RecordStatus::Normal)
             {
@@ -1062,6 +1088,8 @@ public:
                             ref.SetKeyIndex(ckpt_idx);
                             ref.cce_ = const_cast<LruEntry *>(
                                 static_cast<const LruEntry *>(this));
+                            ref.cce_->SetBeingCkpt();
+
                             if (it->payload_status_ == RecordStatus::Normal)
                             {
                                 if (tbl_type != TableType::Secondary)
@@ -1134,6 +1162,8 @@ public:
                             ref.CloneOrCopyKey(TxKey(&key));
                             ref.cce_ = const_cast<LruEntry *>(
                                 static_cast<const LruEntry *>(this));
+                            ref.cce_->SetBeingCkpt();
+
                             if (it->payload_status_ == RecordStatus::Normal)
                             {
                                 if (tbl_type != TableType::Secondary)
@@ -1174,6 +1204,8 @@ public:
                             ref.SetKeyIndex(ckpt_idx);
                             ref.cce_ = const_cast<LruEntry *>(
                                 static_cast<const LruEntry *>(this));
+                            ref.cce_->SetBeingCkpt();
+
                             if (it->payload_status_ == RecordStatus::Normal)
                             {
                                 if (tbl_type != TableType::Secondary)

@@ -368,6 +368,11 @@ public:
      */
     void DetachLru(LruPage *page);
 
+    /**
+     * Replace the old page with new page in Lru list
+     */
+    void ReplaceLru(LruPage *old_page, LruPage *new_page);
+
     TxLockInfo *UpsertLockHoldingTx(TxNumber txn,
                                     int64_t tx_term,
                                     LruEntry *cce_ptr,

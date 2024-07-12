@@ -199,9 +199,9 @@ public:
         return Size();
     }
 
-    bool DefragIfNecessary(mi_heap_t *heap)
+    bool NeedsDefrag(mi_heap_t *heap)
     {
-        return true;
+        return false;
     }
 
     static const RangeBucketKey *NegativeInfinity()

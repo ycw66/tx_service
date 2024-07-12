@@ -107,11 +107,11 @@ public:
                   const T *key = static_cast<const T *>(this_obj);
                   return key->Type();
               }),
-          defrag_if_necessary_func_(
+          needs_defrag_func_(
               [](void *this_obj, mi_heap_t *heap)
               {
                   T *key = static_cast<T *>(this_obj);
-                  return key->DefragIfNecessary(heap);
+                  return key->NeedsDefrag(heap);
               })
     {
     }
@@ -178,9 +178,9 @@ public:
                                    : KeyType::NegativeInf;
     }
 
-    bool DefragIfNecessary(void *this_obj, mi_heap_t *heap) const
+    bool NeedsDefrag(void *this_obj, mi_heap_t *heap) const
     {
-        return defrag_if_necessary_func_(this_obj, heap);
+        return needs_defrag_func_(this_obj, heap);
     }
 
 protected:
@@ -222,8 +222,8 @@ protected:
     typedef KeyType (*TypeFunc)(const void *this_obj);
     TypeFunc const type_func_;
 
-    typedef bool (*DefragIfNecessaryFunc)(void *this_obj, mi_heap_t *heap);
-    DefragIfNecessaryFunc const defrag_if_necessary_func_;
+    typedef bool (*NeedsDefragFunc)(void *this_obj, mi_heap_t *heap);
+    NeedsDefragFunc const needs_defrag_func_;
 };
 
 class TxKey
@@ -329,9 +329,9 @@ public:
         interface_->SerializeStr(GetConstPtr(), str);
     }
 
-    bool DefragIfNecessary(mi_heap_t *heap) const
+    bool NeedsDefrag(mi_heap_t *heap) const
     {
-        return interface_->DefragIfNecessary(GetPtr(), heap);
+        return interface_->NeedsDefrag(GetPtr(), heap);
     }
 
 #ifdef ON_KEY_OBJECT
@@ -740,6 +740,11 @@ public:
             fields_);
     }
 
+    bool NeedsDefrag(mi_heap_t *heap)
+    {
+        return false;
+    }
+
     static const CompositeKey<Types...> *NegativeInfinity()
     {
         return &neg_inf;
@@ -748,11 +753,6 @@ public:
     static const CompositeKey<Types...> *PositiveInfinity()
     {
         return &pos_inf;
-    }
-
-    bool DefragIfNecessary(mi_heap_t *heap)
-    {
-        return false;
     }
 
     static const ::txservice::TxKeyInterface *TxKeyImpl()
@@ -930,6 +930,11 @@ struct VoidKey
     }
 
     bool DefragIfNecessary(mi_heap_t *heap)
+    {
+        return false;
+    }
+
+    bool NeedsDefrag(mi_heap_t *heap)
     {
         return false;
     }

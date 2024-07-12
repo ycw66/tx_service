@@ -61,7 +61,9 @@ public:
         return KeyType::Normal;
     }
 
-    bool DefragIfNecessary(mi_heap_t *heap)
+    // CatalogCcMap is not need to be defragmented, so this method just need
+    // for satisting compling
+    bool NeedsDefrag(mi_heap_t *heap)
     {
         return false;
     }
@@ -299,6 +301,7 @@ public:
     uint64_t SchemaTs() const;
 
     CatalogRecord &operator=(const CatalogRecord &rhs);
+    CatalogRecord &operator=(CatalogRecord &&rhs);
 
     size_t Size() const override
     {
