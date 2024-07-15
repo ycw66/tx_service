@@ -286,7 +286,6 @@ void TryCommitReplayCommands(std::unique_ptr<T> &payload,
                              uint64_t &cur_ver)
 {
     std::vector<TxnCmd> &txn_cmd_list = replay_cmd_list.txn_cmd_list_;
-    assert(!txn_cmd_list.empty());
     // iterate the list and apply the commands in version order
     for (auto it = txn_cmd_list.begin(); it != txn_cmd_list.end();)
     {
