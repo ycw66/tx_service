@@ -1480,21 +1480,7 @@ public:
                 }
                 else
                 {
-                    assert(req.BlockedBy() == ReadCc::BlockByKvFetch ||
-                           req.BlockedBy() == ReadCc::BlockByKeyCache);
-                    if (hd_res->Value().lock_type_ == LockType::NoLock)
-                    {
-                        // If the req does not put a lock on the cce, a read
-                        // intent will be acquried on the cce before fetching
-                        // the record.
-                        ReleaseCceLock(cce->GetKeyLock(),
-                                       cce,
-                                       req.Txn(),
-                                       ng_id,
-                                       LockType::ReadIntent);
-                    }
-
-                    acquired_lock = hd_res->Value().lock_type_;
+                    assert(false);
                 }
 
                 req.SetBlockType(ReadCc::NotBlocked);
@@ -1514,9 +1500,6 @@ public:
                     look_key = &decoded_key;
                 }
 
-                Iterator it = FindEmplace(*look_key, false, !req.IsForWrite());
-                cce = it->second;
-                ccp = it.GetPage();
                 CODE_FAULT_INJECTOR("remote_read_msg_missed", {
                     LOG(INFO) << "FaultInject  remote_read_msg_missed"
                               << "txID: " << req.Txn();
@@ -1530,12 +1513,207 @@ public:
                     return false;
                 });
 #ifdef RANGE_PARTITION_ENABLED
-                if (cce == nullptr)
+                Iterator it = Find(*look_key);
+                cce = it->second;
+                ccp = it.GetPage();
+                if (cce == nullptr ||
+                    cce->PayloadStatus() == RecordStatus::Unknown)
                 {
-                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
+                    if (Type() == TableType::Primary ||
+                        Type() == TableType::UniqueSecondary)
+                    {
+                        RangeSliceOpStatus pin_status;
+                        RangeSliceId slice_id =
+                            shard_->local_shards_.PinRangeSlice(
+                                table_name_,
+                                cc_ng_id_,
+                                ng_term,
+                                KeySchema(),
+                                RecordSchema(),
+                                schema_ts_,
+                                table_schema_->GetKVCatalogInfo(),
+                                *look_key,
+                                true,
+                                &req,
+                                shard_,
+                                pin_status,
+                                false,
+                                0,
+                                txservice_enable_key_cache &&
+                                    Type() == TableType::Primary,
+                                req.PointReadOnCacheMiss());
+
+                        if (pin_status == RangeSliceOpStatus::Successful ||
+                            pin_status == RangeSliceOpStatus::KeyNotExists)
+                        {
+                            if (cc_op != CcOperation::ReadForWrite)
+                            {
+                                if (pin_status ==
+                                    RangeSliceOpStatus::Successful)
+                                {
+                                    slice_id.Unpin();
+                                }
+                                // If the read is not for update, there's no
+                                // need for any lock on it.
+                                hd_res->Value().ts_ = 1;
+                                hd_res->Value().rec_status_ =
+                                    RecordStatus::Deleted;
+                                hd_res->SetFinished();
+                                return true;
+                            }
+                            // Inserting a new key to ccm, add to key cache too
+                            if (txservice_enable_key_cache &&
+                                table_name_.IsBase() &&
+                                (cce == nullptr ||
+                                 cce->PayloadStatus() == RecordStatus::Unknown))
+                            {
+                                TemplateStoreRange<KeyT> *range =
+                                    static_cast<TemplateStoreRange<KeyT> *>(
+                                        slice_id.Range());
+                                auto res = range->AddKey(*look_key,
+                                                         shard_->core_id_,
+                                                         slice_id.Slice());
+                                if (res == RangeSliceOpStatus::Error)
+                                {
+                                    // Key cache is invalidated due to
+                                    // collision. Try to add the cached slices
+                                    // back to the key cache.
+                                    range->InitKeyCache(
+                                        &table_name_, cc_ng_id_, ng_term);
+                                }
+                                else if (res == RangeSliceOpStatus::Retry)
+                                {
+                                    if (pin_status ==
+                                        RangeSliceOpStatus::Successful)
+                                    {
+                                        slice_id.Unpin();
+                                    }
+
+                                    shard_->Enqueue(shard_->LocalCoreId(),
+                                                    &req);
+                                    return false;
+                                }
+                            }
+                            if (cce == nullptr)
+                            {
+                                Iterator it = FindEmplace(*look_key);
+                                cce = it->second;
+                                if (cce == nullptr)
+                                {
+                                    if (pin_status ==
+                                        RangeSliceOpStatus::Successful)
+                                    {
+                                        slice_id.Unpin();
+                                    }
+
+                                    hd_res->SetError(
+                                        CcErrorCode::OUT_OF_MEMORY);
+                                    return true;
+                                }
+                                ccp = it.GetPage();
+                            }
+                            // Key does not exist after quering slice info. Mark
+                            // the key as deleted.
+                            cce->SetCommitTsPayloadStatus(
+                                1U, RecordStatus::Deleted);
+                            cce->SetCkptTs(1U);
+
+                            if (pin_status == RangeSliceOpStatus::Successful)
+                            {
+                                // The slice is unpinned immediately. This
+                                // is because the prior pin operation brings
+                                // all records in the slice into memory,
+                                // including the target record sharded to
+                                // this core. Since cache cleaning is done
+                                // by the tx processor associated with this
+                                // core, the target record cannot be kicked
+                                // out before this read request finishes.
+                                slice_id.Unpin();
+                            }
+                        }
+                        else if (pin_status ==
+                                 RangeSliceOpStatus::BlockedOnLoad)
+                        {
+                            return false;
+                        }
+                        else if (pin_status == RangeSliceOpStatus::Retry)
+                        {
+                            shard_->Enqueue(shard_->LocalCoreId(), &req);
+                            return false;
+                        }
+                        else if (pin_status == RangeSliceOpStatus::Delay)
+                        {
+                            if (slice_id.Range()->HasLock())
+                            {
+                                hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                                return true;
+                            }
+                            else
+                            {
+                                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                                return false;
+                            }
+                        }
+                        else if (pin_status == RangeSliceOpStatus::NotPinned)
+                        {
+                            assert(req.PointReadOnCacheMiss());
+                            if (cce == nullptr)
+                            {
+                                Iterator it = FindEmplace(*look_key);
+                                cce = it->second;
+                                if (cce == nullptr)
+                                {
+                                    hd_res->SetError(
+                                        CcErrorCode::OUT_OF_MEMORY);
+                                    return true;
+                                }
+                                ccp = it.GetPage();
+                            }
+
+                            shard_->FetchRecord(
+                                this->table_name_,
+                                this->table_schema_,
+                                TxKey(look_key),
+                                cce,
+                                this,
+                                this->cc_ng_id_,
+                                ng_term,
+                                &req,
+                                slice_id.Range()->PartitionId());
+
+                            // Acquire a read intent on this cce with the
+                            // special txn to avoid cce being kicked out before
+                            // fetch record returns.
+                            cce->GetOrCreateKeyLock(shard_, this, ccp)
+                                .AcquireReadIntent(fetch_record_txn);
+
+                            return false;
+                        }
+                        else
+                        {
+                            // If the pin operation returns an error, the data
+                            // store is inaccessible.
+                            hd_res->SetError(
+                                CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        assert(Type() == TableType::Catalog);
+                    }
+                }
+                // collect metrics: slice cache hits
+                if (metrics::enable_cache_hit_rate)
+                {
+                    auto meter = shard_->GetMeter();
+                    meter->Collect(
+                        metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
                 }
 #else
+                Iterator it = FindEmplace(*look_key, false, !req.IsForWrite());
+                cce = it->second;
+                ccp = it.GetPage();
                 // The read request accesses a new key not in the cc map. But
                 // the cc map is full and cannot allocates a new entry.
                 if (cce == nullptr)
@@ -1543,27 +1721,63 @@ public:
                     shard_->EnqueueWaitList(&req);
                     return false;
                 }
+                // if ccm contains all the ccentries, then unknown status means
+                // that we can skip accessing kv store and return deleted status
+                // directly.
+                if (ccm_has_full_entries_ &&
+                    cce->PayloadStatus() == RecordStatus::Unknown)
+                {
+                    cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
+                    cce->SetCkptTs(1U);
+                }
 
+                if (metrics::enable_cache_hit_rate)
+                {
+                    auto meter = shard_->GetMeter();
+                    if (cce->PayloadStatus() == RecordStatus::Unknown)
+                    {
+                        meter->Collect(
+                            metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
+                    }
+                    else
+                    {
+                        meter->Collect(
+                            metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
+                    }
+                }
 #endif
                 req.SetCcePtr(cce);
                 cce_addr.SetCce(reinterpret_cast<uint64_t>(cce),
                                 ng_term,
                                 req.NodeGroupId(),
                                 shard_->LocalCoreId());
+                CODE_FAULT_INJECTOR("remote_read_msg_missed", {
+                    LOG(INFO) << "FaultInject  remote_read_msg_missed"
+                              << "txID: " << req.Txn();
+                    if (!req.IsLocal())
+                    {
+                        remote::RemoteRead &remote_req =
+                            static_cast<remote::RemoteRead &>(req);
+                        remote_req.Acknowledge();
+                    }
+
+                    return false;
+                });
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
                                       ccp,
-                                      RecordStatus::Normal,
+                                      cce->PayloadStatus(),
                                       &req,
-                                      req.NodeGroupId(),
+                                      ng_id,
                                       ng_term,
                                       req.TxTerm(),
                                       cc_op,
-                                      req.Isolation(),
-                                      req.Protocol(),
+                                      iso_lvl,
+                                      cc_proto,
                                       req.ReadTimestamp(),
                                       req.IsCoveringKeys());
             }
+
             // After acquiring lock
             switch (err_code)
             {
@@ -1600,304 +1814,6 @@ public:
                 return true;
             }
             }  //-- end: switch
-
-#ifdef RANGE_PARTITION_ENABLED
-            if (cce->PayloadStatus() == RecordStatus::Unknown)
-            {
-                int64_t tx_term = req.TxTerm();
-                if (Type() == TableType::Primary ||
-                    Type() == TableType::UniqueSecondary)
-                {
-                    RangeSliceOpStatus pin_status;
-                    RangeSliceId slice_id = shard_->local_shards_.PinRangeSlice(
-                        table_name_,
-                        cc_ng_id_,
-                        ng_term,
-                        KeySchema(),
-                        RecordSchema(),
-                        schema_ts_,
-                        table_schema_->GetKVCatalogInfo(),
-                        *look_key,
-                        true,
-                        &req,
-                        shard_,
-                        pin_status,
-                        false,
-                        0,
-                        txservice_enable_key_cache &&
-                            Type() == TableType::Primary,
-                        req.PointReadOnCacheMiss());
-
-                    if (pin_status == RangeSliceOpStatus::Successful ||
-                        pin_status == RangeSliceOpStatus::KeyNotExists)
-                    {
-                        // Inserting a new key to ccm, add to key cache too
-                        if (txservice_enable_key_cache && table_name_.IsBase())
-                        {
-                            TemplateStoreRange<KeyT> *range =
-                                static_cast<TemplateStoreRange<KeyT> *>(
-                                    slice_id.Range());
-                            auto res = range->AddKey(
-                                *look_key, shard_->core_id_, slice_id.Slice());
-                            if (res == RangeSliceOpStatus::Error)
-                            {
-                                // Key cache is invalidated due to collision.
-                                // Try to add the cached slices back to the key
-                                // cache.
-                                range->InitKeyCache(
-                                    &table_name_, cc_ng_id_, ng_term);
-                            }
-                            else if (res == RangeSliceOpStatus::Retry)
-                            {
-                                if (pin_status ==
-                                    RangeSliceOpStatus::Successful)
-                                {
-                                    slice_id.Unpin();
-                                }
-                                if (acquired_lock == LockType::NoLock)
-                                {
-                                    std::tie(acquired_lock, err_code) =
-                                        AcquireCceKeyLock(cce,
-                                                          ccp,
-                                                          cce->PayloadStatus(),
-                                                          &req,
-                                                          ng_id,
-                                                          ng_term,
-                                                          tx_term,
-                                                          LockType::ReadIntent,
-                                                          cc_op,
-                                                          iso_lvl,
-                                                          cc_proto,
-                                                          req.ReadTimestamp());
-                                    assert(acquired_lock ==
-                                               LockType::ReadIntent &&
-                                           err_code == CcErrorCode::NO_ERROR);
-                                }
-                                req.SetBlockType(ReadCc::BlockByKeyCache);
-
-                                shard_->Enqueue(shard_->LocalCoreId(), &req);
-                                return false;
-                            }
-                        }
-                        // Key does not exist after quering slice info. Mark the
-                        // key as deleted.
-                        cce->SetCommitTsPayloadStatus(1U,
-                                                      RecordStatus::Deleted);
-                        cce->SetCkptTs(1U);
-
-                        if (pin_status == RangeSliceOpStatus::Successful)
-                        {
-                            // The slice is unpinned immediately. This
-                            // is because the prior pin operation brings
-                            // all records in the slice into memory,
-                            // including the target record sharded to
-                            // this core. Since cache cleaning is done
-                            // by the tx processor associated with this
-                            // core, the target record cannot be kicked
-                            // out before this read request finishes.
-                            slice_id.Unpin();
-                        }
-
-                        if (cc_op != CcOperation::ReadForWrite)
-                        {
-                            // If the read is not for update, there's no need
-                            // for any lock on it.
-                            if (acquired_lock != LockType::NoLock)
-                            {
-                                ReleaseCceLock(cce->GetKeyLock(),
-                                               cce,
-                                               req.Txn(),
-                                               req.NodeGroupId(),
-                                               acquired_lock);
-                                hd_res->Value().lock_type_ = LockType::NoLock;
-                            }
-                            hd_res->Value().ts_ = 1;
-                            hd_res->Value().rec_status_ = RecordStatus::Deleted;
-                            hd_res->SetFinished();
-                            return true;
-                        }
-                    }
-                    else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
-                    {
-                        if (acquired_lock == LockType::NoLock)
-                        {
-                            std::tie(acquired_lock, err_code) =
-                                AcquireCceKeyLock(cce,
-                                                  ccp,
-                                                  cce->PayloadStatus(),
-                                                  &req,
-                                                  ng_id,
-                                                  ng_term,
-                                                  tx_term,
-                                                  LockType::ReadIntent,
-                                                  cc_op,
-                                                  iso_lvl,
-                                                  cc_proto,
-                                                  req.ReadTimestamp());
-                            assert(acquired_lock == LockType::ReadIntent &&
-                                   err_code == CcErrorCode::NO_ERROR);
-                        }
-                        req.SetBlockType(ReadCc::BlockByKvFetch);
-                        return false;
-                    }
-                    else if (pin_status == RangeSliceOpStatus::Retry)
-                    {
-                        req.SetBlockType(ReadCc::BlockByKvFetch);
-                        if (acquired_lock == LockType::NoLock)
-                        {
-                            std::tie(acquired_lock, err_code) =
-                                AcquireCceKeyLock(cce,
-                                                  ccp,
-                                                  cce->PayloadStatus(),
-                                                  &req,
-                                                  ng_id,
-                                                  ng_term,
-                                                  tx_term,
-                                                  LockType::ReadIntent,
-                                                  cc_op,
-                                                  iso_lvl,
-                                                  cc_proto,
-                                                  req.ReadTimestamp());
-                            assert(acquired_lock == LockType::ReadIntent &&
-                                   err_code == CcErrorCode::NO_ERROR);
-                        }
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        return false;
-                    }
-                    else if (pin_status == RangeSliceOpStatus::Delay)
-                    {
-                        if (slice_id.Range()->HasLock())
-                        {
-                            if (acquired_lock != LockType::NoLock)
-                            {
-                                ReleaseCceLock(cce->GetKeyLock(),
-                                               cce,
-                                               req.Txn(),
-                                               req.NodeGroupId(),
-                                               acquired_lock);
-                                hd_res->Value().lock_type_ = LockType::NoLock;
-                            }
-                            hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                            return true;
-                        }
-                        else
-                        {
-                            if (acquired_lock == LockType::NoLock)
-                            {
-                                std::tie(acquired_lock, err_code) =
-                                    AcquireCceKeyLock(cce,
-                                                      ccp,
-                                                      cce->PayloadStatus(),
-                                                      &req,
-                                                      ng_id,
-                                                      ng_term,
-                                                      tx_term,
-                                                      LockType::ReadIntent,
-                                                      cc_op,
-                                                      iso_lvl,
-                                                      cc_proto,
-                                                      req.ReadTimestamp());
-                                assert(acquired_lock == LockType::ReadIntent &&
-                                       err_code == CcErrorCode::NO_ERROR);
-                            }
-                            req.SetBlockType(ReadCc::BlockByKvFetch);
-                            shard_->Enqueue(shard_->LocalCoreId(), &req);
-                            return false;
-                        }
-                    }
-                    else if (pin_status == RangeSliceOpStatus::NotPinned)
-                    {
-                        assert(req.PointReadOnCacheMiss());
-                        //  Acquire a read intent on cce so that
-                        // it won't be kicked before the kv read returns
-                        if (acquired_lock == LockType::NoLock)
-                        {
-                            std::tie(acquired_lock, err_code) =
-                                AcquireCceKeyLock(cce,
-                                                  ccp,
-                                                  cce->PayloadStatus(),
-                                                  &req,
-                                                  ng_id,
-                                                  ng_term,
-                                                  tx_term,
-                                                  LockType::ReadIntent,
-                                                  cc_op,
-                                                  iso_lvl,
-                                                  cc_proto,
-                                                  req.ReadTimestamp());
-                            assert(acquired_lock == LockType::ReadIntent &&
-                                   err_code == CcErrorCode::NO_ERROR);
-                        }
-                        req.SetBlockType(ReadCc::BlockByKvFetch);
-                        shard_->FetchRecord(this->table_name_,
-                                            this->table_schema_,
-                                            TxKey(look_key),
-                                            cce,
-                                            this,
-                                            this->cc_ng_id_,
-                                            ng_term,
-                                            &req,
-                                            slice_id.Range()->PartitionId());
-
-                        return false;
-                    }
-                    else
-                    {
-                        // If the pin operation returns an error, the data
-                        // store is inaccessible.
-                        if (acquired_lock != LockType::NoLock)
-                        {
-                            ReleaseCceLock(cce->GetKeyLock(),
-                                           cce,
-                                           req.Txn(),
-                                           req.NodeGroupId(),
-                                           acquired_lock);
-                        }
-                        hd_res->SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                        return true;
-                    }
-                }
-                else
-                {
-                    assert(Type() == TableType::Catalog);
-                }
-            }
-            else
-            {
-                // collect metrics: slice cache hits
-                if (metrics::enable_cache_hit_rate)
-                {
-                    auto meter = shard_->GetMeter();
-                    meter->Collect(
-                        metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
-                }
-            }
-#else
-            // if ccm contains all the ccentries, then unknown status means
-            // that we can skip accessing kv store and return deleted status
-            // directly.
-            if (ccm_has_full_entries_ &&
-                cce->PayloadStatus() == RecordStatus::Unknown)
-            {
-                cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
-                cce->SetCkptTs(1U);
-            }
-
-            if (metrics::enable_cache_hit_rate)
-            {
-                auto meter = shard_->GetMeter();
-                if (cce->PayloadStatus() == RecordStatus::Unknown)
-                {
-                    meter->Collect(
-                        metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
-                }
-                else
-                {
-                    meter->Collect(
-                        metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
-                }
-            }
-#endif
 
         }  //-- end: read insde
         else
@@ -5047,7 +4963,9 @@ public:
         std::pair<size_t, bool> export_size = {0, true};
         // Do not try to call mi_heap_collect, since it is expensive, flush data
         // will return the memory anyway when it done
+#ifndef RANGE_PARTITION_ENABLED
         if (!scan_heap->Full())
+#endif
         {
             export_size.first =
                 cce->ExportForCkpt(key,
@@ -9047,12 +8965,31 @@ protected:
                   RecordStatus status,
                   std::unique_ptr<TxRecord> rec_uptr) override
     {
-        assert(status != RecordStatus::Unknown);
         CcEntry<KeyT, ValueT> *cce =
             static_cast<CcEntry<KeyT, ValueT> *>(entry);
         CcPage<KeyT, ValueT> *ccp =
             static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
         assert(ccp != nullptr);
+        if (status == RecordStatus::Unknown)
+        {
+            // fetch record fails. Remove the read intent
+            ReleaseCceLock(cce->GetKeyLock(),
+                           cce,
+                           fetch_record_txn,
+                           cc_ng_id_,
+                           LockType::ReadIntent);
+            if (cce->IsFree())
+            {
+                CleanEntry(cce, ccp);
+            }
+            else
+            {
+                // No lock should be put on an unknown cce beside
+                // fetch record read intent.
+                assert(cce->PayloadStatus() != RecordStatus::Unknown);
+            }
+            return true;
+        }
         const ValueT *rec_ptr = static_cast<const ValueT *>(rec_uptr.get());
         const uint64_t cce_version = cce->CommitTs();
 #ifdef RANGE_PARTITION_ENABLED
@@ -9073,10 +9010,6 @@ protected:
                 status == RecordStatus::Deleted &&
                 cce->PayloadStatus() == RecordStatus::Unknown)
             {
-                CcEntry<KeyT, ValueT> *cce =
-                    static_cast<CcEntry<KeyT, ValueT> *>(entry);
-                CcPage<KeyT, ValueT> *ccp =
-                    static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
                 // Addking a new key to the ccm. If the key is in Normal rec
                 // status, it should already be in the key cache. Only add it if
                 // it's in DELETED.
@@ -9127,6 +9060,12 @@ protected:
                 std::make_shared<ValueT>(*rec_ptr), status, commit_ts);
         }
 #endif
+
+        ReleaseCceLock(cce->GetKeyLock(),
+                       cce,
+                       fetch_record_txn,
+                       cc_ng_id_,
+                       LockType::ReadIntent);
 
         return true;
     }
@@ -9921,7 +9860,7 @@ protected:
         }
     }
 
-    /**
+    /*
      * Clean page and return the last_read_ts of page.
      *
      * @param page

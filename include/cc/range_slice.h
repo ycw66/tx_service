@@ -1187,6 +1187,13 @@ public:
                 // cache.
                 no_load_on_miss = false;
             }
+            else
+            {
+                // Someone is loading this key cache into memory, no need to
+                // load slice to init key cache, just wait and retry.
+                pin_status = RangeSliceOpStatus::Retry;
+                return RangeSliceId(this, slice);
+            }
         }
         last_pinned_slice = nullptr;
 

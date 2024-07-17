@@ -14,6 +14,7 @@
 #include "range_slice.h"
 #include "sharder.h"
 #include "statistics.h"
+#include "tx_record.h"
 #include "tx_service.h"
 
 namespace txservice
@@ -301,12 +302,11 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         {
             ccs->Enqueue(req);
         }
+        range_entry_->fetch_range_slices_req_ = nullptr;
         if (range_slice_mem_full)
         {
-            range_entry_->fetch_range_slices_req_ = nullptr;
             lk.unlock();
             shards->KickoutRangeSlices();
-            return;
         }
     }
     else
@@ -314,6 +314,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         // We need to make sure that the CcMap::Execute(CcRequest ) and
         // CcRequest::ABortCcRequest(...) functions occur on the same thread.
         // Otherwise, AbortCcRequest is not safe behavior.
+        std::unique_lock<std::shared_mutex> lk(range_entry_->mux_);
         std::unordered_map<CcShard *, std::vector<CcRequestBase *>>
             waiting_reqs;
 
@@ -326,10 +327,8 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         {
             ccs->AbortCcRequests(std::move(reqs), err);
         }
+        range_entry_->fetch_range_slices_req_ = nullptr;
     }
-
-    std::unique_lock<std::shared_mutex> lk(range_entry_->mux_);
-    range_entry_->fetch_range_slices_req_ = nullptr;
 }
 
 bool ClearCcNodeGroup::Execute(CcShard &ccs)
@@ -703,34 +702,17 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
 
 bool FetchRecordCc::Execute(CcShard &ccs)
 {
-    if (error_code_ == 0)
+    // if the referenced cce is already invalid, we do not need to care about
+    // the fetch result and pending reqs since they are all invalid.
+    if (cce_->PayloadStatus() != RecordStatus::Invalid)
     {
         int64_t cc_ng_candid_term =
             Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-
-        if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
+        if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_)
         {
-            bool succ =
-                ccm_->BackFill(cce_, rec_ts_, rec_status_, std::move(rec_));
-
-            if (!succ)
-            {
-                // Retry if backfill failed.
-                ccs.Enqueue(ccs.core_id_, this);
-                return false;
-            }
-
-            for (CcRequestBase *req : requesters_)
-            {
-                if (req)
-                {
-                    ccs.Enqueue(ccs.core_id_, req);
-                }
-            }
-        }
-        else
-        {
+            // term has changed and the ccm has been erased already. It is no
+            // longer safe to access cce. Just abort all the reqs.
             for (CcRequestBase *req : requesters_)
             {
                 if (req)
@@ -739,14 +721,35 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                 }
             }
         }
-    }
-    else
-    {
-        for (CcRequestBase *req : requesters_)
+        else
         {
-            if (req)
+            bool succ =
+                ccm_->BackFill(cce_, rec_ts_, rec_status_, std::move(rec_));
+            if (!succ)
             {
-                req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+                // Retry if backfill failed.
+                ccs.Enqueue(ccs.core_id_, this);
+                return false;
+            }
+            if (error_code_ == 0)
+            {
+                for (CcRequestBase *req : requesters_)
+                {
+                    if (req)
+                    {
+                        ccs.Enqueue(ccs.core_id_, req);
+                    }
+                }
+            }
+            else
+            {
+                for (CcRequestBase *req : requesters_)
+                {
+                    if (req)
+                    {
+                        req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+                    }
+                }
             }
         }
     }

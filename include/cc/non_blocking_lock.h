@@ -2,7 +2,6 @@
 
 #include <butil/logging.h>
 
-#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -205,6 +204,8 @@ public:
                            CcErrorCode err = CcErrorCode::DEAD_LOCK_ABORT);
     bool FindQueueRequest(TxNumber txid);
 
+    void AbortAllQueuedRequests(CcErrorCode err = CcErrorCode::DEAD_LOCK_ABORT);
+
     LockType SearchLock(TxNumber txn);
 
 private:
@@ -370,13 +371,12 @@ public:
                               nullptr) &&
                    dirty_payload_ == nullptr &&
                    dirty_payload_status_ == RecordStatus::NonExistent);
-            return queue_block_cmds_.Size() == 0;
+            return queue_block_cmds_.Size() == 0 && !HasReplayCommandList();
         }
         else
         {
             return false;
         }
-        return key_lock_.IsEmpty() && !HasReplayCommandList();
 #endif
         return key_lock_.IsEmpty();
     }

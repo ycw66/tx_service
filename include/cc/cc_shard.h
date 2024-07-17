@@ -35,6 +35,7 @@
 #include "store/data_store_handler.h"
 #include "system_handler.h"
 #include "tentry.h"
+#include "tx_record.h"
 #include "tx_service_common.h"
 #include "tx_service_metrics.h"
 
@@ -382,8 +383,7 @@ public:
 
     void DeleteLockHoldingTx(TxNumber txn,
                              LruEntry *cce_ptr,
-                             NodeGroupId cc_ng_id,
-                             bool invalidate_tx_term = false);
+                             NodeGroupId cc_ng_id);
 
     void DropLockHoldingTxs(NodeGroupId cc_ng_id)
     {
@@ -653,6 +653,7 @@ public:
                      int64_t cc_ng_term,
                      CcRequestBase *requester,
                      int32_t range_id = -1);
+
     void RemoveFetchRecordRequest(LruEntry *cce);
 
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,
@@ -785,6 +786,23 @@ public:
     {
         return meter_.get();
     };
+
+    void AddInvalidCce(std::unique_ptr<LruEntry> entry)
+    {
+        entry->SetCommitTsPayloadStatus(0, RecordStatus::Invalid);
+        invalid_cces_.emplace_back(Now(), std::move(entry));
+    }
+
+    void CleanUpInvalidCce()
+    {
+        // free invalid cces after 2 hours
+        auto now = Now();
+        while (!invalid_cces_.empty() &&
+               now - invalid_cces_.front().first > invalid_cce_expire_time_)
+        {
+            invalid_cces_.pop_front();
+        }
+    }
 
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
@@ -921,6 +939,11 @@ private:
 
     // defrag heap cc for this shard
     std::unique_ptr<DefragShardHeapCc> defrag_heap_cc_;
+
+    std::list<std::pair<uint64_t, std::unique_ptr<LruEntry>>> invalid_cces_;
+
+    // free invalid cces after 2 hours.
+    static const uint64_t invalid_cce_expire_time_ = 7200000000;
 
     friend class LocalCcHandler;
     friend class LocalCcShards;

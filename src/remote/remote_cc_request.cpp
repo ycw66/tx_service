@@ -1484,9 +1484,9 @@ bool txservice::remote::RemoteCheckDeadLockCc::Execute(CcShard &ccs)
 {
     ccs.CollectLockWaitingInfo(dead_lock_result_);
 
-    int16_t ii = dead_lock_result_.unfinish_count_.fetch_sub(
+    int16_t unfinished = dead_lock_result_.unfinish_count_.fetch_sub(
         1, std::memory_order_acq_rel);
-    if (ii == 1)
+    if (unfinished == 1)
     {
         output_msg_.set_type(
             tr::CcMessage::MessageType::CcMessage_MessageType_DeadLockResponse);
@@ -1541,7 +1541,7 @@ bool txservice::remote::RemoteCheckDeadLockCc::Execute(CcShard &ccs)
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     }
-    return true;
+    return unfinished == 1;
 }
 
 void txservice::remote::RemoteAbortTransactionCc::Reset(
@@ -1714,7 +1714,7 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     }
-    return true;
+    return unfinish_core_cnt_ == 0;
 }
 
 txservice::remote::RemoteKickoutCcEntry::RemoteKickoutCcEntry()

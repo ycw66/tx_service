@@ -174,6 +174,9 @@ public:
 
     virtual bool CleanBatchPages(size_t clean_page_cnt) = 0;
 
+    // Called when FetchRecord returns. Backfill will clean up the read intent
+    // added by fetch record and update cce status based on the fetch result.
+    // If the fetch fails, cce will be erased if it is not used by other reqs.
     virtual bool BackFill(LruEntry *cce,
                           uint64_t commit_ts,
                           RecordStatus status,

@@ -74,6 +74,7 @@ public:
     using TemplateCcMap<KeyT, ValueT>::KeySchema;
     using TemplateCcMap<KeyT, ValueT>::RecordSchema;
     using TemplateCcMap<KeyT, ValueT>::Type;
+    using TemplateCcMap<KeyT, ValueT>::CleanEntry;
 
     bool Execute(ApplyCc &req)
     {
@@ -120,6 +121,7 @@ public:
 
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
+        bool override_kv_val = false;
 
         // Should create command before calling req.IsReadOnly().
         TxCommand *cmd = nullptr;
@@ -232,6 +234,74 @@ public:
                 return false;
             }
 
+            // Check if this cce does not exists in ccmap at all.
+            // We need to double check that there is no dirty payload
+            // status on the cce since a previous cmd might ignores
+            // old payload value and directly applied dirty payload
+            // status.
+            if (cce->PayloadStatus() == RecordStatus::Unknown &&
+                (!cce->GetKeyLock() ||
+                 cce->DirtyPayloadStatus() == RecordStatus::NonExistent))
+            {
+                // if ccm contains all the ccentries, then unknown status means
+                // that we can skip accessing kv store and return deleted status
+                // directly.
+                if (ccm_has_full_entries_ || txservice_skip_kv)
+                {
+                    cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
+                    cce->SetCkptTs(1U);
+                }
+                else
+                {
+                    // if command does not care about previous value of the key,
+                    // we do not need to fetch kv value. We will assume the key
+                    // does not exist.
+                    if (!cmd->IgnoreKvValue())
+                    {
+                        shard_->FetchRecord(table_name_,
+                                            table_schema_,
+                                            TxKey(look_key),
+                                            cce,
+                                            this,
+                                            cc_ng_id_,
+                                            ng_term,
+                                            &req);
+
+                        req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
+                        // Acquire a read intent on this cce with the
+                        // special txn to avoid cce being kicked out before
+                        // fetch record returns.
+                        cce->GetOrCreateKeyLock(shard_, this, ccp)
+                            .AcquireReadIntent(fetch_record_txn);
+
+                        if (metrics::enable_cache_hit_rate)
+                        {
+                            auto meter = shard_->GetMeter();
+                            meter->Collect(
+                                metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
+                                1,
+                                "miss");
+                        }
+                        return false;
+                    }
+                    else
+                    {
+                        // We will apply a DELETED dirty payload status after
+                        // lock is acquired.
+                        override_kv_val = true;
+                    }
+                }
+            }
+            if (metrics::enable_cache_hit_rate)
+            {
+                auto meter = shard_->GetMeter();
+                meter->Collect(
+                    metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
+            }
+            req.SetCcePtr(cce);
+
+            assert(!cce->HasReplayCommandList());
+
             // For ON_KEY_OBJECT, we add lock regardless of whether the record
             // is deleted, so just pass RecordStatus::Normal.
             std::tie(acquired_lock, err_code) =
@@ -262,8 +332,6 @@ public:
             obj_result.lock_acquired_ = acquired_lock;
             if (acquired_lock != LockType::NoLock)
             {
-                req.SetCcePtr(cce);
-
                 assert(cce != nullptr);
                 cce_addr.SetCce(
                     reinterpret_cast<uint64_t>(cce), ng_term, shard_->core_id_);
@@ -291,75 +359,18 @@ public:
             return true;
         }
         }
-
-        // Check if this cce does not exists in ccmap at all.
-        // We need to double check that there is no dirty payload
-        // status on the cce since a previous cmd might ignores
-        // old payload value and directly applied dirty payload
-        // status.
-        if (cce->PayloadStatus() == RecordStatus::Unknown &&
-            (!cce->GetKeyLock() ||
-             cce->DirtyPayloadStatus() == RecordStatus::NonExistent))
+        if (override_kv_val)
         {
-            // if ccm contains all the ccentries, then unknown status means
-            // that we can skip accessing kv store and return deleted status
-            // directly.
-            if (ccm_has_full_entries_ || txservice_skip_kv)
-            {
-                cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
-                cce->SetCkptTs(1U);
-            }
-            else
-            {
-                if (cmd->IgnoreKvValue())
-                {
-                    // cmd that ignores kv value should be applied regardless of
-                    // current value.
-                    assert(cmd->ProceedOnNonExistentObject() &&
-                           cmd->ProceedOnExistentObject() &&
-                           acquired_lock == LockType::WriteIntent);
-                    // We will pretend that there's a delete on this cce just
-                    // before this cmd to ignore value in kv.
-                    cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
-                    cce->SetCkptTs(1);
-                }
-                else
-                {
-                    shard_->FetchRecord(table_name_,
-                                        table_schema_,
-                                        TxKey(look_key),
-                                        cce,
-                                        this,
-                                        cc_ng_id_,
-                                        ng_term,
-                                        &req);
-
-                    req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
-
-                    if (metrics::enable_cache_hit_rate)
-                    {
-                        auto meter = shard_->GetMeter();
-                        if (cce->PayloadStatus() == RecordStatus::Unknown)
-                        {
-                            meter->Collect(
-                                metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
-                                1,
-                                "miss");
-                        }
-                        else
-                        {
-                            meter->Collect(
-                                metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
-                                1,
-                                "hits");
-                        }
-                    }
-                    return false;
-                }
-            }
+            // cmd that ignores kv value should be applied
+            // regardless of current value.
+            assert(cmd->ProceedOnNonExistentObject() &&
+                   cmd->ProceedOnExistentObject() &&
+                   acquired_lock == LockType::WriteIntent);
+            // We will pretend that there's a delete on this cce
+            // just before this cmd to ignore value in kv.
+            cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
+            cce->SetCkptTs(1);
         }
-
-        assert(!cce->HasReplayCommandList());
 
         if (req.Isolation() > IsolationLevel::ReadCommitted ||
             !cmd->IsReadOnly())
@@ -794,6 +805,9 @@ public:
             return true;
         }
 
+        CcPage<KeyT, ValueT> *ccp =
+            static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+        assert(ccp != nullptr);
         if (commit_ts > 0)
         {
             RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
@@ -839,9 +853,6 @@ public:
                 last_dirty_commit_ts_ = commit_ts;
             }
 
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
-            assert(ccp != nullptr);
             if (commit_ts > ccp->last_dirty_commit_ts_)
             {
                 ccp->last_dirty_commit_ts_ = commit_ts;
@@ -855,6 +866,13 @@ public:
 
         ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
         cce->PopBlockRequest(shard_, cce->payload_.get());
+        if (cce->PayloadStatus() == RecordStatus::Unknown && cce->IsFree())
+        {
+            // If the finished cmd ignores kv value and the tx aborts, we will
+            // end up with a cce with unknown status after dirty payload is
+            // cleared. Remove the unused cce.
+            CleanEntry(cce, ccp);
+        }
         req.Result()->SetFinished();
         return true;
     }
@@ -1238,11 +1256,11 @@ public:
                        << " has_overwrite: " << has_overwrite;
 
             // load payload from kvstore before committing pending commands.
-            // If there's already buffered cmd, that means a previous replaycc
-            // has already sent FetchRecord.
+            // If there's already read intent on cce, that means a previous
+            // replay cc has already sent fetch record.
             if (!has_overwrite &&
                 cce->PayloadStatus() == RecordStatus::Unknown &&
-                !cce->HasReplayCommandList())
+                (!cce->GetKeyLock() || cce->GetKeyLock()->IsEmpty()))
             {
                 int64_t cc_ng_candid_term =
                     Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
@@ -1263,6 +1281,11 @@ public:
                                     cc_ng_id_,
                                     ng_term,
                                     nullptr);
+                // Acquire a read intent on this cce with the
+                // special txn to avoid cce being kicked out before
+                // fetch record returns.
+                cce->GetOrCreateKeyLock(shard_, this, ccp)
+                    .AcquireReadIntent(fetch_record_txn);
             }
             // extract command list
             const uint16_t cmd_cnt = *reinterpret_cast<decltype(cmd_cnt) *>(
@@ -1373,10 +1396,26 @@ public:
                   RecordStatus status,
                   std::unique_ptr<TxRecord> rec_uptr) override
     {
-        assert(status != RecordStatus::Unknown);
         CcEntry<KeyT, ValueT> *cce =
             static_cast<CcEntry<KeyT, ValueT> *>(entry);
         ValueT *rec_ptr = static_cast<ValueT *>(rec_uptr.get());
+        LruPage *ccp = cce->GetCcPage();
+        // Release the read intent acquried by fetch record.
+        ReleaseCceLock(cce->GetKeyLock(),
+                       cce,
+                       fetch_record_txn,
+                       cc_ng_id_,
+                       LockType::ReadIntent);
+        if (status == RecordStatus::Unknown)
+        {
+            // fetch record fails.
+            if (cce->IsFree())
+            {
+                // Remove cce if it is not referenced by anyone.
+                CleanEntry(entry, ccp);
+            }
+            return true;
+        }
         // It's possible that first ReplayLogCc triggers FetchRecord and the
         // second ReplayLogCc has_overwrite and overrides the cce.
         if (cce->PayloadStatus() == RecordStatus::Unknown)

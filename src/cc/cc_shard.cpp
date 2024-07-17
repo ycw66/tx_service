@@ -11,6 +11,7 @@
 #include "cc/cluster_config_cc_map.h"
 #include "cc/non_blocking_lock.h"  // lock_vec_
 #include "cc/range_bucket_cc_map.h"
+#include "cc_req_misc.h"
 #include "checkpointer.h"
 #include "error_messages.h"
 #include "range_slice.h"
@@ -613,8 +614,7 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
 
 void CcShard::DeleteLockHoldingTx(TxNumber txn,
                                   LruEntry *cce_ptr,
-                                  NodeGroupId cc_ng_id,
-                                  bool invalidate_tx_term)
+                                  NodeGroupId cc_ng_id)
 {
     auto ng_it = lock_holding_txs_.find(cc_ng_id);
     if (ng_it == lock_holding_txs_.end())
@@ -628,11 +628,6 @@ void CcShard::DeleteLockHoldingTx(TxNumber txn,
         return;
     }
     TxLockInfo &lk_info = tx_it->second;
-    if (invalidate_tx_term)
-    {
-        Sharder::Instance().SetInvalidLeaderTerm(cc_ng_id,
-                                                 lk_info.tx_coord_term_);
-    }
     lk_info.cce_list_.erase(cce_ptr);
 
     if (lk_info.cce_list_.empty())
@@ -784,6 +779,8 @@ void CcShard::VerifyLruList()
  */
 size_t CcShard::Clean()
 {
+    // See if there's any invalid cce that we can expire
+    CleanUpInvalidCce();
     LruPage *ccp = clean_start_ccp_ ? clean_start_ccp_ : head_ccp_.lru_next_;
     size_t free_cnt = 0;
     bool heap_fragmented = false;

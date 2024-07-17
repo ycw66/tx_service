@@ -49,6 +49,7 @@
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
+#include "tx_record.h"
 #include "type.h"
 
 namespace txservice
@@ -621,12 +622,20 @@ public:
             {
                 const LruEntry *lru_entry =
                     reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+                if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+                {
+                    return false;
+                }
                 ccm_ = lru_entry->GetCcMap();
             }
             else if (cce_addr_->CcePtr() != 0)
             {
                 const LruEntry *lru_entry =
                     reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+                if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+                {
+                    return false;
+                }
                 ccm_ = lru_entry->GetCcMap();
                 assert(ccm_ != nullptr);
             }
@@ -1034,6 +1043,10 @@ public:
 
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+        if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+        {
+            return false;
+        }
         ccm_ = lru_entry->GetCcMap();
         assert(ccm_ != nullptr);
         return true;
@@ -1092,8 +1105,6 @@ public:
     {
         NotBlocked,
         BlockByLock,
-        BlockByKvFetch,
-        BlockByKeyCache,
         // If CcEntry's CommitTs is less than read_ts when do
         // "PkReadCorrespondingSk" or "SnapshotRead", there must be a
         // PostWriteCc request has not done, then, this read should wait until
@@ -1142,6 +1153,10 @@ public:
 
             const LruEntry *lru_entry =
                 reinterpret_cast<const LruEntry *>(tmp_cce_addr.CcePtr());
+            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+            {
+                return false;
+            }
             ccm_ = lru_entry->GetCcMap();
             assert(ccm_ != nullptr);
         }
@@ -1163,38 +1178,6 @@ public:
         }
 
         return true;
-    }
-
-    void AbortCcRequest(CcErrorCode err_code) override
-    {
-        assert(blk_type_ != BlockByKeyCache);
-        if (blk_type_ == BlockByKvFetch)
-        {
-            // Aborted by data store error, release the acquired lock on cce.
-            LruEntry *entry = CcePtr();
-            assert(entry->PayloadStatus() == RecordStatus::Unknown);
-            LockType lk_type = Result()->Value().lock_type_;
-            LruPage *page = entry->GetCcPage();
-            Ccm()->ReleaseCceLock(
-                entry->GetKeyLock(),
-                entry,
-                Txn(),
-                NodeGroupId(),
-                lk_type == LockType::NoLock ? LockType::ReadIntent : lk_type);
-
-            if (entry->IsFree())
-            {
-                // cce is useless since the status is unknown. CleanEntry will
-                // remove the cce if there's no lock on it.
-                Ccm()->CleanEntry(entry, page);
-            }
-        }
-        bool finished = res_->SetError(err_code);
-
-        if (finished)
-        {
-            Free();
-        }
     }
 
     void Reset(const TableName *tn,
@@ -1647,6 +1630,10 @@ public:
 
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+        if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+        {
+            return false;
+        }
         ccm_ = lru_entry->GetCcMap();
         assert(ccm_ != nullptr);
         return true;
@@ -5258,37 +5245,6 @@ public:
         apply_and_commit_ = commit;
     }
 
-    void AbortCcRequest(CcErrorCode err_code) override
-    {
-        if (block_type_ == ApplyBlockType::BlockOnFetch)
-        {
-            // Aborted by data store error, release the acquired lock on cce.
-            LruEntry *entry = CcePtr();
-            assert(entry->PayloadStatus() == RecordStatus::Unknown);
-            LockType lk_type = Result()->Value().lock_acquired_;
-            LruPage *page = entry->GetCcPage();
-            Ccm()->ReleaseCceLock(
-                entry->GetKeyLock(),
-                entry,
-                Txn(),
-                NodeGroupId(),
-                lk_type == LockType::NoLock ? LockType::ReadIntent : lk_type);
-
-            if (entry->IsFree())
-            {
-                // cce is useless since the status is unknown. CleanEntry will
-                // remove the cce if there's no lock on it.
-                Ccm()->CleanEntry(entry, page);
-            }
-        }
-        bool finished = res_->SetError(err_code);
-
-        if (finished)
-        {
-            Free();
-        }
-    }
-
     bool IsLocal() const
     {
         return is_local_;
@@ -5432,6 +5388,10 @@ public:
 
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+        if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+        {
+            return false;
+        }
         ccm_ = lru_entry->GetCcMap();
         assert(ccm_ != nullptr);
         return true;

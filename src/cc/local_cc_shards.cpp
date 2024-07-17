@@ -21,8 +21,6 @@
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "range_slice.h"
-#include "remote_type.h"
-#include "rpc_closure.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
@@ -54,10 +52,11 @@ LocalCcShards::LocalCcShards(
     metrics::CommonLabels common_labels,
     std::unordered_map<TableName, std::string> *prebuilt_tables,
     std::function<void(std::string_view, std::string_view)> publish_func,
-    bool enable_shard_heap_defragment)
+    bool enable_shard_heap_defragment,
+    bool enable_key_cache)
     : range_slice_memory_limit_(
           ((uint64_t) MB(memory_limit_mb)) /
-          (txservice_enable_key_cache
+          ((enable_key_cache && !enable_mvcc)
                ? 10
                : 20)),  // If key cache is included in range slice mem use 10%,
                         // otherwise 5%

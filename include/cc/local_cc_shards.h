@@ -185,7 +185,8 @@ public:
         std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr,
         std::function<void(std::string_view, std::string_view)> publish_func =
             nullptr,
-        bool enable_shard_heap_defragment = false);
+        bool enable_shard_heap_defragment = false,
+        bool enable_key_cache = false);
 
     ~LocalCcShards();
 
@@ -562,6 +563,7 @@ public:
             if (!split_range_res)
             {
                 // split fails
+                assert(new_slice_info.empty());
                 return new_range_entries;
             }
             if (new_slice_info.empty())
@@ -687,6 +689,10 @@ public:
                 new_range_entries.push_back(new_range);
             }
         }
+        if (TableRangesMemoryFull())
+        {
+            KickoutRangeSlices();
+        }
         return new_range_entries;
     }
 
@@ -724,7 +730,6 @@ public:
         mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
         mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
-        bool range_slice_mem_full = TableRangesMemoryFull();
         TxKey range_tx_key(&start_key);
         auto range_it = ranges->find(range_tx_key);
         if (range_it == ranges->end())
@@ -769,7 +774,7 @@ public:
 
             range_ids->try_emplace(partition_id, new_range_ptr);
 
-            if (ng_id == range_ng && slice_keys && !range_slice_mem_full)
+            if (ng_id == range_ng && slice_keys)
             {
                 new_range_ptr->InitRangeSlices(
                     std::move(*slice_keys), range_ng, table_name.IsBase());

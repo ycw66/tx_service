@@ -500,6 +500,8 @@ inline static const uint16_t total_range_buckets = 0x4000;
 inline static const uint16_t total_range_buckets = 4096;
 #endif
 
+inline static const uint64_t fetch_record_txn = UINT64_MAX;
+
 enum struct SlicePosition
 {
     Middle = 0,

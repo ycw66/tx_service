@@ -203,26 +203,12 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
 
     if (slice->status_ == SliceStatus::FullyCached)
     {
-        // collect metrics: slice cache hits
-        if (metrics::enable_cache_hit_rate)
-        {
-            auto meter = cc_shard->GetMeter();
-            meter->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
-        }
-
         ++slice->pins_;
         pins_.fetch_add(1, std::memory_order_release);
         return RangeSliceOpStatus::Successful;
     }
     else
     {
-        // collect metrics: slice cache miss
-        if (metrics::enable_cache_hit_rate)
-        {
-            auto meter = cc_shard->GetMeter();
-            meter->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
-        }
-
         RangeSliceOpStatus pin_status;
 
         LoadSliceStatus load_ret = LoadSlice(tbl_name,

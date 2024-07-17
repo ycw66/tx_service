@@ -1,6 +1,8 @@
 #include "cc/cc_entry.h"
 
 #include "cc/cc_shard.h"
+#include "error_messages.h"
+#include "tx_record.h"
 
 namespace txservice
 {
@@ -131,20 +133,22 @@ void LruEntry::ClearLocks(CcShard &ccs,
     auto [w_tx, w_type] = key_lock->WriteTx();
     if (w_type != NonBlockingLock::WriteLockType::NoWritelock)
     {
-        ccs.DeleteLockHoldingTx(w_tx, this, ng_id, invalidate_owner_term);
+        ccs.DeleteLockHoldingTx(w_tx, this, ng_id);
     }
 
     // Deletes key read locks.
     const std::unordered_set<TxNumber> &key_read_locks = key_lock->ReadLocks();
     for (const TxNumber &txn : key_read_locks)
     {
-        ccs.DeleteLockHoldingTx(txn, this, ng_id, invalidate_owner_term);
+        ccs.DeleteLockHoldingTx(txn, this, ng_id);
     }
 
     for (const TxNumber &txn : key_lock->ReadIntents())
     {
-        ccs.DeleteLockHoldingTx(txn, this, ng_id, invalidate_owner_term);
+        ccs.DeleteLockHoldingTx(txn, this, ng_id);
     }
+    // clean up blocked cc reqs
+    key_lock->AbortAllQueuedRequests(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
 
     // reset lock entry in ccshard lock array to make it reusable.
     cc_lock_and_extra_->SetUsedStatus(false);

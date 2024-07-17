@@ -54,6 +54,8 @@ enum struct RecordStatus : uint8_t
     /// </summary>
     ArchiveVersionMiss,
 
+    Invalid,
+
 #ifdef ON_KEY_OBJECT
     /// <summary>
     /// Used only to indicate the status of temporary object. The temporary

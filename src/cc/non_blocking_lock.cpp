@@ -514,6 +514,15 @@ std::vector<TxNumber> NonBlockingLock::GetBlockTxIds(TxNumber exclude_id)
     return vct;
 }
 
+void NonBlockingLock::AbortAllQueuedRequests(CcErrorCode err)
+{
+    for (int64_t i = 0; i < (int64_t) blocking_queue_.Size(); i++)
+    {
+        blocking_queue_.Get(i).req_->AbortCcRequest(err);
+    }
+    blocking_queue_.Reset();
+}
+
 void NonBlockingLock::AbortQueueRequest(TxNumber txid, CcErrorCode err)
 {
     for (int64_t i = 0; i < (int64_t) blocking_queue_.Size(); i++)

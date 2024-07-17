@@ -5,8 +5,10 @@
 #include <utility>
 
 #include "cc_entry.h"
+#include "cc_req_misc.h"
 #include "cc_request.h"
 #include "cc_shard.h"
+#include "tx_record.h"
 #include "type.h"
 
 namespace txservice
@@ -144,9 +146,15 @@ protected:
                         // because we always search for key in ccmap first
                         // before trying to query the key cache. Remove the key
                         // from key cache if the key is in deleted status.
+                        // In certain special cases like cleaning up cces that
+                        // no longer belong to this range, we remove keys from
+                        // key cache as long as it is not in unknown status.
+                        // This is because cces in unknown status is not added
+                        // to the key cache yet.
                         if (txservice_enable_key_cache &&
                             table_name_.IsBase() &&
-                            (remove_from_key_cache ||
+                            ((remove_from_key_cache &&
+                              cce->PayloadStatus() != RecordStatus::Unknown) ||
                              cce->PayloadStatus() == RecordStatus::Deleted))
                         {
                             store_range->DeleteKey(
@@ -197,8 +205,26 @@ protected:
     {
         // Check if the cce has any locks on it. If so recycle
         // the lock entry before deleting cce.
-        cce->ClearLocks(*cc_shard_, cc_ng_id, NeedInvalidateLockTerm());
-        cce.reset(nullptr);  // Set cce to nullptr to indicate deleting.
+        bool delay_free = false;
+        if (cce->GetKeyLock() && !cce->GetKeyLock()->IsEmpty())
+        {
+            // Do not free this cce directly since it might be visited
+            // by an expired cc req. Put it into the invalid cce pool
+            // and recycle it later.
+            DLOG(WARNING) << "Cleanning up cce that still being referenced, "
+                             "adding it to invalid cce list. cce: "
+                          << cce.get();
+            delay_free = true;
+        }
+        cce->ClearLocks(*cc_shard_, cc_ng_id);
+        if (delay_free)
+        {
+            cc_shard_->AddInvalidCce(std::move(cce));
+        }
+        else
+        {
+            cce.reset(nullptr);  // Set cce to nullptr to indicate deleting.
+        }
         ++clean_cnt_;
     }
 
