@@ -1715,59 +1715,50 @@ void UpsertTableIndexOp::HandleRangeTask(
 
                 LocalCcShards *cc_shards =
                     Sharder::Instance().GetLocalCcShards();
-
-                // Check the task status
-                auto task_status = cc_shards->GetGenerateSkStatus(
-                    range_owner, tx_number, partition_id, tx_term);
-                if (!task_status->StartGenerateSk(tx_term))
+                std::unique_ptr<SkGenerator> sk_generator = nullptr;
                 {
-                    // Terminate itself
-                    LOG(WARNING)
-                        << "Terminate this generate sk task of ng#"
-                        << range_owner << " for partition id: " << partition_id
-                        << " with end key: ,"
-                        << " caused by the tx term is expired.";
-                    std::unique_lock<std::mutex> lk(task_mux);
-                    --unfinished_task_cnt;
-                    task_res = CcErrorCode::TX_NODE_NOT_LEADER;
-                    task_cv.notify_one();
-                    return;
+                    std::lock_guard<std::mutex> lk(
+                        cc_shards->table_index_op_pool_mux_);
+                    if (cc_shards->sk_generator_pool_.empty())
+                    {
+                        sk_generator = std::make_unique<SkGenerator>();
+                    }
+                    else
+                    {
+                        assert(cc_shards->sk_generator_pool_.back() != nullptr);
+                        sk_generator =
+                            std::move(cc_shards->sk_generator_pool_.back());
+                        cc_shards->sk_generator_pool_.pop_back();
+                    }
                 }
 
-                SkGenerator sk_generator(
-                    base_table_name, range_owner, partition_id);
-                size_t scanned_pk_items_count = 0;
-                CcErrorCode res_code = CcErrorCode::NO_ERROR;
-                sk_generator.GenerateSkFromPk(range_start_key.GetShallowCopy(),
-                                              range_end_key.GetShallowCopy(),
-                                              scan_ts,
-                                              sk_names,
-                                              scanned_pk_items_count,
-                                              res_code,
-                                              *task_status);
+                sk_generator->Reset(&range_start_key,
+                                    &range_end_key,
+                                    scan_ts,
+                                    base_table_name,
+                                    range_owner,
+                                    partition_id,
+                                    tx_number,
+                                    tx_term,
+                                    sk_names);
+                sk_generator->ProcessTask();
 
-                auto result = task_status->TaskStatus();
-                task_status->FinishGenerateSk();
-                if (result == GenerateSkStatus::Status::Terminating)
-                {
-                    LOG(ERROR)
-                        << "Terminate this generate sk task of ng#"
-                        << range_owner << " for partition id: " << partition_id
-                        << "  caused by TX_NODE_NOT_LEADER";
-                    std::unique_lock<std::mutex> lk(task_mux);
-                    --unfinished_task_cnt;
-                    task_res = CcErrorCode::TX_NODE_NOT_LEADER;
-                    task_cv.notify_one();
-                    return;
-                }
+                CcErrorCode res_code = sk_generator->TaskResult();
                 if (res_code == CcErrorCode::GET_RANGE_ID_ERR)
                 {
                     LOG(WARNING)
-                        << "Terminate this generate sk task of ng#"
+                        << "Terminate this generate index task of ng#"
                         << range_owner << " for partition id: " << partition_id
                         << " for table: " << base_table_name.Trace()
                         << " caused by the boundary of partition mismatch.";
 
+                    // recycle skgenerator
+                    {
+                        std::lock_guard<std::mutex> lk(
+                            cc_shards->table_index_op_pool_mux_);
+                        cc_shards->sk_generator_pool_.emplace_back(
+                            std::move(sk_generator));
+                    }
                     // Update the task status
                     {
                         std::lock_guard<std::mutex> task_lk(task_mux);
@@ -1811,58 +1802,62 @@ void UpsertTableIndexOp::HandleRangeTask(
                     return;
                 }
 
+                std::unique_lock<std::mutex> task_lk(task_mux);
                 if (res_code != CcErrorCode::NO_ERROR)
                 {
                     LOG(ERROR)
-                        << "Finish this generate sk task of ng#" << range_owner
-                        << " for partition id: " << partition_id
+                        << "Finish this generate index task of ng#"
+                        << range_owner << " for partition id: " << partition_id
                         << " caused by error: " << CcErrorMessage(res_code);
-                    std::unique_lock<std::mutex> lk(task_mux);
-                    --unfinished_task_cnt;
-                    task_res =
-                        task_res == CcErrorCode::NO_ERROR ? res_code : task_res;
-                    task_cv.notify_one();
-                    return;
                 }
-
-                // check the terms
-                auto &terms = sk_generator.NodeGroupTerms();
-                std::unique_lock<std::mutex> lk(task_mux);
-                for (size_t idx = 0; idx < terms.size(); ++idx)
+                else
                 {
-                    auto &term = terms.at(idx);
-                    if (term < 0)
+                    // check the terms
+                    auto &terms = sk_generator->NodeGroupTerms();
+                    for (size_t idx = 0; idx < terms.size(); ++idx)
                     {
-                        continue;
+                        auto &term = terms.at(idx);
+                        if (term < 0)
+                        {
+                            continue;
+                        }
+
+                        auto &ng_term = ng_terms.at(idx);
+                        if (ng_term < 0)
+                        {
+                            ng_term = term;
+                        }
+                        else if (ng_term > 0 && ng_term != term)
+                        {
+                            LOG(ERROR)
+                                << "Generate index failed of ng#" << range_owner
+                                << " for partition id: " << partition_id
+                                << " caused by leader transferred.";
+                            res_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+                            break;
+                        }
+                        else
+                        {
+                            assert(ng_term == term);
+                        }
                     }
 
-                    auto &ng_term = ng_terms.at(idx);
-                    if (ng_term < 0)
-                    {
-                        ng_term = term;
-                    }
-                    else if (ng_term > 0 && ng_term != term)
-                    {
-                        LOG(ERROR) << "Generate sk from pk failed of ng#"
-                                   << range_owner
-                                   << " for partition id: " << partition_id
-                                   << " caused by leader transferred.";
-                        --unfinished_task_cnt;
-                        task_res = task_res == CcErrorCode::NO_ERROR
-                                       ? CcErrorCode::REQUESTED_NODE_NOT_LEADER
-                                       : task_res;
-                        task_cv.notify_one();
-                        return;
-                    }
-                    else
-                    {
-                        assert(ng_term == term);
-                    }
+                    total_pk_items_count += sk_generator->ScannedItemsCount();
                 }
 
                 --unfinished_task_cnt;
-                total_pk_items_count += scanned_pk_items_count;
+                task_res =
+                    task_res == CcErrorCode::NO_ERROR ? res_code : task_res;
                 task_cv.notify_one();
+                task_lk.unlock();
+
+                // recycle skgenerator
+                {
+                    std::lock_guard<std::mutex> lk(
+                        cc_shards->table_index_op_pool_mux_);
+                    cc_shards->sk_generator_pool_.emplace_back(
+                        std::move(sk_generator));
+                }
             }));
     }
     else

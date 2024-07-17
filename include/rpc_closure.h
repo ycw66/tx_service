@@ -302,12 +302,11 @@ public:
 
         CcErrorCode res_code =
             remote::ToLocalType::ConvertCcErrorCode(response_.error_code());
-        total_pk_items_count_ = response_.pk_items_count();
         if (res_code == CcErrorCode::GET_RANGE_ID_ERR)
         {
             LOG(WARNING) << "Terminate this generate sk task of ng#"
                          << request_.node_group_id()
-                         << " for partition id: " << request_.node_group_id()
+                         << " for partition id: " << request_.partition_id()
                          << " for table: " << request_.table_name_str()
                          << " caused by the boundary of partition mismatch.";
 

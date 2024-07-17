@@ -827,70 +827,65 @@ void CcNodeService::GenerateSkFromPk(
                        << ". Base table:" << base_table_name.Trace();
 
             LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
-
-            // Check the task status
-            auto task_status = cc_shards->GetGenerateSkStatus(
-                ng_id, tx_number, partition_id, tx_term);
-            if (!task_status->StartGenerateSk(tx_term))
+            std::unique_ptr<SkGenerator> sk_generator = nullptr;
             {
-                // Terminate itself
-                LOG(WARNING) << "Terminate this generate sk task of ng#"
-                             << ng_id << " for partition id: " << partition_id
-                             << " caused by the tx term is expired.";
-                std::unique_lock<bthread::Mutex> lk(bthd_mux);
-                res_code = static_cast<int>(CcErrorCode::TX_NODE_NOT_LEADER);
-                is_finished = true;
-                bthd_cv.notify_all();
-                return;
+                std::lock_guard<std::mutex> lk(
+                    cc_shards->table_index_op_pool_mux_);
+                if (cc_shards->sk_generator_pool_.empty())
+                {
+                    sk_generator = std::make_unique<SkGenerator>();
+                }
+                else
+                {
+                    assert(cc_shards->sk_generator_pool_.back() != nullptr);
+                    sk_generator =
+                        std::move(cc_shards->sk_generator_pool_.back());
+                    cc_shards->sk_generator_pool_.pop_back();
+                }
             }
 
-            SkGenerator sk_generator(base_table_name, ng_id, partition_id);
-            CcErrorCode res = CcErrorCode::NO_ERROR;
-            sk_generator.RemoteGenerateSkFromPk(start_key_str,
-                                                end_key_str,
-                                                scan_ts,
-                                                new_indexes_name,
-                                                scanned_pk_items_count,
-                                                res,
-                                                *task_status);
+            sk_generator->Reset(start_key_str,
+                                end_key_str,
+                                scan_ts,
+                                base_table_name,
+                                ng_id,
+                                partition_id,
+                                tx_number,
+                                tx_term,
+                                new_indexes_name);
+            sk_generator->ProcessTask();
 
-            auto result = task_status->TaskStatus();
-            task_status->FinishGenerateSk();
-            if (result == GenerateSkStatus::Status::Terminating)
+            CcErrorCode task_res = sk_generator->TaskResult();
+            if (task_res != CcErrorCode::NO_ERROR)
             {
-                LOG(ERROR) << "Terminate this generate sk task of ng#" << ng_id
+                LOG(ERROR) << "Finish this generate index task of ng#" << ng_id
                            << " for partition id: " << partition_id
-                           << " caused by TX_NODE_NOT_LEADER";
-                std::unique_lock<bthread::Mutex> lk(bthd_mux);
-                res_code = static_cast<int>(CcErrorCode::TX_NODE_NOT_LEADER);
-                is_finished = true;
-                bthd_cv.notify_all();
-                return;
+                           << " caused by error: " << CcErrorMessage(task_res);
             }
-            if (res != CcErrorCode::NO_ERROR)
+            else
             {
-                LOG(ERROR) << "Finish this generate sk task of ng#" << ng_id
-                           << " for partition id: " << partition_id
-                           << " caused by error: " << CcErrorMessage(res);
-                std::unique_lock<bthread::Mutex> lk(bthd_mux);
-                is_finished = true;
-                res_code = static_cast<int>(res);
-                bthd_cv.notify_one();
-                return;
-            }
-
-            auto &terms = sk_generator.NodeGroupTerms();
-            size_t ng_cnt = terms.size();
-            ng_terms_vec.resize(ng_cnt, INIT_TERM);
-            for (size_t idx = 0; idx < ng_cnt; ++idx)
-            {
-                ng_terms_vec.at(idx) = terms.at(idx);
+                scanned_pk_items_count = sk_generator->ScannedItemsCount();
+                auto &terms = sk_generator->NodeGroupTerms();
+                size_t ng_cnt = terms.size();
+                ng_terms_vec.resize(ng_cnt, INIT_TERM);
+                for (size_t idx = 0; idx < ng_cnt; ++idx)
+                {
+                    ng_terms_vec.at(idx) = terms.at(idx);
+                }
             }
 
             std::unique_lock<bthread::Mutex> lk(bthd_mux);
-            res_code = static_cast<int>(res);
+            res_code = static_cast<int>(task_res);
             is_finished = true;
             bthd_cv.notify_all();
+
+            // recycle skgenerator
+            {
+                std::lock_guard<std::mutex> lk(
+                    cc_shards->table_index_op_pool_mux_);
+                cc_shards->sk_generator_pool_.emplace_back(
+                    std::move(sk_generator));
+            }
         });
 
     std::unique_lock<bthread::Mutex> lk(bthd_mux);
@@ -910,7 +905,8 @@ void CcNodeService::GenerateSkFromPk(
     DLOG(INFO) << "CcNodeService GenerateSkFromPk RPC of ng#" << ng_id
                << " for partition id: " << partition_id
                << " finished with error: "
-               << CcErrorMessage(static_cast<CcErrorCode>(res_code));
+               << CcErrorMessage(static_cast<CcErrorCode>(res_code))
+               << ". Scanned items count: " << scanned_pk_items_count;
 }
 
 void CcNodeService::UploadBatch(

@@ -5,7 +5,6 @@
 #include <vector>
 
 #include "cc_req_pool.h"
-#include "local_cc_shards.h"
 #include "read_write_entry.h"
 #include "rpc_closure.h"
 #include "tx_request.h"
@@ -15,44 +14,62 @@ namespace txservice
 {
 class TransactionExecution;
 
-class SkGenerator
+class UploadIndexContext
 {
-    using NGWriteEntry =
+public:
+    using TableIndexSet =
+        std::unordered_map<TableName, std::vector<WriteEntry>>;
+    using NGIndexSet =
         std::unordered_map<NodeGroupId, std::vector<WriteEntry *>>;
+
+private:
+    enum struct UploadTaskStatus
+    {
+        Free = 0,
+        Pending,
+        Ongoing
+    };
+
+    struct UploadIndexTask
+    {
+        // The original WriteEntry set for each index table.
+        TableIndexSet table_index_set_;
+        UploadTaskStatus task_status_{UploadTaskStatus::Free};
+    };
+
 #ifdef NDEBUG
     static constexpr uint16_t UploadTimeout = 10000;  // ms
-    static constexpr size_t UploadBatchWorkerSize = 5;
+    static constexpr size_t UploadIndexWorkerSize = 5;
 #else
     static constexpr uint16_t UploadTimeout = 1000;  // ms
-    static constexpr size_t UploadBatchWorkerSize = 2;
+    static constexpr size_t UploadIndexWorkerSize = 2;
 #endif
 
 public:
-    SkGenerator(const TableName &base_table_name,
-                NodeGroupId node_group_id,
-                int32_t partition_id)
-        : base_table_name_(base_table_name),
-          node_group_id_(node_group_id),
-          partition_id_(partition_id)
+    UploadIndexContext() = default;
+
+    UploadIndexContext(const UploadIndexContext &rhs) = delete;
+    UploadIndexContext(UploadIndexContext &&rhs) = delete;
+
+    void Reset(NodeGroupId ng_id);
+    void InitUploadWorkers();
+    void TerminateWorkers();
+    void WaitUntilUploadFinished();
+    void EnqueueNewIndexes(TableIndexSet &&new_indexes);
+    void RecycleUploadTask(UploadIndexTask &task, CcErrorCode task_res);
+    void UploadIndexWorker();
+
+    bool UploadSucceed()
     {
+        std::unique_lock<std::mutex> lk(mux_);
+        return upload_result_ == CcErrorCode::NO_ERROR;
     }
-    ~SkGenerator() = default;
 
-    void GenerateSkFromPk(TxKey start_key,
-                          TxKey end_key,
-                          uint64_t scan_ts,
-                          std::vector<TableName> &new_indexes_name,
-                          size_t &scanned_pk_count,
-                          CcErrorCode &res_code,
-                          GenerateSkStatus &task_status);
-
-    void RemoteGenerateSkFromPk(const std::string &start_key_str,
-                                const std::string &end_key_str,
-                                uint64_t scan_ts,
-                                std::vector<TableName> &new_indexes_name,
-                                size_t &scanned_pk_count,
-                                CcErrorCode &res_code,
-                                GenerateSkStatus &task_status);
+    CcErrorCode UploadResult()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        return upload_result_;
+    }
 
     const std::vector<int64_t> &NodeGroupTerms() const
     {
@@ -60,81 +77,128 @@ public:
     }
 
 private:
-    enum struct UploadTaskStatus
-    {
-        Free = 0,
-        Ongoing,
-        Pending
-    };
-
-    struct UploadBatchTask
-    {
-        // The original WriteEntry set for each index table.
-        std::unordered_map<TableName, std::vector<WriteEntry>> write_entry_set_;
-        UploadTaskStatus task_status_{UploadTaskStatus::Free};
-    };
-
-    /**
-     * @brief Scan pk items, and generate sk items.
-     *
-     * @return The result code.
-     */
-    CcErrorCode ScanPkAndGenerateSk(
-        const TxKey *start_key,
-        const TxKey *end_key,
-        uint64_t scan_ts,
-        int64_t ng_term,
-        uint64_t tx_number,
-        const std::vector<TableName> &new_indexes_name,
-        size_t &scanned_pk_count,
-        GenerateSkStatus &task_status);
-    CcErrorCode UploadWithoutDataLog(
-        UploadBatchTask &upload_task,
-        std::vector<std::unique_ptr<UploadBatchCc>> &upload_req_pool);
-    CcErrorCode UploadSkInternal(
-        std::unordered_map<TableName, NGWriteEntry> &ng_write_set,
-        std::vector<std::unique_ptr<UploadBatchCc>> &upload_req_pool);
-    void UploadBatch(
-        const TableName &table_name,
-        NodeGroupId dest_ng_id,
-        int64_t &ng_term,
-        const std::vector<WriteEntry *> &write_entry_vec,
-        size_t batch_size,
-        size_t start_key_idx,
-        bthread::Mutex &req_mux,
-        bthread::ConditionVariable &req_cv,
-        size_t &finished_req_cnt,
-        CcErrorCode &res_code,
-        std::vector<std::unique_ptr<UploadBatchCc>> &upload_req_pool);
+    CcErrorCode UploadEncodedIndex(UploadIndexTask &upload_task);
+    CcErrorCode UploadIndexInternal(
+        std::unordered_map<TableName, NGIndexSet> &ng_index_set);
+    void SendIndexes(const TableName &table_name,
+                     NodeGroupId dest_ng_id,
+                     int64_t &ng_term,
+                     const std::vector<WriteEntry *> &write_entry_vec,
+                     size_t batch_size,
+                     size_t start_key_idx,
+                     bthread::Mutex &req_mux,
+                     bthread::ConditionVariable &req_cv,
+                     size_t &finished_req_cnt,
+                     CcErrorCode &res_code);
     // Acquire and release range read lock.
     CcErrorCode AcquireRangeReadLocks(
         TransactionExecution *acq_lock_txm,
-        UploadBatchTask &upload_task,
-        std::unordered_map<TableName, NGWriteEntry> &ng_write_set);
+        UploadIndexTask &upload_task,
+        std::unordered_map<TableName, NGIndexSet> &ng_index_set);
     void ReleaseRangeReadLocks(TransactionExecution *acq_lock_txm,
                                bool is_success);
     void AdvanceWriteEntryForRangeInfo(
         const RangeRecord &range_record,
         std::vector<WriteEntry>::iterator &cur_write_entry_it,
         const std::vector<WriteEntry>::iterator &write_entry_end,
-        NGWriteEntry &ng_write_entrys);
-    void UploadBatchWorker();
+        NGIndexSet &ng_write_entrys);
+    UploadBatchCc *NextRequest();
 
-    const TableName &base_table_name_;
     NodeGroupId node_group_id_{0};
-    int32_t partition_id_{0};
-    WorkerThreadContext upload_batch_worker_ctx_{UploadBatchWorkerSize};
-    std::array<UploadBatchTask, UploadBatchWorkerSize> upload_batch_queue_;
-    uint8_t pending_upload_task_size_{0};
-    uint8_t upload_task_head_{UINT8_MAX};
-    std::mutex upload_sender_mux_;
-    std::condition_variable upload_sender_cv_;
-    uint8_t ongoing_upload_task_size_{0};
-    CcErrorCode upload_task_result_{CcErrorCode::NO_ERROR};
-    size_t scan_batch_size_{LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE};
+    std::vector<std::thread> worker_thds_;
+    std::array<UploadIndexTask, UploadIndexWorkerSize> task_pool_;
+    uint8_t free_head_{0};
+    uint8_t pending_head_{0};
+    size_t pending_task_cnt_{0};
+    size_t ongoing_task_cnt_{0};
+    std::mutex mux_;
+    std::condition_variable producer_cv_;
+    std::condition_variable consumer_cv_;
+    WorkerStatus status_{WorkerStatus::Active};
+    uint32_t upload_batch_size_{128};
+    CcErrorCode upload_result_{CcErrorCode::NO_ERROR};
     // Store the node group leader terms after acquired them.
     std::vector<int64_t> leader_terms_;
-    uint32_t upload_batch_size_{128};
+    // For each node group, and each index table
+    CcRequestPool<UploadBatchCc> upload_req_pool_;
+};
+
+class SkGenerator
+{
+public:
+    SkGenerator() = default;
+
+    void Reset(const TxKey *start_key,
+               const TxKey *end_key,
+               uint64_t scan_ts,
+               const TableName &base_table_name,
+               NodeGroupId node_group_id,
+               int32_t partition_id,
+               uint64_t tx_number,
+               int64_t tx_term,
+               std::vector<TableName> &new_indexes_name);
+
+    void Reset(const std::string &start_key_str,
+               const std::string &end_key_str,
+               uint64_t scan_ts,
+               const TableName &base_table_name,
+               NodeGroupId node_group_id,
+               int32_t partition_id,
+               uint64_t tx_number,
+               int64_t tx_term,
+               std::vector<TableName> &new_indexes_name);
+
+    void ProcessTask();
+
+    const std::vector<int64_t> &NodeGroupTerms() const
+    {
+        return upload_index_ctx_.NodeGroupTerms();
+    }
+
+    CcErrorCode TaskResult() const
+    {
+        return task_result_;
+    }
+
+    size_t ScannedItemsCount() const
+    {
+        return scanned_items_count_;
+    }
+
+private:
+    /**
+     * @brief Scan pk items, and generate sk items.
+     *
+     */
+    void ScanAndEncodeIndex(const TxKey *start_key,
+                            const TxKey *end_key,
+                            int64_t ng_term,
+                            uint64_t tx_number);
+
+    const TableName *base_table_name_;
+    NodeGroupId node_group_id_{0};
+    uint64_t tx_number_{0};
+    int64_t tx_term_{INIT_TERM};
+    GenerateSkStatus *task_status_{nullptr};
+    int32_t partition_id_{0};
+    uint64_t scan_ts_{0};
+    union
+    {
+        const TxKey *start_key_;
+        const std::string *start_key_str_;
+    };
+    union
+    {
+        const TxKey *end_key_;
+        const std::string *end_key_str_;
+    };
+    bool is_key_str_{false};
+    const std::vector<TableName> *new_indexes_name_{nullptr};
+    UploadIndexContext upload_index_ctx_;
+    std::vector<SkEncoder::uptr> sk_encoder_vec_;
+    size_t scan_batch_size_{LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE};
+    CcErrorCode task_result_{CcErrorCode::NO_ERROR};
+    size_t scanned_items_count_{0};
 };
 
 }  // namespace txservice

@@ -22,6 +22,7 @@
 #include "range_record.h"
 #include "range_slice.h"
 #include "sharder.h"
+#include "sk_generator.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_key.h"

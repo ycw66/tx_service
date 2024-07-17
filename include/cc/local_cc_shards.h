@@ -49,6 +49,7 @@ class Checkpointer;
 class TxService;
 struct ClusterScaleOp;
 struct DataMigrationOp;
+class SkGenerator;
 
 struct DataMigrationStatus
 {
@@ -1614,6 +1615,7 @@ public:
     std::vector<std::unique_ptr<SplitFlushRangeOp>> split_flush_range_op_pool_;
     std::mutex split_flush_range_op_pool_mux_;
     std::vector<std::unique_ptr<UpsertTableIndexOp>> table_index_op_pool_;
+    std::vector<std::unique_ptr<SkGenerator>> sk_generator_pool_;
     std::mutex table_index_op_pool_mux_;
 
     // Since there's only 1 cluster scale event at a time across the cluster,
