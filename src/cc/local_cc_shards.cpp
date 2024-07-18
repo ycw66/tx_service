@@ -707,7 +707,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             if (!store_range)
             {
                 // Fetch range slices from data store if it's not cached.
-                RunOnTxProcessorCc cc([](CcShard &ccs) {});
+                WaitableCc cc;
                 range_entry->FetchRangeSlices(range_table_name,
                                               &cc,
                                               node_group_id,
@@ -2870,7 +2870,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         StoreRange *store_range = range_entry->PinStoreRange();
         if (!store_range)
         {
-            RunOnTxProcessorCc cc([](CcShard &ccs) {});
+            WaitableCc cc;
             // Since node group is pinned, range entry will not be dropped
             // by ClearNodeGroupCc. This is the only thread that will update
             // table ranges for this table, so we don't need meta data shared

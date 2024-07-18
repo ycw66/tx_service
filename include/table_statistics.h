@@ -1310,7 +1310,7 @@ private:
     {
         uint32_t shard_code = ShardCode(base_table_name_.StringView());
 
-        RunOnTxProcessorCc cc_req(std::move(task));
+        WaitableCc cc_req(std::move(task));
         Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(shard_code,
                                                                  &cc_req);
         cc_req.Wait();

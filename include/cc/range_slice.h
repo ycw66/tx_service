@@ -591,7 +591,7 @@ public:
                                 CcShard *cc_shard,
                                 store::DataStoreHandler *store_hd,
                                 bool force_load = false,
-                                uint8_t prefetch_size = 0);
+                                uint32_t prefetch_size = 0);
 
     void UnpinSlice(StoreSlice *slice, bool need_lock_range);
 
@@ -685,6 +685,40 @@ public:
     }
 
 protected:
+    class LoadSliceController
+    {
+    public:
+        static StoreRange::LoadSliceController ForceLoadConotroller();
+
+        static StoreRange::LoadSliceController NonForceLoadController(
+            bool async_emit, CcShard *submitter);
+
+        bool ForceLoad() const
+        {
+            return force_load_;
+        }
+
+        bool AsyncEmit() const
+        {
+            return async_emit_;
+        }
+
+        // Round-robin load balance.
+        uint16_t NextExecutor() const;
+
+    private:
+        bool force_load_;
+
+        // When async_emit is set, dispatch the loading task to other
+        // TxProcessor. It is mainly used for concurrency emitting.
+        // StoreHandler Driver may cost a lot of cpu to emit a request. e.g,
+        // Cassandra prepare-stmt and execute-stmt are relatively slow.
+        bool async_emit_;
+
+        CcShard *submitter_;
+        mutable uint16_t executor_;
+    };
+
     enum struct LoadSliceStatus
     {
         Success,
@@ -704,8 +738,8 @@ protected:
                               CcRequestBase *cc_request,
                               CcShard *cc_shard,
                               store::DataStoreHandler *store_hd,
-                              bool force_load,
-                              std::unique_lock<std::mutex> &slice_lk);
+                              const LoadSliceController &ctrl,
+                              std::unique_lock<std::mutex> &&slice_lk);
 
     virtual std::pair<size_t, size_t> SearchSlice(
         const StoreSlice *slice) const = 0;
@@ -1045,8 +1079,8 @@ public:
         CcShard *cc_shard,
         store::DataStoreHandler *store_hd,
         bool force_load,
-        uint8_t prefetch_size,
-        uint8_t max_pin_cnt,
+        uint32_t prefetch_size,
+        uint32_t max_pin_cnt,
         bool forward_pin,
         RangeSliceOpStatus &pin_status,
         const StoreSlice *&last_pinned_slice,
@@ -1060,6 +1094,11 @@ public:
         size_t slice_idx = SearchSlice(search_key, inclusive);
         StoreSlice *slice = slices_[slice_idx].get();
         std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
+
+        uint32_t pin_slice_cnt = 0;
+        bool to_prefetch = prefetch_size > 0;
+
+        last_pinned_slice = nullptr;
 
         if (slice->to_alter_)
         {
@@ -1085,12 +1124,11 @@ public:
             CollectCacheHit(*cc_shard);
 
             ++slice->pins_;
+            ++pin_slice_cnt;
             pin_status = RangeSliceOpStatus::Successful;
             last_pinned_slice = slice;
 
             slice_lk.unlock();
-
-            size_t pin_slice_cnt = 1;
 
             if (forward_pin)
             {
@@ -1109,6 +1147,7 @@ public:
                         if (!(*slice_start < *end_key ||
                               (end_inclusive && *slice_start == *end_key)))
                         {
+                            to_prefetch = false;
                             break;
                         }
                     }
@@ -1143,6 +1182,7 @@ public:
                         const KeyT *slice_end = prepin_slice->EndKey();
                         if (!(*end_key < *slice_end))
                         {
+                            to_prefetch = false;
                             break;
                         }
                     }
@@ -1161,11 +1201,13 @@ public:
                     }
                 }
             }
+
+            slice_lk.lock();
             pins_.fetch_add(pin_slice_cnt, std::memory_order_release);
-            return RangeSliceId(this, slice);
         }
         else if (check_key_cache)
         {
+            assert(to_prefetch == false);
             if (slice->IsValidInKeyCache(shard_id))
             {
                 bool found = ContainsKey(search_key, shard_id);
@@ -1195,73 +1237,149 @@ public:
                 return RangeSliceId(this, slice);
             }
         }
-        last_pinned_slice = nullptr;
 
-        // collect metrics: slice cache miss
-        CollectCacheMiss(*cc_shard);
+        assert(slice_lk.owns_lock());
 
-        if (!no_load_on_miss)
+        if (slice->status_ != SliceStatus::FullyCached)
         {
-            LoadSliceStatus load_ret = LoadSlice(tbl_name,
-                                                 ng_term,
-                                                 *slice,
-                                                 key_schema,
-                                                 rec_schema,
-                                                 schema_ts,
-                                                 snapshot_ts,
-                                                 kv_info,
-                                                 cc_request,
-                                                 cc_shard,
-                                                 store_hd,
-                                                 force_load,
-                                                 slice_lk);
-            switch (load_ret)
-            {
-            case LoadSliceStatus::Success:
-                pin_status = RangeSliceOpStatus::BlockedOnLoad;
-                break;
-            case LoadSliceStatus::Delay:
-                pin_status = RangeSliceOpStatus::Delay;
-                break;
-            case LoadSliceStatus::Retry:
-                pin_status = RangeSliceOpStatus::Retry;
-                break;
-            default:
-                pin_status = RangeSliceOpStatus::Error;
-                break;
-            }
-            slice_lk.unlock();
-            size_t sid = slice_idx + 1;
-            for (size_t fid = 0; fid < prefetch_size && sid < slices_.size();
-                 ++fid, ++sid)
-            {
-                StoreSlice *prefetch_slice = slices_[sid].get();
-                std::unique_lock<std::mutex> prefetch_lk(
-                    prefetch_slice->slice_mux_);
+            // collect metrics: slice cache miss
+            CollectCacheMiss(*cc_shard);
 
-                if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
+            if (!no_load_on_miss)
+            {
+                LoadSliceController load_ctrl =
+                    force_load ? LoadSliceController::ForceLoadConotroller()
+                               : LoadSliceController::NonForceLoadController(
+                                     false, cc_shard);
+
+                LoadSliceStatus load_ret = LoadSlice(tbl_name,
+                                                     ng_term,
+                                                     *slice,
+                                                     key_schema,
+                                                     rec_schema,
+                                                     schema_ts,
+                                                     snapshot_ts,
+                                                     kv_info,
+                                                     cc_request,
+                                                     cc_shard,
+                                                     store_hd,
+                                                     load_ctrl,
+                                                     std::move(slice_lk));
+                switch (load_ret)
                 {
-                    LoadSlice(tbl_name,
-                              ng_term,
-                              *prefetch_slice,
-                              key_schema,
-                              rec_schema,
-                              schema_ts,
-                              snapshot_ts,
-                              kv_info,
-                              nullptr,
-                              cc_shard,
-                              store_hd,
-                              false,
-                              prefetch_lk);
+                case LoadSliceStatus::Success:
+                    pin_status = RangeSliceOpStatus::BlockedOnLoad;
+                    break;
+                case LoadSliceStatus::Delay:
+                    pin_status = RangeSliceOpStatus::Delay;
+                    break;
+                case LoadSliceStatus::Retry:
+                    pin_status = RangeSliceOpStatus::Retry;
+                    break;
+                default:
+                    pin_status = RangeSliceOpStatus::Error;
+                    break;
                 }
             }
+            else
+            {
+                pin_status = RangeSliceOpStatus::NotPinned;
+                assert(prefetch_size == 0);
+            }
         }
-        else
+
+        if (to_prefetch)
         {
-            slice_lk.unlock();
-            pin_status = RangeSliceOpStatus::NotPinned;
-            assert(prefetch_size == 0);
+            LoadSliceController load_ctrl =
+                LoadSliceController::NonForceLoadController(true, cc_shard);
+
+            if (forward_pin)
+            {
+                unsigned start_sid =
+                    slice_idx + (pin_slice_cnt > 0 ? pin_slice_cnt : 1);
+                for (unsigned sid = start_sid, k = pin_slice_cnt;
+                     sid < slices_.size() && k <= prefetch_size;
+                     ++sid, ++k)
+                {
+                    TemplateStoreSlice<KeyT> *prefetch_slice =
+                        slices_[sid].get();
+                    if (end_key != nullptr)
+                    {
+                        // If the request (e.g., a scan) specifies the
+                        // end key, does not prefetch slices beyond the
+                        // end key.
+                        const KeyT *slice_start = prefetch_slice->StartKey();
+                        if (!(*slice_start < *end_key ||
+                              (end_inclusive && *slice_start == *end_key)))
+                        {
+                            break;
+                        }
+                    }
+
+                    std::unique_lock<std::mutex> prefetch_lk(
+                        prefetch_slice->slice_mux_);
+
+                    if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
+                    {
+                        LoadSlice(tbl_name,
+                                  ng_term,
+                                  *prefetch_slice,
+                                  key_schema,
+                                  rec_schema,
+                                  schema_ts,
+                                  snapshot_ts,
+                                  kv_info,
+                                  nullptr,
+                                  cc_shard,
+                                  store_hd,
+                                  load_ctrl,
+                                  std::move(prefetch_lk));
+                    }
+                }
+            }
+            else if (slice_idx > 0)
+            {
+                int start_sid =
+                    slice_idx - (pin_slice_cnt > 0 ? pin_slice_cnt : 1);
+                for (int sid = start_sid, k = pin_slice_cnt;
+                     sid > -1 && k <= static_cast<int>(prefetch_size);
+                     --sid, ++k)
+                {
+                    TemplateStoreSlice<KeyT> *prefetch_slice =
+                        slices_[sid].get();
+                    if (end_key != nullptr)
+                    {
+                        // If the request (e.g., a scan) specifies the
+                        // end key, does not prefetch slices beyond the
+                        // end key.
+                        const KeyT *slice_end = prefetch_slice->EndKey();
+                        if (!(*end_key < *slice_end))
+                        {
+                            break;
+                        }
+                    }
+
+                    std::unique_lock<std::mutex> prefetch_lk(
+                        prefetch_slice->slice_mux_);
+
+                    if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
+                    {
+                        LoadSlice(tbl_name,
+                                  ng_term,
+                                  *prefetch_slice,
+                                  key_schema,
+                                  rec_schema,
+                                  schema_ts,
+                                  snapshot_ts,
+                                  kv_info,
+                                  nullptr,
+                                  cc_shard,
+                                  store_hd,
+                                  load_ctrl,
+                                  std::move(prefetch_lk));
+                    }
+                }
+            }
         }
 
         return RangeSliceId(this, slice);

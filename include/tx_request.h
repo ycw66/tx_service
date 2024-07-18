@@ -576,7 +576,7 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
     std::vector<ScanBatchTuple> *batch_;
 
 #ifdef RANGE_PARTITION_ENABLED
-    uint8_t prefetch_slice_cnt_{0};
+    uint32_t prefetch_slice_cnt_{0};
 #endif
 
 #ifdef ON_KEY_OBJECT

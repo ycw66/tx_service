@@ -50,12 +50,18 @@ public:
         {
             if (page_->entries_[idx])
             {
-                *key_insert_it++ = std::move(page_->keys_[idx]);
-                *entry_insert_it++ = std::move(page_->entries_[idx]);
+                *key_insert_it = std::move(page_->keys_[idx]);
+                *entry_insert_it = std::move(page_->entries_[idx]);
+                ++key_insert_it;
+                ++entry_insert_it;
             }
         }
         page_->keys_.erase(key_insert_it, page_->keys_.end());
         page_->entries_.erase(entry_insert_it, page_->entries_.end());
+        assert(std::all_of(page_->entries_.begin(),
+                           page_->entries_.end(),
+                           [](const std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
+                           { return cce.get() != nullptr; }));
     }
 
     size_t CleanCount() const
@@ -86,15 +92,9 @@ protected:
 
         size_t range_end_idx;
         const KeyT *range_end_key = store_range->RangeEndKey();
-        if (range_end_key)
-        {
-            assert(page_->keys_[0] <= *range_end_key);
-            range_end_idx = page_->LowerBound(*range_end_key);
-        }
-        else
-        {
-            range_end_idx = page_->Size();  // nullptr indicates +00.
-        }
+        assert(range_end_key);
+        assert(page_->keys_[0] <= *range_end_key);
+        range_end_idx = page_->LowerBound(*range_end_key);
 
         while (idx_in_page < range_end_idx)
         {
@@ -107,15 +107,9 @@ protected:
 
             size_t slice_end_idx;
             const KeyT *slice_end_key = store_slice->EndKey();
-            if (slice_end_key)
-            {
-                assert(page_->keys_[0] <= *slice_end_key);
-                slice_end_idx = page_->LowerBound(*slice_end_key);
-            }
-            else
-            {
-                slice_end_idx = page_->Size();  // nullptr indicates +00.
-            }
+            assert(slice_end_key);
+            assert(page_->keys_[0] <= *slice_end_key);
+            slice_end_idx = page_->LowerBound(*slice_end_key);
 
             assert(slice_end_idx <= range_end_idx);
 

@@ -464,6 +464,8 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
       cc_ng_term_(cc_ng_term),
       force_load_(force_load),
       finish_cnt_(0),
+      next_idxs_(cc_shards.Count(), 0),
+      partitioned_slice_data_(cc_shards.Count()),
       load_slice_req_(table_name,
                       key_schema,
                       rec_schema,
@@ -477,8 +479,6 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
       range_(range),
       local_cc_shards_(cc_shards)
 {
-    partitioned_slice_data_.resize(cc_shards.Count());
-    next_idxs_.resize(cc_shards.Count(), 0);
     load_slice_req_.post_lambda_ = [this](LoadRangeSliceRequest *req)
     {
         // Update the slice's last load ts.

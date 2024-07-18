@@ -178,7 +178,7 @@ public:
                   bool start_inclusive,
                   const TxKey *end_key,
                   bool end_inclusive,
-                  uint8_t prefetch_size,
+                  uint32_t prefetch_size,
                   uint64_t read_ts,
                   uint64_t tx_number,
                   int64_t tx_term,

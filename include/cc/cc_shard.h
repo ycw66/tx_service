@@ -26,6 +26,7 @@
 #include "cc_map.h"
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
+#include "cc_req_pool.h"
 #include "error_messages.h"
 #include "meter.h"
 #include "metrics.h"
@@ -315,6 +316,14 @@ public:
     void NotifyCkpt(bool request_ckpt = true);
 
     void SetWaitingCkpt(bool is_waiting);
+
+    /**
+     * @brief Dispatch heavy cpu-bound task, e.g. StoreRange::LoadSlice().
+     * @param cc_shard_idx Execute the task on which cc_shard.
+     * @param task A cpu-bound task.
+     */
+    void DispatchTask(uint16_t cc_shard_idx,
+                      std::function<void(CcShard &)> task);
 
     /**
      * @brief Get the number of ccentries in this ccshard
@@ -849,6 +858,9 @@ private:
 
     // For load record from kvstore asynchronously
     std::unordered_map<LruEntry *, FetchRecordCc> fetch_record_reqs_;
+
+    // For concurrency execution of cpu-bound tasks.
+    CcRequestPool<RunOnTxProcessorCc> run_on_tx_processor_cc_pool_;
 
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;

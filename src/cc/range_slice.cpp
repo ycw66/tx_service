@@ -148,6 +148,40 @@ void StoreSlice::InitKeyCache(StoreRange *range,
     }
 }
 
+StoreRange::LoadSliceController
+StoreRange::LoadSliceController::ForceLoadConotroller()
+{
+    StoreRange::LoadSliceController ctrl;
+    ctrl.force_load_ = true;
+    ctrl.async_emit_ = false;
+    ctrl.submitter_ = nullptr;
+    ctrl.executor_ = UINT16_MAX;
+    return ctrl;
+}
+
+StoreRange::LoadSliceController
+StoreRange::LoadSliceController::NonForceLoadController(bool async_emit,
+                                                        CcShard *submitter)
+{
+    StoreRange::LoadSliceController ctrl;
+    ctrl.force_load_ = false;
+    ctrl.async_emit_ = async_emit;
+    ctrl.submitter_ = submitter;
+    ctrl.executor_ =
+        (async_emit && submitter) ? submitter->core_id_ : UINT16_MAX;
+    return ctrl;
+}
+
+uint16_t StoreRange::LoadSliceController::NextExecutor() const
+{
+    assert(force_load_ == false && submitter_ != nullptr);
+    if (executor_++ == submitter_->core_cnt_)
+    {
+        executor_ = 0;
+    }
+    return executor_;
+}
+
 StoreRange::StoreRange(uint32_t partition_id,
                        NodeGroupId range_owner,
                        LocalCcShards &cc_shards,
@@ -189,7 +223,7 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
                                         CcShard *cc_shard,
                                         store::DataStoreHandler *store_hd,
                                         bool force_load,
-                                        uint8_t prefetch_size)
+                                        uint32_t prefetch_size)
 {
     // A shared lock on the range to prevent concurrent splitting or merging of
     // slices.
@@ -211,6 +245,11 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
     {
         RangeSliceOpStatus pin_status;
 
+        LoadSliceController load_ctrl =
+            force_load
+                ? LoadSliceController::ForceLoadConotroller()
+                : LoadSliceController::NonForceLoadController(false, cc_shard);
+
         LoadSliceStatus load_ret = LoadSlice(tbl_name,
                                              ng_term,
                                              *slice,
@@ -222,8 +261,8 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
                                              cc_request,
                                              cc_shard,
                                              store_hd,
-                                             force_load,
-                                             slice_lk);
+                                             load_ctrl,
+                                             std::move(slice_lk));
 
         switch (load_ret)
         {
@@ -244,10 +283,11 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
             break;
         }
 
-        slice_lk.unlock();
-
         if (prefetch_size > 0)
         {
+            load_ctrl =
+                LoadSliceController::NonForceLoadController(true, cc_shard);
+
             auto [slice_idx, slice_cnt] = SearchSlice(slice);
             size_t sid = slice_idx + 1;
             for (size_t fid = 0; fid < prefetch_size && sid < slice_cnt;
@@ -270,8 +310,8 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
                               nullptr,
                               cc_shard,
                               store_hd,
-                              false,
-                              prefetch_lk);
+                              load_ctrl,
+                              std::move(prefetch_lk));
                 }
             }
         }
@@ -361,10 +401,10 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     }
 
     // Dispatch notify_cc to the first core
-    RunOnTxProcessorCc notify_cc([](CcShard &ccs) {});
+    WaitableCc notify_cc;
     CcShard *notify_cc_shard = local_cc_shards_.GetCcShard(0);
 
-    uint8_t unused_prefetch_size = 0;
+    uint32_t unused_prefetch_size = 0;
     int sleep_time = 0;
 
     while (true)
@@ -701,15 +741,15 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
     CcRequestBase *cc_request,
     CcShard *cc_shard,
     store::DataStoreHandler *store_hd,
-    bool force_load,
-    std::unique_lock<std::mutex> &slice_lk)
+    const LoadSliceController &ctrl,
+    std::unique_lock<std::mutex> &&slice_lk)
 {
     // The caller of this method has acquired the slice lock on the input
     // mutex.
 
     if (slice.fetch_slice_cc_ == nullptr)
     {
-        if (!force_load && slice.IsRecentLoad())
+        if (!ctrl.ForceLoad() && slice.IsRecentLoad())
         {
             return LoadSliceStatus::Delay;
         }
@@ -726,7 +766,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
                                                schema_ts,
                                                slice,
                                                *this,
-                                               force_load,
+                                               ctrl.ForceLoad(),
                                                snapshot_ts,
                                                local_cc_shards_);
 
@@ -736,66 +776,143 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         }
 
         slice_lk.unlock();
-        slice.fetch_slice_cc_->LoadRequest()->start_ = metrics::Clock::now();
-        store::DataStoreHandler::DataStoreOpStatus kv_load_status =
-            store_hd->LoadRangeSlice(tbl_name,
-                                     kv_info,
-                                     partition_id_,
-                                     slice.fetch_slice_cc_->LoadRequest());
-        slice_lk.lock();
 
-        // By the time LoadRangeSlice() returns, the slice's status is
-        // either BeingLoaded or PartiallyCached. This is because this
-        // method is called by PinSlice(), which is called by one of tx
-        // processors who will process the fill slice cc request. Hence,
-        // loading slice into memory cannot complete at this point.
-
-        switch (kv_load_status)
+        if (ctrl.AsyncEmit())
         {
-        case store::DataStoreHandler::DataStoreOpStatus::Success:
-            return LoadSliceStatus::Success;
-        case store::DataStoreHandler::DataStoreOpStatus::Retry:
-            // Put the ccrequests back to txprocessor queue except the first
-            // one which will be put back to txprocessor queue by the caller.
-            for (size_t i = 1; i < slice.cc_queue_.size(); ++i)
-            {
-                auto *cc_req = std::get<0>(slice.cc_queue_[i]);
-                auto *cc_shard = std::get<1>(slice.cc_queue_[i]);
-                cc_shard->Enqueue(cc_req);
-            }
-            slice.cc_queue_.clear();
-            slice.fetch_slice_cc_ = nullptr;
-            pins_.fetch_sub(1, std::memory_order_release);
-            return LoadSliceStatus::Retry;
-        default:
-            // Abort those ccrequests except the first one which will be aborted
-            // by the caller. We need to make sure that the
-            // CcMap::Execute(CcRequest ) and CcRequest::ABortCcRequest(...)
-            // functions occur on the same thread. Otherwise, AbortCcRequest is
-            // not safe behavior.
-            std::unordered_map<CcShard *, std::vector<CcRequestBase *>>
-                waiting_reqs;
-            for (size_t i = 1; i < slice.cc_queue_.size(); ++i)
-            {
-                auto *cc_req = std::get<0>(slice.cc_queue_[i]);
-                auto *cc_shard = std::get<1>(slice.cc_queue_[i]);
-                waiting_reqs[cc_shard].push_back(cc_req);
-            }
+            // Prefetching.
+            assert(ctrl.ForceLoad() == false);
+            assert(cc_request == nullptr);
 
-            for (auto &[cc_shard, reqs] : waiting_reqs)
+            auto task = [this, store_hd, &tbl_name, &slice, kv_info](CcShard &)
             {
-                cc_shard->AbortCcRequests(std::move(reqs),
-                                          CcErrorCode::DATA_STORE_ERR);
+                slice.fetch_slice_cc_->LoadRequest()->start_ =
+                    metrics::Clock::now();
+
+                // fetch_slice_cc_.load_slice_req_ holds a copy of slice's
+                // start_key and slice's end_key. Thus it is safe to execute in
+                // a seperate TxProcessor.
+                store::DataStoreHandler::DataStoreOpStatus kv_load_status =
+                    store_hd->LoadRangeSlice(
+                        tbl_name,
+                        kv_info,
+                        partition_id_,
+                        slice.fetch_slice_cc_->LoadRequest());
+
+                std::unique_lock<std::mutex> lk(slice.slice_mux_,
+                                                std::defer_lock);
+                switch (kv_load_status)
+                {
+                case store::DataStoreHandler::DataStoreOpStatus::Success:
+                    break;
+                case store::DataStoreHandler::DataStoreOpStatus::Retry:
+                    // Put the ccrequests back to txprocessor queue.
+                    lk.lock();
+                    for (auto [cc_req, cc_shard] : slice.cc_queue_)
+                    {
+                        cc_shard->Enqueue(cc_req);
+                    }
+                    slice.cc_queue_.clear();
+                    slice.fetch_slice_cc_ = nullptr;
+                    pins_.fetch_sub(1, std::memory_order_release);
+                    break;
+                default:
+                    // Abort those ccrequests.
+                    //
+                    // We need to make sure that the CcMap::Execute(CcRequest )
+                    // and CcRequest::ABortCcRequest(...) functions occur on the
+                    // same thread. Otherwise, AbortCcRequest is not safe
+                    // behavior.
+                    std::unordered_map<CcShard *, std::vector<CcRequestBase *>>
+                        waiting_reqs;
+                    lk.lock();
+                    for (auto [cc_req, cc_shard] : slice.cc_queue_)
+                    {
+                        waiting_reqs[cc_shard].push_back(cc_req);
+                    }
+
+                    for (auto &[cc_shard, reqs] : waiting_reqs)
+                    {
+                        cc_shard->AbortCcRequests(std::move(reqs),
+                                                  CcErrorCode::DATA_STORE_ERR);
+                    }
+                    slice.cc_queue_.clear();
+                    slice.fetch_slice_cc_ = nullptr;
+                    pins_.fetch_sub(1, std::memory_order_release);
+                    break;
+                }
+            };
+
+            cc_shard->DispatchTask(ctrl.NextExecutor(), std::move(task));
+
+            return LoadSliceStatus::Success;
+        }
+        else
+        {
+            slice.fetch_slice_cc_->LoadRequest()->start_ =
+                metrics::Clock::now();
+
+            store::DataStoreHandler::DataStoreOpStatus kv_load_status =
+                store_hd->LoadRangeSlice(tbl_name,
+                                         kv_info,
+                                         partition_id_,
+                                         slice.fetch_slice_cc_->LoadRequest());
+
+            // By the time LoadRangeSlice() returns, the slice's status is
+            // either BeingLoaded or PartiallyCached. This is because this
+            // method is called by PinSlice(), which is called by one of tx
+            // processors who will process the fill slice cc request. Hence,
+            // loading slice into memory cannot complete at this point.
+
+            switch (kv_load_status)
+            {
+            case store::DataStoreHandler::DataStoreOpStatus::Success:
+                return LoadSliceStatus::Success;
+            case store::DataStoreHandler::DataStoreOpStatus::Retry:
+                // Put the ccrequests back to txprocessor queue except the first
+                // one which will be put back to txprocessor queue by the
+                // caller.
+                slice_lk.lock();
+                for (size_t i = 1; i < slice.cc_queue_.size(); ++i)
+                {
+                    auto *cc_req = std::get<0>(slice.cc_queue_[i]);
+                    auto *cc_shard = std::get<1>(slice.cc_queue_[i]);
+                    cc_shard->Enqueue(cc_req);
+                }
+                slice.cc_queue_.clear();
+                slice.fetch_slice_cc_ = nullptr;
+                pins_.fetch_sub(1, std::memory_order_release);
+                return LoadSliceStatus::Retry;
+            default:
+                // Abort those ccrequests except the first one which will be
+                // aborted by the caller. We need to make sure that the
+                // CcMap::Execute(CcRequest ) and CcRequest::ABortCcRequest(...)
+                // functions occur on the same thread. Otherwise, AbortCcRequest
+                // is not safe behavior.
+                std::unordered_map<CcShard *, std::vector<CcRequestBase *>>
+                    waiting_reqs;
+                slice_lk.lock();
+                for (size_t i = 1; i < slice.cc_queue_.size(); ++i)
+                {
+                    auto *cc_req = std::get<0>(slice.cc_queue_[i]);
+                    auto *cc_shard = std::get<1>(slice.cc_queue_[i]);
+                    waiting_reqs[cc_shard].push_back(cc_req);
+                }
+
+                for (auto &[cc_shard, reqs] : waiting_reqs)
+                {
+                    cc_shard->AbortCcRequests(std::move(reqs),
+                                              CcErrorCode::DATA_STORE_ERR);
+                }
+                slice.cc_queue_.clear();
+                slice.fetch_slice_cc_ = nullptr;
+                pins_.fetch_sub(1, std::memory_order_release);
+                return LoadSliceStatus::Error;
             }
-            slice.cc_queue_.clear();
-            slice.fetch_slice_cc_ = nullptr;
-            pins_.fetch_sub(1, std::memory_order_release);
-            return LoadSliceStatus::Error;
         }
     }
     else
     {
-        if (force_load && !slice.fetch_slice_cc_->ForceLoad() &&
+        if (ctrl.ForceLoad() && !slice.fetch_slice_cc_->ForceLoad() &&
             slice.status_ != SliceStatus::BeingLoaded)
         {
             // If the demanding request sets the force_load flag and the
@@ -803,7 +920,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
             // to change the flag if filling into memory has not started.
             slice.fetch_slice_cc_->SetForceLoad(true);
         }
-        else if (force_load && !slice.fetch_slice_cc_->ForceLoad())
+        else if (ctrl.ForceLoad() && !slice.fetch_slice_cc_->ForceLoad())
         {
             // Retry this request whose force_load flag is true, rather than put
             // it into ccrequest queue. If OOM, the queued request will be

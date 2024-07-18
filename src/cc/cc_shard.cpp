@@ -898,6 +898,16 @@ void CcShard::SetWaitingCkpt(bool is_waiting)
     local_shards_.SetWaitingCkpt(is_waiting);
 }
 
+void CcShard::DispatchTask(uint16_t cc_shard_idx,
+                           std::function<void(CcShard &)> task)
+{
+    RunOnTxProcessorCc *cc_req = run_on_tx_processor_cc_pool_.NextRequest();
+    cc_req->Reset(std::move(task));
+
+    uint32_t producer_thd_id = core_id_;
+    Enqueue(producer_thd_id, cc_shard_idx, cc_req);
+}
+
 std::pair<bool, const CatalogEntry *> CcShard::CreateCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,

@@ -271,7 +271,7 @@ void CcNode::OnLeaderStart(int64_t term)
             {
                 // Use a dummy cc request that returns once it's put into cc
                 // queue.
-                RunOnTxProcessorCc cc([](CcShard &ccs) {});
+                WaitableCc cc;
                 Sharder::Instance().UpdateClusterConfig(
                     ng_configs, version, &cc, local_cc_shards_.GetCcShard(0));
                 cc.Wait();

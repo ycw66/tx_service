@@ -1001,7 +1001,7 @@ public:
                                CcShard *cc_shard,
                                RangeSliceOpStatus &pin_status,
                                bool force_load,
-                               uint8_t prefetch_size,
+                               uint32_t prefetch_size,
                                bool check_key_cache = false,
                                bool no_load_on_miss = false)
     {
@@ -1095,8 +1095,8 @@ public:
                                 CcRequestBase *cc_request,
                                 CcShard *cc_shard,
                                 bool force_load,
-                                uint8_t prefetch_size,
-                                uint8_t max_pin_cnt,
+                                uint32_t prefetch_size,
+                                uint32_t max_pin_cnt,
                                 bool forward_pin,
                                 RangeSliceOpStatus &pin_status,
                                 const StoreSlice *&last_pinned_slice)

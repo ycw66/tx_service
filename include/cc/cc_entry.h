@@ -1485,7 +1485,7 @@ struct CcPage : public LruPage
 
         if (new_keys.size() == 1)
         {
-            size_t idx_in_page = Emplace(new_keys.front());
+            size_t idx_in_page = Emplace(std::move(new_keys.front()));
             idxs_in_page[0] = idx_in_page;
             return;
         }

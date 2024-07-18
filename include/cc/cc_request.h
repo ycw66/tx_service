@@ -1830,7 +1830,7 @@ public:
              bool is_require_keys,
              bool is_require_recs,
              bool is_require_sort,
-             uint8_t prefetch_size)
+             uint32_t prefetch_size)
     {
         assert(hd_res.Value().is_local_);
 
@@ -1891,7 +1891,7 @@ public:
              bool is_require_keys,
              bool is_require_recs,
              bool is_require_sort,
-             uint8_t prefetch_size)
+             uint32_t prefetch_size)
     {
         assert(!hd_res.Value().is_local_);
 
@@ -2323,9 +2323,9 @@ public:
      * @brief Returns the number of slices to prefetch when loading a cache-miss
      * slice.
      *
-     * @return uint8_t Number of slices to prefetch
+     * @return uint32_t Number of slices to prefetch
      */
-    uint8_t PrefetchSize() const
+    uint32_t PrefetchSize() const
     {
         return prefetch_size_;
     }
@@ -2381,7 +2381,7 @@ private:
      * @brief Number of slices to prefetch when a cache-miss slice is loaded.
      *
      */
-    uint8_t prefetch_size_{0};
+    uint32_t prefetch_size_{0};
     bool read_for_write_{false};
     bool is_covering_keys_{false};
 

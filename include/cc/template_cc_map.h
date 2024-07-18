@@ -3778,7 +3778,7 @@ public:
             // pins the slice in memory. After the slice is pinned, the request
             // is dispatched to other cores to scan in parallel. The slice is
             // unpinned by the last core finishing the scan batch.
-            RangeSliceOpStatus pin_status;
+            RangeSliceOpStatus pin_status = RangeSliceOpStatus::NotPinned;
             const StoreSlice *last_pinned_slice;
             uint8_t max_pin_cnt = 1;
             if (req_end_key == nullptr &&
@@ -3848,6 +3848,7 @@ public:
                 return req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
             }
 
+            assert(pin_status == RangeSliceOpStatus::Successful);
             req.PinSlices(slice_id, last_pinned_slice);
             // Update unfinished cnt before dispatching to remaining cores.
             req.SetUnfinishedCoreCnt(req.GetShardCount());
@@ -6810,6 +6811,7 @@ public:
         index = last_index;
         if (index == slice_vec.size())
         {
+            slice_vec.clear();
             req.SetFinish();
         }
         else
