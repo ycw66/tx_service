@@ -1877,6 +1877,7 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
     uint64_t data_sync_ts,
     bool is_dirty,
     bool can_be_skipped,
+    uint64_t &last_sync_ts,
     std::shared_ptr<DataSyncStatus> status,
     CcHandlerResult<Void> *hres)
 {
@@ -1885,6 +1886,7 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
         GetRangeOwnerInternal(range_info->PartitionId(), ng_id)->BucketOwner();
     if (range_ng == ng_id)
     {
+        last_sync_ts = std::min(range_entry->GetLastSyncTs(), last_sync_ts);
         auto task_limiter_key = TaskLimiterKey(ng_id,
                                                ng_term,
                                                table_name.StringView(),
@@ -2001,6 +2003,7 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                         << " is forwarding message to ng " << ng_id
                         << " during range split.";
 
+                    last_sync_ts = 0;
                     // Mark the task as failed since we cannot gaurantee all
                     // data before data sync ts is flushed.
                     std::lock_guard<std::mutex> status_lk(status->mux_);
@@ -2142,7 +2145,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
     assert(status != nullptr);
 
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
-    last_data_sync_ts = 0;
+    last_data_sync_ts = UINT64_MAX;
 
 #ifndef RANGE_PARTITION_ENABLED
     CatalogEntry *catalog_entry = GetCatalogInternal(table_name, ng_id);
@@ -2211,12 +2214,6 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
 
     for (auto &range : *ranges)
     {
-        if (range.second->GetLastSyncTs() > 0)
-        {
-            last_data_sync_ts =
-                std::min(last_data_sync_ts, range.second->GetLastSyncTs());
-        }
-
         if (EnqueueRangeDataSyncTask(table_name,
                                      ng_id,
                                      ng_term,
@@ -2224,6 +2221,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                                      data_sync_ts,
                                      is_dirty,
                                      can_be_skipped,
+                                     last_data_sync_ts,
                                      status,
                                      hres))
         {
@@ -2288,6 +2286,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
         TableName table_name(range_table_name.StringView(), type);
         for (int32_t range_id : range_ids)
         {
+            uint64_t last_sync_ts = 0;
             auto range_entry =
                 GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
             if (range_entry && EnqueueRangeDataSyncTask(table_name,
@@ -2297,6 +2296,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
                                                         data_sync_ts,
                                                         false,
                                                         false,
+                                                        last_sync_ts,
                                                         status,
                                                         hres))
             {
@@ -3887,28 +3887,30 @@ void LocalCcShards::SplitFlushRange(
     // Request for new range ids from data store. The new range ids returned
     // by data store are always unique.
     std::vector<std::pair<TxKey, int32_t>> new_range_ids;
+    int32_t new_part_id;
+    if (!store_hd_->GetNextRangePartitionId(
+            table_name, split_keys.size(), new_part_id))
+    {
+        LOG(ERROR) << "Split range failed due to unable to get next "
+                      "partition id. table_name = "
+                   << table_name.StringView();
+
+        range_entry->UnPinStoreRange();
+        data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
+
+        PopPendingTask(node_group,
+                       data_sync_task->node_group_term_,
+                       table_name,
+                       data_sync_task->range_id_);
+        txservice::AbortTx(split_txm);
+
+        return;
+    }
     for (TxKey &new_key : split_keys)
     {
-        int32_t new_part_id;
-        if (!store_hd_->GetNextRangePartitionId(table_name, &new_part_id))
-        {
-            LOG(ERROR) << "Split range failed due to unable to get next "
-                          "partition id. table_name = "
-                       << table_name.StringView();
-
-            range_entry->UnPinStoreRange();
-            data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
-
-            PopPendingTask(node_group,
-                           data_sync_task->node_group_term_,
-                           table_name,
-                           data_sync_task->range_id_);
-            txservice::AbortTx(split_txm);
-
-            return;
-        }
         log_output.append(std::to_string(new_part_id) + ",");
         new_range_ids.emplace_back(std::move(new_key), new_part_id);
+        new_part_id++;
     }
 
     // Start the SplitFlush tx. This would split the range, flush the data

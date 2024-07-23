@@ -545,6 +545,7 @@ public:
 
         if (range_owner == ng_id)
         {
+            uint64_t old_last_sync_ts = old_entry->GetLastSyncTs();
             // Store range is pinned during range split so we don't need mutex
             // on range entry.
             TemplateStoreRange<KeyT> *old_store_range =
@@ -638,7 +639,8 @@ public:
                         *range_start_key,
                         old_info->DirtyTs(),
                         &cur_range_slices,
-                        false);
+                        false,
+                        old_last_sync_ts);
                 new_range_entries.push_back(new_range);
             }
         }
@@ -709,7 +711,8 @@ public:
         const KeyT &start_key,
         uint64_t version,
         std::vector<SliceInitInfo> *slice_keys = nullptr,
-        bool need_meta_lk = true)
+        bool need_meta_lk = true,
+        uint64_t last_sync_ts = 0)
     {
         std::unique_lock<std::shared_mutex> lk(meta_data_mux_, std::defer_lock);
         if (need_meta_lk)
@@ -789,6 +792,10 @@ public:
             else
             {
                 mi_restore_default_thread_id();
+            }
+            if (last_sync_ts > 0)
+            {
+                new_range_ptr->UpdateLastDataSyncTS(last_sync_ts);
             }
 
             return new_range_ptr;
@@ -1679,6 +1686,7 @@ private:
                                   uint64_t data_sync_ts,
                                   bool is_dirty,
                                   bool can_be_skipped,
+                                  uint64_t &last_sync_ts,
                                   std::shared_ptr<DataSyncStatus> status,
                                   CcHandlerResult<Void> *hres);
 #else

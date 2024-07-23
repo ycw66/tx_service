@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <shared_mutex>
@@ -587,8 +588,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     // the data is still not flushed into data store yet.
     uint64_t post_flush_size = slice->PostCkptSize();
     assert(post_flush_size != UINT64_MAX);
-    uint32_t subslice_cnt =
-        post_flush_size / (StoreSlice::slice_upper_bound * 0.5);
+    uint32_t subslice_cnt = post_flush_size / StoreSlice::slice_upper_bound;
     if (subslice_cnt < 2)
     {
         subslice_cnt = 2;

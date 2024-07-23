@@ -302,7 +302,8 @@ public:
                                       const TableSchema *table_schema) = 0;
 
     virtual bool GetNextRangePartitionId(const TableName &tablename,
-                                         int32_t *out_next_partition_id,
+                                         uint32_t range_cnt,
+                                         int32_t &out_next_partition_id,
                                          int retry_count = 5) = 0;
 
     virtual std::string CreateKVCatalogInfo(

@@ -104,7 +104,12 @@ int Sharder::Init(
     LocalCcShards *local_shards,
     std::unique_ptr<TxLog> log_agent,
     const std::string &local_path,
-    const uint16_t rep_group_cnt)
+    const uint16_t rep_group_cnt
+#ifndef ON_KEY_OBJECT
+    ,
+    const uint32_t bthread_worker_num
+#endif
+)
 {
     node_id_ = node_id;
     local_shards_ = local_shards;
@@ -245,10 +250,12 @@ int Sharder::Init(
         return -1;
     }
 #else
+    brpc::ServerOptions server_options;
+    server_options.num_threads = bthread_worker_num;
     if (cc_node_server_.Start(
             GET_CCNODE_RPC_PORT(
                 cluster_config_.ng_configs_.at(node_id_).front().port_),
-            NULL) != 0)
+            &server_options) != 0)
     {
         LOG(FATAL) << "Failed to start the cc node server.";
         return -1;
@@ -271,7 +278,7 @@ int Sharder::Init(
     if (log_replay_server_.Start(
             GET_LOG_REPLAY_RPC_PORT(
                 cluster_config_.ng_configs_.at(node_id_).front().port_),
-            nullptr) != 0)
+            &server_options) != 0)
     {
         LOG(FATAL) << "Failed to start the log replay server.";
         return -1;

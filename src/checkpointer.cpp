@@ -152,7 +152,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                     }
                 }
 
-                uint64_t table_last_synced_ts = 0;
+                uint64_t table_last_synced_ts = UINT64_MAX;
                 local_shards_.EnqueueDataSyncTaskForTable(table_name,
                                                           node_group,
                                                           leader_term,
@@ -168,7 +168,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 // the table or range was successfully flushed into storage in
                 // this round of checkpoint. Check the smallest valid synced ts
                 // of all tables and use it to truncate log.
-                if (table_last_synced_ts > 0)
+                if (table_last_synced_ts != UINT64_MAX)
                 {
                     last_succ_ckpt_ts =
                         std::min(last_succ_ckpt_ts, table_last_synced_ts);

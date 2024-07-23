@@ -235,7 +235,8 @@ public:
     }
 
     bool GetNextRangePartitionId(const txservice::TableName &tablename,
-                                 int32_t *out_next_partition_id,
+                                 uint32_t range_cnt,
+                                 int32_t &out_next_partition_id,
                                  int retry_count = 5) override
     {
         return true;

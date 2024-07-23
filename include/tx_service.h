@@ -1005,6 +1005,9 @@ public:
               const std::string &local_path)
     {
         uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
+#ifndef ON_KEY_OBJECT
+        uint32_t bthread_worker_num = (uint32_t) conf.at("bthread_worker_num");
+#endif
         if (Sharder::Instance().Init(node_id,
                                      ng_configs,
                                      cluster_config_version,
@@ -1016,7 +1019,12 @@ public:
                                      &local_cc_shards_,
                                      std::move(log_agent),
                                      local_path,
-                                     ng_rep_cnt) < 0)
+                                     ng_rep_cnt
+#ifndef ON_KEY_OBJECT
+                                     ,
+                                     bthread_worker_num
+#endif
+                                     ) < 0)
 
         {
             return -1;
