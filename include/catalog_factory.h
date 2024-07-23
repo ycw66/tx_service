@@ -59,6 +59,9 @@ struct SkEncoder
      */
     virtual std::pair<TxKey, TxRecord::Uptr> GeneratePackedSk(
         const TxKey *pk, const TxRecord *record) const = 0;
+    virtual void Reset()
+    {
+    }
 };
 
 struct TableSchema

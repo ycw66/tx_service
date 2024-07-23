@@ -37,6 +37,13 @@ void SkGenerator::Reset(const TxKey *start_key,
         sk_encoder_vec_.clear();
         sk_encoder_vec_.reserve(new_indexes_name_->size());
     }
+    else
+    {
+        for (auto &encoder : sk_encoder_vec_)
+        {
+            encoder->Reset();
+        }
+    }
     scan_batch_size_ = LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE;
     task_result_ = CcErrorCode::NO_ERROR;
     scanned_items_count_ = 0;
@@ -68,6 +75,13 @@ void SkGenerator::Reset(const std::string &start_key_str,
         tx_term_ = tx_term;
         sk_encoder_vec_.clear();
         sk_encoder_vec_.reserve(new_indexes_name_->size());
+    }
+    else
+    {
+        for (auto &encoder : sk_encoder_vec_)
+        {
+            encoder->Reset();
+        }
     }
     scan_batch_size_ = LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE;
     task_result_ = CcErrorCode::NO_ERROR;
