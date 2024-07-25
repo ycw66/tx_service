@@ -4103,7 +4103,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                 // Clone key
                                                 data_sync_vecs[i].emplace_back(
                                                     rec.Key().Clone(),
-                                                    rec.GetPayload(),
+                                                    rec.ReleasePayload(),
                                                     rec.payload_status_,
                                                     rec.commit_ts_,
                                                     rec.cce_,

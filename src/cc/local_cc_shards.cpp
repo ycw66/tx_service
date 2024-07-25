@@ -2795,7 +2795,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                     auto &rec = scan_cc.DataSyncVec(i)[j];
                     // Clone key
                     data_sync_vecs[i].emplace_back(rec.Key().Clone(),
-                                                   rec.GetPayload(),
+                                                   rec.ReleasePayload(),
                                                    rec.payload_status_,
                                                    rec.commit_ts_,
                                                    rec.cce_,
@@ -3540,6 +3540,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_[0]; ++j)
             {
                 auto &rec = scan_cc.DataSyncVec(0)[j];
+#ifdef ON_KEY_OBJECT
+                assert(rec.cce_ != nullptr);
+#endif
                 // Note. Clone key instead of move key. The memory of
                 // rec.Key() will be reused to avoid memory allocation.
                 if (rec.cce_)
@@ -3547,7 +3550,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                     // cce_ is null means the key is already persisted on kv, so
                     // we don't need to put it into the flush vec.
                     data_sync_vec->emplace_back(rec.Key().Clone(),
-                                                rec.GetPayload(),
+                                                rec.ReleasePayload(),
                                                 rec.payload_status_,
                                                 rec.commit_ts_,
                                                 rec.cce_,
@@ -3623,6 +3626,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 archive_vec = std::make_unique<std::vector<FlushRecord>>();
 
                 mv_base_vec = std::make_unique<std::vector<TxKey>>();
+            }
+
+            if (scan_cc.force_flush_)
+            {
+                // Clear the FlushRecords' memory of scan cc since the
+                // DataSyncScan heap is full.
+                scan_cc.DataSyncVec(0).clear();
+                scan_cc.DataSyncVec(0).resize(DATA_SYNC_SCAN_BATCH_SIZE);
             }
 
             scan_cc.Reset();

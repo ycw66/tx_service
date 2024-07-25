@@ -79,7 +79,7 @@ public:
         tx_key_.Release();
         tx_key_ = std::move(key);
         key_type_ = FlushKeyType::TxKey;
-        payload_ = payload;
+        payload_ = std::move(payload);
         payload_status_ = payload_status;
         commit_ts_ = commit_ts;
         cce_ = cce;
@@ -219,9 +219,9 @@ public:
         return payload_.get();
     }
 
-    std::shared_ptr<TxRecord> GetPayload() const
+    std::shared_ptr<TxRecord> ReleasePayload()
     {
-        return payload_;
+        return std::move(payload_);
     }
 
     size_t PayloadSize() const
@@ -958,10 +958,13 @@ public:
         // want to flush this key to new range on base table. Only for range
         // partition
         size_t exported_count = 0;
+
+        const uint64_t commit_ts = CommitTs();
+        const RecordStatus rec_status = PayloadStatus();
+
+#ifndef ON_KEY_OBJECT
         if (IsPersistent())
         {
-            const uint64_t commit_ts = CommitTs();
-            const RecordStatus rec_status = PayloadStatus();
             // 1.This version data has alredy flushed to base
             // table(commit_ts == ckpt_ts).
             // 2. No new version data to be
@@ -990,11 +993,7 @@ public:
 
                 if (rec_status == RecordStatus::Normal)
                 {
-#ifndef ON_KEY_OBJECT
                     ref.SetPayload(payload_);
-#else
-                    ref.SetPayload(payload_.get());
-#endif
                 }
 
                 // the size of record is not change.
@@ -1005,9 +1004,6 @@ public:
             return exported_count;
         }
 
-        const uint64_t commit_ts = CommitTs();
-        const RecordStatus rec_status = PayloadStatus();
-#ifndef ON_KEY_OBJECT
         size_t ckpt_idx = ckpt_vec_size;
         assert(commit_ts > CkptTs());
 #endif
