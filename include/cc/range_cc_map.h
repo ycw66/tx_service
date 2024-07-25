@@ -1275,24 +1275,6 @@ private:
             range_info->new_partition_id_.push_back(new_part_id);
         }
         DesrializeFrom(buf, offset, &range_info->dirty_ts_);
-
-        DesrializeFrom(buf, offset, &is_normal);
-        if (is_normal)
-        {
-            KeyT end_key;
-            end_key.Deserialize(buf, offset, nullptr);
-            CcEntry<KeyT, RangeRecord> *cce = Find(end_key)->second;
-            assert(cce != nullptr);
-            const TemplateRangeInfo<KeyT> *next_range_info =
-                static_cast<const TemplateRangeInfo<KeyT> *>(
-                    cce->payload_->range_info_);
-            range_info->SetEndKey(next_range_info->StartKey());
-            assert(range_info->EndKey() != nullptr);
-        }
-        else
-        {
-            range_info->SetEndKey(KeyT::PositiveInfinity());
-        }
         range_record->SetRangeInfo(std::move(range_info));
     }
 

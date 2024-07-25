@@ -908,14 +908,7 @@ public:
             SerializeToStr(&new_id, str);
         }
         SerializeToStr(&range_info_->dirty_ts_, str);
-        // Serialize end key
-        TxKey end_tx_key = range_info_->EndTxKey();
-        is_normal = end_tx_key.Type() == KeyType::Normal;
-        SerializeToStr(&is_normal, str);
-        if (is_normal)
-        {
-            end_tx_key.Serialize(str);
-        }
+        // we do not care about end key
     }
 
     void Deserialize(const char *buf, size_t &offset) override
@@ -936,8 +929,8 @@ public:
         {
             size += start_tx_key.SerializedLength();
         }
-        // version_ts, dirty_ts, partition_id, new_key_cnt, slice_cnt
-        size += (2 * sizeof(uint64_t) + sizeof(int32_t) + 2 * sizeof(uint16_t));
+        // version_ts, dirty_ts, partition_id, new_key_cnt
+        size += (2 * sizeof(uint64_t) + sizeof(int32_t) + sizeof(uint16_t));
         for (const TxKey &new_key : range_info_->new_key_)
         {
             size += new_key.SerializedLength();
