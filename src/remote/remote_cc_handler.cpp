@@ -910,6 +910,8 @@ void txservice::remote::RemoteCcHandler::KickoutData(
     const TableName &table_name,
     uint32_t ng_id,
     txservice::CleanType clean_type,
+    const TxKey *start_key,
+    const TxKey *end_key,
     CcHandlerResult<Void> &hres,
     uint64_t clean_ts)
 {
@@ -931,8 +933,16 @@ void txservice::remote::RemoteCcHandler::KickoutData(
         ToRemoteType::ConvertTableType(table_name.Type()));
     kickout_data_req->set_node_group_id(ng_id);
     kickout_data_req->set_clean_ts(clean_ts);
-    assert(clean_type == txservice::CleanType::CleanForAlterTable ||
-           clean_type == txservice::CleanType::CleanForTruncateTable);
+    kickout_data_req->clear_start_key();
+    kickout_data_req->clear_end_key();
+    if (start_key && start_key->Type() == KeyType::Normal)
+    {
+        start_key->Serialize(*kickout_data_req->mutable_start_key());
+    }
+    if (end_key && end_key->Type() == KeyType::Normal)
+    {
+        end_key->Serialize(*kickout_data_req->mutable_end_key());
+    }
     kickout_data_req->set_clean_type((txservice::remote::CleanType) clean_type);
 
     // Send message

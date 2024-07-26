@@ -4619,8 +4619,40 @@ public:
         range_id_ = range_id;
         range_version_ = range_version;
         resume_key_.clear();
-        start_key_ = start_key;
-        end_key_ = end_key;
+        start_key_ = start_key ? start_key->KeyPtr() : nullptr;
+        end_key_ = end_key ? end_key->KeyPtr() : nullptr;
+        start_key_str_ = nullptr;
+        end_key_str_ = nullptr;
+        resume_key_.resize(core_cnt);
+    }
+
+    void Reset(const TableName &table_name,
+               const uint32_t ng_id,
+               uint16_t core_cnt,
+               CcHandlerResult<Void> *res,
+               CleanType clean_type,
+               const std::string *start_key = nullptr,
+               const std::string *end_key = nullptr,
+               std::vector<uint16_t> *bucket_ids = nullptr,
+               uint64_t clean_ts = 0,
+               int32_t range_id = INT32_MAX,
+               uint64_t range_version = UINT64_MAX)
+    {
+        start_key_str_ = start_key;
+        end_key_str_ = end_key;
+        start_key_ = nullptr;
+        end_key_ = nullptr;
+        table_name_ = &table_name;
+        node_group_id_ = ng_id;
+        res_ = res;
+        unfinished_cnt_ = core_cnt;
+        err_code_ = CcErrorCode::NO_ERROR;
+        bucket_ids_ = bucket_ids;
+        clean_type_ = clean_type;
+        clean_ts_ = clean_ts;
+        range_id_ = range_id;
+        range_version_ = range_version;
+        resume_key_.clear();
         resume_key_.resize(core_cnt);
     }
 
@@ -4687,14 +4719,48 @@ public:
         resume_key_.at(core_id) = std::move(key);
     }
 
-    const TxKey *StartKey() const
+    const void *StartKey() const
     {
         return start_key_;
     }
 
-    const TxKey *EndKey() const
+    const void *EndKey() const
     {
         return end_key_;
+    }
+
+    void SetDecodedStartKey(TxKey key)
+    {
+        assert(key.IsOwner());
+        decoded_start_key_ = std::move(key);
+        start_key_ = decoded_start_key_.KeyPtr();
+    }
+
+    void SetDecodedEndKey(TxKey key)
+    {
+        assert(key.IsOwner());
+        decoded_end_key_ = std::move(key);
+        end_key_ = decoded_end_key_.KeyPtr();
+    }
+
+    const std::string *StartKeyStr() const
+    {
+        return start_key_str_;
+    }
+
+    const std::string *EndKeyStr() const
+    {
+        return end_key_str_;
+    }
+
+    void SetStartKey(const void *key)
+    {
+        start_key_ = key;
+    }
+
+    void SetEndKey(const void *key)
+    {
+        end_key_ = key;
     }
 
     bool SetFinish()
@@ -4734,22 +4800,13 @@ public:
         case CleanType::CleanRangeData:
         case CleanType::CleanRangeDataForMigration:
         {
-            const KeyT *start =
-                start_key_ != nullptr ? start_key_->GetKey<KeyT>() : nullptr;
-            const KeyT *end =
-                end_key_ != nullptr ? end_key_->GetKey<KeyT>() : nullptr;
+            assert(start_key_ && end_key_);
+            const KeyT *start = static_cast<const KeyT *>(start_key_);
+            const KeyT *end = static_cast<const KeyT *>(end_key_);
 
-            if (start == nullptr || *start < key || *start == key)
+            if (*start < key || *start == key)
             {
-                if (end)
-                {
-                    return key < *end;
-                }
-                else
-                {
-                    // end key is pos inf
-                    return true;
-                }
+                return key < *end;
             }
 
             return false;
@@ -4817,9 +4874,12 @@ private:
     // Only used by migration
     int32_t range_id_{INT32_MAX};
     uint64_t range_version_{UINT64_MAX};
-
-    const TxKey *start_key_{nullptr};
-    const TxKey *end_key_{nullptr};
+    const std::string *start_key_str_{nullptr};
+    const std::string *end_key_str_{nullptr};
+    const void *start_key_{nullptr};
+    const void *end_key_{nullptr};
+    TxKey decoded_start_key_{};
+    TxKey decoded_end_key_{};
     std::vector<TxKey> resume_key_;
     std::atomic_uint16_t unfinished_cnt_{0};
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};

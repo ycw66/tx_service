@@ -277,6 +277,8 @@ public:
                      const TableName &table_name,
                      uint32_t ng_id,
                      txservice::CleanType clean_type,
+                     const TxKey *start_key,
+                     const TxKey *end_key,
                      CcHandlerResult<Void> &hres,
                      uint64_t clean_ts = 0);
 

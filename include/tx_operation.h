@@ -891,6 +891,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     std::unordered_map<size_t, int32_t> old_delta_sizes_;
 
     std::vector<std::pair<TxKey, int32_t>>::const_iterator kickout_data_it_;
+    bool cleaning_old_range_dirty_owner_{false};
 
     /**
      * @brief Acquire read lock on local cluster config ccmap to block cluster
@@ -999,6 +1000,7 @@ private:
     void ForceToFinish(TransactionExecution *txm);
     void ClearDataSyncVec();
     void ClearInfos();
+    bool ForwardKickoutIterator(TransactionExecution *txm);
     std::vector<SplitRangeInfo> GenSplittedRangeInfos();
 };
 

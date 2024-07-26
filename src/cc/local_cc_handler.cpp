@@ -1902,8 +1902,6 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
     {
         // Only alter table and truncate table will try to clean data on remote
         // node.
-        assert(clean_type == CleanType::CleanForAlterTable ||
-               clean_type == CleanType::CleanForTruncateTable);
         remote_hd_.KickoutData(cc_shards_.node_id_,
                                tx_number,
                                tx_term,
@@ -1911,6 +1909,8 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                                table_name,
                                ng_id,
                                clean_type,
+                               start_key,
+                               end_key,
                                hres,
                                clean_ts);
     }

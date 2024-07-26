@@ -7067,17 +7067,57 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
+        if (req.StartKeyStr() && !req.StartKey())
+        {
+            // first time processing remote req.
+            if (req.StartKeyStr()->empty())
+            {
+                req.SetStartKey(KeyT::NegativeInfinity());
+            }
+            else
+            {
+                const std::string *key_str = req.StartKeyStr();
+                assert(key_str != nullptr);
+                std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
+                size_t offset = 0;
+                decoded_key->Deserialize(key_str->data(), offset, KeySchema());
+                // target_key = decoded_key.get();
+                req.SetDecodedStartKey(TxKey(std::move(decoded_key)));
+            }
+            if (req.EndKeyStr()->empty())
+            {
+                req.SetEndKey(KeyT::PositiveInfinity());
+            }
+            else
+            {
+                const std::string *key_str = req.EndKeyStr();
+                assert(key_str != nullptr);
+                std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
+                size_t offset = 0;
+                decoded_key->Deserialize(key_str->data(), offset, KeySchema());
+                // target_key = decoded_key.get();
+                req.SetDecodedEndKey(TxKey(std::move(decoded_key)));
+            }
+
+            // dispatch req to all cores after setting keys
+            for (uint16_t i = 1; i < shard_->core_cnt_; i++)
+            {
+                shard_->local_shards_.EnqueueToCcShard(i, &req);
+            }
+        }
         // Iterate the cc map using the original page list.
-        const TxKey *start_tx_key = req.StartKey();
-        const KeyT *start_key =
-            start_tx_key != nullptr && start_tx_key->KeyPtr() != nullptr
-                ? req.StartKey()->GetKey<KeyT>()
-                : KeyT::NegativeInfinity();
-        const TxKey *end_tx_key = req.EndKey();
-        const KeyT *end_key =
-            end_tx_key != nullptr && end_tx_key->KeyPtr() != nullptr
-                ? req.EndKey()->GetKey<KeyT>()
-                : KeyT::PositiveInfinity();
+        const KeyT *start_key = static_cast<const KeyT *>(req.StartKey());
+        if (!start_key)
+        {
+            start_key = KeyT::NegativeInfinity();
+            req.SetStartKey(KeyT::NegativeInfinity());
+        }
+        const KeyT *end_key = static_cast<const KeyT *>(req.EndKey());
+        if (!end_key)
+        {
+            end_key = KeyT::PositiveInfinity();
+            req.SetEndKey(KeyT::NegativeInfinity());
+        }
         LruPage *lru_page;
         uint16_t pause_idx = shard_->core_id_;
         if (req.GetCleanType() == CleanType::CleanBucketData)

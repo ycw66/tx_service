@@ -1579,12 +1579,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         TX_TRACE_ASSOCIATE(msg.get(), kickout_cc_entry_req);
         // Construct the ccrequest by deserializing the ccmessage
         kickout_cc_entry_req->Reset(std::move(msg));
-        // Dispatch the request to all cores and run in parallel.
-        size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
-        for (size_t idx = 0; idx < core_cnt; ++idx)
-        {
-            local_shards_.EnqueueCcRequest(idx, kickout_cc_entry_req);
-        }
+        // req is enqueued to first core to parse key, then dispatched to other
+        // cores to run in parallel.
+        local_shards_.EnqueueCcRequest(0, kickout_cc_entry_req);
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_KickoutDataResponse:

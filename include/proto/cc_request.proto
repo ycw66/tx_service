@@ -880,6 +880,8 @@ message KickoutDataRequest {
     CcTableType table_type = 4;
     uint64 clean_ts = 5;
     CleanType clean_type = 6;
+    bytes start_key = 7;
+    bytes end_key = 8;
 }
 
 message KickoutDataResponse {

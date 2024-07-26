@@ -4031,8 +4031,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                  tx_term,
                                  previous_scan_ts,
                                  ckpt_ts,
-                                 &local_cc_shards,
-                                 &hd_res](
+                                 &local_cc_shards](
                                     const TxKey *req_start_key,
                                     const TxKey *req_end_key,
                                     bool export_base_table_rec_if_need) mutable
@@ -5317,50 +5316,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             }
             return;
         }
+        cleaning_old_range_dirty_owner_ = false;
+        kickout_data_it_ = new_range_info_.cbegin();
         // Kickout old range data. For those data that now falls on a
         // new node, we need to kickout them out from the old node's ccmap.
         // We don't care about the commit ts of the target cc entry, all entries
         // fall into the migrated new ranges should be kicked out no matter
         // what.
-        auto local_shards = Sharder::Instance().GetLocalCcShards();
-        for (kickout_data_it_ = new_range_info_.cbegin();
-             kickout_data_it_ != new_range_info_.cend();
-             kickout_data_it_++)
-        {
-            NodeGroupId new_owner =
-                local_shards
-                    ->GetRangeOwner(kickout_data_it_->second, txm->TxCcNodeId())
-                    ->BucketOwner();
-            if (new_owner != txm->TxCcNodeId())
-            {
-                // Note that even if the new node group falls on the same node,
-                // we still need to clean the cc entry from native ccmap since
-                // failover and native ccmaps are separated.
-                kickout_old_range_data_op_.start_key_ =
-                    kickout_data_it_->first.GetShallowCopy();
-                if (std::next(kickout_data_it_) == new_range_info_.cend())
-                {
-                    kickout_old_range_data_op_.end_key_ =
-                        old_end_key_.GetShallowCopy();
-                }
-                else
-                {
-                    kickout_old_range_data_op_.end_key_ =
-                        std::next(kickout_data_it_)->first.GetShallowCopy();
-                }
-                kickout_old_range_data_op_.clean_type_ =
-                    CleanType::CleanRangeData;
-
-                LOG(INFO)
-                    << "Split Flush transaction kickout old data in range "
-                    << kickout_data_it_->second << ", original range id "
-                    << range_info_->PartitionId()
-                    << ", txn: " << txm->TxNumber();
-                break;
-            }
-        }
-
-        if (kickout_data_it_ == new_range_info_.cend())
+        if (ForwardKickoutIterator(txm))
         {
             LOG(INFO) << "Split Flush transaction post all lock, range id "
                       << range_info_->PartitionId()
@@ -5398,39 +5361,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             }
             return;
         }
-        kickout_data_it_++;
-        auto local_shards = Sharder::Instance().GetLocalCcShards();
-        for (; kickout_data_it_ != new_range_info_.cend(); kickout_data_it_++)
-        {
-            NodeGroupId new_owner =
-                local_shards
-                    ->GetRangeOwner(kickout_data_it_->second, txm->TxCcNodeId())
-                    ->BucketOwner();
-            if (new_owner != txm->TxCcNodeId())
-            {
-                kickout_old_range_data_op_.start_key_ =
-                    kickout_data_it_->first.GetShallowCopy();
-                if (std::next(kickout_data_it_) == new_range_info_.cend())
-                {
-                    kickout_old_range_data_op_.end_key_ =
-                        old_end_key_.GetShallowCopy();
-                }
-                else
-                {
-                    kickout_old_range_data_op_.end_key_ =
-                        std::next(kickout_data_it_)->first.GetShallowCopy();
-                }
-
-                LOG(INFO)
-                    << "Split Flush transaction kickout old data in range "
-                    << kickout_data_it_->second << ", original range id "
-                    << range_info_->PartitionId()
-                    << ", txn: " << txm->TxNumber();
-                break;
-            }
-        }
-
-        if (kickout_data_it_ == new_range_info_.cend())
+        if (ForwardKickoutIterator(txm))
         {
             LOG(INFO) << "Split Flush transaction post all lock, range id "
                       << range_info_->PartitionId()
@@ -5815,6 +5746,113 @@ std::vector<SplitRangeInfo> SplitFlushRangeOp::GenSplittedRangeInfos()
         std::move(start_key), range_id, std::move(subrange_slices));
 
     return splitted_range_info;
+}
+
+bool SplitFlushRangeOp::ForwardKickoutIterator(TransactionExecution *txm)
+{
+    auto local_shards = Sharder::Instance().GetLocalCcShards();
+
+    if (!cleaning_old_range_dirty_owner_)
+    {
+        for (; kickout_data_it_ != new_range_info_.cend(); kickout_data_it_++)
+        {
+            auto new_range_bucket_info = local_shards->GetRangeOwner(
+                kickout_data_it_->second, txm->TxCcNodeId());
+            NodeGroupId new_owner = new_range_bucket_info->BucketOwner();
+            NodeGroupId dirty_new_owner =
+                new_range_bucket_info->DirtyBucketOwner();
+            if (new_owner != txm->TxCcNodeId() &&
+                dirty_new_owner != txm->TxCcNodeId())
+            {
+                // Note that even if the new node group falls on the same node,
+                // we still need to clean the cc entry from native ccmap since
+                // failover and native ccmaps are separated.
+                kickout_old_range_data_op_.start_key_ =
+                    kickout_data_it_->first.GetShallowCopy();
+                if (std::next(kickout_data_it_) == new_range_info_.cend())
+                {
+                    kickout_old_range_data_op_.end_key_ =
+                        old_end_key_.GetShallowCopy();
+                }
+                else
+                {
+                    kickout_old_range_data_op_.end_key_ =
+                        std::next(kickout_data_it_)->first.GetShallowCopy();
+                }
+                kickout_old_range_data_op_.clean_type_ =
+                    CleanType::CleanRangeData;
+                kickout_old_range_data_op_.node_group_ = txm->TxCcNodeId();
+                LOG(INFO)
+                    << "Split Flush transaction kickout old data in range "
+                    << kickout_data_it_->second << ", original range id "
+                    << range_info_->PartitionId()
+                    << ", txn: " << txm->TxNumber();
+                kickout_data_it_++;
+                return false;
+            }
+        }
+        assert(kickout_data_it_ == new_range_info_.cend());
+        kickout_data_it_ = new_range_info_.cbegin();
+        cleaning_old_range_dirty_owner_ = true;
+    }
+
+    // If the range split happens during data migration, all changes in the
+    // range will be forwarded to the dirty bucket owner. So when we kick out
+    // data that is splitted to another ng, we need to kick out the data on the
+    // dirty bucket owner as well.
+    if (cleaning_old_range_dirty_owner_)
+    {
+        NodeGroupId old_range_dirty_owner =
+            local_shards
+                ->GetRangeOwner(range_info_->PartitionId(), txm->TxCcNodeId())
+                ->DirtyBucketOwner();
+        if (old_range_dirty_owner == UINT32_MAX)
+        {
+            return true;
+        }
+        assert(old_range_dirty_owner != txm->TxCcNodeId());
+        for (; kickout_data_it_ != new_range_info_.cend(); kickout_data_it_++)
+        {
+            auto new_range_bucket_info = local_shards->GetRangeOwner(
+                kickout_data_it_->second, txm->TxCcNodeId());
+            NodeGroupId new_owner = new_range_bucket_info->BucketOwner();
+            NodeGroupId dirty_new_owner =
+                new_range_bucket_info->DirtyBucketOwner();
+            if (new_owner != old_range_dirty_owner &&
+                dirty_new_owner != old_range_dirty_owner)
+            {
+                // Note that even if the new node group falls on the same node,
+                // we still need to clean the cc entry from native ccmap since
+                // failover and native ccmaps are separated.
+                kickout_old_range_data_op_.start_key_ =
+                    kickout_data_it_->first.GetShallowCopy();
+                if (std::next(kickout_data_it_) == new_range_info_.cend())
+                {
+                    kickout_old_range_data_op_.end_key_ =
+                        old_end_key_.GetShallowCopy();
+                }
+                else
+                {
+                    kickout_old_range_data_op_.end_key_ =
+                        std::next(kickout_data_it_)->first.GetShallowCopy();
+                }
+                kickout_old_range_data_op_.clean_type_ =
+                    CleanType::CleanRangeData;
+                kickout_old_range_data_op_.node_group_ = old_range_dirty_owner;
+
+                LOG(INFO)
+                    << "Split Flush transaction kickout old data in range "
+                    << kickout_data_it_->second << ", original range id "
+                    << range_info_->PartitionId()
+                    << ", txn: " << txm->TxNumber();
+                kickout_data_it_++;
+                return false;
+            }
+        }
+    }
+
+    assert(kickout_data_it_ == new_range_info_.cend());
+    return true;
 }
 
 ReleaseScanExtraLockOp::ReleaseScanExtraLockOp(TransactionExecution *txm)
