@@ -175,16 +175,22 @@ struct RemoteScanCache
 
 struct RemoteScanSliceCache
 {
-    static constexpr size_t BasicTupleSize = 40;
+    // Approximate meta data size in storage.
+    static constexpr size_t MetaDataSize = 8;
 
     RemoteScanSliceCache(uint16_t shard_cnt)
-        : cache_mem_size_(0), shard_cnt_(shard_cnt)
+        : cache_mem_size_(0), mem_max_bytes_(0), shard_cnt_(shard_cnt)
     {
     }
 
     bool IsFull() const
     {
-        return cache_mem_size_ >= 1024 * 60;
+        return cache_mem_size_ >= mem_max_bytes_;
+    }
+
+    void SetCacheMaxBytes(size_t max_bytes)
+    {
+        mem_max_bytes_ = max_bytes;
     }
 
     void Reset(uint16_t shard_cnt)
@@ -199,6 +205,7 @@ struct RemoteScanSliceCache
         key_off_vec_.clear();
         rec_off_vec_.clear();
         cache_mem_size_ = 0;
+        mem_max_bytes_ = 0;
         shard_cnt_ = shard_cnt;
     }
 
@@ -248,6 +255,7 @@ struct RemoteScanSliceCache
     std::vector<size_t> key_off_vec_;  // Used to remove trailing keys.
     std::vector<size_t> rec_off_vec_;  // Used to remove trailing records.
     uint32_t cache_mem_size_;
+    uint32_t mem_max_bytes_;
     uint16_t shard_cnt_;
 };
 
@@ -259,7 +267,7 @@ struct RangeScanSliceResult
           cc_ng_id_(0),
           ccm_scanner_(nullptr),
           is_local_(true),
-          last_key_set_(false)
+          last_key_status_(LastKeySetStatus::Unset)
     {
     }
 
@@ -269,7 +277,7 @@ struct RangeScanSliceResult
           cc_ng_id_(0),
           ccm_scanner_(nullptr),
           is_local_(true),
-          last_key_set_(true)
+          last_key_status_(LastKeySetStatus::Setup)
     {
     }
 
@@ -278,7 +286,7 @@ struct RangeScanSliceResult
           slice_position_(rhs.slice_position_),
           cc_ng_id_(rhs.cc_ng_id_),
           is_local_(rhs.is_local_),
-          last_key_set_(rhs.last_key_set_)
+          last_key_status_(rhs.last_key_status_.load(std::memory_order_acquire))
     {
         if (rhs.is_local_)
         {
@@ -303,7 +311,9 @@ struct RangeScanSliceResult
         slice_position_ = rhs.slice_position_;
         is_local_ = rhs.is_local_;
         cc_ng_id_ = rhs.cc_ng_id_;
-        last_key_set_ = rhs.last_key_set_;
+        last_key_status_.store(
+            rhs.last_key_status_.load(std::memory_order_acquire),
+            std::memory_order_release);
 
         if (rhs.is_local_)
         {
@@ -319,19 +329,18 @@ struct RangeScanSliceResult
 
     void Reset()
     {
-        std::unique_lock<std::shared_mutex> lk(last_key_mux_);
-        last_key_set_ = false;
+        last_key_status_.store(LastKeySetStatus::Unset,
+                               std::memory_order_release);
         last_key_ = TxKey();
     }
 
     const TxKey *SetLastKey(TxKey key)
     {
-        std::unique_lock<std::shared_mutex> lk(last_key_mux_);
-        if (!last_key_set_)
-        {
-            last_key_ = std::move(key);
-            last_key_set_ = true;
-        }
+        assert(last_key_status_.load(std::memory_order_acquire) ==
+               LastKeySetStatus::Unset);
+        last_key_ = std::move(key);
+        last_key_status_.store(LastKeySetStatus::Setup,
+                               std::memory_order_release);
 
         return &last_key_;
     }
@@ -341,9 +350,13 @@ struct RangeScanSliceResult
                                                 SlicePosition slice_pos)
     {
         bool success = false;
-        std::unique_lock<std::shared_mutex> lk(last_key_mux_);
-        if (!last_key_set_)
+
+        LastKeySetStatus actual = LastKeySetStatus::Unset;
+        if (last_key_status_.compare_exchange_strong(
+                actual, LastKeySetStatus::Setting, std::memory_order_acq_rel))
         {
+            slice_position_ = slice_pos;
+
             // If the slice position is the last or the first, this is the last
             // scan batch, which must end with positive/negative infinity or the
             // request's end key. In both cases, the input key is a valid
@@ -359,9 +372,20 @@ struct RangeScanSliceResult
                 last_key_ = key->CloneTxKey();
             }
 
-            last_key_set_ = true;
-            slice_position_ = slice_pos;
+            last_key_status_.store(LastKeySetStatus::Setup,
+                                   std::memory_order_release);
             success = true;
+        }
+        else
+        {
+            if (actual != LastKeySetStatus::Setup)
+            {
+                while (last_key_status_.load(std::memory_order_acquire) !=
+                       LastKeySetStatus::Setup)
+                {
+                    // Busy poll.
+                }
+            }
         }
 
         return {last_key_.GetKey<KeyT>(), success};
@@ -369,8 +393,8 @@ struct RangeScanSliceResult
 
     std::pair<const TxKey *, bool> PeekLastKey() const
     {
-        std::shared_lock<std::shared_mutex> lk(last_key_mux_);
-        if (last_key_set_)
+        if (last_key_status_.load(std::memory_order_acquire) ==
+            LastKeySetStatus::Setup)
         {
             return {&last_key_, true};
         }
@@ -382,8 +406,8 @@ struct RangeScanSliceResult
 
     TxKey MoveLastKey()
     {
-        std::unique_lock<std::shared_mutex> lk(last_key_mux_);
-        last_key_set_ = false;
+        last_key_status_.store(LastKeySetStatus::Unset,
+                               std::memory_order_release);
         return std::move(last_key_);
     }
 
@@ -393,9 +417,9 @@ struct RangeScanSliceResult
      * inclusive start key of the next scan batch. For backward scans, the
      * last key is the inclusive start of the current slice, which is the
      * exclusive start key of the next scan batch.
-     *
      */
     TxKey last_key_;
+
     SlicePosition slice_position_;
     NodeGroupId cc_ng_id_{0};
 
@@ -406,8 +430,19 @@ struct RangeScanSliceResult
     };
     bool is_local_{true};
 
-    bool last_key_set_{false};
-    mutable std::shared_mutex last_key_mux_;
+    /**
+     * For scene like: (1-write, n-read), atomic variable has obvious
+     * performance advantage over mutex/shared_mutex. For readers, mutex needs
+     * to modify a flag, and shared_mutex needs to modify a counter. However,
+     * atomic variable merely load a variable.
+     */
+    enum struct LastKeySetStatus : uint8_t
+    {
+        Unset,
+        Setting,
+        Setup,
+    };
+    std::atomic<LastKeySetStatus> last_key_status_;
 };
 
 struct ScanNextResult

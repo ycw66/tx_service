@@ -1297,8 +1297,8 @@ public:
             {
                 unsigned start_sid =
                     slice_idx + (pin_slice_cnt > 0 ? pin_slice_cnt : 1);
-                for (unsigned sid = start_sid, k = pin_slice_cnt;
-                     sid < slices_.size() && k <= prefetch_size;
+                for (unsigned sid = start_sid, k = 0;
+                     sid < slices_.size() && k < prefetch_size;
                      ++sid, ++k)
                 {
                     TemplateStoreSlice<KeyT> *prefetch_slice =
@@ -1341,8 +1341,8 @@ public:
             {
                 int start_sid =
                     slice_idx - (pin_slice_cnt > 0 ? pin_slice_cnt : 1);
-                for (int sid = start_sid, k = pin_slice_cnt;
-                     sid > -1 && k <= static_cast<int>(prefetch_size);
+                for (int sid = start_sid, k = 0;
+                     sid > -1 && k < static_cast<int>(prefetch_size);
                      --sid, ++k)
                 {
                     TemplateStoreSlice<KeyT> *prefetch_slice =

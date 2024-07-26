@@ -1278,9 +1278,9 @@ void txservice::LocalCcHandler::ScanNextBatch(
             req->SetPriorCceAddr(
                 last_tuple != nullptr ? last_tuple->cce_addr_.CcePtr() : 0,
                 core_id);
-
-            cache->Reset();
         }
+
+        scanner.ResetCaches();
 
         uint32_t core_rand = butil::fast_rand();
 
@@ -1351,6 +1351,8 @@ void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
                                           std::unique_ptr<CcScanner> scanner)
 {
     assert(scanner->Direction() == direction);
+
+    scanner->Close();
 
     if (table_name.Type() == TableType::Primary)
     {

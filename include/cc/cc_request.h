@@ -2229,6 +2229,8 @@ public:
             {
                 if (err_ == CcErrorCode::NO_ERROR)
                 {
+                    res_->Value().ccm_scanner_->FinalizeCommit();
+
                     res_->SetFinished();
                 }
                 else
@@ -2662,6 +2664,8 @@ public:
             }
             else
             {
+                hd_res_->Value().ccm_scanner_->FinalizeCommit();
+
                 hd_res_->SetFinished();
             }
 

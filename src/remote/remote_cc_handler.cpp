@@ -646,8 +646,9 @@ void txservice::remote::RemoteCcHandler::ScanNext(
             const ScanTuple *last_tuple = cache->LastTuple();
             scan_slice->add_prior_cce_vec(
                 last_tuple != nullptr ? last_tuple->cce_addr_.CcePtr() : 0);
-            cache->Reset();
         }
+
+        scanner.ResetCaches();
     }
 
     scan_slice->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));

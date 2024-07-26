@@ -3731,11 +3731,17 @@ public:
             scan_cache = static_cast<TemplateScanCache<KeyT, ValueT> *>(
                 req.GetLocalScanCache(core_id));
             assert(scan_cache != nullptr);
+            scan_cache->SetCacheMaxBytes(
+                StoreSlice::slice_upper_bound *
+                (1 + req.PrefetchSize() / shard_->core_cnt_));
         }
         else
         {
             remote_scan_cache = req.GetRemoteScanCache(core_id);
             assert(remote_scan_cache != nullptr);
+            remote_scan_cache->SetCacheMaxBytes(
+                StoreSlice::slice_upper_bound *
+                (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
         auto is_cache_full = [&req, scan_cache, remote_scan_cache]() {
@@ -3780,23 +3786,8 @@ public:
             // unpinned by the last core finishing the scan batch.
             RangeSliceOpStatus pin_status = RangeSliceOpStatus::NotPinned;
             const StoreSlice *last_pinned_slice;
-            uint8_t max_pin_cnt = 1;
-            if (req_end_key == nullptr &&
-                req.PrefetchSize() < shard_->core_cnt_)
-            {
-                if (req.PrefetchSize() < UINT8_MAX)
-                {
-                    max_pin_cnt += req.PrefetchSize();
-                }
-                else
-                {
-                    max_pin_cnt = req.PrefetchSize();
-                }
-            }
-            else
-            {
-                max_pin_cnt = shard_->core_cnt_;
-            }
+            uint32_t max_pin_cnt = req.PrefetchSize();
+
             RangeSliceId slice_id = shard_->local_shards_.PinRangeSlices(
                 table_name_,
                 req.NodeGroupId(),
@@ -4900,6 +4891,7 @@ public:
         {
             req.GetLocalScanner()->CommitAtCore(core_id);
         }
+
         if (req.SetFinish())
         {
             if (req.Result()->Value().is_local_)
@@ -6299,7 +6291,7 @@ public:
                 &req,
                 shard_,
                 false,
-                UINT8_MAX,
+                0,
                 1,
                 true,
                 pin_status,
@@ -9427,7 +9419,7 @@ protected:
                  bool is_require_recs = true)
     {
         TemplateScanTuple<KeyT, ValueT> *tuple = nullptr;
-        uint32_t tuple_size = ScanCache::BasicTupleSize;
+        uint32_t tuple_size = ScanCache::MetaDataSize;
 
         if (is_read_snapshot)
         {
@@ -9557,7 +9549,7 @@ protected:
         const ValueT *payload = &empty_val;
 #endif
 
-        uint32_t tuple_size = RemoteScanSliceCache::BasicTupleSize;
+        uint32_t tuple_size = RemoteScanSliceCache::MetaDataSize;
 
         if (is_read_snapshot)
         {

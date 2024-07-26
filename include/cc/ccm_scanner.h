@@ -32,15 +32,21 @@ struct ScanCache
 {
 public:
     static constexpr size_t ScanBatchSize = 128;
-    static constexpr size_t BasicTupleSize = 40;
+
+    // Approximate meta data size in storage.
+    static constexpr size_t MetaDataSize = 8;
 
     ScanCache(CcScanner *scanner)
-        : idx_(0), size_(0), scanner_(scanner), mem_size_(0)
+        : idx_(0), size_(0), scanner_(scanner), mem_size_(0), mem_max_bytes_(0)
     {
     }
 
     ScanCache(size_t idx, size_t size, CcScanner *scanner)
-        : idx_(idx), size_(size), scanner_(scanner), mem_size_(0)
+        : idx_(idx),
+          size_(size),
+          scanner_(scanner),
+          mem_size_(0),
+          mem_max_bytes_(0)
     {
     }
 
@@ -48,7 +54,8 @@ public:
         : idx_(rhs.idx_),
           size_(rhs.size_),
           scanner_(rhs.scanner_),
-          mem_size_(rhs.mem_size_)
+          mem_size_(rhs.mem_size_),
+          mem_max_bytes_(rhs.mem_max_bytes_)
     {
     }
 
@@ -80,6 +87,7 @@ public:
         idx_ = 0;
         size_ = 0;
         mem_size_ = 0;
+        mem_max_bytes_ = 0;
         trailing_cnt_ = 0;
     }
 
@@ -129,6 +137,7 @@ protected:
     size_t size_;
     CcScanner *const scanner_;
     uint32_t mem_size_{0};
+    uint32_t mem_max_bytes_{0};
     size_t trailing_cnt_{0};
 };
 
@@ -159,7 +168,12 @@ public:
 
     bool IsFull() const
     {
-        return mem_size_ >= 1024 * 60;
+        return mem_size_ >= mem_max_bytes_;
+    }
+
+    void SetCacheMaxBytes(size_t max_bytes)
+    {
+        mem_max_bytes_ = max_bytes;
     }
 
     TemplateScanTuple<KeyT, ValueT> *AddScanTuple()
@@ -289,6 +303,9 @@ public:
     virtual ScanCache *Cache(uint32_t shard_code) = 0;
     virtual ScanCache *AddShard(uint32_t shard_code) = 0;
     virtual void ResetShards(size_t shard_cnt) = 0;
+    virtual void ResetCaches() = 0;
+    virtual void Reset(const Schema *key_schema) = 0;
+    virtual void Close() = 0;
     virtual void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
                                      *shard_code_and_sizes) const = 0;
     virtual void ShardCacheLastTuples(
@@ -325,6 +342,10 @@ public:
     }
 
     virtual uint32_t CacheCount() const = 0;
+
+    virtual void CommitAtCore(uint16_t core_id) = 0;
+
+    virtual void FinalizeCommit() = 0;
 
     ScanDirection Direction() const
     {
@@ -400,11 +421,6 @@ public:
         return is_for_write_;
     }
 
-    virtual void Reset(const Schema *key_schema) = 0;
-    virtual void CommitAtCore(uint16_t core_id)
-    {
-    }
-
 protected:
     ScanDirection direct_;
     ScanIndexType index_type_;
@@ -452,6 +468,17 @@ public:
     {
         assert(false &&
                "ResetShards is designed for RangePartitionedCcmScanner.");
+    }
+
+    void ResetCaches() override
+    {
+        for (auto &[shard_code, cache] : scans_)
+        {
+            cache.Reset();
+        }
+
+        curr_shard_code_ = 0;
+        curr_tuple_ = 0;
     }
 
     uint32_t BlockedShard() const override
@@ -605,6 +632,14 @@ public:
         return scans_.size();
     }
 
+    void CommitAtCore(uint16_t core_id) override
+    {
+    }
+
+    void FinalizeCommit() override
+    {
+    }
+
     void Reset(const Schema *key_schema) override
     {
         key_schema_ = key_schema;
@@ -616,6 +651,14 @@ public:
         {
             cache_it->second.Reset();
         }
+    }
+
+    void Close() override
+    {
+        status_ = ScannerStatus::Closed;
+        scans_.clear();
+        curr_shard_code_ = 0;
+        curr_tuple_ = 0;
     }
 
 private:
@@ -648,15 +691,18 @@ public:
         if (shard_code >= curr_size)
         {
             scans_.reserve(shard_code + 1);
+            index_chain_.reserve(shard_code + 1);
             for (size_t idx = curr_size; idx < shard_code + 1; ++idx)
             {
                 scans_.emplace_back(this, key_schema_);
+                index_chain_.emplace_back();
             }
         }
 
         for (size_t idx = 0; idx < curr_size; ++idx)
         {
             scans_[idx].Reset();
+            index_chain_[idx].clear();
         }
 
         assert(shard_code < scans_.size());
@@ -670,9 +716,11 @@ public:
         if (shard_cnt > old_size)
         {
             scans_.reserve(shard_cnt);
+            index_chain_.reserve(shard_cnt);
             for (size_t idx = old_size; idx < shard_cnt; ++idx)
             {
                 scans_.emplace_back(this, key_schema_);
+                index_chain_.emplace_back();
             }
         }
         else if (shard_cnt < old_size)
@@ -681,18 +729,31 @@ public:
             {
                 scans_.pop_back();
             }
+            index_chain_.resize(shard_cnt);
         }
 
         assert(scans_.size() == shard_cnt);
 
-        for (size_t idx = 0; idx < old_size; ++idx)
+        for (size_t idx = 0; idx < old_size && idx < shard_cnt; ++idx)
         {
             scans_[idx].Reset();
+            index_chain_[idx].clear();
         }
 
         std::unique_lock<std::mutex> lk(mux_);
         head_index_ = Inf();
-        index_chain_.resize(shard_cnt);
+        head_occupied_ = false;
+    }
+
+    void ResetCaches() override
+    {
+        for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
+        {
+            scans_[core_id].Reset();
+            index_chain_[core_id].clear();
+        }
+
+        head_index_ = Inf();
         head_occupied_ = false;
     }
 
@@ -796,14 +857,13 @@ public:
     {
         key_schema_ = key_schema;
         partition_ng_term_ = -1;
+    }
 
-        for (auto cache_it = scans_.begin(); cache_it != scans_.end();
-             ++cache_it)
-        {
-            cache_it->Reset();
-        }
-
-        std::unique_lock<std::mutex> lk(mux_);
+    void Close() override
+    {
+        status_ = ScannerStatus::Closed;
+        scans_.clear();
+        index_chain_.clear();
         head_index_ = Inf();
         head_occupied_ = false;
     }
@@ -819,7 +879,7 @@ public:
         if (sz > 0)
         {
             std::vector<CompoundIndex> &next_chain = index_chain_[core_id];
-            next_chain.clear();
+            assert(next_chain.empty());
             next_chain.reserve(sz);
 
             for (uint32_t idx = 0; idx < sz - 1; ++idx)
@@ -837,8 +897,20 @@ public:
             }
             else
             {
-                Concat(core_id, next_chain);
+                // Concat. Delay concat to FinalizeCommit() to avoid lock.
             }
+        }
+    }
+
+    void FinalizeCommit() override
+    {
+        if (is_require_sort_)
+        {
+            // Already sorted by CommitAtCore().
+        }
+        else
+        {
+            ConcatAll();
         }
     }
 
@@ -1019,9 +1091,24 @@ private:
         Merge(merge_head);
     }
 
-    void Concat(uint16_t core_id, std::vector<CompoundIndex> &chain)
+    /**
+     * @brief Concat all chains at last finished core to avoid lock.
+     */
+    void ConcatAll()
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        assert(head_index_ == Inf());
+        for (uint16_t core_id = 0; core_id < index_chain_.size(); ++core_id)
+        {
+            std::vector<CompoundIndex> &chain = index_chain_[core_id];
+            if (!chain.empty())
+            {
+                ConcatLockFree(core_id, chain);
+            }
+        }
+    }
+
+    void ConcatLockFree(uint16_t core_id, std::vector<CompoundIndex> &chain)
+    {
         chain.back() = head_index_;
         head_index_ = {core_id, 0};
     }
