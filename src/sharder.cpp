@@ -301,11 +301,11 @@ int Sharder::Init(
             LOG(FATAL) << "Failed to fork host manager process";
             return -1;
         }
+        LOG(INFO) << "Forking host manager process with " << *hm_bin_path
+                  << ", the hm will be listening on " << hm_ip_ << ":"
+                  << hm_port_;
         if (pid == 0)
         {
-            LOG(INFO) << "Forking host manager process with " << *hm_bin_path
-                      << ", the hm will be listening on " << hm_ip_ << ":"
-                      << hm_port_;
             std::string log_path = local_path + "/cc_ng";
             if (execl(hm_bin_path->c_str(),
                       "host_manager",
