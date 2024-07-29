@@ -295,15 +295,15 @@ int Sharder::Init(
 
         hm_ip_ = "0.0.0.0";
         assert(hm_bin_path != nullptr);
+        LOG(INFO) << "Forking host manager process with " << *hm_bin_path
+                  << ", the hm will be listening on " << hm_ip_ << ":"
+                  << hm_port_;
         int pid = fork();
         if (pid == -1)
         {
             LOG(FATAL) << "Failed to fork host manager process";
             return -1;
         }
-        LOG(INFO) << "Forking host manager process with " << *hm_bin_path
-                  << ", the hm will be listening on " << hm_ip_ << ":"
-                  << hm_port_;
         if (pid == 0)
         {
             std::string log_path = local_path + "/cc_ng";
