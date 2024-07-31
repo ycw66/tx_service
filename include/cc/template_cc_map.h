@@ -4403,8 +4403,20 @@ public:
                     {
                         while (scan_cache->Size() > 0)
                         {
+                            // If req.is_require_keys_ is false, the KeyT object
+                            // in scan cache is invalid, so, should use the cce,
+                            // which is valid in any situation, to get the
+                            // corresponding key.
+                            CcEntry<KeyT, ValueT> *last_cce =
+                                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                                    scan_cache->Last()->cce_addr_.CcePtr());
+                            while (scan_ccm_it->second != last_cce)
+                            {
+                                --scan_ccm_it;
+                                assert(scan_ccm_it != Begin());
+                            }
                             const KeyT *last_key =
-                                &scan_cache->Last()->KeyObj();
+                                static_cast<const KeyT *>(scan_ccm_it->first);
                             if (*end_key < *last_key ||
                                 (*end_key == *last_key && !end_inclusive))
                             {
@@ -4413,6 +4425,10 @@ public:
                             }
                             else
                             {
+                                // Reset iterator to the key after the last
+                                // scanned tuple since we might need to continue
+                                // scanning if trailing_cnt == 0.
+                                ++scan_ccm_it;
                                 break;
                             }
                         }
@@ -4770,8 +4786,20 @@ public:
                     {
                         while (scan_cache->Size() > 0)
                         {
+                            // If req.is_require_keys_ is false, the KeyT object
+                            // in scan cache is invalid, so, should use the cce,
+                            // which is valid in any situation, to get the
+                            // corresponding key.
+                            CcEntry<KeyT, ValueT> *last_cce =
+                                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                                    scan_cache->Last()->cce_addr_.CcePtr());
+                            while (scan_ccm_it->second != last_cce)
+                            {
+                                ++scan_ccm_it;
+                                assert(scan_ccm_it != End());
+                            }
                             const KeyT *last_key =
-                                &scan_cache->Last()->KeyObj();
+                                static_cast<const KeyT *>(scan_ccm_it->first);
                             if (*last_key < *end_key ||
                                 (*last_key == *end_key && !end_inclusive))
                             {
@@ -4780,6 +4808,10 @@ public:
                             }
                             else
                             {
+                                // Reset iterator to the key after the last
+                                // scanned tuple since we might need to continue
+                                // scanning if trailing_cnt == 0.
+                                --scan_ccm_it;
                                 break;
                             }
                         }
