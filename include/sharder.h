@@ -244,12 +244,7 @@ public:
              LocalCcShards *local_shards,
              std::unique_ptr<TxLog> log_agent,
              const std::string &local_path,
-             const uint16_t rep_group_cnt
-#ifndef ON_KEY_OBJECT
-             ,
-             const uint32_t bthread_worker_num
-#endif
-    );
+             const uint16_t rep_group_cnt);
 
     /**
      * @brief Checks if the current leader of the input cc node group is on the

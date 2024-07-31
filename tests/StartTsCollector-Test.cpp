@@ -62,8 +62,6 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
         "collect_active_tx_ts_interval_seconds", 2));
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("rep_group_cnt", 3));
-    tx_service_conf.insert(
-        std::pair<std::string, uint32_t>("bthread_worker_num", 0));
 
     std::unique_ptr<TxService> tx_service_ =
         std::make_unique<TxService>(&mock_catalog_factory,

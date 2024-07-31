@@ -104,12 +104,7 @@ int Sharder::Init(
     LocalCcShards *local_shards,
     std::unique_ptr<TxLog> log_agent,
     const std::string &local_path,
-    const uint16_t rep_group_cnt
-#ifndef ON_KEY_OBJECT
-    ,
-    const uint32_t bthread_worker_num
-#endif
-)
+    const uint16_t rep_group_cnt)
 {
     node_id_ = node_id;
     local_shards_ = local_shards;
@@ -237,7 +232,6 @@ int Sharder::Init(
     // Start the cc_stream_server_ after TxProcessor start using interface
     // StartCcStreamReceiver().
 
-#ifdef ON_KEY_OBJECT
     brpc::ServerOptions server_options;
     // server_options.num_threads 0 means use default bthread worker count.
     server_options.num_threads = 0;
@@ -249,23 +243,10 @@ int Sharder::Init(
         LOG(FATAL) << "Failed to start the cc node server.";
         return -1;
     }
-#else
-    brpc::ServerOptions server_options;
-    server_options.num_threads = bthread_worker_num;
-    if (cc_node_server_.Start(
-            GET_CCNODE_RPC_PORT(
-                cluster_config_.ng_configs_.at(node_id_).front().port_),
-            &server_options) != 0)
-    {
-        LOG(FATAL) << "Failed to start the cc node server.";
-        return -1;
-    }
-#endif
 
     // The log replay server uses local_port+3 for receiving streams from log
     // groups.
 
-#ifdef ON_KEY_OBJECT
     if (log_replay_server_.Start(
             GET_LOG_REPLAY_RPC_PORT(
                 cluster_config_.ng_configs_.at(node_id_).front().port_),
@@ -274,16 +255,6 @@ int Sharder::Init(
         LOG(FATAL) << "Failed to start the log replay server.";
         return -1;
     }
-#else
-    if (log_replay_server_.Start(
-            GET_LOG_REPLAY_RPC_PORT(
-                cluster_config_.ng_configs_.at(node_id_).front().port_),
-            &server_options) != 0)
-    {
-        LOG(FATAL) << "Failed to start the log replay server.";
-        return -1;
-    }
-#endif
 
     // Notify host manager that this node has been started
     if (hm_ip && !hm_ip->empty())
@@ -1086,7 +1057,6 @@ void Sharder::StartCcStreamReceiver()
 {
     // The cc_stream_receiver_ object has been add to this server during
     // Sharder::Init().
-#ifdef ON_KEY_OBJECT
     brpc::ServerOptions server_options;
     // server_options.num_threads 0 means use default bthread worker count.
     server_options.num_threads = 0;
@@ -1096,12 +1066,5 @@ void Sharder::StartCcStreamReceiver()
     {
         LOG(FATAL) << "Failed to start the cc stream server.";
     }
-#else
-    if (cc_stream_server_.Start(
-            cluster_config_.ng_configs_.at(node_id_).front().port_, NULL) != 0)
-    {
-        LOG(FATAL) << "Failed to start the cc stream server.";
-    }
-#endif
 }
 }  // namespace txservice
