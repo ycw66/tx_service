@@ -339,6 +339,28 @@ struct BlobTxRecord : public TxRecord
     {
     }
 
+    BlobTxRecord &operator=(const BlobTxRecord &rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+        value_ = rhs.value_;
+        return *this;
+    }
+
+    BlobTxRecord &operator=(BlobTxRecord &&rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        value_ = std::move(rhs.value_);
+
+        return *this;
+    }
+
     void Serialize(std::vector<char> &buf, size_t &offset) const override
     {
         assert(false);

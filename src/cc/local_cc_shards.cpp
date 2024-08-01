@@ -3550,7 +3550,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                     // cce_ is null means the key is already persisted on kv, so
                     // we don't need to put it into the flush vec.
                     data_sync_vec->emplace_back(rec.Key().Clone(),
+#ifdef ON_KEY_OBJECT
+                                                rec.GetPayload(),
+#else
                                                 rec.ReleasePayload(),
+#endif
                                                 rec.payload_status_,
                                                 rec.commit_ts_,
                                                 rec.cce_,

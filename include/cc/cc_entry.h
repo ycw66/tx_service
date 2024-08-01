@@ -41,7 +41,11 @@ struct CcPage;
 struct FlushRecord
 {
 private:
+#ifndef ON_KEY_OBJECT
     std::shared_ptr<TxRecord> payload_{nullptr};
+#else
+    BlobTxRecord payload_{};
+#endif
 
     enum class FlushKeyType : uint8_t
     {
@@ -69,6 +73,9 @@ public:
     {
     }
 
+#ifndef ON_KEY_OBJECT
+    // Only used by "data_sync_vec->emplace_back()" in
+    // LocalCcShards::DataSync().
     FlushRecord(TxKey key,
                 std::shared_ptr<TxRecord> payload,
                 RecordStatus payload_status,
@@ -85,6 +92,25 @@ public:
         cce_ = cce;
         delta_size_ = delta_size;
     }
+#else
+    FlushRecord(TxKey key,
+                const BlobTxRecord &payload,
+                RecordStatus payload_status,
+                uint64_t commit_ts,
+                LruEntry *cce,
+                int32_t delta_size)
+    {
+        tx_key_.Release();
+        tx_key_ = std::move(key);
+        key_type_ = FlushKeyType::TxKey;
+        // use copy constructor to avoid re-allocatting memory in DataSyncScanCc
+        payload_ = payload;
+        payload_status_ = payload_status;
+        commit_ts_ = commit_ts;
+        cce_ = cce;
+        delta_size_ = delta_size;
+    }
+#endif
 
     ~FlushRecord()
     {
@@ -201,14 +227,6 @@ public:
     {
         payload_ = sptr;
     }
-#else
-    void SetPayload(const TxRecord *ptr)
-    {
-        auto rec = std::make_shared<BlobTxRecord>();
-        ptr->Serialize(rec->value_);
-        payload_ = rec;
-    }
-#endif
 
     const TxRecord *Payload() const
     {
@@ -228,6 +246,32 @@ public:
     {
         return Payload() == nullptr ? 0 : Payload()->Size();
     }
+#else
+    void SetPayload(const TxRecord *ptr)
+    {
+        payload_.value_.clear();
+        ptr->Serialize(payload_.value_);
+    }
+
+    const TxRecord *Payload() const
+    {
+        if (payload_.value_.empty())
+        {
+            return nullptr;
+        }
+        return &payload_;
+    }
+
+    const BlobTxRecord &GetPayload()
+    {
+        return payload_;
+    }
+
+    size_t PayloadSize() const
+    {
+        return Payload() == nullptr ? 0 : Payload()->Size();
+    }
+#endif
 
     TxKey Key() const;
 
