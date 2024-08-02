@@ -667,23 +667,30 @@ void Sharder::RecoverTx(uint64_t lock_tx_number,
 
 void Sharder::OnLeaderStart(uint32_t ng_id, int64_t term)
 {
-    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
-    auto find_it = cluster_config_.cc_nodes_.find(ng_id);
-    // TODO: is this always true when cluster config is changed?
-    assert(find_it != cluster_config_.cc_nodes_.end());
+    std::shared_ptr<fault::CcNode> node;
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        auto find_it = cluster_config_.cc_nodes_.find(ng_id);
+        // TODO: is this always true when cluster config is changed?
+        assert(find_it != cluster_config_.cc_nodes_.end());
+        node = find_it->second;
+    }
 
-    return find_it->second->OnLeaderStart(term);
+    return node->OnLeaderStart(term);
 }
 
 void Sharder::OnLeaderStop(uint32_t ng_id)
 {
-    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+    std::shared_ptr<fault::CcNode> node;
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        auto find_it = cluster_config_.cc_nodes_.find(ng_id);
+        // TODO: is this always true when cluster config is changed?
+        assert(find_it != cluster_config_.cc_nodes_.end());
+        node = find_it->second;
+    }
 
-    auto find_it = cluster_config_.cc_nodes_.find(ng_id);
-    // TODO: is this always true when cluster config is changed?
-    assert(find_it != cluster_config_.cc_nodes_.end());
-
-    return find_it->second->OnLeaderStop();
+    return node->OnLeaderStop();
 }
 
 void Sharder::LogTransferLeader(uint32_t log_group_id, uint32_t leader_idx)
@@ -979,6 +986,7 @@ void Sharder::UpdateClusterConfig(
                     ng_buf->add_member_nodes(node.node_id_);
                 }
             }
+            auto last_term = LeaderTerm(node_id_);
             req.set_ng_id(node_id_);
             req.set_config_version(version);
             cntl.set_timeout_ms(10000);
@@ -1001,14 +1009,31 @@ void Sharder::UpdateClusterConfig(
 
             {
                 std::unique_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+                bool truncate_log = false;
                 // First remove node groups that are removed from the cluster.
                 size_t cur_ngs = cluster_config_.ng_configs_.size();
                 for (size_t deleted_ng = new_ng_configs.size();
                      deleted_ng < cur_ngs;
                      deleted_ng++)
                 {
+                    if (deleted_ng == node_id_)
+                    {
+                        // Truncate previous log if this ng is also removed.
+                        truncate_log = true;
+                    }
                     cluster_config_.ng_configs_.erase(deleted_ng);
                     cluster_config_.ng_configs_.erase(deleted_ng);
+                }
+
+                if (truncate_log)
+                {
+                    auto [last_ckpt_ts, mem_usage] =
+                        Sharder::Instance()
+                            .GetLocalCcShards()
+                            ->GetTxService()
+                            ->ckpt_.GetNewCheckpointTs(node_id_, true);
+                    log_agent_->UpdateCheckpointTs(
+                        node_id_, last_term, last_ckpt_ts);
                 }
                 for (auto &ng_pair : new_ng_configs)
                 {

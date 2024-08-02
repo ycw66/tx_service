@@ -788,7 +788,7 @@ public:
 
     void Reset(std::function<void(CcShard &ccs)> task = {})
     {
-        std::lock_guard<std::mutex> lk(mux_);
+        std::lock_guard<bthread::Mutex> lk(mux_);
         RunOnTxProcessorCc::Reset(std::move(task));
 
         is_finished_ = false;
@@ -797,31 +797,34 @@ public:
 
     void Wait()
     {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this]() { return is_finished_; });
+        std::unique_lock<bthread::Mutex> lk(mux_);
+        while (!is_finished_)
+        {
+            cv_.wait(lk);
+        }
     }
 
     bool IsFinished() const
     {
-        std::lock_guard<std::mutex> lk(mux_);
+        std::lock_guard<bthread::Mutex> lk(mux_);
         return is_finished_;
     }
 
     bool IsError() const
     {
-        std::lock_guard<std::mutex> lk(mux_);
+        std::lock_guard<bthread::Mutex> lk(mux_);
         return error_code_ != CcErrorCode::NO_ERROR;
     }
 
     CcErrorCode ErrorCode() const
     {
-        std::lock_guard<std::mutex> lk(mux_);
+        std::lock_guard<bthread::Mutex> lk(mux_);
         return error_code_;
     }
 
     void AbortCcRequest(CcErrorCode error_code) override
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        std::unique_lock<bthread::Mutex> lk(mux_);
         is_finished_ = true;
         error_code_ = error_code;
         cv_.notify_one();
@@ -829,7 +832,7 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        std::unique_lock<bthread::Mutex> lk(mux_);
         RunOnTxProcessorCc::Execute(ccs);
         is_finished_ = true;
         error_code_ = CcErrorCode::NO_ERROR;
@@ -848,8 +851,8 @@ private:
     }
 
 private:
-    mutable std::mutex mux_;
-    std::condition_variable cv_;
+    mutable bthread::Mutex mux_;
+    bthread::ConditionVariable cv_;
 
     bool is_finished_;
     CcErrorCode error_code_;

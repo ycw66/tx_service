@@ -943,11 +943,11 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        if (log_type_ == TxLogType::DATA &&
-            Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) > 0)
+        if (Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) > 0)
         {
-            if (hd_result_.ErrorCode() ==
-                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
+            if (log_type_ == TxLogType::DATA &&
+                hd_result_.ErrorCode() ==
+                    CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
             {
                 // For DML transactions, the coordinator must keep retrying the
                 // WriteLog request until getting a clear response, either
@@ -1753,10 +1753,6 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                         hd_result.Value();
                     const CcEntryAddr &cce_addr =
                         acquire_all_result.local_cce_addr_;
-                    DLOG(INFO)
-                        << "rwset.DedupRead tx_numer: " << txm->TxNumber()
-                        << " ,cce_addr: " << std::hex << cce_addr.CcePtr()
-                        << " ,ErrorCode: " << (int32_t) hd_result.ErrorCode();
                     uint64_t read_version = txm->rw_set_.DedupRead(cce_addr);
                     if (read_version > 0 &&
                         read_version != acquire_all_result.commit_ts_)
@@ -6253,6 +6249,10 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
 #else
     vct_key_shard_code_.clear();
     vct_key_shard_code_.resize(len);
+    for (auto &shard_code : vct_key_shard_code_)
+    {
+        shard_code.second = UINT32_MAX;
+    }
     bucket_lock_cur_ = 0;
     lock_bucket_result_->Reset();
     lock_bucket_result_->Value().Reset();

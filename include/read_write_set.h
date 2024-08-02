@@ -604,7 +604,7 @@ public:
                 entry.AddCommand(cmd);
 
                 if (forward_key_shard != UINT32_MAX &&
-                    entry.forward_entry_ != nullptr)
+                    entry.forward_entry_ == nullptr)
                 {
                     assert(cmd != nullptr);
                     entry.forward_entry_ = std::make_unique<CmdForwardEntry>(

@@ -1579,9 +1579,22 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         TX_TRACE_ASSOCIATE(msg.get(), kickout_cc_entry_req);
         // Construct the ccrequest by deserializing the ccmessage
         kickout_cc_entry_req->Reset(std::move(msg));
-        // req is enqueued to first core to parse key, then dispatched to other
-        // cores to run in parallel.
-        local_shards_.EnqueueCcRequest(0, kickout_cc_entry_req);
+        if (kickout_cc_entry_req->GetCleanType() ==
+            txservice::CleanType::CleanForTruncateTable)
+        {
+            // Truncate table does not need to desrialize key, dispatch to all
+            // cores directly
+            for (uint16_t i = 0; i < local_shards_.Count(); i++)
+            {
+                local_shards_.EnqueueCcRequest(i, kickout_cc_entry_req);
+            }
+        }
+        else
+        {
+            // req is enqueued to first core to parse key, then dispatched to
+            // other cores to run in parallel.
+            local_shards_.EnqueueCcRequest(0, kickout_cc_entry_req);
+        }
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_KickoutDataResponse:

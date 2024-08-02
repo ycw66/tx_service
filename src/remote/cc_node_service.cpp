@@ -165,7 +165,6 @@ void CcNodeService::ClusterAddNode(
             ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
         return;
     }
-    LOG(INFO) << "received add node request";
 
     std::vector<std::pair<std::string, uint16_t>> delta_nodes;
     for (int i = 0; i < request->host_list_size(); i++)
@@ -249,7 +248,6 @@ void CcNodeService::ClusterRemoveNode(
             ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
         return;
     }
-    LOG(INFO) << "received remove node request";
 
     std::vector<std::pair<std::string, uint16_t>> delta_nodes;
     // Start cluster scale tx and wait for the log is written before
@@ -1003,7 +1001,7 @@ void CcNodeService::PublishBucketsMigrating(
     DLOG(INFO) << "CcNodeService received PublishBucketsMigrating RPC of #ng"
                << ng_id << ", is_migrating:" << (int) request->is_migrating();
 
-    if (Sharder::Instance().LeaderNodeId(ng_id) != Sharder::Instance().NodeId())
+    if (Sharder::Instance().LeaderTerm(ng_id) < 0)
     {
         response->set_node_group_id(ng_id);
         response->set_success(false);

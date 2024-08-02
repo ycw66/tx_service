@@ -112,6 +112,12 @@ public:
               {
                   T *key = static_cast<T *>(this_obj);
                   return key->NeedsDefrag(heap);
+              }),
+          to_string_func_(
+              [](const void *this_obj)
+              {
+                  const T *key = static_cast<const T *>(this_obj);
+                  return key->ToString();
               })
     {
     }
@@ -183,6 +189,12 @@ public:
         return needs_defrag_func_(this_obj, heap);
     }
 
+    std::string ToString(const void *this_obj) const
+    {
+        return this_obj != nullptr ? to_string_func_(this_obj)
+                                   : std::string("NULL");
+    }
+
 protected:
     typedef void (*DeleteFunc)(void *obj_ptr);
     DeleteFunc const delete_func_;
@@ -224,6 +236,9 @@ protected:
 
     typedef bool (*NeedsDefragFunc)(void *this_obj, mi_heap_t *heap);
     NeedsDefragFunc const needs_defrag_func_;
+
+    typedef std::string (*ToStringFunc)(const void *this_obj);
+    ToStringFunc const to_string_func_;
 };
 
 class TxKey
@@ -332,6 +347,11 @@ public:
     bool NeedsDefrag(mi_heap_t *heap) const
     {
         return interface_->NeedsDefrag(GetPtr(), heap);
+    }
+
+    std::string ToString() const
+    {
+        return interface_->ToString(GetConstPtr());
     }
 
 #ifdef ON_KEY_OBJECT
