@@ -155,7 +155,7 @@ protected:
                                 key, cc_shard_->core_id_, store_slice);
                         }
 
-                        MarkClean(cc_ng_id_, std::move(cce));
+                        MarkClean(cc_ng_id_, cce);
                         continue;
                     }
                 }
@@ -186,7 +186,7 @@ protected:
 
         if (is_clean_target && can_be_cleaned)
         {
-            MarkClean(cc_ng_id_, std::move(cce));
+            MarkClean(cc_ng_id_, cce);
         }
         else
         {
@@ -195,7 +195,7 @@ protected:
     }
 
     void MarkClean(NodeGroupId cc_ng_id,
-                   std::unique_ptr<CcEntry<KeyT, ValueT>> cce)
+                   std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
     {
         // Check if the cce has any locks on it. If so recycle
         // the lock entry before deleting cce.
