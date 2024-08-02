@@ -70,7 +70,13 @@ public:
     }
 
 protected:
-    virtual bool CanBeCleaned(const CcEntry<KeyT, ValueT> *cce) const = 0;
+    struct CanBeCleanedResult
+    {
+        bool can_be_cleaned_;
+        bool delay_free_;
+    };
+    virtual CanBeCleanedResult CanBeCleaned(
+        const CcEntry<KeyT, ValueT> *cce) const = 0;
 
     virtual bool IsCleanTarget(const KeyT &key,
                                const CcEntry<KeyT, ValueT> *cce) const = 0;
@@ -122,7 +128,7 @@ protected:
                 auto &cce = page_->entries_[idx];
 
                 bool is_clean_target = IsCleanTarget(key, cce.get());
-                bool can_be_cleaned = CanBeCleaned(cce.get());
+                auto [can_be_cleaned, delay_free] = CanBeCleaned(cce.get());
 
                 if (is_clean_target && can_be_cleaned)
                 {
@@ -155,7 +161,7 @@ protected:
                                 key, cc_shard_->core_id_, store_slice);
                         }
 
-                        MarkClean(cc_ng_id_, cce);
+                        MarkClean(cc_ng_id_, cce, delay_free);
                         continue;
                     }
                 }
@@ -182,11 +188,11 @@ protected:
                                std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
     {
         bool is_clean_target = IsCleanTarget(key, cce.get());
-        bool can_be_cleaned = CanBeCleaned(cce.get());
+        auto [can_be_cleaned, delay_free] = CanBeCleaned(cce.get());
 
         if (is_clean_target && can_be_cleaned)
         {
-            MarkClean(cc_ng_id_, cce);
+            MarkClean(cc_ng_id_, cce, delay_free);
         }
         else
         {
@@ -195,12 +201,10 @@ protected:
     }
 
     void MarkClean(NodeGroupId cc_ng_id,
-                   std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
+                   std::unique_ptr<CcEntry<KeyT, ValueT>> &cce,
+                   bool delay_free)
     {
-        // Check if the cce has any locks on it. If so recycle
-        // the lock entry before deleting cce.
-        bool delay_free = false;
-        if (cce->GetKeyLock() && !cce->GetKeyLock()->IsEmpty())
+        if (delay_free)
         {
             // Do not free this cce directly since it might be visited
             // by an expired cc req. Put it into the invalid cce pool
@@ -253,9 +257,10 @@ public:
     }
 
 private:
-    bool CanBeCleaned(const CcEntry<KeyT, ValueT> *cce) const override
+    typename CcPageCleanGuard<KeyT, ValueT>::CanBeCleanedResult CanBeCleaned(
+        const CcEntry<KeyT, ValueT> *cce) const override
     {
-        return cce->IsFree();
+        return {cce->IsFree(), false};
     }
 
     bool IsCleanTarget(const KeyT &key,
@@ -342,9 +347,15 @@ private:
     }
 
 private:
-    bool CanBeCleaned(const CcEntry<KeyT, ValueT> *cce) const override
+    typename CcPageCleanGuard<KeyT, ValueT>::CanBeCleanedResult CanBeCleaned(
+        const CcEntry<KeyT, ValueT> *cce) const override
     {
-        return kickout_cc_->CanBeCleaned(cce);
+        // Check if the cce has any locks on it. If so recycle the lock entry
+        // before deleting cce.
+        bool can_be_cleaned = kickout_cc_->CanBeCleaned(cce);
+        bool delay_free = can_be_cleaned && cce->GetKeyLock() &&
+                          !cce->GetKeyLock()->IsEmpty();
+        return {can_be_cleaned, delay_free};
     }
 
     bool IsCleanTarget(const KeyT &key,
