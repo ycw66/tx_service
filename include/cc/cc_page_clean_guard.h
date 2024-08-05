@@ -260,7 +260,7 @@ private:
     typename CcPageCleanGuard<KeyT, ValueT>::CanBeCleanedResult CanBeCleaned(
         const CcEntry<KeyT, ValueT> *cce) const override
     {
-        return {cce->IsFree(), false};
+        return {(cce->IsFree() && !cce->GetBeingCkpt()), false};
     }
 
     bool IsCleanTarget(const KeyT &key,

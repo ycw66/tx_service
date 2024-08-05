@@ -350,7 +350,7 @@ public:
 
     void ClearBeingCkpt();
 
-    bool GetBeingCkpt();
+    bool GetBeingCkpt() const;
 
 #ifndef ON_KEY_OBJECT
     uint64_t CkptTs() const

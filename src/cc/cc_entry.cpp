@@ -188,7 +188,7 @@ void LruEntry::ClearBeingCkpt()
     commit_ts_and_status_ = commit_ts_and_status_ & mask;
 }
 
-bool LruEntry::GetBeingCkpt()
+bool LruEntry::GetBeingCkpt() const
 {
     return commit_ts_and_status_ & 0x20;
 }

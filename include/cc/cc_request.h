@@ -4848,7 +4848,7 @@ public:
             // All data in the target range/bucket can be cleaned.
             return true;
         case CleanType::CleanForAlterTable:
-            return entry->IsFree();
+            return entry->IsFree() && !entry->GetBeingCkpt();
         default:
             assert(false);
             return false;
