@@ -2498,7 +2498,7 @@ public:
         return total_cmt / 1024;
     }
 
-    void ShardMemoryUsageReport()
+    void ShardMemoryUsageReport(LocalCcShards &local_shards)
     {
         for (uint16_t core_id = 0; core_id < memory_allocated_vec_.size();
              core_id++)

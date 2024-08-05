@@ -186,7 +186,8 @@ uint16_t StoreRange::LoadSliceController::NextExecutor() const
 StoreRange::StoreRange(uint32_t partition_id,
                        NodeGroupId range_owner,
                        LocalCcShards &cc_shards,
-                       bool init_key_cache)
+                       bool init_key_cache,
+                       size_t estimate_rec_size)
     : partition_id_(partition_id),
       cc_ng_id_(range_owner),
       local_cc_shards_(cc_shards),
@@ -194,16 +195,29 @@ StoreRange::StoreRange(uint32_t partition_id,
 {
     if (init_key_cache && txservice_enable_key_cache)
     {
-        uint16_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
-        for (uint16_t id = 0; id < core_cnt; id++)
+        size_t key_cache_size;
+        if (estimate_rec_size == UINT64_MAX)
         {
             // Assume each record is 200 bytes, calculate the size of the key
             // cache.
+            key_cache_size = StoreRange::range_max_size /
+                             StoreRange::key_cache_default_load_factor / 200;
+        }
+        else
+        {
+            key_cache_size =
+                std::max((size_t) 1000,
+                         (size_t) (StoreRange::range_max_size /
+                                   StoreRange::key_cache_default_load_factor /
+                                   estimate_rec_size));
+        }
+
+        uint16_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+        for (uint16_t id = 0; id < core_cnt; id++)
+        {
             key_cache_.push_back(
                 std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
-                    StoreRange::range_max_size /
-                    StoreRange::key_cache_default_load_factor / 200 /
-                    core_cnt));
+                    key_cache_size / core_cnt));
         }
     }
     else
@@ -593,6 +607,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     {
         subslice_cnt = 2;
     }
+    size_t rec_cnt = 0;
     uint32_t avg_subslice_size = post_flush_size / subslice_cnt;
     std::vector<SliceChangeInfo> split_keys;
     split_keys.reserve(subslice_cnt);
@@ -605,6 +620,10 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     {
         post_ckpt_subslice_size += item_vec[pos].post_update_size_;
         curr_subslice_size += item_vec[pos].cur_size_;
+        if (item_vec[pos].post_update_size_ != 0)
+        {
+            rec_cnt++;
+        }
 
         if (post_ckpt_subslice_size >= avg_subslice_size)
         {
@@ -628,6 +647,16 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             post_ckpt_subslice_size = 0;
             curr_subslice_size = 0;
             subslice_start = pos + 1;
+        }
+    }
+
+    if (table_name.IsBase() && rec_cnt != 0)
+    {
+        // Set estimate record size for base table
+        auto stats_obj = schema->StatisticsObject();
+        if (stats_obj)
+        {
+            stats_obj->SetEstimateRecordSize(post_flush_size / rec_cnt);
         }
     }
 

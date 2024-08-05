@@ -984,6 +984,11 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
             {
                 // Log group leader might be outdated. Wait for the leader
                 // refresh and retry.
+                CODE_FAULT_INJECTOR("upsert_table_prepare_log_fail", {
+                    LOG(INFO) << "FaultInject  upsert_table_prepare_log_fail";
+                    txm->PostProcess(*this);
+                    return;
+                });
                 ReRunOp(txm);
                 return;
             }

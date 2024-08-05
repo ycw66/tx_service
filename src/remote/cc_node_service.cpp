@@ -1134,13 +1134,18 @@ void CcNodeService::UploadBatchSlices(
     CcErrorCode err = CcErrorCode::NO_ERROR;
     if (req.ErrorCode() != CcErrorCode::NO_ERROR)
     {
+        LOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+                  << " finished with error: " << static_cast<uint32_t>(err);
         err = req.ErrorCode();
+    }
+    else
+    {
+        DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+                   << " finished with error: " << static_cast<uint32_t>(err);
     }
 
     response->set_error_code(ToRemoteType::ConvertCcErrorCode(err));
     response->set_ng_term(ng_term);
-    DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
-               << " finished with error: " << static_cast<uint32_t>(err);
 }
 
 }  // namespace remote

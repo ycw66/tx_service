@@ -896,6 +896,28 @@ public:
         return sample_pool_map;
     }
 
+    void SetEstimateRecordSize(size_t size) override
+    {
+        size_t orig_val = estimate_record_size_.load(std::memory_order_relaxed);
+        if (orig_val == UINT64_MAX)
+        {
+            // If rec size is unset
+
+            estimate_record_size_.store(size, std::memory_order_relaxed);
+        }
+        else
+        {
+            // Update size with a 0.1 weight.
+            estimate_record_size_.store(size * 0.1 + orig_val * 0.9,
+                                        std::memory_order_relaxed);
+        }
+    }
+
+    size_t EstimateRecordSize() const override
+    {
+        return estimate_record_size_.load(std::memory_order_relaxed);
+    }
+
     // This method is called in tx_processor thread.
     //
     // Every node group execute this method.
@@ -1481,6 +1503,8 @@ private:
     mutable std::shared_mutex index_sample_pool_map_mutex_;
 
     mutable std::atomic<bool> updated_since_sync_{false};
+
+    mutable std::atomic<size_t> estimate_record_size_{UINT64_MAX};
 };
 
 }  // namespace txservice

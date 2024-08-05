@@ -442,6 +442,33 @@ public:
         }
     }
 
+    void TableRangeHeapUsageReport()
+    {
+        std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
+        bool is_override_thd = mi_is_override_thread();
+        mi_threadid_t prev_thd =
+            mi_override_thread(GetTableRangesHeapThreadId());
+        mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
+
+        int64_t allocated, committed;
+        mi_thread_stats(&allocated, &committed);
+        LOG(INFO) << "Table range memory report: allocated " << allocated
+                  << ", committed " << committed << ", full: "
+                  << (bool) (static_cast<size_t>(allocated) >=
+                             range_slice_memory_limit_);
+
+        mi_heap_set_default(prev_heap);
+        if (is_override_thd)
+        {
+            mi_override_thread(prev_thd);
+        }
+        else
+        {
+            mi_restore_default_thread_id();
+        }
+        heap_lk.unlock();
+    }
+
     /**
      * -------------------------------------
      *
@@ -534,7 +561,8 @@ public:
     std::vector<const TemplateTableRangeEntry<KeyT> *> SplitTableRange(
         const TableName &table_name,
         NodeGroupId ng_id,
-        TemplateTableRangeEntry<KeyT> *old_entry)
+        TemplateTableRangeEntry<KeyT> *old_entry,
+        size_t estimate_rec_size = UINT64_MAX)
     {
         std::vector<const TemplateTableRangeEntry<KeyT> *> new_range_entries;
         assert(old_entry != nullptr);
@@ -640,7 +668,8 @@ public:
                         old_info->DirtyTs(),
                         &cur_range_slices,
                         false,
-                        old_last_sync_ts);
+                        old_last_sync_ts,
+                        estimate_rec_size);
                 new_range_entries.push_back(new_range);
             }
         }
@@ -687,7 +716,9 @@ public:
                                      *range_start,
                                      old_info->DirtyTs(),
                                      slices_keys,
-                                     false);
+                                     false,
+                                     0,
+                                     estimate_rec_size);
 
                 new_range_entries.push_back(new_range);
             }
@@ -712,7 +743,8 @@ public:
         uint64_t version,
         std::vector<SliceInitInfo> *slice_keys = nullptr,
         bool need_meta_lk = true,
-        uint64_t last_sync_ts = 0)
+        uint64_t last_sync_ts = 0,
+        size_t estimate_rec_size = UINT64_MAX)
     {
         std::unique_lock<std::shared_mutex> lk(meta_data_mux_, std::defer_lock);
         if (need_meta_lk)
@@ -780,8 +812,11 @@ public:
 
             if (ng_id == range_ng && slice_keys)
             {
-                new_range_ptr->InitRangeSlices(
-                    std::move(*slice_keys), range_ng, table_name.IsBase());
+                new_range_ptr->InitRangeSlices(std::move(*slice_keys),
+                                               range_ng,
+                                               table_name.IsBase(),
+                                               false,
+                                               estimate_rec_size);
             }
 
             mi_heap_set_default(prev_heap);

@@ -566,14 +566,15 @@ public:
         268435456;  // 256 * 1024 * 1024 = 256MB
 #endif
 
-    static constexpr float_t key_cache_default_load_factor = 0.5;
+    static constexpr float_t key_cache_default_load_factor = 0.8;
 
     static constexpr float_t new_range_load_factor = 0.1;
 
     StoreRange(uint32_t partition_id,
                NodeGroupId range_owner,
                LocalCcShards &cc_shards,
-               bool init_key_cache);
+               bool init_key_cache,
+               size_t estimate_rec_size);
 
     StoreRange(const StoreRange &) = delete;
 
@@ -794,15 +795,8 @@ protected:
     // if we cannot find a key in cc map. We will query for the key in this
     // cache to make sure that the key exists in kv before loading the slice
     // from kv. We maintain a cache for each core to reduce contention. We only
-    // maintain key cache for primary key for now. By assuming 200 bytes per row
-    // for pk table, and a load factor of 0.5, we can get the max size of each
-    // cuckoo filter is max_range_size / 200 / core_cnt * 2. The load factor is
-    // set to 0.5 since the size of a range can grow larger than max range size
-    // before it is flushed to kv. So we used a lower load factor to reduce
-    // collision. An add collision might result in the whole key cache being
-    // invalidated which is very expensive. A 12 bits long fingerprint for each
-    // key leads to a 0.1% false positive rate for the key cache. Overall the
-    // key cache will consume about 1.5% memory size of the range.
+    // maintain key cache for primary key for now. A 12 bits long fingerprint
+    // for each key leads to a 0.1% false positive rate for the key cache.
 
     // The cache is updated when 1) whenever a new key is inserted into ccm, we
     // will add the key to key cache. 2) when a deleted key is removed from ccm,
@@ -830,8 +824,13 @@ public:
                        NodeGroupId range_owner,
                        LocalCcShards &cc_shards,
                        bool init_key_cache,
-                       bool empty_range = false)
-        : StoreRange(partition_id, range_owner, cc_shards, init_key_cache),
+                       bool empty_range = false,
+                       size_t estimate_rec_size = UINT64_MAX)
+        : StoreRange(partition_id,
+                     range_owner,
+                     cc_shards,
+                     init_key_cache,
+                     estimate_rec_size),
           range_start_key_(start_key),
           range_end_key_(end_key)
     {
@@ -976,17 +975,19 @@ public:
         {
             return;
         }
+        LOG(INFO) << "Invalidate key cache of range " << partition_id_
+                  << " on core " << core_id << " due to collision";
         std::shared_lock<std::shared_mutex> s_lk(mux_);
         // shared lock to avoid slice split
         for (auto &slice : slices_)
         {
             slice->SetKeyCacheValidity(core_id, false);
         }
+        // Create a larger key cache if the old one cannot hold enough keys.
+        size_t last_key_cache_size = key_cache_[core_id]->Size();
         key_cache_[core_id] =
             std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
-                StoreRange::range_max_size /
-                StoreRange::key_cache_default_load_factor / 200 /
-                key_cache_.size());
+                last_key_cache_size * 1.2);
     }
     /**
      * @brief Split the range with new_end. new_end will be the new
@@ -1494,9 +1495,10 @@ public:
 
     void InitKeyCache(const TableName *tbl_name,
                       NodeGroupId ng_id,
-                      int64_t term)
+                      int64_t term,
+                      bool force = false)
     {
-        if (!SetLastInitKeyCacheTs())
+        if (!SetLastInitKeyCacheTs() && !force)
         {
             // Just initialized recently but already invalidated. The range in
             // memory might not fit into the key cache.

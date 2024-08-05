@@ -16,6 +16,7 @@
 #include "statistics.h"
 #include "tx_record.h"
 #include "tx_service.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -272,9 +273,22 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
 {
     if (err == CcErrorCode::NO_ERROR)
     {
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        size_t estimate_rec_size = UINT64_MAX;
+        if (table_name_.IsBase() && txservice_enable_key_cache)
+        {
+            // Get estiamte record size for key cache
+            auto schema = shards->GetSharedTableSchema(
+                TableName(table_name_.GetBaseTableNameSV(), TableType::Primary),
+                cc_ng_id_);
+            auto stats = schema->StatisticsObject();
+            if (stats)
+            {
+                estimate_rec_size = stats->EstimateRecordSize();
+            }
+        }
         std::unique_lock<std::shared_mutex> lk(range_entry_->mux_);
         assert(range_entry_->RangeSlices() == nullptr);
-        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
 
         std::unique_lock<std::mutex> heap_lk(shards->table_ranges_heap_mux_);
         bool is_override_thd = mi_is_override_thread();
@@ -283,8 +297,11 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         mi_heap_t *prev_heap =
             mi_heap_set_default(shards->GetTableRangesHeap());
 
-        range_entry_->InitRangeSlices(
-            std::move(slice_info_), cc_ng_id_, table_name_.IsBase());
+        range_entry_->InitRangeSlices(std::move(slice_info_),
+                                      cc_ng_id_,
+                                      table_name_.IsBase(),
+                                      false,
+                                      estimate_rec_size);
         bool range_slice_mem_full = shards->TableRangesMemoryFull();
 
         mi_heap_set_default(prev_heap);
@@ -594,6 +611,27 @@ void FillStoreSliceCc::SetFinish()
             const TableName *tbl_name = table_name_;
             auto cc_ng_id = cc_ng_id_;
             auto cc_ng_term = cc_ng_term_;
+            if (init_key_cache && load_slice_req_.RecordCnt() > 0)
+            {
+                LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+                size_t estimate_rec_size = UINT64_MAX;
+
+                // Get estiamte record size for key cache
+                auto schema = shards->GetSharedTableSchema(
+                    TableName(table_name_->GetBaseTableNameSV(),
+                              TableType::Primary),
+                    cc_ng_id_);
+                auto stats = schema->StatisticsObject();
+                assert(load_slice_req_.SliceSize() > 0);
+                estimate_rec_size =
+                    load_slice_req_.SliceSize() / load_slice_req_.RecordCnt();
+                if (stats)
+                {
+                    // Update estimate size in table stats with the loaded
+                    // slice.
+                    stats->SetEstimateRecordSize(estimate_rec_size);
+                }
+            }
             range_slice_.CommitLoading(range_, load_slice_req_.SliceSize());
             if (init_key_cache)
             {

@@ -565,8 +565,22 @@ public:
                 }
 
                 // Update the table range map in local cc shards.
-                new_range_entries = shard_->local_shards_.SplitTableRange(
-                    this->table_name_, this->cc_ng_id_, old_entry);
+                size_t estimate_rec_size = UINT64_MAX;
+                if (txservice_enable_key_cache && this->table_name_.IsBase())
+                {
+                    TableStatistics<KeyT> *statistics =
+                        static_cast<TableStatistics<KeyT> *>(
+                            table_schema_->StatisticsObject().get());
+                    if (statistics)
+                    {
+                        estimate_rec_size = statistics->EstimateRecordSize();
+                    }
+                }
+                new_range_entries =
+                    shard_->local_shards_.SplitTableRange(this->table_name_,
+                                                          this->cc_ng_id_,
+                                                          old_entry,
+                                                          estimate_rec_size);
                 if (new_range_entries.empty())
                 {
                     // Range split failed due to slice pinned or being
@@ -587,6 +601,18 @@ public:
                             new_store_range->InitKeyCache(
                                 &this->table_name_, this->cc_ng_id_, ng_term);
                         }
+                    }
+
+                    // The old range might have its key cache invalidated since
+                    // too many keys are inserted to the range before range
+                    // split, now that the keys are splitted to new ranges, try
+                    // to re-initialize the key cache of old range if it's not
+                    // valid.
+                    auto old_store_range = old_entry->TypedStoreRange();
+                    if (old_store_range)
+                    {
+                        old_store_range->InitKeyCache(
+                            &this->table_name_, this->cc_ng_id_, ng_term, true);
                     }
                 }
 

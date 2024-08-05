@@ -324,6 +324,7 @@ public:
           end_key_(std::move(end_key)),
           snapshot_ts_(snapshot_ts),
           slice_size_(0),
+          rec_cnt_(0),
           cc_ng_id_(cc_ng_id),
           cc_ng_term_(cc_ng_term)
     {
@@ -333,6 +334,7 @@ public:
     {
         failed_ = false;
         slice_size_ = 0;
+        rec_cnt_ = 0;
         slice_data_.clear();
     }
 
@@ -345,6 +347,10 @@ public:
         slice_size_ += record->Size();
         slice_data_.emplace_back(
             std::move(key), std::move(record), version_ts, is_deleted);
+        if (!is_deleted)
+        {
+            rec_cnt_++;
+        }
     }
 
     std::deque<SliceDataItem> &SliceData()
@@ -410,6 +416,11 @@ public:
         return failed_;
     }
 
+    size_t RecordCnt() const
+    {
+        return rec_cnt_;
+    }
+
     std::function<void(LoadRangeSliceRequest *)> post_lambda_;
     metrics::TimePoint start_;
 
@@ -424,6 +435,7 @@ private:
     TxKey end_key_;
     uint64_t snapshot_ts_;
     uint32_t slice_size_;
+    uint32_t rec_cnt_;
     NodeGroupId cc_ng_id_;
     int64_t cc_ng_term_;
     bool failed_{false};

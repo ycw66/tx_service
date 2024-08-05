@@ -432,7 +432,8 @@ public:
     virtual void InitRangeSlices(std::vector<SliceInitInfo> &&slices,
                                  NodeGroupId ng_id,
                                  bool init_key_cache,
-                                 bool empty_range = false) = 0;
+                                 bool empty_range = false,
+                                 size_t estimate_rec_size = UINT64_MAX) = 0;
 
     /**
      * @brief Check whether the store range is free or not.
@@ -538,7 +539,8 @@ public:
     void InitRangeSlices(std::vector<SliceInitInfo> &&slices,
                          NodeGroupId ng_id,
                          bool init_key_cache,
-                         bool empty_range = false) override
+                         bool empty_range = false,
+                         size_t estimate_rec_size = UINT64_MAX) override
     {
         std::unique_ptr<TemplateStoreRange<KeyT>> range_slices =
             std::make_unique<TemplateStoreRange<KeyT>>(
@@ -548,7 +550,8 @@ public:
                 ng_id,
                 *Sharder::Instance().GetLocalCcShards(),
                 init_key_cache,
-                empty_range);
+                empty_range,
+                estimate_rec_size);
 
         if (!empty_range)
         {

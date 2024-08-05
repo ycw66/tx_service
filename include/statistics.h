@@ -93,6 +93,10 @@ public:
     MakeStoreStatistics(bool *updated_since_sync) const = 0;
 
     virtual void SetUpdatedSinceSync() = 0;
+
+    virtual void SetEstimateRecordSize(size_t size) = 0;
+
+    virtual size_t EstimateRecordSize() const = 0;
 };
 
 struct StatisticsEntry
