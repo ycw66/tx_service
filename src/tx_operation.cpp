@@ -4492,6 +4492,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                         dest_node_id);
                                 if (channel == nullptr)
                                 {
+                                    range_start_data_it = range_end_data_it;
                                     // Fail to establish the channel to the tx
                                     // node. Just skip the cache sending.
                                     LOG(ERROR) << "UploadRangeSlices: Failed "
@@ -4551,6 +4552,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                                 if (cntl.Failed())
                                 {
+                                    range_start_data_it = range_end_data_it;
                                     LOG(ERROR)
                                         << "Fail to upload dirty range slices "
                                            "RPC ng#"
@@ -4563,6 +4565,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                         resp.error_code()) !=
                                     CcErrorCode::NO_ERROR)
                                 {
+                                    range_start_data_it = range_end_data_it;
                                     LOG(INFO) << "New owner ng#" << range_owner
                                               << " reject to receive dirty "
                                                  "range data";
