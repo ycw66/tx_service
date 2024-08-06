@@ -10362,6 +10362,12 @@ protected:
             merged_page->last_access_ts_ = merge_last_access_ts;
         }
 
+        // last_dirty_commit_ts_ of merged page will inherit the larger
+        // one.
+        merged_page->last_dirty_commit_ts_ =
+            std::max(merged_page->last_dirty_commit_ts_,
+                     discarded_page->last_dirty_commit_ts_);
+
         // remove discarded page from the map
         // note that all iterators are invalid after the erasion
         ccmp_.erase(discarded_page_it);
