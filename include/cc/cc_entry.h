@@ -5,6 +5,8 @@
 #include <algorithm>  // std::max
 #include <atomic>
 #include <cassert>
+#include <cstdint>
+#include <deque>
 #include <list>
 #include <memory>   // std::make_unique, make_shared, shared_ptr
 #include <utility>  // std::move
@@ -12,6 +14,7 @@
 
 #include "cc_req_base.h"
 #include "non_blocking_lock.h"
+#include "slice_data_item.h"
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -1330,6 +1333,66 @@ public:
         return exported_count;
     }
 
+    void UpdateCcEntry(const SliceDataItem &data_item, bool enable_mvcc)
+    {
+        const ValueT *record =
+            static_cast<const ValueT *>(data_item.record_.get());
+
+#ifdef RANGE_PARTITION_ENABLED
+        // Initialize the data store size if it is unspecified
+        // before
+        if (data_store_size_ == INT32_MAX)
+        {
+            data_store_size_ = data_item.is_deleted_
+                                   ? 0
+                                   : data_item.key_.Size() + record->Size();
+        }
+#endif
+
+#ifndef ON_KEY_OBJECT
+        // If the in-memory version is from a upload request (i.e.
+        // generated sk record from pk), the data store version
+        // might be newer. Only overwrite if in memory version is
+        // newer.
+        const uint64_t cce_version = CommitTs();
+        if (cce_version < data_item.version_ts_)
+        {
+            if (data_item.is_deleted_)
+            {
+                payload_ = nullptr;
+            }
+            else
+            {
+                if (payload_.use_count() == 1)
+                {
+                    *(payload_) = *record;
+                }
+                else
+                {
+                    payload_ = std::make_shared<ValueT>(*record);
+                }
+            }
+            RecordStatus status = data_item.is_deleted_ ? RecordStatus::Deleted
+                                                        : RecordStatus::Normal;
+            SetCommitTsPayloadStatus(data_item.version_ts_, status);
+        }
+        if (cce_version > 1 && data_item.version_ts_ < cce_version &&
+            enable_mvcc)
+        {
+            AddArchiveRecord(std::make_shared<ValueT>(*record),
+                             data_item.is_deleted_ ? RecordStatus::Deleted
+                                                   : RecordStatus::Normal,
+                             data_item.version_ts_);
+
+            // The cc entry's commit ts is 1 when it is initialized.
+            // Commit ts greater than 1 means that the key is
+            // already cached in memory.
+            return;
+        }
+#endif
+        SetCkptTs(data_item.version_ts_);
+    }
+
 #ifndef ON_KEY_OBJECT
     size_t ArchiveRecordsCount() const
     {
@@ -1632,6 +1695,50 @@ struct CcPage : public LruPage
         entries_.erase(entries_.begin() + split_pos, entries_.end());
     }
 
+    // Only used by batch fill slice
+    // This method only palces some keys in [start_index, end_index).
+    // Note: If there are keys in [start_index, end_index) before, then these
+    // keys will be overwritten.
+    void PlaceKeys(
+        std::vector<KeyT> &src_keys,
+        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &src_entries,
+        std::deque<SliceDataItem> &slice_items,
+        const std::vector<std::pair<size_t, bool>> &location_infos,
+        size_t start_index,
+        size_t end_index,
+        size_t offset,
+        bool enable_mvcc)
+    {
+        assert(start_index >= 0 && end_index <= Size());
+        assert(offset + (end_index - start_index) <= location_infos.size());
+
+        offset += (end_index - start_index - 1);
+        for (size_t idx = end_index; idx > start_index; --idx, --offset)
+        {
+            auto &location_info = location_infos[offset];
+            if (location_info.second)
+            {
+                // Emplace new key to target page
+                auto new_cc_entry = std::make_unique<CcEntry<KeyT, ValueT>>();
+                new_cc_entry->UpdateCcEntry(slice_items[location_info.first],
+                                            enable_mvcc);
+
+                // emplace new key into page
+                const KeyT *item_key =
+                    slice_items[location_info.first].key_.GetKey<KeyT>();
+
+                keys_[idx - 1] = KeyT(*item_key);
+                entries_[idx - 1] = std::move(new_cc_entry);
+            }
+            else
+            {
+                keys_[idx - 1] = std::move(src_keys[location_info.first]);
+                entries_[idx - 1] = std::move(src_entries[location_info.first]);
+                entries_[idx - 1]->UpdateCcPage(this);
+            }
+        }
+    }
+
     /**
      * Find upper bound of key, requiring key is in the range of this page's
      * [front, back).
@@ -1720,6 +1827,21 @@ struct CcPage : public LruPage
             return KeyT::PositiveInfinity();
         }
         size_t idx_in_page = FindEntry(cce);
+        assert(idx_in_page < keys_.size());
+        return &keys_.at(idx_in_page);
+    }
+
+    const KeyT *Key(size_t idx_in_page) const
+    {
+        if (IsNegInf())
+        {
+            return KeyT::NegativeInfinity();
+        }
+        if (IsPosInf())
+        {
+            return KeyT::PositiveInfinity();
+        }
+
         assert(idx_in_page < keys_.size());
         return &keys_.at(idx_in_page);
     }

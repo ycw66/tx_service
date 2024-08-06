@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -25,6 +26,7 @@
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
 #include "mimalloc.h"
+#include "non_blocking_lock.h"
 #include "proto/cc_request.pb.h"
 #include "remote/remote_cc_handler.h"  //RemoteCcHandler
 #include "remote/remote_cc_request.h"
@@ -8491,6 +8493,209 @@ protected:
         return FindEmplace(key, emplace, force_emplace, read_only_req);
     }
 
+    std::pair<bool, size_t> ShuffleKeyAndPageSplit(
+        BtreeMapIterator &target_iter,
+        CcPage<KeyT, ValueT> *&target_page,
+        std::deque<SliceDataItem> &slice_items,
+        std::vector<std::pair<size_t, bool>> &location_infos,
+        size_t new_key_cnt,
+        size_t first_key_index_in_page)
+    {
+        size_t new_first_key_idx_in_page = 0;
+        bool need_forward_iter = true;
+        assert(target_iter->second.get() == target_page);
+
+        size_t total_size = target_page->Size() + new_key_cnt;
+        assert(total_size == location_infos.size());
+
+        if (total_size <= CcPage<KeyT, ValueT>::split_threshold_)
+        {
+            target_page->keys_.resize(total_size);
+            target_page->entries_.resize(total_size);
+            target_page->PlaceKeys(target_page->keys_,
+                                   target_page->entries_,
+                                   slice_items,
+                                   location_infos,
+                                   first_key_index_in_page,  // start index
+                                   total_size,               // end index
+                                   first_key_index_in_page,  // offset
+                                   shard_->EnableMvcc());
+
+            shard_->UpdateLruList(target_page, true);
+            TryUpdatePageKey(target_iter);
+            assert(target_iter->second.get() == target_page);
+            assert(target_iter->first == target_page->FirstKey());
+        }
+        else
+        {
+            // 0.7
+            double fill_factor = 1;
+            size_t data_cnt_per_page =
+                std::ceil(CcPage<KeyT, ValueT>::split_threshold_ * fill_factor);
+            assert(data_cnt_per_page <= 64);
+
+            size_t page_cnt = total_size / data_cnt_per_page;
+            size_t remain_size = total_size % data_cnt_per_page;
+            assert((page_cnt * data_cnt_per_page) + remain_size == total_size);
+
+            std::vector<KeyT> old_page_keys = std::move(target_page->keys_);
+            std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
+                old_page_entries = std::move(target_page->entries_);
+            assert(target_page->keys_.empty());
+            assert(target_page->entries_.empty());
+            target_page->keys_.reserve(CcPage<KeyT, ValueT>::split_threshold_);
+            target_page->entries_.reserve(
+                CcPage<KeyT, ValueT>::split_threshold_);
+
+            uint64_t old_page_last_dirty_commit_ts =
+                target_page->last_dirty_commit_ts_;
+
+            for (size_t page_idx = 0; page_idx < page_cnt; ++page_idx)
+            {
+                size_t offset = page_idx * data_cnt_per_page;
+                std::unique_ptr<CcPage<KeyT, ValueT>> new_page_owner = nullptr;
+
+                if (page_idx != 0)
+                {
+                    // create new page
+                    new_page_owner = std::make_unique<CcPage<KeyT, ValueT>>(
+                        this, target_page, target_page->next_page_);
+                    target_page = new_page_owner.get();
+                }
+
+                target_page->keys_.resize(data_cnt_per_page);
+                target_page->entries_.resize(data_cnt_per_page);
+                target_page->PlaceKeys(old_page_keys,
+                                       old_page_entries,
+                                       slice_items,
+                                       location_infos,
+                                       0,
+                                       data_cnt_per_page,
+                                       offset,
+                                       shard_->EnableMvcc());
+
+                if (page_idx == 0)
+                {
+                    // Update ccmap node key
+                    TryUpdatePageKey(target_iter);
+                    assert(target_iter->second.get() == target_page);
+                }
+                else
+                {
+                    assert(new_page_owner != nullptr);
+                    assert(target_page == new_page_owner.get());
+                    // Emplace new page to ccmap
+                    target_iter = ccmp_.try_emplace(++target_iter,
+                                                    target_page->FirstKey(),
+                                                    std::move(new_page_owner));
+
+                    assert(target_iter->second.get() == target_page);
+                }
+
+                // Update `last_dirty_commit_ts_`
+                target_page->last_dirty_commit_ts_ =
+                    old_page_last_dirty_commit_ts;
+                // Move target_page to lru tail. Update last
+                // access ts
+                shard_->UpdateLruList(target_page, true);
+            }
+
+            if (remain_size > 0)
+            {
+                bool need_rebalance =
+                    remain_size < CcPage<KeyT, ValueT>::merge_threshold_;
+                // Insert remaining data to next page.
+                if (need_rebalance &&
+                    target_page->next_page_ != &pos_inf_page_ &&
+                    target_page->next_page_->Size() + remain_size <=
+                        CcPage<KeyT, ValueT>::split_threshold_)
+                {
+                    size_t next_page_old_size = target_page->next_page_->Size();
+                    target_page->next_page_->keys_.resize(next_page_old_size +
+                                                          remain_size);
+                    target_page->next_page_->entries_.resize(
+                        next_page_old_size + remain_size);
+
+                    for (size_t idx = next_page_old_size; idx > 0; --idx)
+                    {
+                        target_page->next_page_->keys_[idx + remain_size - 1] =
+                            std::move(target_page->next_page_->keys_[idx - 1]);
+                        target_page->next_page_
+                            ->entries_[idx + remain_size - 1] = std::move(
+                            target_page->next_page_->entries_[idx - 1]);
+                    }
+
+                    target_page->next_page_->PlaceKeys(
+                        old_page_keys,
+                        old_page_entries,
+                        slice_items,
+                        location_infos,
+                        0,
+                        remain_size,
+                        page_cnt * data_cnt_per_page,
+                        shard_->EnableMvcc());
+
+                    target_page->next_page_->last_dirty_commit_ts_ =
+                        std::max(target_page->next_page_->last_dirty_commit_ts_,
+                                 old_page_last_dirty_commit_ts);
+                    shard_->UpdateLruList(target_page->next_page_, true);
+
+                    // Update next page key
+                    target_iter++;
+                    TryUpdatePageKey(target_iter);
+                    assert(target_iter->second.get() ==
+                           target_page->next_page_);
+                    target_iter--;
+
+                    new_first_key_idx_in_page = remain_size;
+                    return {need_forward_iter, new_first_key_idx_in_page};
+                }
+
+                // Create new page.
+                auto new_page_owner = std::make_unique<CcPage<KeyT, ValueT>>(
+                    this, target_page, target_page->next_page_);
+                target_page = new_page_owner.get();
+
+                target_page->keys_.resize(remain_size);
+                target_page->entries_.resize(remain_size);
+
+                target_page->PlaceKeys(old_page_keys,
+                                       old_page_entries,
+                                       slice_items,
+                                       location_infos,
+                                       0,
+                                       remain_size,
+                                       page_cnt * data_cnt_per_page,
+                                       shard_->EnableMvcc());
+
+                target_page->last_dirty_commit_ts_ =
+                    old_page_last_dirty_commit_ts;
+                shard_->UpdateLruList(target_page, true);
+                target_iter = ccmp_.try_emplace(++target_iter,
+                                                target_page->FirstKey(),
+                                                std::move(new_page_owner));
+                assert(target_iter->second.get() == target_page);
+
+                // Move data from `next_page` to `target_page`
+                if (need_rebalance && target_page->next_page_ != &pos_inf_page_)
+                {
+                    assert(target_page->Size() <
+                           target_page->next_page_->Size());
+                    new_first_key_idx_in_page = target_page->Size();
+
+                    auto next_page_iter = target_iter;
+                    ++next_page_iter;
+                    RedistributeBetweenPages(target_iter, next_page_iter);
+
+                    assert(target_iter->second.get() == target_page);
+                    need_forward_iter = false;
+                }
+            }
+        }
+        assert(target_iter->second.get() == target_page);
+        return {need_forward_iter, new_first_key_idx_in_page};
+    }
+
     bool BatchFillSlice(std::deque<SliceDataItem> &slice_items,
                         bool force_emplace,
                         size_t first_index,
@@ -8516,70 +8721,6 @@ protected:
                 return false;
             }
         }
-
-        auto update_cc_entry = [shard = shard_](const SliceDataItem &data_item,
-                                                CcEntry<KeyT, ValueT> *cce)
-        {
-            const ValueT *record =
-                static_cast<const ValueT *>(data_item.record_.get());
-
-#ifdef RANGE_PARTITION_ENABLED
-            // Initialize the data store size if it is unspecified
-            // before
-            if (cce->data_store_size_ == INT32_MAX)
-            {
-                cce->data_store_size_ =
-                    data_item.is_deleted_
-                        ? 0
-                        : data_item.key_.Size() + record->Size();
-            }
-#endif
-
-#ifndef ON_KEY_OBJECT
-            // If the in-memory version is from a upload request (i.e.
-            // generated sk record from pk), the data store version
-            // might be newer. Only overwrite if in memory version is
-            // newer.
-            const uint64_t cce_version = cce->CommitTs();
-            if (cce_version < data_item.version_ts_)
-            {
-                if (data_item.is_deleted_)
-                {
-                    cce->payload_ = nullptr;
-                }
-                else
-                {
-                    if (cce->payload_.use_count() == 1)
-                    {
-                        *(cce->payload_) = *record;
-                    }
-                    else
-                    {
-                        cce->payload_ = std::make_shared<ValueT>(*record);
-                    }
-                }
-                RecordStatus status = data_item.is_deleted_
-                                          ? RecordStatus::Deleted
-                                          : RecordStatus::Normal;
-                cce->SetCommitTsPayloadStatus(data_item.version_ts_, status);
-            }
-            if (cce_version > 1 && data_item.version_ts_ < cce_version &&
-                shard->EnableMvcc())
-            {
-                cce->AddArchiveRecord(std::make_shared<ValueT>(*record),
-                                      data_item.is_deleted_
-                                          ? RecordStatus::Deleted
-                                          : RecordStatus::Normal,
-                                      data_item.version_ts_);
-
-                // The cc entry's commit ts is 1 when it is initialized.
-                // Commit ts greater than 1 means that the key is
-                // already cached in memory.
-                return;
-            }
-#endif
-            cce->SetCkptTs(data_item.version_ts_);
-        };
 
         typename decltype(ccmp_)::iterator target_iter;
         CcPage<KeyT, ValueT> *target_page = nullptr;
@@ -8610,214 +8751,202 @@ protected:
 
         target_page = target_iter->second.get();
 
-        bool is_emplace = false;
-        std::vector<KeyT> new_keys;
-        std::vector<size_t> new_key_item_idxs;
-        new_keys.reserve(CcPage<KeyT, ValueT>::split_threshold_);
-        new_key_item_idxs.reserve(CcPage<KeyT, ValueT>::split_threshold_);
-        std::vector<size_t> entry_indexs;
+        // find first key index
+        const KeyT *first_key =
+            static_cast<const KeyT *>(slice_items[first_index].key_.KeyPtr());
+        size_t key_idx_in_page = target_page->LowerBound(*first_key);
+        size_t new_key_cnt = 0;
+        size_t first_key_index_in_page = key_idx_in_page;
 
-        for (size_t item_idx = first_index; item_idx < end_idx;)
+        // `location_infos` records when all new keys are inserted into the
+        // page, where does the key in each position on the page come from
+        // The first value of pair: the index of vector or the index of
+        // target_page.
+        // The second value of pair: true means the key come from items vector,
+        // false means the key come from target_page.
+        // <key_idx_in_page, false>, <slice_items_idx, true>
+        std::vector<std::pair<size_t, bool>> location_infos;
+        location_infos.reserve(CcPage<KeyT, ValueT>::split_threshold_ +
+                               FillStoreSliceCc::MaxScanBatchSize);
+
+        // keys before `key_idx_in_page` are come from target_page. So set all
+        // values to false
+        for (size_t idx = 0; idx < key_idx_in_page; ++idx)
+        {
+            location_infos.emplace_back(idx, false);
+        }
+
+        // fast path if all inserted keys fit in between 2 existing keys
+        bool all_key_no_exists = false;
+        if (key_idx_in_page == target_page->Size() ||
+            *first_key < *target_page->Key(key_idx_in_page))
+        {
+            assert(end_idx > 0);
+            const KeyT *end_key = static_cast<const KeyT *>(
+                slice_items[end_idx - 1].key_.KeyPtr());
+
+            if (key_idx_in_page == target_page->Size())
+            {
+                if (*end_key < target_page->next_page_->FirstKey())
+                {
+                    all_key_no_exists = true;
+                }
+            }
+            else
+            {
+                assert(key_idx_in_page < target_page->Size());
+                if (*end_key < *target_page->Key(key_idx_in_page))
+                {
+                    all_key_no_exists = true;
+                }
+            }
+        }
+
+        if (all_key_no_exists)
+        {
+            new_key_cnt += (end_idx - first_index);
+            // keys are come from `slice_items`. So set all values to true
+            for (size_t idx = first_index; idx < end_idx; ++idx)
+            {
+                location_infos.emplace_back(idx, true);
+            }
+            // keys after `key_idx_in_page` are come from target_page. So set
+            // all values to false
+            for (size_t idx = key_idx_in_page; idx < target_page->Size(); ++idx)
+            {
+                location_infos.emplace_back(idx, false);
+            }
+
+            ShuffleKeyAndPageSplit(target_iter,
+                                   target_page,
+                                   slice_items,
+                                   location_infos,
+                                   new_key_cnt,
+                                   first_key_index_in_page);
+
+            size_ += (end_idx - first_index);
+
+            return true;
+        }
+
+        bool need_forward_iter = true;
+        size_t item_idx = first_index;
+
+        while (item_idx < end_idx)
         {
             const KeyT *target_key =
                 static_cast<const KeyT *>(slice_items[item_idx].key_.KeyPtr());
 
-            size_t idx_in_page = target_page->Find(*target_key);
-
-            if (idx_in_page != target_page->Size())
+            // Move to next page.
+            if (key_idx_in_page == target_page->Size())
             {
-                // found
-                assert(idx_in_page < target_page->Size());
-
-                is_emplace = false;
-                update_cc_entry(slice_items[item_idx],
-                                target_page->Entry(idx_in_page));
-            }
-            else
-            {
-                // Check whether the key is stored on the next page
-                if (target_page->next_page_->FirstKey() <= *target_key)
+                if (*target_key < target_page->next_page_->FirstKey())
                 {
-                    // Batch emplace new keys into this target page.
-                    if (!new_keys.empty())
-                    {
-                        target_page->EmplaceKeys(new_keys, entry_indexs);
-
-                        assert(new_keys.size() == entry_indexs.size());
-                        assert(new_key_item_idxs.size() == entry_indexs.size());
-
-                        for (size_t i = 0; i < entry_indexs.size(); ++i)
-                        {
-                            size_t slice_item_index = new_key_item_idxs[i];
-                            update_cc_entry(
-                                slice_items[slice_item_index],
-                                target_page->Entry(entry_indexs[i]));
-                        }
-
-                        TryUpdatePageKey(target_iter);
-
-                        new_keys.clear();
-                        new_key_item_idxs.clear();
-                    }
-
-                    // Move to next page
-                    target_iter++;
-
-                    if (target_iter == ccmp_.end())
-                    {
-                        target_iter = ccmp_.try_emplace(
-                            target_iter,
-                            *target_key,
-                            std::make_unique<CcPage<KeyT, ValueT>>(
-                                this, target_page, target_page->next_page_));
-                    }
-                    target_page = target_iter->second.get();
+                    location_infos.emplace_back(item_idx, true);
+                    new_key_cnt++;
+                    item_idx++;
                     continue;
                 }
 
-                // Page will be full soon.
-                if (target_page->Size() + new_keys.size() ==
-                    CcPage<KeyT, ValueT>::split_threshold_)
+                if (new_key_cnt > 0)
                 {
-                    // Batch emplace new keys into this target page.
-                    if (!new_keys.empty())
-                    {
-                        target_page->EmplaceKeys(new_keys, entry_indexs);
+                    std::tie(need_forward_iter, key_idx_in_page) =
+                        ShuffleKeyAndPageSplit(target_iter,
+                                               target_page,
+                                               slice_items,
+                                               location_infos,
+                                               new_key_cnt,
+                                               first_key_index_in_page);
 
-                        assert(new_keys.size() == entry_indexs.size());
-                        assert(new_key_item_idxs.size() == entry_indexs.size());
-
-                        for (size_t i = 0; i < entry_indexs.size(); ++i)
-                        {
-                            size_t slice_item_index = new_key_item_idxs[i];
-                            update_cc_entry(
-                                slice_items[slice_item_index],
-                                target_page->Entry(entry_indexs[i]));
-                        }
-
-                        TryUpdatePageKey(target_iter);
-
-                        new_keys.clear();
-                        new_key_item_idxs.clear();
-
-                        assert(target_page->Full());
-                    }
+                    assert(new_key_cnt > 0);
+                    // Update CCMap size
+                    size_ += new_key_cnt;
+                }
+                else
+                {
+                    // Forward to next page
+                    key_idx_in_page = 0;
+                    need_forward_iter = true;
+                    // all keys exists. only move target page to lru tail
+                    shard_->UpdateLruList(target_page, false);
                 }
 
-                if (target_page->Full() && target_page->LastKey() < *target_key)
+                new_key_cnt = 0;
+                location_infos.clear();
+                first_key_index_in_page = key_idx_in_page;
+                // keys before `key_idx_in_page` are come from target_page. So
+                // set all values to false
+                for (size_t lidx = 0; lidx < key_idx_in_page; ++lidx)
                 {
-                    assert(new_keys.empty());
-                    assert(new_key_item_idxs.empty());
+                    location_infos.emplace_back(lidx, false);
+                }
 
-                    // target page is full, choose the next page if
-                    // `key` can be inserted into next page
+                if (need_forward_iter)
+                {
                     target_iter++;
-                    if (target_iter == ccmp_.end())
-                    {
-                        // create a new page
-                        target_iter = ccmp_.try_emplace(
-                            target_iter,
-                            *target_key,
-                            std::make_unique<CcPage<KeyT, ValueT>>(
-                                this, target_page, target_page->next_page_));
-                    }
-                    target_page = target_iter->second.get();
                 }
 
-                if (target_page->Full())
+                if (target_iter == ccmp_.end())
                 {
-                    assert(new_keys.empty());
-                    assert(new_key_item_idxs.empty());
-
-                    // split this page
-                    std::vector<KeyT> new_page_keys;
-                    std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
-                        new_page_entries;
-                    uint64_t new_last_commit_ts = 0;
-                    target_page->Split(
-                        new_page_keys, new_page_entries, new_last_commit_ts);
-
-                    const KeyT &key_of_new_page = *new_page_keys.begin();
-                    auto new_page_it = ccmp_.try_emplace(
-                        target_iter,
-                        key_of_new_page,
-                        std::make_unique<CcPage<KeyT, ValueT>>(
-                            this,
-                            std::move(new_page_keys),
-                            std::move(new_page_entries),
-                            target_page,
-                            target_page->next_page_));
-                    CcPage<KeyT, ValueT> *new_page = new_page_it->second.get();
-                    new_page->last_dirty_commit_ts_ = new_last_commit_ts;
-
-                    for (auto &cce : new_page->entries_)
-                    {
-                        cce->UpdateCcPage(new_page);
-                    }
-
-                    // insert new page into lru list right after old
-                    // page
-                    if (target_page->lru_next_ != nullptr)
-                    {
-                        LruPage *next = target_page->lru_next_;
-                        new_page->lru_next_ = next;
-                        next->lru_prev_ = new_page;
-                        target_page->lru_next_ = new_page;
-                        new_page->lru_prev_ = target_page;
-                        new_page->last_access_ts_ =
-                            target_page->last_access_ts_;
-                    }
-
-                    // Iterators are invalidated after split. Find the target
-                    // page.
-                    if (new_page->FirstKey() <= *target_key)
-                    {
-                        target_iter = new_page_it;
-                        target_page = new_page;
-                    }
-                    else
-                    {
-                        target_iter = --new_page_it;
-                        target_page = target_iter->second.get();
-                        assert(target_iter->first == target_page->FirstKey());
-                        assert(target_iter->second->LastKey() <
-                               new_page->FirstKey());
-                    }
+                    assert(item_idx == end_idx);
+                    assert(new_key_cnt == 0);
+                    break;
                 }
 
-                // We will insert these keys into the page later. This
-                // is to avoid frequent moving of data during insertion
-                new_keys.emplace_back(*target_key);
-                new_key_item_idxs.emplace_back(item_idx);
+                target_page = target_iter->second.get();
 
-                is_emplace = true;
+                continue;
             }
 
-            shard_->UpdateLruList(target_page, is_emplace);
-            ++item_idx;
-        }
-
-        if (!new_keys.empty())
-        {
-            target_page->EmplaceKeys(new_keys, entry_indexs);
-
-            assert(new_keys.size() == entry_indexs.size());
-            assert(new_key_item_idxs.size() == entry_indexs.size());
-
-            for (size_t i = 0; i < entry_indexs.size(); ++i)
+            if (*target_key < *target_page->Key(key_idx_in_page))
             {
-                size_t slice_item_index = new_key_item_idxs[i];
-                update_cc_entry(slice_items[slice_item_index],
-                                target_page->Entry(entry_indexs[i]));
+                // `true` means the key comes from the items vector.
+                location_infos.emplace_back(item_idx, true);
+
+                new_key_cnt++;
+                // Move forwrd item index
+                item_idx++;
             }
-
-            TryUpdatePageKey(target_iter);
-
-            new_keys.clear();
-            new_key_item_idxs.clear();
+            else if (*target_key == *target_page->Key(key_idx_in_page))
+            {
+                location_infos.emplace_back(key_idx_in_page, false);
+                // Don't need to empalce key. But we need to update entry's
+                // payload
+                target_page->Entry(key_idx_in_page)
+                    ->UpdateCcEntry(slice_items[item_idx],
+                                    shard_->EnableMvcc());
+                item_idx++;
+                key_idx_in_page++;
+            }
+            else
+            {
+                location_infos.emplace_back(key_idx_in_page, false);
+                key_idx_in_page++;
+            }
         }
 
-        size_ += (end_idx - first_index);
+        if (new_key_cnt > 0)
+        {
+            assert(target_iter->second.get() == target_page);
+            size_t total_size = target_page->Size() + new_key_cnt;
+            // keys after `key_idx_in_page` are come from target_page. So set
+            // all values to false
+            for (size_t idx = key_idx_in_page; idx < target_page->Size(); ++idx)
+            {
+                location_infos.emplace_back(idx, false);
+            }
+
+            ShuffleKeyAndPageSplit(target_iter,
+                                   target_page,
+                                   slice_items,
+                                   location_infos,
+                                   new_key_cnt,
+                                   first_key_index_in_page);
+
+            assert(new_key_cnt > 0);
+            // Update Ccmap size
+            size_ += new_key_cnt;
+        }
 
         return true;
     }
@@ -10096,6 +10225,9 @@ protected:
         assert(page2_it->first != page2.FirstKey());
         TryUpdatePageKey(page2_it);
         assert(page2_it->second.get() == &page2);
+        page1_it = page2_it;
+        --page1_it;
+        assert(page1_it->second.get() == &page1);
 
         // update LRU list
         // after redistribution, the two pages should be seen as one in
@@ -10229,12 +10361,6 @@ protected:
             lru_next->lru_prev_ = merged_page;
             merged_page->last_access_ts_ = merge_last_access_ts;
         }
-
-        // last_dirty_commit_ts_ of merged page will inherit the larger
-        // one.
-        merged_page->last_dirty_commit_ts_ =
-            std::max(merged_page->last_dirty_commit_ts_,
-                     discarded_page->last_dirty_commit_ts_);
 
         // remove discarded page from the map
         // note that all iterators are invalid after the erasion

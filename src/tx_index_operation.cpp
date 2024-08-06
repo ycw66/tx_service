@@ -603,6 +603,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 }
                 return;
             });
+
         ACTION_FAULT_INJECTOR("term_AlterTableIndex_FlushNewPackedSKOp");
         assert(op_type_ == OperationType::AddIndex);
         assert(alter_table_info_.index_add_count_ ==
