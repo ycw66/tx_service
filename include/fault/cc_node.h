@@ -33,10 +33,6 @@ public:
            LocalCcShards &local_shards,
            uint32_t log_group_cnt);
 
-    int64_t Term() const
-    {
-        return leader_term_.load(std::memory_order_acquire);
-    }
     bool CheckLogGroupReplayFinished(uint32_t log_group_id, int64_t ng_term);
 
     void FinishLogGroupReplay(uint32_t log_group_id,
@@ -67,8 +63,8 @@ public:
         return last_ckpt_ts_.load(std::memory_order_relaxed);
     }
 
-    void OnLeaderStart(int64_t term);
-    void OnLeaderStop();
+    bool OnLeaderStart(int64_t term);
+    bool OnLeaderStop(int64_t term);
 
 private:
     void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);
@@ -77,8 +73,8 @@ private:
     const uint32_t ng_id_;
     // CcNode is located on node: node_id_.
     const uint32_t node_id_;
-    std::atomic<int64_t> leader_term_;
-    std::atomic<int64_t> candidate_leader_term_;
+
+    std::atomic<bool> is_processing_{false};
 
     std::atomic<uint64_t> last_ckpt_ts_;
 

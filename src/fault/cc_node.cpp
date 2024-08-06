@@ -1,5 +1,7 @@
 #include "fault/cc_node.h"
 
+#include <atomic>
+
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "tx_service.h"
@@ -13,8 +15,6 @@ CcNode::CcNode(const uint32_t ng_id,
                uint32_t log_group_cnt)
     : ng_id_(ng_id),
       node_id_(node_id),
-      leader_term_(-1),
-      candidate_leader_term_(-1),
       last_ckpt_ts_(0),
       pinning_threads_(0),
       local_cc_shards_(local_shards),
@@ -209,31 +209,47 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
     }
 }
 
-void CcNode::OnLeaderStart(int64_t term)
+bool CcNode::OnLeaderStart(int64_t term)
 {
-    // Check if cc node still think it is the owner of node group. If so,
-    // we need to clear the expired in memory state first
-    int64_t orig_term = leader_term_.load(std::memory_order_acquire);
-    if (orig_term >= term)
+    bool expected = false;
+    if (!is_processing_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel))
     {
-        return;
+        // Keep retring
+        return false;
     }
-    else if (orig_term > 0)
+
+    std::shared_ptr<void> defer_release(
+        nullptr,
+        [this](void *)
+        { is_processing_.store(false, std::memory_order_release); });
+
+    if (Sharder::Instance().InvalidLeaderTerm(ng_id_) >= term)
     {
-        OnLeaderStop();
+        // outdate request. This ccnode is not leader anymore.
+        return true;
     }
+
+    if (Sharder::Instance().CandidateLeaderTerm(ng_id_) >= term ||
+        Sharder::Instance().LeaderTerm(ng_id_) >= term)
+    {
+        // This ccnode has become a candidate leader or leader
+        return true;
+    }
+
+    // Invalidate terms smaller than the new term on this ng.
+    Sharder::Instance().SetInvalidLeaderTerm(ng_id_, term - 1);
+
     {
         // replay thread and leader election thread may update
-        // candidate_leader_term_ and recovered_log_groups_ concurrently.
+        // candidate_leader_term_, leader_term_ and recovered_log_groups_
+        // concurrently.
         std::lock_guard<std::mutex> lk(recovery_mux_);
         Sharder::Instance().SetCandidateTerm(ng_id_, term);
-
         // new leader will send ReplayLog request to logservice to replay logs.
         // It should reset the recovered_log_groups_ ahead.
         recovered_log_groups_.clear();
     }
-    // Invalidate terms smaller than the new term on this ng.
-    Sharder::Instance().SetInvalidLeaderTerm(ng_id_, term - 1);
 
     LOG(INFO) << "CC node " << node_id_ << " becomes the leader of ng#"
               << ng_id_ << ". Term: " << term;
@@ -278,27 +294,62 @@ void CcNode::OnLeaderStart(int64_t term)
             }
         }
     }
+
     local_cc_shards_.InitPrebuiltTables(ng_id_);
+
     if (txservice_skip_wal)
     {
-        Sharder::Instance().SetLeaderTerm(ng_id_, term);
-        LOG(INFO) << "Skipped log replay for cc node group #" << ng_id_
-                  << " with the term " << term;
-        Sharder::Instance().SetCandidateTerm(ng_id_, -1);
-        Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
+        {
+            // replay thread and leader election thread may update
+            // candidate_leader_term_, leader_term_ and recovered_log_groups_
+            // concurrently.
+            std::lock_guard<std::mutex> lk(recovery_mux_);
+            Sharder::Instance().SetLeaderTerm(ng_id_, term);
+            LOG(INFO) << "Skipped log replay for cc node group #" << ng_id_
+                      << " with the term " << term;
+            Sharder::Instance().SetCandidateTerm(ng_id_, -1);
+            Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
+        }
         NotifyNewLeaderStart(ng_id_, node_id_);
     }
+
+    return true;
 }
 
-void CcNode::OnLeaderStop()
+bool CcNode::OnLeaderStop(int64_t term)
 {
+    bool expected = false;
+    if (!is_processing_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel))
+    {
+        // Keep retrying
+        return false;
+    }
+
+    std::shared_ptr<void> defer_release(
+        nullptr,
+        [this](void *)
+        { is_processing_.store(false, std::memory_order_release); });
+
+    if (Sharder::Instance().InvalidLeaderTerm(ng_id_) >= term)
+    {
+        // This ccnode has already call `OnLeaderStop` at `term`
+        return true;
+    }
+
+    Sharder::Instance().SetInvalidLeaderTerm(ng_id_, term);
+
+    {
+        // replay thread and leader election thread may update
+        // candidate_leader_term_, leader_term_ and recovered_log_groups_
+        // concurrently.
+        std::lock_guard<std::mutex> lk(recovery_mux_);
+        Sharder::Instance().SetLeaderTerm(ng_id_, -1);
+        Sharder::Instance().SetCandidateTerm(ng_id_, -1);
+    }
+
     LOG(INFO) << "CC node " << node_id_ << " steps down as the leader of ng#"
               << ng_id_ << ".";
-
-    Sharder::Instance().SetInvalidLeaderTerm(
-        ng_id_, Sharder::Instance().LeaderTerm(ng_id_));
-    Sharder::Instance().SetCandidateTerm(ng_id_, -1);
-    Sharder::Instance().SetLeaderTerm(ng_id_, -1);
 
     // Wait for data unpin then clear all node_group data
     {
@@ -312,6 +363,8 @@ void CcNode::OnLeaderStop()
         local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
     }
     clear_ccm_req.Wait();
+
+    return true;
 }
 
 }  // namespace txservice::fault

@@ -25,8 +25,8 @@ void CcNodeService::OnLeaderStart(::google::protobuf::RpcController *controller,
     brpc::ClosureGuard done_guard(done);
     NodeGroupId ng_id = request->node_group_id();
     int64_t term = request->node_group_term();
-    Sharder::Instance().OnLeaderStart(ng_id, term);
-    response->set_error(false);
+    bool success = Sharder::Instance().OnLeaderStart(ng_id, term);
+    response->set_error(!success);
 }
 
 void CcNodeService::OnLeaderStop(::google::protobuf::RpcController *controller,
@@ -36,8 +36,9 @@ void CcNodeService::OnLeaderStop(::google::protobuf::RpcController *controller,
 {
     brpc::ClosureGuard done_guard(done);
     NodeGroupId ng_id = request->node_group_id();
-    Sharder::Instance().OnLeaderStop(ng_id);
-    response->set_error(false);
+    int64_t term = request->node_group_term();
+    bool success = Sharder::Instance().OnLeaderStop(ng_id, term);
+    response->set_error(!success);
 }
 
 void CcNodeService::CheckTxStatus(::google::protobuf::RpcController *controller,

@@ -326,9 +326,9 @@ public:
      */
     void UpdateLeader(uint32_t ng_id, uint32_t node_id);
 
-    void OnLeaderStart(uint32_t ng_id, int64_t term);
+    bool OnLeaderStart(uint32_t ng_id, int64_t term);
 
-    void OnLeaderStop(uint32_t ng_id);
+    bool OnLeaderStop(uint32_t ng_id, int64_t term);
 
     /**
      * @brief Update the log group's leader node id when the log group leader

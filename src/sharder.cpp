@@ -665,7 +665,7 @@ void Sharder::RecoverTx(uint64_t lock_tx_number,
     }
 }
 
-void Sharder::OnLeaderStart(uint32_t ng_id, int64_t term)
+bool Sharder::OnLeaderStart(uint32_t ng_id, int64_t term)
 {
     std::shared_ptr<fault::CcNode> node;
     {
@@ -679,7 +679,7 @@ void Sharder::OnLeaderStart(uint32_t ng_id, int64_t term)
     return node->OnLeaderStart(term);
 }
 
-void Sharder::OnLeaderStop(uint32_t ng_id)
+bool Sharder::OnLeaderStop(uint32_t ng_id, int64_t term)
 {
     std::shared_ptr<fault::CcNode> node;
     {
@@ -690,7 +690,7 @@ void Sharder::OnLeaderStop(uint32_t ng_id)
         node = find_it->second;
     }
 
-    return node->OnLeaderStop();
+    return node->OnLeaderStop(term);
 }
 
 void Sharder::LogTransferLeader(uint32_t log_group_id, uint32_t leader_idx)
