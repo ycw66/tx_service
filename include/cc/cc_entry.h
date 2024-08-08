@@ -254,6 +254,10 @@ public:
     {
         payload_.value_.clear();
         ptr->Serialize(payload_.value_);
+        if (ptr->HasTTL())
+        {
+            payload_.SetTTL(ptr->GetTTL());
+        }
     }
 
     const TxRecord *Payload() const
@@ -361,7 +365,20 @@ public:
         return ckpt_ts_;
     }
 #endif
+
 #ifdef ON_KEY_OBJECT
+    ReplayTxnCmdList &ReplayCommandList()
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        return cc_lock_and_extra_->ReplayCommandList();
+    }
+
+    bool HasReplayCommandList()
+    {
+        return cc_lock_and_extra_ != nullptr &&
+               cc_lock_and_extra_->HasReplayCommandList();
+    }
+
     void PopBlockRequest(CcShard *ccs, txservice::TxObject *object)
     {
         if (cc_lock_and_extra_ != nullptr)
@@ -659,18 +676,6 @@ public:
     {
         assert(cc_lock_and_extra_ != nullptr);
         cc_lock_and_extra_->SetDirtyPayloadStatus(status);
-    }
-
-    ReplayTxnCmdList &ReplayCommandList()
-    {
-        assert(cc_lock_and_extra_ != nullptr);
-        return cc_lock_and_extra_->ReplayCommandList();
-    }
-
-    bool HasReplayCommandList()
-    {
-        return cc_lock_and_extra_ != nullptr &&
-               cc_lock_and_extra_->HasReplayCommandList();
     }
 
     std::unique_ptr<ValueT> payload_{nullptr};

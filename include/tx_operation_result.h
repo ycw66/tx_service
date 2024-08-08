@@ -521,6 +521,8 @@ struct ObjectCommandResult
         object_modified_ = false;
         is_local_ = true;
         cmd_result_ = nullptr;
+        ttl_expired_ = false;
+        ttl_ = UINT64_MAX;
     }
 
     // cce commit_ts, for validation?
@@ -543,6 +545,11 @@ struct ObjectCommandResult
 
     // Only used for remote request deserializes the received command result.
     TxCommandResult *cmd_result_{nullptr};
+
+    // TTL expired
+    bool ttl_expired_{false};
+    // TTL if expired
+    uint64_t ttl_{UINT64_MAX};
 };
 
 struct UploadBatchResult

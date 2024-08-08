@@ -105,6 +105,36 @@ struct TxRecord
     {
         return false;
     }
+
+    virtual void SetTTL(uint64_t ttl)
+    {
+        return;
+    }
+
+    virtual uint64_t GetTTL() const
+    {
+        assert(false);
+        return 0;
+    }
+
+    virtual bool HasTTL() const
+    {
+        return false;
+    }
+
+    // convert to ttl txrecord
+    virtual TxRecord::Uptr AddTTL(uint64_t ttl)
+    {
+        assert(false);
+        return nullptr;
+    }
+
+    // convert to plain txrecord without ttl
+    virtual TxRecord::Uptr RemoveTTL()
+    {
+        assert(false);
+        return nullptr;
+    }
 };
 
 template <typename... Types>
@@ -410,7 +440,23 @@ struct BlobTxRecord : public TxRecord
         return value_.size();
     }
 
+    bool HasTTL() const override
+    {
+        return ttl_ != UINT64_MAX;
+    }
+
+    void SetTTL(uint64_t ttl) override
+    {
+        ttl_ = ttl;
+    }
+
+    uint64_t GetTTL() const override
+    {
+        return ttl_;
+    }
+
     std::string value_;
+    uint64_t ttl_{UINT64_MAX};
 };
 
 }  // namespace txservice

@@ -300,7 +300,17 @@ public:
             }
             req.SetCcePtr(cce);
 
-            assert(!cce->HasReplayCommandList());
+            // If record expired in KV, it is possible the the cce reply list is
+            // not empty due to replay command list and cce commit_ts version
+            // mismatch
+            if (cce->HasReplayCommandList() &&
+                cce->PayloadStatus() == RecordStatus::Deleted &&
+                cce->CommitTs() == 1)
+            {
+                ReplayTxnCmdList &replay_cmd_list = cce->ReplayCommandList();
+                replay_cmd_list.Clear();
+                cce->RecycleKeyLock(*shard_);
+            }
 
             // For ON_KEY_OBJECT, we add lock regardless of whether the record
             // is deleted, so just pass RecordStatus::Normal.
@@ -370,6 +380,33 @@ public:
             // just before this cmd to ignore value in kv.
             cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
             cce->SetCkptTs(1);
+        }
+
+        // check if the payload is expired
+        TxObject *obj = static_cast<TxObject *>(cce->payload_.get());
+        if (obj != nullptr && obj->HasTTL())
+        {
+            // If ttl is expired
+            if (obj->GetTTL() < shard_->Now())
+            {
+                // return deleted
+                if (req.IsReadOnly())
+                {
+                    obj_result.rec_status_ = RecordStatus::Deleted;
+                    obj_result.commit_ts_ = obj->GetTTL();
+                    hd_res->SetFinished();
+                    return true;
+                }
+                // mark deleted on cce if not read only
+                else
+                {
+                    cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
+                    cce->SetDirtyPayload(nullptr);
+                    cce->SetPendingCmd(nullptr);
+                    obj_result.ttl_expired_ = true;
+                    obj_result.ttl_ = obj->GetTTL();
+                }
+            }
         }
 
         if (req.Isolation() > IsolationLevel::ReadCommitted ||
@@ -1432,6 +1469,7 @@ public:
             {
                 assert(cce->payload_ == nullptr);
             }
+
             // Check if there's any buffered replay cmds, and try to
             // commit them.
             if (cce->HasReplayCommandList())
@@ -1462,6 +1500,19 @@ public:
                 {
                     // Recycles the lock if all the replay commands have been
                     // applied.
+                    cce->RecycleKeyLock(*shard_);
+                }
+
+                // After completing the log replay and attempting the command
+                // replay on cce,
+                // if the record status remains deleted and commit_ts is 1,
+                // and the replay_cmd_list is still not empty, this indicates
+                // the record has expired in the KV store.
+                if (Sharder::Instance().LeaderTerm(cc_ng_id_) != -1 &&
+                    !replay_cmd_list.IsNull() &&
+                    commit_status == RecordStatus::Deleted && commit_ts == 1)
+                {
+                    replay_cmd_list.Clear();
                     cce->RecycleKeyLock(*shard_);
                 }
             }

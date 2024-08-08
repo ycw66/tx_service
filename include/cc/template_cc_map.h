@@ -5839,23 +5839,39 @@ public:
                     // If the data is owned by this ng, fetch the record,
                     // otherwise only skip this record for now and don't
                     // truncate redo log.
-                    assert(cce->PayloadStatus() == RecordStatus::Unknown);
-                    uint16_t bucket_id =
-                        Sharder::Instance().MapKeyHashToBucketId(key_hash);
-                    if (shard_->GetBucketOwner(bucket_id, cc_ng_id_) ==
-                        cc_ng_id_)
+                    if (cce->PayloadStatus() == RecordStatus::Unknown)
                     {
-                        TxKey tx_key(key);
-                        shard_->FetchRecord(table_name_,
-                                            table_schema_,
-                                            TxKey(key),
-                                            cce,
-                                            this,
-                                            cc_ng_id_,
-                                            ng_term,
-                                            nullptr);
+                        uint16_t bucket_id =
+                            Sharder::Instance().MapKeyHashToBucketId(key_hash);
+                        if (shard_->GetBucketOwner(bucket_id, cc_ng_id_) ==
+                            cc_ng_id_)
+                        {
+                            TxKey tx_key(key);
+                            shard_->FetchRecord(table_name_,
+                                                table_schema_,
+                                                TxKey(key),
+                                                cce,
+                                                this,
+                                                cc_ng_id_,
+                                                ng_term,
+                                                nullptr);
+                        }
+                        replay_cmds_notnull = true;
                     }
-                    replay_cmds_notnull = true;
+                    // If record expired in KV, it is possible the the cce reply
+                    // list is not empty due to version mismatch
+                    else if (cce->PayloadStatus() == RecordStatus::Deleted &&
+                             cce->CommitTs() == 1)
+                    {
+                        ReplayTxnCmdList &replay_cmd_list =
+                            cce->ReplayCommandList();
+                        replay_cmd_list.Clear();
+                        cce->RecycleKeyLock(*shard_);
+                    }
+                    else
+                    {
+                        assert(false);
+                    }
                 }
                 else if (cce->NeedCkpt())
                 {

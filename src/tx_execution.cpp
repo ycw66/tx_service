@@ -5908,6 +5908,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
         uint64_t commit_ts = cmd_result.commit_ts_;
         uint64_t last_vali_ts = cmd_result.last_vali_ts_;
+        bool ttl_expired = cmd_result.ttl_expired_;
 
         if (obj_cmd_op.auto_commit_ && txservice_skip_wal)
         {
@@ -5918,6 +5919,26 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         bool version_changed = false;
         if (lock_acquired == LockType::WriteLock)
         {
+            // If the cce is expired before the command is applyed
+            // Add a retire command before the write command
+            if (ttl_expired)
+            {
+                auto retire_command =
+                    obj_cmd_.command_->RetireExpiredTTLObjectCommand();
+                rw_set_.AddObjectCommand(*table_name,
+                                         cce_addr,
+                                         commit_ts,
+                                         last_vali_ts,
+                                         obj_cmd_.key_,
+                                         retire_command.get(),
+                                         object_modified,
+                                         table_option->enable_wal_
+#ifndef RANGE_PARTITION_ENABLED
+                                         ,
+                                         obj_cmd_op.forward_key_shard_
+#endif
+                );
+            }
             // The command modifies the object. Put it into the command set
             // for writing log and post-processing. If the command fails, only
             // to release the write lock.
@@ -6254,6 +6275,28 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
                 if (cmd_res.lock_acquired_ == LockType::WriteLock)
                 {
+                    // If the cce is expired before the command is applyed
+                    // Add a retire command before the write command
+                    if (cmd_res.ttl_expired_)
+                    {
+                        DLOG(INFO) << "ttl_expired_";
+                        auto retire_command =
+                            vct_cmd->at(i)->RetireExpiredTTLObjectCommand();
+                        rw_set_.AddObjectCommand(
+                            *req->table_name_,
+                            cmd_res.cce_addr_,
+                            cmd_res.commit_ts_,
+                            cmd_res.last_vali_ts_,
+                            &vct_key->at(i),
+                            retire_command.get(),
+                            cmd_res.object_modified_,
+                            enable_wal
+#ifndef RANGE_PARTITION_ENABLED
+                            ,
+                            obj_cmd_op.vct_key_shard_code_[i].second
+#endif
+                        );
+                    }
                     // The command modifies the object. Put it into the command
                     // set for writing log and post-processing. If the command
                     // fails, only to release the write lock.

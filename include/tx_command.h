@@ -64,6 +64,17 @@ public:
     }
     virtual std::unique_ptr<TxRecord> CreateObject(
         const std::string *image) const = 0;
+    virtual std::unique_ptr<TxRecord> CreateTTLObject(
+        const std::string *image) const
+    {
+        assert(false);
+        return nullptr;
+    }
+    virtual std::unique_ptr<TxCommand> RetireExpiredTTLObjectCommand() const
+    {
+        assert(false);
+        return nullptr;
+    }
     virtual std::unique_ptr<TxCommandResult> CreateCommandResult() const = 0;
     virtual bool ProceedOnNonExistentObject() const = 0;
     virtual bool ProceedOnExistentObject() const = 0;
@@ -244,6 +255,7 @@ struct ReplayTxnCmdList
 
     void Clear()
     {
+        txn_cmd_list_.clear();
         txn_cmd_list_.shrink_to_fit();
     }
 
