@@ -47,10 +47,6 @@
 #include "range_slice.h"
 #endif
 
-#ifdef ON_KEY_OBJECT
-DECLARE_bool(skip_kv);
-#endif
-
 namespace txservice
 {
 template <typename KeyT, typename ValueT>

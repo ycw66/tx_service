@@ -32,7 +32,10 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
         ccs->ckpter_ = this;
     }
 
-    thd_ = std::thread([this] { Run(); });
+    if (store_hd_)
+    {
+        thd_ = std::thread([this] { Run(); });
+    }
 
     DLOG(INFO) << "checkpointer init, checkpoint_interval_: "
                << checkpoint_interval_
@@ -325,7 +328,10 @@ void Checkpointer::Join()
     // time unflushed records to the data store, before exiting. The
     // caller of this method, i.e., the destructor of the tx
     // service, is blocked until last flushing finishes.
-    thd_.join();
+    if (thd_.joinable())
+    {
+        thd_.join();
+    }
 }
 
 void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,

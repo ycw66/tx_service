@@ -9,6 +9,7 @@
 #include "cc_request.h"
 #include "cc_shard.h"
 #include "tx_record.h"
+#include "tx_service_common.h"
 #include "type.h"
 
 namespace txservice

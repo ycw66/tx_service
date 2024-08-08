@@ -65,6 +65,14 @@ void LruEntry::SetCommitTsPayloadStatus(uint64_t ts, RecordStatus status)
     {
         commit_ts_and_status_ = (ts << 8) | stat;
     }
+
+#ifdef ON_KEY_OBJECT
+    if (txservice_skip_kv && status == RecordStatus::Deleted)
+    {
+        // Mark entry as flushed on skip_kv mode.
+        commit_ts_and_status_ |= 0x10;
+    }
+#endif
 }
 
 bool LruEntry::IsFree() const

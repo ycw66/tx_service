@@ -55,6 +55,11 @@ public:
     {
         return false;
     }
+    // Only true for DEL.
+    virtual bool IsDelete() const
+    {
+        return false;
+    }
     // If this commands does not need previous object value. Note that
     // this is different with IsOverwrite since some of the commands overwrites
     // old value but need to return the status / value of the old object.

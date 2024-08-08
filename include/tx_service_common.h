@@ -8,6 +8,12 @@
 
 namespace txservice
 {
+
+// whether skip write redo log to log_service.
+inline bool txservice_skip_wal = false;
+// whether skip accessing KV when cc map cache misses.
+inline bool txservice_skip_kv = false;
+
 enum struct TxShardStatus
 {
     Free = 0,

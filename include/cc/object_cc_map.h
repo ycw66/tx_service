@@ -203,7 +203,10 @@ public:
                 look_key = &decoded_key;
             }
 
-            auto it = FindEmplace(*look_key, false, req.IsReadOnly());
+            // DEL existing keys only decreases memory utilization therefore
+            // considered readonly here.
+            auto it = FindEmplace(
+                *look_key, false, req.IsReadOnly() || req.IsDelete());
             cce = it->second;
             ccp = it.GetPage();
             if (cmd->GetBlockOperationType() == BlockOperation::Discard)
@@ -228,8 +231,15 @@ public:
             if (cce == nullptr)
             {
                 // The apply request needs a new cc entry but the cc map has
-                // reached the maximal capacity. Blocks the request by putting
-                // it into wait list until capacity is avaliable.
+                // reached the maximal capacity.
+                // If skip_kv, return error directly.
+                if (txservice_skip_kv)
+                {
+                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return false;
+                }
+                // Otherwise, block the request by putting it into wait list
+                // util capacity is available.
                 shard_->EnqueueWaitList(&req);
                 return false;
             }

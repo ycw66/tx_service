@@ -50,11 +50,6 @@ extern BAIDU_THREAD_LOCAL TaskGroup *tls_task_group;
 namespace txservice
 {
 
-// whether skip write redo log to log_service.
-inline bool txservice_skip_wal = false;
-// whether skip accessing KV when cc map cache misses.
-inline bool txservice_skip_kv = false;
-
 // the OFFSET_TABLE contains only prime numbers
 inline const size_t OFFSET_TABLE[] = {
 #include "offset_inl.list"

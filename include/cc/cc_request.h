@@ -2944,6 +2944,7 @@ public:
             pause_pos_ = {TxKey(), true};
             ccs.Enqueue(this);
         }
+        (void) df;
 
         return false;
     }
@@ -5317,6 +5318,18 @@ public:
     bool IsRemote() const
     {
         return !is_local_;
+    }
+
+    bool IsDelete() const
+    {
+        if (is_local_)
+        {
+            assert(local_input_.cmd_ != nullptr);
+            return local_input_.cmd_ == nullptr ||
+                   local_input_.cmd_->IsDelete();
+        }
+        assert(remote_input_.cmd_ != nullptr);
+        return remote_input_.cmd_ == nullptr || remote_input_.cmd_->IsDelete();
     }
 
     bool IsReadOnly() const

@@ -781,7 +781,12 @@ size_t CcShard::Clean()
 {
     // See if there's any invalid cce that we can expire
     CleanUpInvalidCce();
+#ifdef ON_KEY_OBJECT
+    LruPage *ccp = !txservice_skip_kv && clean_start_ccp_ ? clean_start_ccp_
+                                                          : head_ccp_.lru_next_;
+#else
     LruPage *ccp = clean_start_ccp_ ? clean_start_ccp_ : head_ccp_.lru_next_;
+#endif
     size_t free_cnt = 0;
     bool heap_fragmented = false;
 
