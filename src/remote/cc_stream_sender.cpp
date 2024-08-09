@@ -957,7 +957,7 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     stub.Connect(&cntl, &request, &response, nullptr);
     if (cntl.Failed())
     {
-        LOG(ERROR) << "Failed the connect rpc to node " << node_id
+        LOG(ERROR) << "Failed to connect to node " << node_id
                    << ", ip: " << ip_addr
                    << ", connect error: " << cntl.ErrorCode() << ", "
                    << cntl.ErrorText();

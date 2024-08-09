@@ -11,6 +11,17 @@
 
 namespace txservice
 {
+#if defined(DISABLE_CKPT_REPORT) && !defined(DEBUG)
+DEFINE_bool(report_ckpt, false, "Print log on do checkpoint.");
+#else
+DEFINE_bool(report_ckpt, true, "Print log on do checkpoint.");
+#endif
+bool PassValidate(const char *, bool)
+{
+    return true;
+}
+BRPC_VALIDATE_GFLAG(report_ckpt, PassValidate);
+
 Checkpointer::Checkpointer(LocalCcShards &shards,
                            store::DataStoreHandler *write_hd,
                            const uint32_t &checkpoint_interval,
@@ -56,8 +67,13 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
         ccs->Enqueue(&ckpt_req);
     }
     ckpt_req.Wait();
-    ckpt_req.ShardMemoryUsageReport(local_shards_);
+    if (FLAGS_report_ckpt)
+    {
+        ckpt_req.ShardMemoryUsageReport(local_shards_);
+    }
+#ifdef RANGE_PARTITION_ENABLED
     local_shards_.TableRangeHeapUsageReport();
+#endif
 
     uint64_t ckpt_ts = UINT64_MAX;
     ckpt_ts = ckpt_req.GetCkptTs();
@@ -109,8 +125,9 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             continue;
         }
 
-        LOG(INFO) << "Begin checkpoint with timestamp: " << ckpt_ts
-                  << ". The memory usage of node is: " << mem_usage << " KB.";
+        LOG_IF(INFO, FLAGS_report_ckpt)
+            << "Begin checkpoint with timestamp: " << ckpt_ts
+            << ". The memory usage of node is: " << mem_usage << " KB.";
 
         // Get table names in this node group, checkpointer should be TableName
         // string owner.
@@ -190,8 +207,9 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         if (last_succ_ckpt_ts != UINT64_MAX && last_succ_ckpt_ts > last_ckpt_ts)
         {
             assert(last_succ_ckpt_ts != 0);
-            LOG(INFO) << "Checkpoint of node group #" << node_group
-                      << " succeeded with timestamp: " << last_succ_ckpt_ts;
+            LOG_IF(INFO, FLAGS_report_ckpt)
+                << "Checkpoint of node group #" << node_group
+                << " succeeded with timestamp: " << last_succ_ckpt_ts;
             Sharder::Instance().UpdateNodeGroupCkptTs(node_group,
                                                       last_succ_ckpt_ts);
             NotifyLogOfCkptTs(node_group, leader_term, last_succ_ckpt_ts);
@@ -212,11 +230,12 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 status->err_code_ == CcErrorCode::NO_ERROR)
             {
                 // Truncate redo log
-                LOG(INFO) << "Checkpoint of node group #" << node_group
-                          << " succeeded with timestamp: "
-                          << (status->truncate_log_ts_ == 0
-                                  ? ckpt_ts
-                                  : status->truncate_log_ts_);
+                LOG_IF(INFO, FLAGS_report_ckpt)
+                    << "Checkpoint of node group #" << node_group
+                    << " succeeded with timestamp: "
+                    << (status->truncate_log_ts_ == 0
+                            ? ckpt_ts
+                            : status->truncate_log_ts_);
 
                 // Note: `status->truncate_log_ts_ may larger than `ckpt_ts`. So
                 // we use `status->truncate_log_ts_` to truncate log.

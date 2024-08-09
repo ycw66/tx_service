@@ -147,7 +147,7 @@ int Sharder::Init(
 
             for (uint16_t port : txlog_ports_)
             {
-                LOG(INFO) << "txlog_port = " << port;
+                DLOG(INFO) << "txlog_port = " << port;
             }
         }
 
@@ -266,9 +266,9 @@ int Sharder::Init(
 
         hm_ip_ = "0.0.0.0";
         assert(hm_bin_path != nullptr);
-        LOG(INFO) << "Forking host manager process with " << *hm_bin_path
-                  << ", the hm will be listening on " << hm_ip_ << ":"
-                  << hm_port_;
+        DLOG(INFO) << "Forking host manager process with " << *hm_bin_path
+                   << ", the hm will be listening on " << hm_ip_ << ":"
+                   << hm_port_;
         int pid = fork();
         if (pid == -1)
         {
@@ -283,6 +283,9 @@ int Sharder::Init(
                       hm_ip_.c_str(),
                       std::to_string(hm_port_).c_str(),
                       log_path.c_str(),
+#if BRPC_WITH_GLOG
+                      FLAGS_log_dir.c_str(),
+#endif
                       (char *) 0) == -1)
             {
                 LOG(ERROR) << "Failed to start host manager process, errno: "
