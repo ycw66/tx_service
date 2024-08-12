@@ -217,6 +217,11 @@ public:
                 cc_hd_.get(), txlog_hd_, this, true);
         }
 
+#ifdef ON_KEY_OBJECT
+        // Increment external txm count of this TxProcessor.
+        coordi_->external_txm_cnt_.fetch_add(1, std::memory_order_relaxed);
+#endif
+
         TransactionExecution *tx_ptr = tx.get();
         active_tx_lock_.Lock();
         active_tx_map_.try_emplace(tx.get(), std::move(tx));
@@ -620,6 +625,36 @@ public:
                 active_cnt, req_cnt, yield, coordi->shard_status_, true);
         };
     }
+
+#ifdef ON_KEY_OBJECT
+    std::function<bool(int16_t)> TryUpdateExtProcFunctor()
+    {
+        return [this, coordi = coordi_](int16_t thd_delta) -> bool
+        {
+            if (thd_delta == -1 &&
+                coordi->external_txm_cnt_.load(std::memory_order_relaxed) > 0)
+            {
+                // The external processor is trying to sleep. If there is still
+                // external txms (which are bound to the external TxProcessor),
+                // don't allow it to sleep.
+                return false;
+            }
+            int16_t ext_thd_cnt = coordi->ext_processor_cnt_.fetch_add(
+                thd_delta, std::memory_order_relaxed);
+
+            ext_thd_cnt += thd_delta;
+            assert(ext_thd_cnt >= 0);
+
+            // There is no external thread anymore. Wakes up the native tx
+            // processor.
+            if (ext_thd_cnt == 0)
+            {
+                Notify(coordi->sleep_mux_, coordi->sleep_cv_);
+            }
+            return true;
+        };
+    }
+#endif
 
     std::function<void(int16_t)> UpdateExtProcFunctor()
     {
@@ -1101,7 +1136,7 @@ public:
 
 #ifdef ON_KEY_OBJECT
     std::function<std::tuple<std::function<void()>,
-                             std::function<void(int16_t)>,
+                             std::function<bool(int16_t)>,
                              std::function<bool(bool)>>(int16_t)>
     GetTxProcFunctors()
     {
@@ -1110,7 +1145,7 @@ public:
             assert(group_id >= 0);
             int16_t sid = group_id % pool_.size();
             return std::make_tuple(pool_[sid]->TxProcessorFunctor(),
-                                   pool_[sid]->UpdateExtProcFunctor(),
+                                   pool_[sid]->TryUpdateExtProcFunctor(),
                                    pool_[sid]->OverrideShardHeapFunctor());
         };
     }

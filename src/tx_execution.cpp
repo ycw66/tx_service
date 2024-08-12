@@ -142,6 +142,11 @@ void TransactionExecution::Reset()
     {
         tx_req_queue_.Reset();
         bind_to_ext_proc_ = false;
+#ifdef ON_KEY_OBJECT
+        // Decrement the external_txm_cnt_ of this TxProcessor.
+        tx_processor_->coordi_->external_txm_cnt_.fetch_sub(
+            1, std::memory_order_relaxed);
+#endif
     }
     else
     {

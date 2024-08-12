@@ -262,9 +262,8 @@ public:
             allow_resume_call_ = false;
             return resume_func_;
         }
-#else
-        return nullptr;
 #endif
+        return nullptr;
     }
 
     int Wait()
