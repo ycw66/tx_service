@@ -26,7 +26,12 @@ namespace txservice
 Sharder::Sharder() = default;
 Sharder::~Sharder()
 {
-    Shutdown();
+    // Shutdown() must be called during stop.
+    assert(cc_stream_receiver_ == nullptr);
+    assert(cc_node_service_ == nullptr);
+    assert(log_replay_service_ == nullptr);
+    assert(tx_worker_pool_ == nullptr);
+    assert(sharder_worker_ == nullptr);
 }
 
 void Sharder::Shutdown()
