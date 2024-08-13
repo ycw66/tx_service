@@ -993,12 +993,12 @@ void CcShard::FetchCatalog(const TableName &table_name,
                 table_name, *this, cc_ng_id, cc_ng_term);
         fetch_req = fetch_catalog_cc.get();
         fetch_reqs_.emplace(table_name, std::move(fetch_catalog_cc));
+        local_shards_.store_hd_->FetchTableCatalog(table_name, fetch_req);
     }
 
-    fetch_req->AddRequester(requester);
-    if (fetch_req->RequesterCount() == 1)
+    if (requester != nullptr)
     {
-        local_shards_.store_hd_->FetchTableCatalog(table_name, fetch_req);
+        fetch_req->AddRequester(requester);
     }
 }
 
@@ -1563,22 +1563,19 @@ void CcShard::DropCcms(NodeGroupId ng_id)
 {
     if (node_id_ == ng_id)
     {
-        for (auto ccm_it = native_ccms_.begin(); ccm_it != native_ccms_.end();)
+        for (auto &[table_name, ccm] : native_ccms_)
         {
-            if (ccm_it->first == catalog_ccm_name)
+            if (table_name == catalog_ccm_name)
             {
-                ccm_it->second->Clean();
-                ++ccm_it;
-                continue;
+                ccm->Clean();
             }
-            if (ccm_it->first == range_bucket_ccm_name)
-            {
-                ++ccm_it;
-                continue;
-            }
-
-            ccm_it = native_ccms_.erase(ccm_it);
         }
+        absl::erase_if(native_ccms_,
+                       [&](const auto &entry)
+                       {
+                           return entry.first != catalog_ccm_name &&
+                                  entry.first != range_bucket_ccm_name;
+                       });
         // Drop range bucket ccm last. We might call release cce lock
         // on cce in range bucket ccm in range ccmap desctructor.
         native_ccms_.erase(range_bucket_ccm_name);

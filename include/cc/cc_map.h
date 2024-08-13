@@ -317,12 +317,14 @@ protected:
      * @param cce
      * @param tx_number
      * @param lock_type
+     * @param recycle_lock Whether recycle the lock if it's empty.
      */
     void ReleaseCceLock(NonBlockingLock *lock,
                         LruEntry *cce,
                         TxNumber tx_number,
                         uint32_t ng_id,
-                        LockType lk_type = LockType::NoLock);
+                        LockType lk_type = LockType::NoLock,
+                        bool recycle_lock = true) const;
 
     /**
      * @brief The version of this ccmap. It is the version of the corresponding

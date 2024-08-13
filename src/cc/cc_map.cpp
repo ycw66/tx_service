@@ -380,7 +380,8 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
                            LruEntry *cce,
                            TxNumber tx_number,
                            uint32_t ng_id,
-                           LockType lk_type)
+                           LockType lk_type,
+                           bool recycle_lock) const
 {
     if (lock == nullptr)
     {
@@ -430,7 +431,10 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
         }
 
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
-        cce->RecycleKeyLock(*shard_);
+        if (recycle_lock)
+        {
+            cce->RecycleKeyLock(*shard_);
+        }
     }
     else
     {

@@ -179,6 +179,14 @@ public:
                    bool is_recovering = false,
                    bool execute_immediately = true) override;
 
+    std::pair<txservice::CcErrorCode, txservice::NonBlockingLock *> ReadCatalog(
+        const TableName &table_name,
+        uint32_t ng_id,
+        int64_t ng_term,
+        TxNumber tx_number) const;
+
+    bool ReleaseCatalogRead(NonBlockingLock *lock) const;
+
     bool ReadLocal(const TableName &table_name,
                    const std::string &key_str,
                    TxRecord &record,

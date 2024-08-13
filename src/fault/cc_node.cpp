@@ -295,7 +295,7 @@ bool CcNode::OnLeaderStart(int64_t term)
         }
     }
 
-    local_cc_shards_.InitPrebuiltTables(ng_id_);
+    local_cc_shards_.InitPrebuiltTables(ng_id_, term);
 
     if (txservice_skip_wal)
     {

@@ -1185,11 +1185,25 @@ public:
 
                     // For PostCommit or Commit, the post-write-all request
                     // releases the write lock.
+
+#ifdef ON_KEY_OBJECT
+                    // Do not recycle the lock on Catalog since it's frequently
+                    // accessed.
+                    bool recycle_lock =
+                        table_name_.Type() != TableType::Catalog;
+                    ReleaseCceLock(cce_ptr->GetKeyLock(),
+                                   cce_ptr,
+                                   txn,
+                                   req.NodeGroupId(),
+                                   lk_type,
+                                   recycle_lock);
+#else
                     ReleaseCceLock(cce_ptr->GetKeyLock(),
                                    cce_ptr,
                                    txn,
                                    req.NodeGroupId(),
                                    lk_type);
+#endif
                 }
             }
         }
@@ -1266,14 +1280,25 @@ public:
         uint64_t commit_ts = req.CommitTs();
         TxNumber txn = req.Txn();
 
+        bool recycle_lock = true;
+#ifdef ON_KEY_OBJECT
+        // Do not recycle the lock on Catalog CcEntries since it's frequently
+        // accessed.
+        recycle_lock = table_name_.Type() != TableType::Catalog;
+#endif
+
         // FIXME(lzx): Now, we don't backfill for "Unkown" entry when scanning.
         // So, Validate operation fails if another tx backfilled it. Temporary
         // fix is that we don't validate for "Unkown" status results.
         if (cc_entry.PayloadStatus() != RecordStatus::Unknown && key_ts > 0 &&
             key_ts != cc_entry.CommitTs())
         {
-            ReleaseCceLock(
-                cc_entry.GetKeyLock(), &cc_entry, txn, req.NodeGroupId());
+            ReleaseCceLock(cc_entry.GetKeyLock(),
+                           &cc_entry,
+                           txn,
+                           req.NodeGroupId(),
+                           LockType::NoLock,
+                           recycle_lock);
             // broken repeatable read, set error.
             hd_res->SetError(
                 CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH);
@@ -1326,7 +1351,12 @@ public:
                 }
             }
 
-            ReleaseCceLock(key_lock, &cc_entry, txn, req.NodeGroupId());
+            ReleaseCceLock(key_lock,
+                           &cc_entry,
+                           txn,
+                           req.NodeGroupId(),
+                           LockType::NoLock,
+                           recycle_lock);
 
             if (conflicting_txs.Size() > 0)
             {

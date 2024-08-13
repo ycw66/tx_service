@@ -63,6 +63,12 @@ endif()
 
 add_subdirectory(abseil-cpp)
 
+set(ABSEIL
+        absl::btree
+        absl::flat_hash_map
+        absl::span
+)
+
 find_package(Protobuf REQUIRED)
 find_package(GFLAGS REQUIRED)
 find_package(OpenSSL REQUIRED)
@@ -217,7 +223,7 @@ add_library(txservice STATIC ${TxService_SOURCES} )
 
 target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
 
-target_link_libraries(txservice PUBLIC mimalloc ${LINK_LIB} ${PROTOBUF_LIBRARIES})
+target_link_libraries(txservice PUBLIC mimalloc ${LINK_LIB} ${PROTOBUF_LIBRARIES} ${ABSEIL})
 
 #add_executable(hello ${CMAKE_SOURCE_DIR}/hello.cpp)
 #target_link_libraries(hello PRIVATE txservice ${CMAKE_THREAD_LIBS_INIT})

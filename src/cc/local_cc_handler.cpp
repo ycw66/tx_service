@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 
+#include "catalog_cc_map.h"
 #include "cc_protocol.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
@@ -647,6 +648,27 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     }
 
     return finished;
+}
+
+std::pair<txservice::CcErrorCode, txservice::NonBlockingLock *>
+txservice::LocalCcHandler::ReadCatalog(const TableName &table_name,
+                                       uint32_t ng_id,
+                                       int64_t ng_term,
+                                       TxNumber tx_number) const
+{
+    CcShard *shard_ = cc_shards_.cc_shards_[thd_id_].get();
+    const TableName &catalog_table_name = txservice::catalog_ccm_name;
+    CcMap *ccm = shard_->GetCcm(catalog_table_name, ng_id);
+    assert(ccm != nullptr);
+    CatalogCcMap *catalog_ccm = reinterpret_cast<CatalogCcMap *>(ccm);
+
+    return catalog_ccm->ReadTable(table_name, ng_id, ng_term, tx_number);
+}
+
+bool txservice::LocalCcHandler::ReleaseCatalogRead(NonBlockingLock *lock) const
+{
+    CcShard *shard_ = cc_shards_.cc_shards_[thd_id_].get();
+    return lock->ReleaseReadLockFast(shard_);
 }
 
 bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,

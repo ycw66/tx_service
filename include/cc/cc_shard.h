@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "catalog.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
@@ -852,7 +853,7 @@ private:
         lock_holding_txs_;
 
     // below are all string owners
-    std::unordered_map<TableName, CcMap::uptr> native_ccms_;
+    absl::flat_hash_map<TableName, CcMap::uptr> native_ccms_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
         failover_ccms_;
 

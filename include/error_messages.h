@@ -61,7 +61,10 @@ enum struct TxErrorCode
     DATA_NOT_ON_LOCAL_NODE,
 
     // Execute TxRequest on a committed/aborted txn
-    TX_REQUEST_TO_COMMITTED_ABORTED_TX
+    TX_REQUEST_TO_COMMITTED_ABORTED_TX,
+
+    // Read catalog fail, table not initialized or being modified.
+    READ_CATALOG_FAIL,
 };
 
 static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
@@ -104,7 +107,9 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::GET_RANGE_ID_ERROR, "Acquire range read lock failed."},
     {TxErrorCode::ACQUIRE_LEADER_TERM_FAIL, "Acquire leader term failed."},
     {TxErrorCode::TX_REQUEST_TO_COMMITTED_ABORTED_TX,
-     "Execute TxRequest failed, transaction has committed/aborted"}};
+     "Execute TxRequest failed, transaction has committed/aborted"},
+    {TxErrorCode::READ_CATALOG_FAIL,
+     "Current db is being modified by FLUSHDB or not initialized"}};
 
 enum struct CcErrorCode : uint8_t
 {
@@ -194,6 +199,9 @@ enum struct CcErrorCode : uint8_t
     // Refuse to receive batch data sent from remote for cache.
     UPLOAD_BATCH_REJECTED,
 
+    // Read catalog fail, table not initialized or being modified.
+    READ_CATALOG_FAIL,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 
@@ -264,6 +272,8 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
 
     {CcErrorCode::LOG_NOT_TRUNCATABLE, "LOG_NOT_TRUNCATABLE"},
     {CcErrorCode::UPLOAD_BATCH_REJECTED, "UPLOAD_BATCH_REJECTED"},
+
+    {CcErrorCode::READ_CATALOG_FAIL, "READ_CATALOG_FAIL"},
 
     // NOTICE: please keep this variable at tail.
     {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},

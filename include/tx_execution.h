@@ -455,6 +455,8 @@ private:
     void ClearCachedBucketInfos();
 #endif
 
+    void ReleaseCatalogsRead();
+
     enum struct TxType
     {
         Data = 0,
@@ -599,6 +601,10 @@ private:
 
     std::unique_ptr<CircularQueue<std::unique_ptr<ScanCloseTxRequest>>>
         scan_close_req_pool_{nullptr};
+
+    // The dbs (for EloqKV) this txm has read.
+    // TODO: accommodate for MonographDB
+    std::array<NonBlockingLock *, 16> locked_db_{nullptr};
 
     ObjectCommandOp obj_cmd_;
     MultiObjectCommandOp multi_obj_cmd_;

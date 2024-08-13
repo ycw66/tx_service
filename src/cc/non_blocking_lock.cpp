@@ -230,6 +230,36 @@ bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
     }
 }
 
+bool NonBlockingLock::AcquireReadLockFast(TxNumber tx_number)
+{
+    // read lock doesn't conflict with write intent in blocking queue.
+    bool no_blocking_queue_conflict =
+        blocking_queue_.Size() == 0 ||
+        blocking_queue_.Peek().lk_type_ == LockType::WriteIntent;
+
+    if (NoWriteLockConflict(tx_number) && no_blocking_queue_conflict)
+    {
+        // Acquire read lock succeeds.
+        // For fast path catalog read, only increment the read_cnt_.
+        read_cnt_++;
+        return true;
+    }
+
+    return false;
+}
+
+bool NonBlockingLock::ReleaseReadLockFast(CcShard *ccs)
+{
+    // For fast path catalog realese read lock, only decrement the read_cnt_.
+    assert(read_cnt_ > 0);
+    read_cnt_--;
+    // If releasing the current read lock may unblock anything, it may be the
+    // write lock who is the head of the blocking queue, or a no lock pk read
+    // directed from a sk scan.
+    TryPopBlockingQueue(ccs);
+    return true;
+}
+
 /**
  * @brief Acquire the read lock on this object (i.e. ccentry). The algorithm
  * is as follows:
@@ -442,7 +472,7 @@ void NonBlockingLock::InsertBlockingQueue(CcRequestBase *cc_req,
 
 bool NonBlockingLock::IsEmpty() const
 {
-    return read_intentions_.empty() && read_locks_.empty() &&
+    return read_intentions_.empty() && read_locks_.empty() && read_cnt_ == 0 &&
            write_lk_type_ == WriteLockType::NoWritelock &&
            blocking_queue_.Size() == 0;
 }

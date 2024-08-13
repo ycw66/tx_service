@@ -121,8 +121,6 @@ LocalCcShards::LocalCcShards(
             assert(ins_res.second);
             (void) ins_res;
         }
-
-        InitPrebuiltTables(node_id);
     }
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
@@ -866,10 +864,19 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     }
 }
 
-void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id)
+void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id, int64_t term)
 {
     for (auto &[table, image] : prebuilt_tables_)
     {
+        if (image.empty())
+        {
+            // FetchCatalog from data store
+            for (auto &shard : cc_shards_)
+            {
+                shard->FetchCatalog(table, ng_id, term, nullptr);
+            }
+            continue;
+        }
         auto table_it = table_catalogs_.try_emplace(table);
         auto ng_it = table_it.first->second.try_emplace(ng_id);
         if (ng_it.second)

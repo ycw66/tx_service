@@ -1598,7 +1598,7 @@ public:
         uint64_t data_sync_ts,
         CcHandlerResult<Void> *hres);
 
-    void InitPrebuiltTables(NodeGroupId ng_id);
+    void InitPrebuiltTables(NodeGroupId ng_id, int64_t term);
 
     void PublishMessage(const std::string &chan, const std::string &message);
 

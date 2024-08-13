@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc_request.h"
@@ -42,6 +43,12 @@ public:
         : TemplateCcMap<CatalogKey, CatalogRecord>(
               shard, cc_ng_id, table_name, 1, nullptr, false)
     {
+    }
+
+    void Clean() override
+    {
+        TemplateCcMap::Clean();
+        table_locks_.clear();
     }
 
     using TemplateCcMap::Execute;
@@ -1438,5 +1445,68 @@ public:
     {
         return TableType::Catalog;
     }
+
+    std::pair<CcErrorCode, NonBlockingLock *> ReadTable(
+        const TableName &table_name,
+        uint32_t node_group_id,
+        int64_t ng_term,
+        TxNumber tx_number)
+    {
+        auto lock_it = table_locks_.find(table_name.StringView());
+        if (lock_it == table_locks_.end())
+        {
+            CatalogKey table_key{txservice::TableName{
+                table_name.StringView(), txservice::TableType::Primary}};
+            TxKey catalog_tx_key(&table_key);
+            auto it = FindEmplace(table_key);
+
+            CcEntry<CatalogKey, CatalogRecord> *catalog_cce = it->second;
+            CcPage<CatalogKey, CatalogRecord> *catalog_ccp = it.GetPage();
+
+            const CatalogEntry *catalog_entry =
+                shard_->GetCatalog(table_key.Name(), node_group_id);
+
+            if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
+            {
+                // The catalog entry hasn't been initialized, try to load it
+                // from data store.
+                shard_->FetchCatalog(
+                    table_name, node_group_id, ng_term, nullptr);
+                return {CcErrorCode::READ_CATALOG_FAIL, nullptr};
+            }
+
+            assert(catalog_entry != nullptr && catalog_entry->Version() > 0);
+            assert(catalog_entry->schema_ != nullptr);
+
+            // upload catalog record
+            catalog_cce->payload_ = std::make_unique<CatalogRecord>();
+            catalog_cce->payload_->Set(catalog_entry->schema_,
+                                       catalog_entry->dirty_schema_,
+                                       catalog_entry->Version());
+            catalog_cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
+                                                  RecordStatus::Normal);
+
+            NonBlockingLock *lock =
+                &catalog_cce->GetOrCreateKeyLock(shard_, this, catalog_ccp);
+            auto res = table_locks_.try_emplace(table_name.StringView(), lock);
+            lock_it = res.first;
+        }
+
+        bool read_success = lock_it->second->AcquireReadLockFast(tx_number);
+        return read_success
+                   ? std::pair<CcErrorCode,
+                               NonBlockingLock *>{CcErrorCode::NO_ERROR,
+                                                  lock_it->second}
+                   : std::pair<CcErrorCode, NonBlockingLock *>{
+                         CcErrorCode::READ_CATALOG_FAIL, nullptr};
+    }
+
+private:
+    // An index structure to directly get the lock via table name.
+    // WARNING: This is based on the assumption that the locks for catalog cc
+    // entryies are never recycled. If the assumption is violated, this
+    // structured should not be used.
+    // TODO: Better separate lock of catalog ccmap from CcShard locks
+    absl::flat_hash_map<std::string, NonBlockingLock *> table_locks_;
 };
 }  // namespace txservice

@@ -56,6 +56,7 @@ public:
     {
         read_intentions_.clear();
         read_locks_.clear();
+        read_cnt_ = 0;
         write_lk_type_ = WriteLockType::NoWritelock;
         write_txn_ = 0;
         blocking_queue_.Reset();
@@ -88,6 +89,22 @@ public:
     bool AcquireWriteIntent(CcRequestBase *cc_req, CcProtocol protocol);
 
     bool ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs);
+
+    /**
+     * @brief Fast path to add read lock. Only used by Catalog read.
+     *
+     * @param tx_number
+     * @return
+     */
+    bool AcquireReadLockFast(TxNumber tx_number);
+
+    /**
+     * @brief Fast path to release read lock. Only used by Catalog read.
+     *
+     * @param ccs
+     * @return
+     */
+    bool ReleaseReadLockFast(CcShard *ccs);
 
     /**
      * @brief Tries to acquire the read lock. Only tx's under 2PL acquire read
@@ -178,6 +195,9 @@ public:
             debug_string.append(",");
         }
 
+        debug_string.append(", read_cnt_(for catalog lock): ");
+        debug_string.append(std::to_string(read_cnt_));
+
         debug_string.append(" ,write_lock: ");
         if (write_lk_type_ != WriteLockType::NoWritelock)
         {
@@ -262,6 +282,10 @@ private:
 
     bool NoReadLockConflict(TxNumber tx_number) const
     {
+        if (read_cnt_ > 0)
+        {
+            return false;
+        }
         return read_locks_.empty() ||
                (read_locks_.size() == 1 && *read_locks_.begin() == tx_number);
     }
@@ -286,6 +310,9 @@ private:
     std::unordered_set<TxNumber> read_intentions_;
     // Tx's who have acquired read locks
     std::unordered_set<TxNumber> read_locks_;
+    // How many readers has acquired read locks. Only used for Catalog read fast
+    // path.
+    int read_cnt_{};
 
     WriteLockType write_lk_type_;
     TxNumber write_txn_{0};
