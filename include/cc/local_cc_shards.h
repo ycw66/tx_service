@@ -1772,7 +1772,12 @@ private:
     // option is disabled.
     bool PrebuiltTable(const TableName &table_name) const
     {
-        return prebuilt_tables_.find(table_name) != prebuilt_tables_.end();
+        auto it = prebuilt_tables_.find(table_name);
+        if (it != prebuilt_tables_.end())
+        {
+            return !it->second.empty();
+        }
+        return false;
     }
 
     const uint32_t node_id_;
