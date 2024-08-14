@@ -2317,56 +2317,66 @@ public:
             req.SetCcePtr(cce);
             req.SetCcePtrScanType(scan_type);
 
-            if (scan_type != ScanType::ScanGap)
+#ifdef ON_KEY_OBJECT
+            if (FilterRecord(key_ptr,
+                             cce,
+                             req.GetRedisObjectType(),
+                             req.GetRedisScanPattern()))
             {
-                auto lock_pair = AcquireCceKeyLock(cce,
-                                                   ccp,
-                                                   cce->PayloadStatus(),
-                                                   &req,
-                                                   ng_id,
-                                                   ng_term,
-                                                   tx_term,
-                                                   cc_op,
-                                                   iso_lvl,
-                                                   cc_proto,
-                                                   req.ReadTimestamp(),
-                                                   req.IsCoveringKeys());
-                switch (lock_pair.second)
+#endif
+                if (scan_type != ScanType::ScanGap)
                 {
-                case CcErrorCode::NO_ERROR:
-                    break;
-                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
-                {
-                    req.SetIsWaitForPostWrite(true);
-                    return false;
+                    auto lock_pair = AcquireCceKeyLock(cce,
+                                                       ccp,
+                                                       cce->PayloadStatus(),
+                                                       &req,
+                                                       ng_id,
+                                                       ng_term,
+                                                       tx_term,
+                                                       cc_op,
+                                                       iso_lvl,
+                                                       cc_proto,
+                                                       req.ReadTimestamp(),
+                                                       req.IsCoveringKeys());
+                    switch (lock_pair.second)
+                    {
+                    case CcErrorCode::NO_ERROR:
+                        break;
+                    case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                    {
+                        req.SetIsWaitForPostWrite(true);
+                        return false;
+                    }
+                    case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+                    {
+                        // Lock fail should stop the execution of current
+                        // CC request since it's already in blocking queue.
+                        return false;
+                    }
+                    default:
+                    {
+                        // lock confilct: back off and retry.
+                        req.Result()->SetError(lock_pair.second);
+                        return true;
+                    }
+                    }  //-- end: switch
                 }
-                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+                else
                 {
-                    // Lock fail should stop the execution of current
-                    // CC request since it's already in blocking queue.
-                    return false;
+                    // TODO(lzx): handle gap lock
                 }
-                default:
-                {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(lock_pair.second);
-                    return true;
-                }
-                }  //-- end: switch
-            }
-            else
-            {
-                // TODO(lzx): handle gap lock
-            }
 
-            AddScanTuple(key_ptr,
-                         cce,
-                         typed_cache,
-                         scan_type,
-                         ng_id,
-                         ng_term,
-                         req.ReadTimestamp(),
-                         is_read_snapshot);
+                AddScanTuple(key_ptr,
+                             cce,
+                             typed_cache,
+                             scan_type,
+                             ng_id,
+                             ng_term,
+                             req.ReadTimestamp(),
+                             is_read_snapshot);
+#ifdef ON_KEY_OBJECT
+            }
+#endif
             cce_last = cce;
             ccp_last = ccp;
         }
@@ -3119,57 +3129,67 @@ public:
             req.SetCcePtr(cce, shard_->LocalCoreId());
             req.SetCcePtrScanType(scan_type, shard_->LocalCoreId());
 
-            if (scan_type != ScanType::ScanGap)
+#ifdef ON_KEY_OBJECT
+            if (FilterRecord(key_ptr,
+                             cce,
+                             req.GetRedisObjectType(),
+                             req.GetRedisScanPattern()))
             {
-                auto lock_pair = AcquireCceKeyLock(cce,
-                                                   ccp,
-                                                   cce->PayloadStatus(),
-                                                   &req,
-                                                   ng_id,
-                                                   ng_term,
-                                                   tx_term,
-                                                   cc_op,
-                                                   iso_lvl,
-                                                   cc_proto,
-                                                   req.ReadTimestamp(),
-                                                   req.IsCoveringKeys());
-                switch (lock_pair.second)
+#endif
+                if (scan_type != ScanType::ScanGap)
                 {
-                case CcErrorCode::NO_ERROR:
-                    break;
-                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
-                {
-                    req.SetIsWaitForPostWrite(true, shard_->LocalCoreId());
-                    return false;
+                    auto lock_pair = AcquireCceKeyLock(cce,
+                                                       ccp,
+                                                       cce->PayloadStatus(),
+                                                       &req,
+                                                       ng_id,
+                                                       ng_term,
+                                                       tx_term,
+                                                       cc_op,
+                                                       iso_lvl,
+                                                       cc_proto,
+                                                       req.ReadTimestamp(),
+                                                       req.IsCoveringKeys());
+                    switch (lock_pair.second)
+                    {
+                    case CcErrorCode::NO_ERROR:
+                        break;
+                    case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                    {
+                        req.SetIsWaitForPostWrite(true, shard_->LocalCoreId());
+                        return false;
+                    }
+                    case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+                    {
+                        // Lock fail should stop the execution of current
+                        // CC request since it's already in blocking queue.
+                        // TODO(lzx): Add remote acknowlege when lock fail
+                        return false;
+                    }
+                    default:
+                    {
+                        // lock confilct: back off and retry.
+                        req.Result()->SetError(lock_pair.second);
+                        return true;
+                    }
+                    }  //-- end: switch
                 }
-                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+                else
                 {
-                    // Lock fail should stop the execution of current
-                    // CC request since it's already in blocking queue.
-                    // TODO(lzx): Add remote acknowlege when lock fail
-                    return false;
+                    // TODO(lzx): handle gap lock
                 }
-                default:
-                {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(lock_pair.second);
-                    return true;
-                }
-                }  //-- end: switch
-            }
-            else
-            {
-                // TODO(lzx): handle gap lock
-            }
 
-            AddScanTupleMsg(key_ptr,
-                            cce,
-                            &scan_cache,
-                            scan_type,
-                            ng_term,
-                            req.ReadTimestamp(),
-                            is_read_snapshot,
-                            req.is_ckpt_delta_);
+                AddScanTupleMsg(key_ptr,
+                                cce,
+                                &scan_cache,
+                                scan_type,
+                                ng_term,
+                                req.ReadTimestamp(),
+                                is_read_snapshot,
+                                req.is_ckpt_delta_);
+#ifdef ON_KEY_OBJECT
+            }
+#endif
             cce_last = cce;
             ccp_last = ccp;
         }
