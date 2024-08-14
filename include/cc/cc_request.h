@@ -3279,9 +3279,29 @@ public:
         return data_sync_vec_[core_id];
     }
 
+    std::unique_ptr<std::vector<FlushRecord>> MoveOutDataSyncVec(
+        uint16_t core_id)
+    {
+        auto moved = std::make_unique<std::vector<FlushRecord>>(
+            std::move(data_sync_vec_[core_id]));
+        data_sync_vec_[core_id] = std::vector<FlushRecord>();
+        data_sync_vec_[core_id].resize(scan_batch_size_);
+        return moved;
+    }
+
     std::vector<FlushRecord> &ArchiveVec(uint16_t core_id)
     {
         return archive_vec_[core_id];
+    }
+
+    std::unique_ptr<std::vector<FlushRecord>> MoveOutArchiveVec(
+        uint16_t core_id)
+    {
+        auto moved = std::make_unique<std::vector<FlushRecord>>(
+            std::move(archive_vec_[core_id]));
+        archive_vec_[core_id] = std::vector<FlushRecord>();
+        archive_vec_[core_id].resize(scan_batch_size_);
+        return moved;
     }
 
     std::vector<size_t> &MoveBaseIdxVec(uint16_t core_id)
@@ -4890,12 +4910,12 @@ private:
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
 };
 
-struct PostFlushDataCc : public CcRequestBase
+struct ReleaseDataSyncScanHeapCc : public CcRequestBase
 {
 public:
     static const size_t VEC_ERASE_BATCH_SIZE = 1000;
 
-    explicit PostFlushDataCc(
+    explicit ReleaseDataSyncScanHeapCc(
         size_t core_cnt,
         std::vector<std::unique_ptr<std::vector<FlushRecord>>>
             data_sync_vec_per_core,
@@ -4937,6 +4957,7 @@ public:
                     {
                         data_sync_vec->resize(0);
                     }
+                    data_sync_vec->shrink_to_fit();
                     mi_heap_set_default(prev_heap);
 
                     if (data_sync_vec->size() != 0)
@@ -4981,6 +5002,45 @@ public:
             }
         }
 
+        {
+            std::lock_guard<std::mutex> lk(mux_);
+            if (--pending_shard_ == 0)
+            {
+                cv_.notify_one();
+                // Reset waiting ckpt flag. Shards should be
+                // able to request ckpt again if no cc entries
+                // can be kicked out.
+                ccs.SetWaitingCkpt(false);
+            }
+        }
+
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return pending_shard_ == 0; });
+    }
+
+    std::mutex mux_;
+    std::condition_variable cv_;
+    size_t pending_shard_;
+    std::vector<std::unique_ptr<std::vector<FlushRecord>>>
+        data_sync_vec_per_core_;
+    std::vector<std::unique_ptr<std::vector<FlushRecord>>>
+        archive_vec_per_core_;
+};
+
+struct PostFlushDataCc : public CcRequestBase
+{
+public:
+    explicit PostFlushDataCc(size_t core_cnt) : pending_shard_(core_cnt)
+    {
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
         ccs.ResetCleanStart();
         ccs.DequeueWaitList();
 

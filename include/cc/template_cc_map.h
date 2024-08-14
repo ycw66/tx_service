@@ -5985,19 +5985,11 @@ public:
                                         table_name_.Type());
             if (is_scan_mem_full)
             {
-                // wait for free memory if scan result is empty
-                if (req.accumulated_scan_cnt_[vec_idx] == 0)
-                {
-                    shard_->EnqueueWaitList(&req);
-                }
-                else
-                {
-                    // scan memory is full and there are
-                    // data for flush
-                    req.force_flush_ = true;
-                    req.SetFinish(vec_idx);
-                    return false;
-                }
+                //  scan memory is full and there are
+                //  data for flush
+                req.force_flush_ = true;
+                req.SetFinish(vec_idx);
+                return false;
             }
             else if (req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_)
             {

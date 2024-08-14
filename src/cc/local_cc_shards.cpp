@@ -3593,7 +3593,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             if ((data_sync_vec->size() + archive_vec->size() +
                      mv_base_vec->size() >
                  rec_size_limit) ||
-                scan_cc.force_flush_)
+                (scan_cc.force_flush_ && scan_cc.accumulated_scan_cnt_[0] > 0))
             {
                 {
                     std::unique_lock<bthread::Mutex> flight_task_lk(
@@ -3639,13 +3639,23 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 mv_base_vec = std::make_unique<std::vector<TxKey>>();
             }
 
+#ifdef ON_KEY_OBJECT
             if (scan_cc.force_flush_)
             {
                 // Clear the FlushRecords' memory of scan cc since the
                 // DataSyncScan heap is full.
-                scan_cc.DataSyncVec(0).clear();
-                scan_cc.DataSyncVec(0).resize(DATA_SYNC_SCAN_BATCH_SIZE);
+                std::vector<std::unique_ptr<std::vector<FlushRecord>>>
+                    data_sync_vec_per_core(1), archive_vec_per_core(1);
+                data_sync_vec_per_core[0] = scan_cc.MoveOutDataSyncVec(0);
+                archive_vec_per_core[0] = scan_cc.MoveOutArchiveVec(0);
+                ReleaseDataSyncScanHeapCc release_scan_heap_cc(
+                    1,
+                    std::move(data_sync_vec_per_core),
+                    std::move(archive_vec_per_core));
+                EnqueueCcRequest(worker_idx, &release_scan_heap_cc);
+                release_scan_heap_cc.Wait();
             }
+#endif
 
             scan_cc.Reset();
         }
@@ -4276,9 +4286,19 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                 }
             }
 
-            PostFlushDataCc reset_cc(Count(),
-                                     std::move(data_sync_vec_per_core),
-                                     std::move(archive_vec_per_core));
+            ReleaseDataSyncScanHeapCc release_scan_heap_cc(
+                Count(),
+                std::move(data_sync_vec_per_core),
+                std::move(archive_vec_per_core));
+            for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
+            {
+                EnqueueToCcShard(core_idx, &release_scan_heap_cc);
+            }
+
+            release_scan_heap_cc.Wait();
+
+            PostFlushDataCc reset_cc(Count());
+
             for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
             {
                 EnqueueToCcShard(core_idx, &reset_cc);
@@ -4287,13 +4307,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             reset_cc.Wait();
         }
 #else
-        std::vector<std::unique_ptr<std::vector<FlushRecord>>>
-            data_sync_vec_per_core(1), archive_vec_per_core(1);
-        data_sync_vec_per_core[0] = std::move(data_sync_vec_owner);
-        archive_vec_per_core[0] = std::move(archive_vec_owner);
-        PostFlushDataCc reset_cc(1,
-                                 std::move(data_sync_vec_per_core),
-                                 std::move(archive_vec_per_core));
+        PostFlushDataCc reset_cc(1);
         EnqueueToCcShard(scan_task_worker_idx, &reset_cc);
         reset_cc.Wait();
 #endif

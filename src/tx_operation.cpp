@@ -5200,12 +5200,26 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         data_sync_vec_per_core[record_core_id]->emplace_back(
                             std::move(flush_record));
                     }
-                    PostFlushDataCc reset_cc(local_shards->Count(),
-                                             std::move(data_sync_vec_per_core),
-                                             std::move(archive_vec_per_core));
-                    for (size_t idx = 0; idx < local_shards->Count(); ++idx)
+
+                    ReleaseDataSyncScanHeapCc release_scan_heap_cc(
+                        local_shards->Count(),
+                        std::move(data_sync_vec_per_core),
+                        std::move(archive_vec_per_core));
+                    for (size_t core_idx = 0; core_idx < local_shards->Count();
+                         ++core_idx)
                     {
-                        local_shards->EnqueueCcRequest(idx, &reset_cc);
+                        local_shards->EnqueueToCcShard(core_idx,
+                                                       &release_scan_heap_cc);
+                    }
+
+                    release_scan_heap_cc.Wait();
+
+                    PostFlushDataCc reset_cc(local_shards->Count());
+
+                    for (size_t core_idx = 0; core_idx < local_shards->Count();
+                         ++core_idx)
+                    {
+                        local_shards->EnqueueToCcShard(core_idx, &reset_cc);
                     }
 
                     reset_cc.Wait();
