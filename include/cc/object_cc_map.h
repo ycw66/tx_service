@@ -1632,6 +1632,18 @@ private:
         {
             return false;
         }
+        else
+        {
+            // if ttl is expired
+            TxObject *obj = static_cast<TxObject *>(cce->payload_.get());
+            if (obj != nullptr && obj->HasTTL())
+            {
+                if (obj->GetTTL() < shard_->Now())
+                {
+                    return false;
+                }
+            }
+        }
 
         return true;
     }

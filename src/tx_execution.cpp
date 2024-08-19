@@ -6397,7 +6397,6 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     // Add a retire command before the write command
                     if (cmd_res.ttl_expired_)
                     {
-                        DLOG(INFO) << "ttl_expired_";
                         auto retire_command =
                             vct_cmd->at(i)->RetireExpiredTTLObjectCommand();
                         rw_set_.AddObjectCommand(
