@@ -31,17 +31,33 @@ struct KVCatalogInfo
                table_type == TableType::UniqueSecondary);
         if (table_type == TableType::Primary)
         {
-            return kv_table_name_;
+            return kv_table_uuid_;
         }
         else
         {
-            return kv_index_names_.at(table_name);
+            return kv_index_uuids_.at(table_name);
         }
     }
 
-    std::string kv_table_name_;
+    virtual const std::string &GetTableUUID(const TableName &table_name) const
+    {
+        const TableType table_type = table_name.Type();
+        assert(table_type == TableType::Primary ||
+               table_type == TableType::Secondary ||
+               table_type == TableType::UniqueSecondary);
+        if (table_type == TableType::Primary)
+        {
+            return kv_table_uuid_;
+        }
+        else
+        {
+            return kv_index_uuids_.at(table_name);
+        }
+    }
+
+    std::string kv_table_uuid_;
     // map of <mysql_index_table_name, kv_index_table_name>
-    std::unordered_map<TableName, std::string> kv_index_names_;
+    std::unordered_map<TableName, std::string> kv_index_uuids_;
 };
 
 class Statistics;

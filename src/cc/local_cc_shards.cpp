@@ -931,6 +931,33 @@ std::map<TxKey, TableRangeEntry::uptr> *LocalCcShards::GetTableRangesForATable(
     return GetTableRangesForATableInternal(range_table_name, ng_id);
 }
 
+std::optional<std::vector<uint32_t>> LocalCcShards::GetTableRangeIds(
+    const TableName &range_table_name, NodeGroupId node_group_id)
+{
+    // Acquire shared mutex
+    std::shared_lock<std::shared_mutex> s_lk(meta_data_mux_);
+
+    std::vector<uint32_t> table_range_ids;
+    auto table_it = table_range_ids_.find(range_table_name);
+    if (table_it == table_range_ids_.end())
+    {
+        return std::nullopt;
+    }
+
+    auto ng_it = table_it->second.find(node_group_id);
+    if (ng_it == table_it->second.end())
+    {
+        return std::nullopt;
+    }
+
+    for (const auto &table_range_id : ng_it->second)
+    {
+        table_range_ids.push_back(table_range_id.first);
+    }
+
+    return table_range_ids;
+}
+
 std::unordered_map<uint32_t, TableRangeEntry *>
     *LocalCcShards::GetTableRangeIdsForATableInternal(
         const TableName &range_table_name, const NodeGroupId ng_id)

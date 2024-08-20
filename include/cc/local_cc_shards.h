@@ -1229,6 +1229,9 @@ public:
                          const NodeGroupId ng_id,
                          const NodeGroupId local_ng_id) const;
 
+    std::optional<std::vector<uint32_t>> GetTableRangeIds(
+        const TableName &range_table_name, NodeGroupId node_group_id);
+
     /**
      * @brief add dirty range slices info into
      * TemplateTableRangeEntry::dirty_range_slices_.
