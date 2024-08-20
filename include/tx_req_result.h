@@ -95,8 +95,8 @@ public:
             // The yield func and resume func can only be called once each.
             if (allow_resume_call_)
             {
-                (*resume_func_)();
                 allow_resume_call_ = false;
+                (*resume_func_)();
             }
             // resume_func_ = nullptr;
             return;
@@ -145,8 +145,8 @@ public:
             // The yield func and resume func can only be called once each.
             if (allow_resume_call_)
             {
-                (*resume_func_)();
                 allow_resume_call_ = false;
+                (*resume_func_)();
             }
             return;
         }
@@ -188,8 +188,8 @@ public:
             // The yield func and resume func can only be called once each.
             if (allow_resume_call_)
             {
-                (*resume_func_)();
                 allow_resume_call_ = false;
+                (*resume_func_)();
             }
             return;
         }
@@ -239,7 +239,6 @@ public:
 #ifdef ON_KEY_OBJECT
         allow_yield_call_ = yield_fptr != nullptr;
         allow_resume_call_ = resume_fptr != nullptr;
-        pass_resume_func_to_ccreq_ = false;
         yield_cnt_ = 0;
 #endif
     }
@@ -274,8 +273,8 @@ public:
             // The yield func and resume func can only be called once each.
             if (allow_yield_call_)
             {
-                (*yield_func_)();
                 allow_yield_call_ = false;
+                (*yield_func_)();
             }
             else if (status_ == TxResultStatus::Unknown)
             {
@@ -330,13 +329,12 @@ private:
 
     bool waiting_{false};
     const std::function<void()> *yield_func_;
+    // the resume func might be passed to cc handler result
     const std::function<void()> *resume_func_;
 
 #ifdef ON_KEY_OBJECT
     bool allow_yield_call_{};
     bool allow_resume_call_{};
-    // whether the resume func can be passed to cc handler result
-    bool pass_resume_func_to_ccreq_{};
 
     int yield_cnt_{};
     inline static int initial_wait_time_us_ = 100;

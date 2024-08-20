@@ -34,6 +34,14 @@ bool CcHandlerResult<T>::SetFinished()
         });
     TX_TRACE_DUMP(static_cast<T *>(&result_));
 
+#ifdef EXT_TX_PROC_ENABLED
+    // Warning! As soon as is_finished_ is set, the txm can be forwarded and
+    // Reset, which means CcHandlerResult could be reset.
+    // Copy the runtime_resume_func_ since it could be set to empty once
+    // is_finished_ is set.
+    const std::function<void()> *resume_func = runtime_resume_func_;
+#endif
+
     if (ref_cnted_)
     {
         auto r = ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
@@ -48,9 +56,9 @@ bool CcHandlerResult<T>::SetFinished()
                     post_lambda_(this);
                 }
 #ifdef EXT_TX_PROC_ENABLED
-                if (runtime_resume_func_)
+                if (resume_func)
                 {
-                    (*runtime_resume_func_)();
+                    (*resume_func)();
                 }
                 else if (txm_ != nullptr && is_blocking_)
                 {
@@ -73,9 +81,9 @@ bool CcHandlerResult<T>::SetFinished()
             }
 
 #ifdef EXT_TX_PROC_ENABLED
-            if (runtime_resume_func_)
+            if (resume_func)
             {
-                (*runtime_resume_func_)();
+                (*resume_func)();
             }
             else if (txm_ != nullptr && is_blocking_)
             {
@@ -135,6 +143,15 @@ bool CcHandlerResult<T>::ForceError()
                     .append(std::to_string(this->txm_->TxTerm()));
             }
         });
+
+#ifdef EXT_TX_PROC_ENABLED
+    // Warning! As soon as is_finished_ is set, the txm can be forwarded and
+    // Reset, which means CcHandlerResult could be reset.
+    // Copy the runtime_resume_func_ since it could be set to empty once
+    // is_finished_ is set.
+    const std::function<void()> *resume_func = runtime_resume_func_;
+#endif
+
     bool expect = false;
     bool success = is_finished_.compare_exchange_strong(
         expect, true, std::memory_order_acq_rel);
@@ -151,9 +168,9 @@ bool CcHandlerResult<T>::ForceError()
         }
 
 #ifdef EXT_TX_PROC_ENABLED
-        if (runtime_resume_func_)
+        if (resume_func)
         {
-            (*runtime_resume_func_)();
+            (*resume_func)();
         }
         else if (txm_ != nullptr && is_blocking_)
         {
