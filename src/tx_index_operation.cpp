@@ -86,8 +86,8 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     is_force_finished_ = false;
 
     new_indexes_name_.reserve(alter_table_info_.index_add_count_);
-    for (auto index_it = alter_table_info_.index_add_kv_uuids_.cbegin();
-         index_it != alter_table_info_.index_add_kv_uuids_.cend();
+    for (auto index_it = alter_table_info_.index_add_names_.cbegin();
+         index_it != alter_table_info_.index_add_names_.cend();
          ++index_it)
     {
         new_indexes_name_.emplace_back(index_it->first.StringView(),
@@ -607,7 +607,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         ACTION_FAULT_INJECTOR("term_AlterTableIndex_FlushNewPackedSKOp");
         assert(op_type_ == OperationType::AddIndex);
         assert(alter_table_info_.index_add_count_ ==
-               alter_table_info_.index_add_kv_uuids_.size());
+               alter_table_info_.index_add_names_.size());
 
         LOG(INFO) << "Alter Table Index transaction flush old sk record "
                   << "for base table: " << table_key_.Name().Trace()
@@ -630,7 +630,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // Send the flush data request to the node groups to which
             // the new packed sk data sharding, so obtain the node group
             // count from the @@expected_ng_terms.
-            auto &new_index_names = this->alter_table_info_.index_add_kv_uuids_;
+            auto &new_index_names = this->alter_table_info_.index_add_names_;
             size_t table_cnt = new_index_names.size();
             auto add_index_it = new_index_names.cbegin();
             assert(add_index_it != new_index_names.cend());
@@ -1166,8 +1166,8 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
 
     new_indexes_name_.clear();
     new_indexes_name_.reserve(alter_table_info_.index_add_count_);
-    for (auto index_it = alter_table_info_.index_add_kv_uuids_.cbegin();
-         index_it != alter_table_info_.index_add_kv_uuids_.cend();
+    for (auto index_it = alter_table_info_.index_add_names_.cbegin();
+         index_it != alter_table_info_.index_add_names_.cend();
          ++index_it)
     {
         new_indexes_name_.emplace_back(index_it->first.StringView(),

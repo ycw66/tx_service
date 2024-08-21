@@ -639,8 +639,8 @@ struct AlterTableInfo
                    sizeof(uint8_t));
         size_t index_name_len;
         std::string add_index_name;
-        for (auto add_index_it = index_add_kv_uuids_.cbegin();
-             add_index_it != index_add_kv_uuids_.cend();
+        for (auto add_index_it = index_add_names_.cbegin();
+             add_index_it != index_add_names_.cend();
              add_index_it++)
         {
             add_index_name.append(add_index_it->first.String())
@@ -657,8 +657,8 @@ struct AlterTableInfo
         std::string drop_index_name;
         res.append(reinterpret_cast<const char *>(&(index_drop_count_)),
                    sizeof(uint8_t));
-        for (auto drop_index_it = index_drop_kv_uuids_.cbegin();
-             drop_index_it != index_drop_kv_uuids_.cend();
+        for (auto drop_index_it = index_drop_names_.cbegin();
+             drop_index_it != index_drop_names_.cend();
              drop_index_it++)
         {
             drop_index_name.append(drop_index_it->first.String())
@@ -693,7 +693,7 @@ struct AlterTableInfo
         if (index_add_count_ > 0)
         {
             // Clear this buff.
-            index_add_kv_uuids_.clear();
+            index_add_names_.clear();
             std::string add_index_names(buf + offset, add_index_names_len);
 
             std::stringstream add_ss(add_index_names);
@@ -709,12 +709,12 @@ struct AlterTableInfo
                 txservice::TableName add_index_name(std::string_view(*it),
                                                     table_type);
                 const std::string &add_index_kv_name = *(++it);
-                index_add_kv_uuids_.emplace(add_index_name, add_index_kv_name);
+                index_add_names_.emplace(add_index_name, add_index_kv_name);
             }
         }
         else
         {
-            index_add_kv_uuids_.clear();
+            index_add_names_.clear();
         }
         offset += add_index_names_len;
 
@@ -725,7 +725,7 @@ struct AlterTableInfo
         if (index_drop_count_ > 0)
         {
             // Clear this buff.
-            index_drop_kv_uuids_.clear();
+            index_drop_names_.clear();
             std::string drop_index_names(buf + offset, drop_index_names_len);
 
             std::stringstream drop_ss(drop_index_names);
@@ -741,13 +741,12 @@ struct AlterTableInfo
                 txservice::TableName drop_index_name(std::string_view(*it),
                                                      table_type);
                 const std::string &drop_index_kv_name = *(++it);
-                index_drop_kv_uuids_.emplace(drop_index_name,
-                                             drop_index_kv_name);
+                index_drop_names_.emplace(drop_index_name, drop_index_kv_name);
             }
         }
         else
         {
-            index_drop_kv_uuids_.clear();
+            index_drop_names_.clear();
         }
         offset += drop_index_names_len;
 
@@ -758,15 +757,15 @@ struct AlterTableInfo
     {
         index_add_count_ = 0;
         index_drop_count_ = 0;
-        index_add_kv_uuids_.clear();
-        index_drop_kv_uuids_.clear();
+        index_add_names_.clear();
+        index_drop_names_.clear();
     }
 
     uint8_t index_add_count_;
     uint8_t index_drop_count_;
     // map of <mysql_index_table_name, kv_index_table_name>
-    std::unordered_map<txservice::TableName, std::string> index_add_kv_uuids_;
-    std::unordered_map<txservice::TableName, std::string> index_drop_kv_uuids_;
+    std::unordered_map<txservice::TableName, std::string> index_add_names_;
+    std::unordered_map<txservice::TableName, std::string> index_drop_names_;
 };
 
 struct HeapMemStats
