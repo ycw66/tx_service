@@ -703,7 +703,9 @@ public:
         clone->data_store_size_ = data_store_size_;
         clone->archives_ = std::move(archives_);
 #else
-        clone->payload_ = std::make_unique<ValueT>(*payload_);
+        TxRecord *rec = static_cast<TxRecord *>(payload_.get());
+        TxRecord::Uptr rec_clone = rec->Clone();
+        clone->payload_.reset(static_cast<ValueT *>(rec_clone.release()));
 #endif
     }
 
