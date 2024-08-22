@@ -5281,6 +5281,7 @@ public:
                 delete remote_input_.cmd_;
             }
             remote_input_.cmd_ = nullptr;
+            remote_input_.is_owner_ = false;
         }
     }
 
