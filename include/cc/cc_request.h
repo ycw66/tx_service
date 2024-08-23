@@ -2459,18 +2459,25 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        std::unique_lock lk(mux_);
-        ckpt_ts_ = std::min(ckpt_ts_, ccs.ActiveTxMinTs(cc_ng_id_));
+        uint64_t tx_min_ts = ccs.ActiveTxMinTs(cc_ng_id_);
         int64_t allocated, committed;
         bool full = ccs.GetShardHeap()->Full(&allocated, &committed);
+
+        uint64_t old_val = ckpt_ts_.load(std::memory_order_relaxed);
+        if (old_val > tx_min_ts)
+        {
+            while (!ckpt_ts_.compare_exchange_weak(
+                       old_val, tx_min_ts, std::memory_order_acq_rel) &&
+                   old_val > tx_min_ts)
+                ;
+        }
         memory_allocated_vec_[ccs.LocalCoreId()] = allocated;
         memory_committed_vec_[ccs.LocalCoreId()] = committed;
         heap_full_vec_[ccs.LocalCoreId()] = full;
-
-        assert(finish_cnt_ < shard_cnt_);
-        ++finish_cnt_;
-        if (finish_cnt_ == shard_cnt_)
+        uint64_t finished = finish_cnt_.fetch_add(1, std::memory_order_acquire);
+        if (finished == shard_cnt_ - 1)
         {
+            std::unique_lock lk(mux_);
             cv_.notify_one();
         }
 
@@ -2482,7 +2489,7 @@ public:
     void Wait()
     {
         std::unique_lock lk(mux_);
-        while (finish_cnt_ != shard_cnt_)
+        while (finish_cnt_.load(std::memory_order_relaxed) != shard_cnt_)
         {
             cv_.wait(lk);
         }
@@ -2490,7 +2497,7 @@ public:
 
     uint64_t GetCkptTs() const
     {
-        return ckpt_ts_;
+        return ckpt_ts_.load(std::memory_order_relaxed);
     }
 
     uint64_t GetMemUsage() const
@@ -2533,7 +2540,7 @@ public:
     }
 
 private:
-    uint64_t ckpt_ts_;
+    std::atomic<uint64_t> ckpt_ts_;
     bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
     std::atomic<size_t> finish_cnt_;
