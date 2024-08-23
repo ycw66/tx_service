@@ -6400,6 +6400,8 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
 #else
             key_shard_code = vct_key_shard_code_[i].first;
 #endif
+            bool commit = false;
+            bool skip_kv = !tx_req_->table_option_->enable_data_store_;
             txm->cc_handler_->ObjectCommand(
                 *tx_req_->table_name_,
                 key,
@@ -6412,7 +6414,8 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 hd_res,
                 txm->iso_level_,
                 txm->protocol_,
-                false);
+                commit,
+                skip_kv);
 
             if (hd_res.Value().is_local_)
             {

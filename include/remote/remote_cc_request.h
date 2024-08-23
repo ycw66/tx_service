@@ -367,6 +367,11 @@ public:
     }
 
 #ifdef ON_KEY_OBJECT
+    bool IsSkipKv() const
+    {
+        return is_skip_kv_;
+    }
+
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -393,6 +398,7 @@ private:
     std::atomic<uint32_t> unfinish_cnt_{0};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
+    bool is_skip_kv_{false};
 
     uint64_t snapshot_ts_{0};
     std::vector<bool> is_wait_for_post_write_;
@@ -476,6 +482,11 @@ public:
     }
 
 #ifdef ON_KEY_OBJECT
+    bool IsSkipKv() const
+    {
+        return is_skip_kv_;
+    }
+
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -514,6 +525,7 @@ private:
     TableType tbl_type_;
 
 #ifdef ON_KEY_OBJECT
+    bool is_skip_kv_{false};
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 #endif

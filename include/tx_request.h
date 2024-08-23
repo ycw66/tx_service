@@ -381,6 +381,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                       TransactionExecution *txm = nullptr
 #ifdef ON_KEY_OBJECT
                       ,
+                      bool is_skip_kv = false,
                       int32_t obj_type = -1,
                       std::string_view scan_pattern = {}
 #endif
@@ -404,6 +405,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           scan_alias_(UINT64_MAX)
 #ifdef ON_KEY_OBJECT
           ,
+          is_skip_kv_(is_skip_kv),
           obj_type_(obj_type),
           scan_pattern_(scan_pattern)
 #endif
@@ -430,6 +432,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                TransactionExecution *txm = nullptr
 #ifdef ON_KEY_OBJECT
                ,
+               bool is_skip_kv = false,
                int32_t obj_type = -1,
                std::string_view scan_pattern = {}
 #endif
@@ -454,6 +457,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         read_local_ = is_read_local;
         scan_alias_ = UINT64_MAX;
 #ifdef ON_KEY_OBJECT
+        is_skip_kv_ = is_skip_kv;
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 #endif
@@ -487,6 +491,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     uint64_t scan_alias_{UINT64_MAX};
 
 #ifdef ON_KEY_OBJECT
+    bool is_skip_kv_{false};
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 #endif
@@ -554,6 +559,7 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
                        TransactionExecution *txm = nullptr
 #ifdef ON_KEY_OBJECT
                        ,
+                       bool is_skip_kv = false,
                        int32_t obj_type = -1,
                        std::string_view scan_pattern = {}
 #endif
@@ -564,6 +570,7 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
           batch_(batch_vec)
 #ifdef ON_KEY_OBJECT
           ,
+          is_skip_kv_(is_skip_kv),
           obj_type_(obj_type),
           scan_pattern_(scan_pattern)
 #endif
@@ -580,6 +587,7 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
 #endif
 
 #ifdef ON_KEY_OBJECT
+    bool is_skip_kv_{false};
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 #endif

@@ -144,6 +144,7 @@ public:
                   bool is_covering_keys = false
 #ifdef ON_KEY_OBJECT
                   ,
+                  bool is_skip_kv = false,
                   int32_t obj_type = -1,
                   const std::string_view &scan_pattern = {}
 #endif
@@ -164,6 +165,7 @@ public:
                   bool is_covering_keys = false
 #ifdef ON_KEY_OBJECT
                   ,
+                  bool is_skip_kv = false,
                   int32_t obj_type = -1,
                   const std::string_view &scan_pattern = {}
 #endif
@@ -295,7 +297,8 @@ public:
                        CcHandlerResult<ObjectCommandResult> &hres,
                        IsolationLevel iso_level,
                        CcProtocol proto,
-                       bool commit);
+                       bool commit,
+                       bool skip_kv);
 
     void PublishMessage(uint64_t ng_id,
                         int64_t tx_term,

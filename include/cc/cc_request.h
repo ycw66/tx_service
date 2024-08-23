@@ -1485,6 +1485,7 @@ public:
                bool is_include_floor_cce = false
 #ifdef ON_KEY_OBJECT
                ,
+               bool is_skip_kv = false,
                int32_t obj_type = -1,
                const std::string_view &scan_pattern = {}
 #endif
@@ -1506,6 +1507,7 @@ public:
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
 #ifdef ON_KEY_OBJECT
+        is_skip_kv_ = is_skip_kv;
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 #endif
@@ -1556,6 +1558,11 @@ public:
         return is_wait_for_post_write_;
     }
 #ifdef ON_KEY_OBJECT
+    bool IsSkipKv() const
+    {
+        return is_skip_kv_;
+    }
+
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -1590,6 +1597,7 @@ private:
 
     bool is_wait_for_post_write_{false};
 #ifdef ON_KEY_OBJECT
+    bool is_skip_kv_{false};
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 #endif
@@ -1652,6 +1660,7 @@ public:
                bool is_covering_keys
 #ifdef ON_KEY_OBJECT
                ,
+               bool is_skip_kv = false,
                int32_t obj_type = -1,
                const std::string_view &scan_pattern = {}
 #endif
@@ -1672,6 +1681,7 @@ public:
         cce_addr_ = &last_tuple->cce_addr_;
         ccm_ = nullptr;
 #ifdef ON_KEY_OBJECT
+        is_skip_kv_ = is_skip_kv;
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 #endif
@@ -1721,7 +1731,13 @@ public:
     {
         return is_wait_for_post_write_;
     }
+
 #ifdef ON_KEY_OBJECT
+    bool IsSkipKv() const
+    {
+        return is_skip_kv_;
+    }
+
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -1753,6 +1769,7 @@ private:
     bool is_wait_for_post_write_{false};
 
 #ifdef ON_KEY_OBJECT
+    bool is_skip_kv_{false};
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 #endif
@@ -5296,7 +5313,8 @@ public:
                CcHandlerResult<ObjectCommandResult> *res,
                CcProtocol proto,
                IsolationLevel iso_level,
-               bool commit)
+               bool commit,
+               bool skip_kv)
     {
         TemplatedCcRequest<ApplyCc, ObjectCommandResult>::Reset(
             table_name,
@@ -5324,6 +5342,7 @@ public:
         tx_ts_ = tx_ts;
         cce_ptr_ = nullptr;
         apply_and_commit_ = commit;
+        skip_kv_ = skip_kv;
         block_type_ = ApplyBlockType::NoBlocking;
     }
 
@@ -5338,7 +5357,8 @@ public:
                CcHandlerResult<ObjectCommandResult> *res,
                CcProtocol proto,
                IsolationLevel iso_level,
-               bool commit)
+               bool commit,
+               bool skip_kv)
     {
         TemplatedCcRequest<ApplyCc, ObjectCommandResult>::Reset(
             table_name,
@@ -5369,6 +5389,7 @@ public:
         cce_ptr_ = nullptr;
         block_type_ = ApplyBlockType::NoBlocking;
         apply_and_commit_ = commit;
+        skip_kv_ = skip_kv;
     }
 
     bool IsLocal() const
@@ -5479,6 +5500,10 @@ public:
     // acquiring lock and writing log. If false, just execute the command to
     // get the result.
     bool apply_and_commit_{};
+
+    // Whether skip access backend storage when cache miss. If true, return key
+    // not exists directly, otherwise try fetch the key from backend storage.
+    bool skip_kv_{};
 
     enum struct ApplyBlockType
     {

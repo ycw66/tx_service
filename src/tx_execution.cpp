@@ -2115,6 +2115,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               is_require_sort
 #ifdef ON_KEY_OBJECT
                               ,
+                              scan_open.tx_req_->is_skip_kv_,
                               scan_open.tx_req_->obj_type_,
                               scan_open.tx_req_->scan_pattern_
 #endif
@@ -2280,6 +2281,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 scan_next.hd_result_
 #ifdef ON_KEY_OBJECT
                 ,
+                scan_next.tx_req_->is_skip_kv_,
                 scan_next.tx_req_->obj_type_,
                 scan_next.tx_req_->scan_pattern_
 #endif
@@ -5928,6 +5930,7 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     // the command in postprocess.
     bool commit =
         obj_cmd_op.auto_commit_ && !obj_cmd_op.table_option_->enable_wal_;
+    bool skip_kv = !obj_cmd_op.table_option_->enable_data_store_;
     cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
                                *obj_cmd_op.key_,
                                key_shard_code,
@@ -5939,7 +5942,8 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
                                hd_res,
                                iso_level_,
                                protocol_,
-                               commit);
+                               commit,
+                               skip_kv);
 
     StartTiming();
 }
@@ -6265,6 +6269,9 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 #endif
         // NOTICE: For MultiObjectCommand, must not commit commands in ApplyCc
         hd_res.Reset();
+
+        bool commit = false;
+        bool skip_kv = !obj_cmd_op.tx_req_->table_option_->enable_data_store_;
         cc_handler_->ObjectCommand(*req->table_name_,
                                    key,
                                    key_shard_code,
@@ -6276,7 +6283,8 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
                                    hd_res,
                                    iso_level_,
                                    protocol_,
-                                   false);
+                                   commit,
+                                   skip_kv);
 
         if (hd_res.Value().is_local_)
         {

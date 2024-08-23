@@ -798,6 +798,7 @@ void txservice::LocalCcHandler::ScanOpen(
     bool is_require_sort
 #ifdef ON_KEY_OBJECT
     ,
+    bool is_skip_kv,
     int32_t obj_type,
     const std::string_view &scan_pattern
 #endif
@@ -963,6 +964,7 @@ void txservice::LocalCcHandler::ScanOpen(
                            false
 #ifdef ON_KEY_OBJECT
                            ,
+                           is_skip_kv,
                            obj_type,
                            scan_pattern
 #endif
@@ -1005,6 +1007,7 @@ void txservice::LocalCcHandler::ScanOpen(
                                 is_covering_keys
 #ifdef ON_KEY_OBJECT
                                 ,
+                                is_skip_kv,
                                 obj_type,
                                 scan_pattern
 #endif
@@ -1166,6 +1169,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
     CcHandlerResult<ScanNextResult> &hd_res
 #ifdef ON_KEY_OBJECT
     ,
+    bool is_skip_kv,
     int32_t obj_type,
     const std::string_view &scan_pattern
 #endif
@@ -1197,6 +1201,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    scanner.is_covering_keys_
 #ifdef ON_KEY_OBJECT
                    ,
+                   is_skip_kv,
                    obj_type,
                    scan_pattern
 #endif
@@ -1224,6 +1229,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             scanner.is_covering_keys_
 #ifdef ON_KEY_OBJECT
                             ,
+                            is_skip_kv,
                             obj_type,
                             scan_pattern
 #endif
@@ -1688,7 +1694,8 @@ void txservice::LocalCcHandler::ObjectCommand(
     txservice::CcHandlerResult<txservice::ObjectCommandResult> &hres,
     IsolationLevel iso_level,
     txservice::CcProtocol proto,
-    bool commit)
+    bool commit,
+    bool skip_kv)
 {
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
@@ -1711,7 +1718,8 @@ void txservice::LocalCcHandler::ObjectCommand(
                    &hres,
                    proto,
                    iso_level,
-                   commit);
+                   commit,
+                   skip_kv);
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
     }
     else
@@ -1742,7 +1750,8 @@ void txservice::LocalCcHandler::ObjectCommand(
                                  hres,
                                  iso_level,
                                  proto,
-                                 commit);
+                                 commit,
+                                 skip_kv);
     }
 }
 

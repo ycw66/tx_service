@@ -22,7 +22,8 @@
 
 namespace txservice
 {
-// whether skip accessing KV when cc map cache misses.
+// Whether skip accessing KV when cc map cache misses. This is a system level
+// flag, means all object table (e.g. redis db) has disabled kv storage.
 extern bool txservice_skip_kv;
 
 template <typename KeyT, typename ValueT>
@@ -233,7 +234,7 @@ public:
                 // The apply request needs a new cc entry but the cc map has
                 // reached the maximal capacity.
                 // If skip_kv, return error directly.
-                if (txservice_skip_kv)
+                if (req.skip_kv_)
                 {
                     hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
                     return false;
@@ -256,7 +257,7 @@ public:
                 // if ccm contains all the ccentries, then unknown status means
                 // that we can skip accessing kv store and return deleted status
                 // directly.
-                if (ccm_has_full_entries_ || txservice_skip_kv)
+                if (ccm_has_full_entries_ || req.skip_kv_)
                 {
                     cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
                     cce->SetCkptTs(1U);
@@ -1616,10 +1617,11 @@ private:
     bool FilterRecord(const KeyT *key,
                       const CcEntry<KeyT, ValueT> *cce,
                       int32_t obj_type,
-                      const std::string_view &scan_pattern) override
+                      const std::string_view &scan_pattern,
+                      bool skip_kv) override
     {
         if (cce->PayloadStatus() == RecordStatus::Deleted &&
-            (!cce->NeedCkpt() || txservice_skip_kv))
+            (!cce->NeedCkpt() || skip_kv))
         {
             return false;
         }

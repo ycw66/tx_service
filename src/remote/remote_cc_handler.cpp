@@ -469,6 +469,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     bool is_covering_keys
 #ifdef ON_KEY_OBJECT
     ,
+    bool is_skip_kv,
     int32_t obj_type,
     const std::string_view &scan_pattern
 #endif
@@ -513,6 +514,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_ckpt(is_ckpt);
     scan_open->set_is_covering_keys(is_covering_keys);
 #ifdef ON_KEY_OBJECT
+    scan_open->set_is_skip_kv(is_skip_kv);
     scan_open->set_obj_type(obj_type);
     scan_open->set_scan_pattern(std::string(scan_pattern));
 #endif
@@ -536,6 +538,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     bool is_covering_keys
 #ifdef ON_KEY_OBJECT
     ,
+    bool is_skip_kv,
     int32_t obj_type,
     const std::string_view &scan_pattern
 #endif
@@ -570,6 +573,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_is_covering_keys(is_covering_keys);
 
 #ifdef ON_KEY_OBJECT
+    scan_next->set_is_skip_kv(is_skip_kv);
     scan_next->set_obj_type(obj_type);
     scan_next->set_scan_pattern(std::string(scan_pattern));
 #endif
@@ -964,7 +968,8 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
     CcHandlerResult<ObjectCommandResult> &hres,
     IsolationLevel iso_level,
     CcProtocol proto,
-    bool commit)
+    bool commit,
+    bool skip_kv)
 {
     CcMessage send_msg;
 
@@ -987,6 +992,7 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
     apply_req->set_protocol(ToRemoteType::ConvertProtocol(proto));
     apply_req->set_tx_ts(tx_ts);
     apply_req->set_apply_and_commit(commit);
+    apply_req->set_skip_kv(skip_kv);
 
     apply_req->clear_cmd();
     std::string *cmd_str = apply_req->mutable_cmd();

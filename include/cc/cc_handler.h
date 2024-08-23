@@ -312,6 +312,7 @@ public:
         bool is_require_sort = true
 #ifdef ON_KEY_OBJECT
         ,
+        bool is_skip_kv = false,
         int32_t obj_type = -1,
         const std::string_view &scan_pattern = {}
 #endif
@@ -341,6 +342,7 @@ public:
                                CcHandlerResult<ScanNextResult> &hd_res
 #ifdef ON_KEY_OBJECT
                                ,
+                               bool is_skip_kv,
                                int32_t obj_type = -1,
                                const std::string_view &scan_pattern = {}
 #endif
@@ -493,7 +495,8 @@ public:
                                CcHandlerResult<ObjectCommandResult> &hres,
                                IsolationLevel iso_level,
                                CcProtocol proto,
-                               bool commit) = 0;
+                               bool commit,
+                               bool skip_kv) = 0;
 
     virtual void PublishMessage(uint64_t ng_id,
                                 int64_t tx_term,
