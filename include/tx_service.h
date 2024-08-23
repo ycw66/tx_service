@@ -1032,7 +1032,8 @@ public:
               const std::string *hm_bin_path,
               const std::map<std::string, uint32_t> &conf,
               std::unique_ptr<TxLog> log_agent,
-              const std::string &local_path)
+              const std::string &local_path,
+              bool enable_brpc_builtin_services = true)
     {
         uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
         if (Sharder::Instance().Init(node_id,
@@ -1046,7 +1047,8 @@ public:
                                      &local_cc_shards_,
                                      std::move(log_agent),
                                      local_path,
-                                     ng_rep_cnt) < 0)
+                                     ng_rep_cnt,
+                                     enable_brpc_builtin_services) < 0)
 
         {
             return -1;
@@ -1068,7 +1070,7 @@ public:
 #endif
 
         // Start cc stream receiver server.
-        Sharder::Instance().StartCcStreamReceiver();
+        Sharder::Instance().StartCcStreamReceiver(enable_brpc_builtin_services);
 
         if (local_cc_shards_.EnableMvcc())
         {

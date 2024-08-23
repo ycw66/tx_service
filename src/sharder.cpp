@@ -109,7 +109,8 @@ int Sharder::Init(
     LocalCcShards *local_shards,
     std::unique_ptr<TxLog> log_agent,
     const std::string &local_path,
-    const uint16_t rep_group_cnt)
+    const uint16_t rep_group_cnt,
+    bool enable_brpc_builtin_services)
 {
     node_id_ = node_id;
     local_shards_ = local_shards;
@@ -240,6 +241,7 @@ int Sharder::Init(
     brpc::ServerOptions server_options;
     // server_options.num_threads 0 means use default bthread worker count.
     server_options.num_threads = 0;
+    server_options.has_builtin_services = enable_brpc_builtin_services;
     if (cc_node_server_.Start(
             GET_CCNODE_RPC_PORT(
                 cluster_config_.ng_configs_.at(node_id_).front().port_),
@@ -288,6 +290,7 @@ int Sharder::Init(
                       hm_ip_.c_str(),
                       std::to_string(hm_port_).c_str(),
                       log_path.c_str(),
+                      enable_brpc_builtin_services ? "Y" : "N",
 #if BRPC_WITH_GLOG
                       FLAGS_log_dir.c_str(),
 #endif
@@ -1086,13 +1089,14 @@ void Sharder::UpdateClusterConfig(
         });
 }
 
-void Sharder::StartCcStreamReceiver()
+void Sharder::StartCcStreamReceiver(bool enable_brpc_builtin_services)
 {
     // The cc_stream_receiver_ object has been add to this server during
     // Sharder::Init().
     brpc::ServerOptions server_options;
     // server_options.num_threads 0 means use default bthread worker count.
     server_options.num_threads = 0;
+    server_options.has_builtin_services = enable_brpc_builtin_services;
     if (cc_stream_server_.Start(
             cluster_config_.ng_configs_.at(node_id_).front().port_,
             &server_options) != 0)

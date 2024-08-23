@@ -244,7 +244,8 @@ public:
              LocalCcShards *local_shards,
              std::unique_ptr<TxLog> log_agent,
              const std::string &local_path,
-             const uint16_t rep_group_cnt);
+             const uint16_t rep_group_cnt,
+             bool enable_brpc_builtin_services);
 
     /**
      * @brief Checks if the current leader of the input cc node group is on the
@@ -516,7 +517,7 @@ public:
      * TxProcessor thread start, so, should start cc stream server after the
      * txservice::Start().
      */
-    void StartCcStreamReceiver();
+    void StartCcStreamReceiver(bool enable_brpc_builtin_services = true);
 
     std::shared_ptr<brpc::Channel> GetCcNodeServiceChannel(uint32_t node_id);
 
