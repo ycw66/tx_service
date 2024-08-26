@@ -1760,16 +1760,26 @@ void txservice::remote::RemoteKickoutCcEntry::Reset(
 
     // Construct local ccrequest using the info. in request body.
     const KickoutDataRequest &req = input_msg->kickout_data_req();
+
     std::string_view table_name_sv{req.table_name_str()};
     table_name_ = TableName(table_name_sv,
                             ToLocalType::ConvertCcTableType(req.table_type()));
 
-    size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+    size_t core_cnt = 0;
+    if (req.clean_type() == remote::CleanType::CleanCcm)
+    {
+        core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+    }
+    else
+    {
+        core_cnt = 1;
+    }
+
     KickoutCcEntryCc::Reset(table_name_,
                             req.node_group_id(),
                             core_cnt,
                             &cc_res_,
-                            (txservice::CleanType) req.clean_type(),
+                            ToLocalType::ConvertCleanType(req.clean_type()),
                             &req.start_key(),
                             &req.end_key(),
                             nullptr,

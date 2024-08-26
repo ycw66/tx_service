@@ -105,6 +105,13 @@ struct UpsertTableIndexOp : public SchemaOp
      * failures.
      */
     WriteToLogOp commit_log_op_;
+
+    /**
+     * @brief Clean ccmap on all node groups
+     *
+     */
+    KickoutDataAllOp clean_ccm_op_;
+
     /**
      * @brief Removes write locks in all nodes. If the schema operation
      * succeeds, also installs the new schema in all nodes.

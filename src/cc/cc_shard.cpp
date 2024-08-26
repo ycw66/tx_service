@@ -1434,9 +1434,9 @@ void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)
     }
 }
 
-bool CcShard::TruncateCcm(const txservice::TableName &table_name,
-                          txservice::NodeGroupId ng_id,
-                          uint64_t clean_ts)
+bool CcShard::CleanCcmPages(const txservice::TableName &table_name,
+                            txservice::NodeGroupId ng_id,
+                            uint64_t clean_ts)
 {
     if (ng_id == node_id_)
     {
@@ -1445,8 +1445,10 @@ bool CcShard::TruncateCcm(const txservice::TableName &table_name,
         if (native_it != native_ccms_.end())
         {
             auto &ccm = native_it->second;
+
             if (ccm->SchemaTs() >= clean_ts)
             {
+                // This request is outdate.
                 return true;
             }
 
@@ -1455,16 +1457,9 @@ bool CcShard::TruncateCcm(const txservice::TableName &table_name,
                 // Yield
                 return false;
             }
-
-            CatalogEntry *catalog_entry = GetCatalog(table_name, ng_id);
-            assert(catalog_entry->DirtyVersion() == clean_ts);
-            // No more data. Update schema timestamps
-            ccm->SetTableSchema(catalog_entry->dirty_schema_.get());
-            ccm->SetSchemaTs(catalog_entry->DirtyVersion());
-            DLOG(INFO) << "Truncate ccm on shard: " << core_id_
-                       << ", set new table schema: " << ccm->GetTableSchema()
-                       << ", schema ts: " << ccm->SchemaTs();
         }
+        // else: 1. This request is outdate, the ccmap was erased.
+        // 2. No data in memory
     }
     else
     {
@@ -1487,12 +1482,48 @@ bool CcShard::TruncateCcm(const txservice::TableName &table_name,
                     // Has more data. Yield to avoid blocking txprocessor
                     return false;
                 }
+            }
+        }
+    }
 
-                CatalogEntry *catalog_entry = GetCatalog(table_name, ng_id);
-                assert(catalog_entry->DirtyVersion() == clean_ts);
-                // No more data. Update schema timestamps
-                ccm->SetTableSchema(catalog_entry->dirty_schema_.get());
-                ccm->SetSchemaTs(catalog_entry->DirtyVersion());
+    return true;
+}
+
+void CcShard::UpdateCcmSchema(const TableName &table_name,
+                              NodeGroupId node_group_id,
+                              const TableSchema *table_schema,
+                              uint64_t schema_ts)
+{
+    if (node_group_id == node_id_)
+    {
+        auto native_it = native_ccms_.find(table_name);
+
+        if (native_it != native_ccms_.end())
+        {
+            auto &ccm = native_it->second;
+
+            ccm->SetTableSchema(table_schema);
+            ccm->SetSchemaTs(schema_ts);
+
+            DLOG(INFO) << "Truncate ccm on shard: " << core_id_
+                       << ", set new table schema: " << ccm->GetTableSchema()
+                       << ", schema ts: " << ccm->SchemaTs();
+        }
+    }
+    else
+    {
+        auto fail_ccm_it = failover_ccms_.find(table_name);
+        if (fail_ccm_it != failover_ccms_.end())
+        {
+            std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
+                fail_ccm_it->second;
+            auto it = ccms.find(node_group_id);
+            if (it != ccms.end())
+            {
+                auto &ccm = it->second;
+
+                ccm->SetTableSchema(table_schema);
+                ccm->SetSchemaTs(schema_ts);
 
                 DLOG(INFO) << "Truncate ccm on shard: " << core_id_
                            << ", set new table schema: "
@@ -1501,8 +1532,6 @@ bool CcShard::TruncateCcm(const txservice::TableName &table_name,
             }
         }
     }
-
-    return true;
 }
 
 /**

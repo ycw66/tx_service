@@ -40,6 +40,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
       prepare_log_for_sk_op_(txm),
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
+      clean_ccm_op_(txm),
       post_all_lock_op_(txm),
       clean_log_op_(txm),
       read_cluster_result_(txm),
@@ -80,6 +81,8 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+
+    clean_ccm_op_.Clear();
 
     alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
 
@@ -130,6 +133,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     TX_TRACE_ASSOCIATE(this, &prepare_log_for_sk_op_, "prepare_log_for_sk_op_");
     TX_TRACE_ASSOCIATE(this, &acquire_all_lock_op_, "acquire_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
+    TX_TRACE_ASSOCIATE(this, &clean_ccm_op_, "clean_ccm_op_");
     TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
 }
@@ -471,13 +475,24 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else if (op_type_ == OperationType::DropIndex)
         {
-            // For DROP INDEX, the data store operation happens after all
-            // write locks are acquired and commit log is flushed.
-            LOG(INFO) << "Alter Table Index transaction commit dirty table"
-                      << " schema, txn: " << txm->TxNumber();
-            op_ = &post_all_lock_op_;
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
+            assert(clean_ccm_op_.table_names_.empty());
+            for (const auto &index_drop_name :
+                 alter_table_info_.index_drop_names_)
+            {
+                clean_ccm_op_.table_names_.emplace_back(
+                    index_drop_name.first.StringView().data(),
+                    index_drop_name.first.StringView().size(),
+                    index_drop_name.first.Type());
+            }
+
+            clean_ccm_op_.commit_ts_ = txm->CommitTs();
+            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
+
+            LOG(INFO) << "Alter Table Index transaction clean cc map, txn: "
+                      << txm->TxNumber();
+            op_ = &clean_ccm_op_;
+            txm->PushOperation(&clean_ccm_op_);
+            txm->Process(clean_ccm_op_);
         }
         else
         {
@@ -524,6 +539,42 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             txm->PushOperation(&generate_sk_parallel_op_);
             txm->Process(generate_sk_parallel_op_);
         }
+    }
+    else if (op_ == &clean_ccm_op_)
+    {
+        assert(op_type_ == OperationType::DropIndex);
+
+        if (clean_ccm_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                LOG(ERROR) << "Alter Table Index transaction failed to clean "
+                              "ccmap, err code: "
+                           << (int) clean_ccm_op_.hd_result_.ErrorCode()
+                           << ", err msg: "
+                           << clean_ccm_op_.hd_result_.ErrorMsg()
+                           << ", txn: " << txm->TxNumber() << ", keep retrying";
+                op_ = &clean_ccm_op_;
+                txm->PushOperation(&clean_ccm_op_);
+                txm->Process(clean_ccm_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+
+            return;
+        }
+
+        clean_ccm_op_.Clear();
+
+        // For DROP INDEX, the data store operation happens after all
+        // write locks are acquired and commit log is flushed.
+        LOG(INFO) << "Alter Table Index transaction commit dirty table"
+                  << " schema, txn: " << txm->TxNumber();
+        op_ = &post_all_lock_op_;
+        txm->PushOperation(&post_all_lock_op_);
+        txm->Process(post_all_lock_op_);
     }
     else if (op_ == &generate_sk_parallel_op_)
     {
@@ -1111,6 +1162,9 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     commit_log_op_.Reset();
     clean_log_op_.Reset();
 
+    clean_ccm_op_.Clear();
+    clean_ccm_op_.hd_result_.Reset();
+
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
     acquire_all_intent_op_.keys_.clear();
     acquire_all_intent_op_.keys_.emplace_back(&table_key_);
@@ -1160,6 +1214,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     prepare_log_for_sk_op_.ResetHandlerTxm(txm);
     acquire_all_lock_op_.ResetHandlerTxm(txm);
     commit_log_op_.ResetHandlerTxm(txm);
+    clean_ccm_op_.ResetHandlerTxm(txm);
     post_all_lock_op_.ResetHandlerTxm(txm);
     clean_log_op_.ResetHandlerTxm(txm);
     is_force_finished_ = false;
@@ -1303,9 +1358,9 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
         if (ng_term < 0 &&
             (ng_term = Sharder::Instance().LeaderTerm(ng_id)) < 0)
         {
-            LOG(ERROR)
-                << "FlushData operation: request node not the leader of ng#"
-                << ng_id;
+            LOG(ERROR) << "FlushData operation: request node not the "
+                          "leader of ng#"
+                       << ng_id;
             hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return;
         }
@@ -1455,8 +1510,8 @@ void UpsertTableIndexOp::DispatchRangeTask(
             {
                 if (!Sharder::Instance().CheckLeaderTerm(local_ng_id, tx_term))
                 {
-                    LOG(ERROR)
-                        << "DispatchRangeTask: Transaction node not leader.";
+                    LOG(ERROR) << "DispatchRangeTask: Transaction node "
+                                  "not leader.";
                     std::unique_lock<std::mutex> lk(task_mux);
                     task_res = CcErrorCode::TX_NODE_NOT_LEADER;
                     return;
@@ -1506,8 +1561,8 @@ void UpsertTableIndexOp::DispatchRangeTask(
             read_range_req.Wait();
             if (read_range_req.IsError())
             {
-                // This read operation might fail if it's blocked by a write
-                // lock acquired by range split.
+                // This read operation might fail if it's blocked by a
+                // write lock acquired by range split.
                 LOG(ERROR) << "Acquire range read lock failed for table: "
                            << range_table_name.Trace() << " of ng#"
                            << local_ng_id
@@ -1643,7 +1698,8 @@ void UpsertTableIndexOp::DispatchRangeTask(
             // Update the scanned pk range count.
             scanned_pk_range_count_ += dispatched_task_count;
             total_scanned_pk_items_count_ += pk_items_count;
-            DLOG(INFO) << "Generate sk task successfully for this batch ranges."
+            DLOG(INFO) << "Generate sk task successfully for this "
+                          "batch ranges."
                        << " Base table: " << base_table_name.Trace();
         }
     } while (!NeedTriggerFlushSkOp());
@@ -1705,9 +1761,9 @@ void UpsertTableIndexOp::HandleRangeTask(
                 while (Sharder::Instance().LeaderTerm(range_owner) < 0 &&
                        Sharder::Instance().CandidateLeaderTerm(range_owner) > 0)
                 {
-                    // Waiting until log replay finished on this node group.
-                    // Including data(.pk) log and and catalog(.table range
-                    // info) log.
+                    // Waiting until log replay finished on this node
+                    // group. Including data(.pk) log and and
+                    // catalog(.table range info) log.
                     LOG(WARNING) << "GenerateSkFromPk of ng#" << range_owner
                                  << " for partition id: " << partition_id
                                  << " waiting log replay finished.";
@@ -1751,7 +1807,8 @@ void UpsertTableIndexOp::HandleRangeTask(
                         << "Terminate this generate index task of ng#"
                         << range_owner << " for partition id: " << partition_id
                         << " for table: " << base_table_name.Trace()
-                        << " caused by the boundary of partition mismatch.";
+                        << " caused by the boundary of partition "
+                           "mismatch.";
 
                     // recycle skgenerator
                     {

@@ -1933,6 +1933,8 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
     }
     else
     {
+        // Increment remote reference counter
+        hres.IncrementRemoteRef();
         // Only alter table and truncate table will try to clean data on remote
         // node.
         remote_hd_.KickoutData(cc_shards_.node_id_,

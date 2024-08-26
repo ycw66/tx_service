@@ -435,7 +435,7 @@ enum CleanType {
     CleanRangeDataForMigration = 1;
     CleanBucketData = 2;
     CleanForAlterTable = 3;
-    CleanForTruncateTable = 4;
+    CleanCcm = 4;
 }
 
 message AcquireRequest {

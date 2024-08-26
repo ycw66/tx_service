@@ -703,9 +703,14 @@ public:
      * @param ng_id
      * @param schema_ts
      */
-    bool TruncateCcm(const TableName &table_name,
-                     NodeGroupId ng_id,
-                     uint64_t clean_ts);
+    bool CleanCcmPages(const TableName &table_name,
+                       NodeGroupId ng_id,
+                       uint64_t clean_ts);
+
+    void UpdateCcmSchema(const TableName &table_name,
+                         NodeGroupId node_group_id,
+                         const TableSchema *table_schema,
+                         uint64_t schema_ts);
 
     void CleanCcm(const TableName &table_name);
 

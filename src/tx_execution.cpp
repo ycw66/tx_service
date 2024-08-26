@@ -5695,6 +5695,7 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
 
     kickout_data_op.is_running_ = true;
     kickout_data_op.hd_result_.Reset();
+    kickout_data_op.hd_result_.SetRefCnt(1);
     cc_handler_->KickoutData(*kickout_data_op.table_name_,
                              kickout_data_op.node_group_,
                              tx_number_.load(std::memory_order_relaxed),
@@ -6651,7 +6652,7 @@ void TransactionExecution::Process(KickoutDataAllOp &kickout_data_all_op)
         for (size_t table_idx = 0; table_idx < table_cnt; ++table_idx)
         {
             cc_handler_->KickoutData(
-                *kickout_data_all_op.table_names_.at(table_idx),
+                kickout_data_all_op.table_names_.at(table_idx),
                 ng_id,
                 tx_number_.load(std::memory_order_relaxed),
                 tx_term_,

@@ -1580,7 +1580,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         // Construct the ccrequest by deserializing the ccmessage
         kickout_cc_entry_req->Reset(std::move(msg));
         if (kickout_cc_entry_req->GetCleanType() ==
-            txservice::CleanType::CleanForTruncateTable)
+            txservice::CleanType::CleanCcm)
         {
             // Truncate table does not need to desrialize key, dispatch to all
             // cores directly
@@ -1647,12 +1647,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (!cc_resp.error_code())
         {
-            hd_res->SetError(
+            hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(cc_resp.error_code()));
         }
         else
         {
-            hd_res->SetFinished();
+            hd_res->SetRemoteFinished();
         }
 
         // Recycle the cc message

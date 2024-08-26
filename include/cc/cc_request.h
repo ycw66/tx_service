@@ -4713,10 +4713,11 @@ public:
             return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
-        if (clean_type_ == CleanType::CleanForTruncateTable)
+        if (clean_type_ == CleanType::CleanCcm)
         {
-            if (!CleanForTruncateTable(ccs))
+            if (!CleanCcMap(ccs))
             {
+                // Current ccmap has more page
                 // Yield
                 ccs.Enqueue(ccs.LocalCoreId(), this);
                 return false;
@@ -4754,6 +4755,19 @@ public:
             // If no ccmap for this table, nothing to kickout, notify finish
             // directly.
             return SetFinish();
+        }
+    }
+
+    void SetUnfinishedCoreCnt(size_t core_cnt)
+    {
+        unfinished_cnt_ = core_cnt;
+        size_t resume_key_vec_size = resume_key_.size();
+        if (resume_key_vec_size < core_cnt)
+        {
+            for (size_t idx = resume_key_vec_size; idx < core_cnt; ++idx)
+            {
+                resume_key_.emplace_back(TxKey());
+            }
         }
     }
 
@@ -4895,16 +4909,16 @@ public:
         case CleanType::CleanForAlterTable:
             return entry->IsFree() && !entry->GetBeingCkpt();
         default:
-            assert(false);
+            assert(false && "Unknown type");
             return false;
         }
     }
 
-    bool CleanForTruncateTable(CcShard &ccs)
+    bool CleanCcMap(CcShard &ccs)
     {
-        assert(clean_type_ == CleanType::CleanForTruncateTable);
+        assert(clean_type_ == CleanType::CleanCcm);
 
-        return ccs.TruncateCcm(*table_name_, node_group_id_, clean_ts_);
+        return ccs.CleanCcmPages(*table_name_, node_group_id_, clean_ts_);
     }
 
     CleanType GetCleanType() const
@@ -4916,6 +4930,7 @@ private:
     CleanType clean_type_;
     // Target buckets to be cleaned if clean type is CleanBucketData.
     std::vector<uint16_t> *bucket_ids_{nullptr};
+
     // 1. CleanForAlterTable: kickout all cce with commit ts <= clean_ts_
     // 2. CleanForTruncateTable: the commit ts of UpsertTableOp. We truncate ccm
     // only if catalog_entry->DirtyVersion() == clean_ts_.

@@ -2075,7 +2075,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
       reset_sequence_record_op_(txm),
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
-      truncate_table_op_(txm),
+      clean_ccm_op_(txm),
       post_all_lock_op_(txm),
       clean_log_op_(txm),
       read_cluster_result_(txm)
@@ -2113,9 +2113,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
 
-    truncate_table_op_.Clear();
-    truncate_table_op_.clean_type_ = CleanType::CleanForTruncateTable;
-    truncate_table_op_.table_names_.push_back(&table_key_.Name());
+    clean_ccm_op_.Clear();
 
     TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
     TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
@@ -2435,28 +2433,53 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else if (op_type_ == OperationType::DropTable)
         {
-            // Clear write set before commit dirty schema.
-            txm->rw_set_.ClearTable(table_key_.Name());
-            txm->rw_set_.ClearReadSet(table_key_.Name());
+            // Read table schema from local cc shard. This is because we
+            // could be recovering from commit stage, in which case we
+            // have skipped post_all_intent_op_ and the schema in
+            // catalog_rec_ would be empty.
+            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+            auto catalog_entry =
+                shards->GetCatalog(table_key_.Name(), txm->TxCcNodeId());
+            const TableSchema *table_old_schema = catalog_entry->schema_.get();
+            assert(table_old_schema->GetBaseTableName() == table_key_.Name());
+            assert(clean_ccm_op_.table_names_.empty());
 
-            // For DROP TABLE and TRUNCATE TABLE, the data store operation
-            // happens after all write locks are acquired and commit log is
-            // flushed.
-            op_ = &post_all_lock_op_;
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
-        }
-        else if (op_type_ == OperationType::TruncateTable)
-        {
+            auto clean_ccm_names = table_old_schema->IndexNames();
+            clean_ccm_names.emplace_back(
+                table_old_schema->GetBaseTableName().StringView().data(),
+                table_old_schema->GetBaseTableName().StringView().size(),
+                table_old_schema->GetBaseTableName().Type());
+            clean_ccm_op_.table_names_ = std::move(clean_ccm_names);
+
+            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
+            clean_ccm_op_.commit_ts_ = txm->CommitTs();
+
             LOG(INFO)
                 << "UpsertTableOp: Clean all ccmap on all node groups, txn: "
                 << txm->TxNumber();
-            truncate_table_op_.commit_ts_ = txm->CommitTs();
-            assert(truncate_table_op_.clean_type_ ==
-                   CleanType::CleanForTruncateTable);
-            op_ = &truncate_table_op_;
-            txm->PushOperation(&truncate_table_op_);
-            txm->Process(truncate_table_op_);
+
+            op_ = &clean_ccm_op_;
+            txm->PushOperation(&clean_ccm_op_);
+            txm->Process(clean_ccm_op_);
+        }
+        else if (op_type_ == OperationType::TruncateTable)
+        {
+            assert(clean_ccm_op_.table_names_.empty());
+
+            clean_ccm_op_.table_names_.emplace_back(
+                table_key_.Name().StringView().data(),
+                table_key_.Name().StringView().size(),
+                table_key_.Name().Type());
+            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
+            clean_ccm_op_.commit_ts_ = txm->CommitTs();
+
+            LOG(INFO)
+                << "UpsertTableOp: Clean all ccmap on all node groups, txn: "
+                << txm->TxNumber();
+
+            op_ = &clean_ccm_op_;
+            txm->PushOperation(&clean_ccm_op_);
+            txm->Process(clean_ccm_op_);
         }
         else if (op_type_ == OperationType::CreateTable &&
                  catalog_rec_.DirtySchema()->HasAutoIncrement())
@@ -2732,21 +2755,22 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
         }
     }
-    else if (op_ == &truncate_table_op_)
+    else if (op_ == &clean_ccm_op_)
     {
-        assert(op_type_ == OperationType::TruncateTable);
-        if (truncate_table_op_.hd_result_.IsError())
+        assert(op_type_ == OperationType::TruncateTable ||
+               op_type_ == OperationType::DropTable);
+        if (clean_ccm_op_.hd_result_.IsError())
         {
             if (txm->CheckLeaderTerm())
             {
                 LOG(ERROR)
                     << "UpsertTableOp: failed to truncate table, err code: "
-                    << (int) truncate_table_op_.hd_result_.ErrorCode()
-                    << ", err msg: " << truncate_table_op_.hd_result_.ErrorMsg()
+                    << (int) clean_ccm_op_.hd_result_.ErrorCode()
+                    << ", err msg: " << clean_ccm_op_.hd_result_.ErrorMsg()
                     << ", txn: " << txm->TxNumber() << ", keep retrying";
-                op_ = &truncate_table_op_;
-                txm->PushOperation(&truncate_table_op_);
-                txm->Process(truncate_table_op_);
+                op_ = &clean_ccm_op_;
+                txm->PushOperation(&clean_ccm_op_);
+                txm->Process(clean_ccm_op_);
             }
             else
             {
@@ -2755,6 +2779,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             return;
         }
+
+        clean_ccm_op_.Clear();
 
         // Clear write set before commit dirty schema.
         txm->rw_set_.ClearTable(table_key_.Name());
@@ -2982,9 +3008,8 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
 
-    truncate_table_op_.Clear();
-    truncate_table_op_.table_names_.push_back(&table_key_.Name());
-    truncate_table_op_.clean_type_ = CleanType::CleanForTruncateTable;
+    clean_ccm_op_.Clear();
+    clean_ccm_op_.hd_result_.Reset();
 
     // reset cc_handler_res txm
     read_cluster_result_.ResetTxm(txm);
@@ -2997,7 +3022,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     reset_sequence_record_op_.ResetHandlerTxm(txm);
     acquire_all_lock_op_.ResetHandlerTxm(txm);
     commit_log_op_.ResetHandlerTxm(txm);
-    truncate_table_op_.ResetHandlerTxm(txm);
+    clean_ccm_op_.ResetHandlerTxm(txm);
     post_all_lock_op_.ResetHandlerTxm(txm);
     clean_log_op_.ResetHandlerTxm(txm);
 
@@ -3320,6 +3345,19 @@ void KickoutDataOp::Forward(TransactionExecution *txm)
 
         txm->PostProcess(*this);
     }
+    else if (hd_result_.LocalRefCnt() == 0)
+    {
+        if (txm->IsTimeOut(10) && hd_result_.SetResultByTimeoutThread())
+        {
+            LOG(WARNING) << "Kickout data operation timeout 10s";
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+                return;
+            }
+        }
+    }
 }
 
 KickoutDataAllOp::KickoutDataAllOp(TransactionExecution *txm) : hd_result_(txm)
@@ -3335,6 +3373,7 @@ void KickoutDataAllOp::Reset(uint32_t ng_cnt, size_t table_cnt)
 void KickoutDataAllOp::Clear()
 {
     table_names_.clear();
+    table_names_.shrink_to_fit();
 }
 
 void KickoutDataAllOp::ResetHandlerTxm(TransactionExecution *txm)
@@ -3368,24 +3407,15 @@ void KickoutDataAllOp::Forward(TransactionExecution *txm)
         return;
     }
 
-    if (txm->IsTimeOut(10) && hd_result_.SetResultByTimeoutThread())
+    if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(10) &&
+        hd_result_.SetResultByTimeoutThread())
     {
         LOG(WARNING) << "Kickout data all operation timeout 10s";
-        if (txm->CheckLeaderTerm() && retry_num_ > 0)
+        bool force_error = hd_result_.ForceError();
+        if (force_error)
         {
-            LOG(WARNING) << "ReRun this operation with the retry number: "
-                         << retry_num_;
-            ReRunOp(txm);
+            txm->PostProcess(*this);
             return;
-        }
-        else
-        {
-            bool force_error = hd_result_.ForceError();
-            if (force_error)
-            {
-                LOG(WARNING) << "Force error for this operation";
-                txm->PostProcess(*this);
-            }
         }
     }
 }

@@ -97,10 +97,9 @@ enum struct CleanType
      */
     CleanForAlterTable,
     /**
-     * This is used to clean all data during truncate table operation. Also need
-     * to update table schema.
+     * This is used to clean all data during upsert table operation.
      */
-    CleanForTruncateTable
+    CleanCcm,
 };
 
 class CcShard;

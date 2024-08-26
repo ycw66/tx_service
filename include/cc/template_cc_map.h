@@ -7189,6 +7189,9 @@ public:
                 req.SetDecodedEndKey(TxKey(std::move(decoded_key)));
             }
 
+            // Update unfinished core cnt
+            req.SetUnfinishedCoreCnt(shard_->core_cnt_);
+
             // dispatch req to all cores after setting keys
             for (uint16_t i = 1; i < shard_->core_cnt_; i++)
             {
@@ -8992,7 +8995,6 @@ protected:
         if (new_key_cnt > 0)
         {
             assert(target_iter->second.get() == target_page);
-            size_t total_size = target_page->Size() + new_key_cnt;
             // keys after `key_idx_in_page` are come from target_page. So set
             // all values to false
             for (size_t idx = key_idx_in_page; idx < target_page->Size(); ++idx)

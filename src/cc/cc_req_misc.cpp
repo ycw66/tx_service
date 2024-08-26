@@ -709,7 +709,6 @@ bool GetPostCkptSlice::Execute(CcShard &ccs)
     int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
     if (cc_ng_term < 0)
     {
-        slice_items_.clear();
         SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         return false;
     }

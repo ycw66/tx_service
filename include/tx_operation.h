@@ -586,7 +586,7 @@ struct KickoutDataAllOp : public TransactionOperation
     void Forward(TransactionExecution *txm) override;
 
     // To handle multi tables.
-    std::vector<const TableName *> table_names_;
+    std::vector<TableName> table_names_;
     uint64_t commit_ts_{0};
     CleanType clean_type_{CleanType::CleanForAlterTable};
     CcHandlerResult<Void> hd_result_;
@@ -733,10 +733,10 @@ struct UpsertTableOp : public SchemaOp
     WriteToLogOp commit_log_op_;
 
     /**
-     * @brief Truncate ccmap on all node groups
+     * @brief Clean ccmap on all node groups
      *
      */
-    KickoutDataAllOp truncate_table_op_;
+    KickoutDataAllOp clean_ccm_op_;
 
     /**
      * @brief Removes write locks in all nodes. If the schema operation

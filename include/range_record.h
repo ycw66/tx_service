@@ -737,6 +737,8 @@ public:
 
     void SetAcceptsDirtyRangeData(bool accept)
     {
+        std::lock_guard<std::shared_mutex> entry_lk(mux_);
+
         if (dirty_range_slices_ != nullptr)
         {
             dirty_range_slices_->first = accept;

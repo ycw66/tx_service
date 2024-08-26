@@ -562,6 +562,21 @@ public:
             {
 #ifndef ON_KEY_OBJECT
                 assert(false && "Only implement for redis");
+#else
+                // A remote tx is allowed to acquire write intents/locks and
+                // drop a table, even if the table's schema has not been
+                // initialized at this node. The earlier acquiring-write-intent
+                // request creates a schema cc entry in the catalog cc map and a
+                // node-level schema view. The version timestamp of the schema
+                // is 0, if the schema is uninitialized (null). Or, the current
+                // schema must not be null.
+
+                assert(catalog_entry->Version() == 0 || old_schema != nullptr);
+                assert(new_schema->Version() == catalog_entry->DirtyVersion());
+                shard_->UpdateCcmSchema(table_key->Name(),
+                                        req.NodeGroupId(),
+                                        new_schema,
+                                        catalog_entry->DirtyVersion());
 #endif
             }
             else if (req.OpType() == OperationType::DropTable)
@@ -589,6 +604,7 @@ public:
                 shard_->CleanCcm(table_key->Name(), req.NodeGroupId());
 #endif
 #endif
+
                 if (old_schema != nullptr)
                 {
                     std::vector<TableName> index_names =
@@ -694,6 +710,7 @@ public:
                             assert(req.OpType() == OperationType::DropIndex);
                             // Remove sk cc map for dropped index.
                             shard_->DropCcm(old_index_name, req.NodeGroupId());
+
 // range table operation.
 #ifdef RANGE_PARTITION_ENABLED
                             // Drop range table if exist

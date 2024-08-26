@@ -349,6 +349,27 @@ public:
         }
     }
 
+    static txservice::CleanType ConvertCleanType(
+        txservice::remote::CleanType clean_type)
+    {
+        switch (clean_type)
+        {
+        case txservice::remote::CleanType::CleanRangeData:
+            return txservice::CleanType::CleanRangeData;
+        case txservice::remote::CleanType::CleanRangeDataForMigration:
+            return txservice::CleanType::CleanRangeDataForMigration;
+        case txservice::remote::CleanType::CleanBucketData:
+            return txservice::CleanType::CleanBucketData;
+        case txservice::remote::CleanType::CleanForAlterTable:
+            return txservice::CleanType::CleanForAlterTable;
+        case txservice::remote::CleanType::CleanCcm:
+            return txservice::CleanType::CleanCcm;
+        default:
+            assert(false);
+            return txservice::CleanType::CleanRangeData;
+        }
+    }
+
     static txservice::CcErrorCode ConvertCcErrorCode(int error_code)
     {
         assert(error_code >= 0 &&

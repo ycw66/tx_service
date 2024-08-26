@@ -697,6 +697,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             auto limiter = task_limiters_.emplace(
                 task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
             assert(limiter.second == true);
+            (void) limiter;
 #endif
 
             replay_log_cc.SetFinish();
@@ -4258,6 +4259,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                 // We're only updating in memory status here, so
                 // this should always succeed.
                 assert(res);
+                (void) res;
 #endif
                 succ = false;
             }
