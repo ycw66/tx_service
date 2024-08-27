@@ -851,7 +851,7 @@ public:
 
     void Enqueue(std::function<void(CcShard &)> handle_resp);
 
-    void SetFinish(int err);
+    void SetFinish(int err, bool enqueue = false);
 
     CcShard &GetCcShard()
     {

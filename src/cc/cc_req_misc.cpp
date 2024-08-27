@@ -806,9 +806,13 @@ void FetchRecordCc::Enqueue(std::function<void(CcShard &)> handle_resp)
     ccs_.Enqueue(this);
 }
 
-void FetchRecordCc::SetFinish(int err)
+void FetchRecordCc::SetFinish(int err, bool enqueue)
 {
     error_code_ = err;
+    if (enqueue)
+    {
+        ccs_.Enqueue(this);
+    }
 }
 
 bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
