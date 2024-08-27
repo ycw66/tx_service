@@ -760,6 +760,11 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         }
         else
         {
+            if (handle_resp_)
+            {
+                handle_resp_(ccs);
+            }
+
             bool succ =
                 ccm_->BackFill(cce_, rec_ts_, rec_status_, std::move(rec_));
             if (!succ)
@@ -795,10 +800,15 @@ bool FetchRecordCc::Execute(CcShard &ccs)
     return false;
 }
 
+void FetchRecordCc::Enqueue(std::function<void(CcShard &)> handle_resp)
+{
+    handle_resp_ = std::move(handle_resp);
+    ccs_.Enqueue(this);
+}
+
 void FetchRecordCc::SetFinish(int err)
 {
     error_code_ = err;
-    ccs_.Enqueue(this);
 }
 
 bool UpdateCceCkptTsCc::Execute(CcShard &ccs)

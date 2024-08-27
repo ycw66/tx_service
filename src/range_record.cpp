@@ -35,6 +35,7 @@ void TableRangeEntry::FetchRangeSlices(const TableName &range_tbl_name,
     if (fetch_range_slices_req_->RequesterCount() == 1)
     {
         lk.unlock();
+        fetch_range_slices_req_->cc_shard_ = cc_shard;
         Sharder::Instance().GetLocalCcShards()->store_hd_->FetchRangeSlices(
             fetch_range_slices_req_.get());
     }

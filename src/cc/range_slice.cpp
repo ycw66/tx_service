@@ -42,14 +42,17 @@ StoreSlice::~StoreSlice() = default;
 void StoreSlice::StartLoading(FillStoreSliceCc *fill_req,
                               LocalCcShards &cc_shards)
 {
-    std::unique_lock<std::mutex> lk(slice_mux_);
+    {
+        std::scoped_lock<std::mutex> lk(slice_mux_);
 
-    assert(pins_ == 0);
-    status_ = SliceStatus::BeingLoaded;
+        assert(pins_ == 0);
+        status_ = SliceStatus::BeingLoaded;
+    }
 
+    uint32_t producer_thd_id = fill_req->LoadRequest()->cc_shard_->core_id_;
     for (uint16_t core_id = 0; core_id < cc_shards.Count(); ++core_id)
     {
-        cc_shards.EnqueueCcRequest(core_id, fill_req);
+        cc_shards.EnqueueCcRequest(producer_thd_id, core_id, fill_req);
     }
 }
 
@@ -812,14 +815,16 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
             assert(ctrl.ForceLoad() == false);
             assert(cc_request == nullptr);
 
-            auto task = [this, store_hd, &tbl_name, &slice, kv_info](CcShard &)
+            auto task =
+                [this, store_hd, &tbl_name, &slice, kv_info](CcShard &ccs)
             {
                 slice.fetch_slice_cc_->LoadRequest()->start_ =
                     metrics::Clock::now();
+                slice.fetch_slice_cc_->LoadRequest()->cc_shard_ = &ccs;
 
                 // fetch_slice_cc_.load_slice_req_ holds a copy of slice's
-                // start_key and slice's end_key. Thus it is safe to execute in
-                // a seperate TxProcessor.
+                // start_key and slice's end_key. Thus it is safe to execute
+                // in a seperate TxProcessor.
                 store::DataStoreHandler::DataStoreOpStatus kv_load_status =
                     store_hd->LoadRangeSlice(
                         tbl_name,
@@ -879,6 +884,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         {
             slice.fetch_slice_cc_->LoadRequest()->start_ =
                 metrics::Clock::now();
+            slice.fetch_slice_cc_->LoadRequest()->cc_shard_ = cc_shard;
 
             store::DataStoreHandler::DataStoreOpStatus kv_load_status =
                 store_hd->LoadRangeSlice(tbl_name,

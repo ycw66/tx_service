@@ -245,6 +245,9 @@ public:
     uint64_t slice_version_{0};
     uint64_t segment_cnt_{0};
     uint64_t segment_id_{0};
+
+    // Execute storage callback on the sender TxProcessor.
+    CcShard *cc_shard_{nullptr};
 };
 
 /**
@@ -278,6 +281,121 @@ private:
     uint16_t finish_cnt_{0};
     std::mutex mux_;
     std::condition_variable wait_cv_;
+};
+
+struct RunOnTxProcessorCc : public CcRequestBase
+{
+public:
+    explicit RunOnTxProcessorCc(std::function<void(CcShard &ccs)> task = {},
+                                bool recycle = true)
+        : task_(std::move(task)), recycle_(recycle)
+    {
+    }
+
+    void Reset(std::function<void(CcShard &ccs)> task)
+    {
+        task_ = std::move(task);
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        // Copy, in case task_ delete the this pointer.
+        bool recycle = recycle_;
+        if (task_)
+        {
+            task_(ccs);
+        }
+        return recycle;
+    }
+
+private:
+    std::function<void(CcShard &ccs)> task_;
+
+    // Tell TxProcessor to return it to CcRequestPool or not.
+    bool recycle_;
+};
+
+struct WaitableCc : public RunOnTxProcessorCc
+{
+public:
+    explicit WaitableCc(std::function<void(CcShard &ccs)> task = {})
+        : RunOnTxProcessorCc(std::move(task), false),
+          is_finished_(false),
+          error_code_(CcErrorCode::NO_ERROR)
+    {
+    }
+
+    void Reset(std::function<void(CcShard &ccs)> task = {})
+    {
+        std::lock_guard<bthread::Mutex> lk(mux_);
+        RunOnTxProcessorCc::Reset(std::move(task));
+
+        is_finished_ = false;
+        error_code_ = CcErrorCode::NO_ERROR;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<bthread::Mutex> lk(mux_);
+        while (!is_finished_)
+        {
+            cv_.wait(lk);
+        }
+    }
+
+    bool IsFinished() const
+    {
+        std::lock_guard<bthread::Mutex> lk(mux_);
+        return is_finished_;
+    }
+
+    bool IsError() const
+    {
+        std::lock_guard<bthread::Mutex> lk(mux_);
+        return error_code_ != CcErrorCode::NO_ERROR;
+    }
+
+    CcErrorCode ErrorCode() const
+    {
+        std::lock_guard<bthread::Mutex> lk(mux_);
+        return error_code_;
+    }
+
+    void AbortCcRequest(CcErrorCode error_code) override
+    {
+        std::unique_lock<bthread::Mutex> lk(mux_);
+        is_finished_ = true;
+        error_code_ = error_code;
+        cv_.notify_one();
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        std::unique_lock<bthread::Mutex> lk(mux_);
+        bool recycle = RunOnTxProcessorCc::Execute(ccs);
+        is_finished_ = true;
+        error_code_ = CcErrorCode::NO_ERROR;
+        cv_.notify_one();
+        assert(recycle == false);
+        return recycle;
+    }
+
+private:
+    void *operator new(size_t) noexcept
+    {
+        return nullptr;
+    }
+
+    void operator delete(void *)
+    {
+    }
+
+private:
+    mutable bthread::Mutex mux_;
+    bthread::ConditionVariable cv_;
+
+    bool is_finished_;
+    CcErrorCode error_code_;
 };
 
 struct FillStoreSliceCc;
@@ -402,7 +520,11 @@ public:
     }
 
     std::function<void(LoadRangeSliceRequest *)> post_lambda_;
+
     metrics::TimePoint start_;
+
+    // Execute storage callback on the sender TxProcessor.
+    CcShard *cc_shard_;
 
 private:
     const TableName *table_name_;
@@ -727,7 +849,14 @@ public:
 
     bool Execute(CcShard &ccs) override;
 
+    void Enqueue(std::function<void(CcShard &)> handle_resp);
+
     void SetFinish(int err);
+
+    CcShard &GetCcShard()
+    {
+        return FetchCc::ccs_;
+    }
 
     const TableName *table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
@@ -740,114 +869,8 @@ public:
     int error_code_{0};
     // Only used in range partition
     int range_id_;
-};
 
-struct RunOnTxProcessorCc : public CcRequestBase
-{
-public:
-    explicit RunOnTxProcessorCc(std::function<void(CcShard &ccs)> task = {})
-        : task_(std::move(task))
-    {
-    }
-
-    void Reset(std::function<void(CcShard &ccs)> task)
-    {
-        task_ = std::move(task);
-    }
-
-    bool Execute(CcShard &ccs) override
-    {
-        if (task_)
-        {
-            task_(ccs);
-        }
-        return true;
-    }
-
-private:
-    std::function<void(CcShard &ccs)> task_;
-};
-
-struct WaitableCc : public RunOnTxProcessorCc
-{
-public:
-    explicit WaitableCc(std::function<void(CcShard &ccs)> task = {})
-        : RunOnTxProcessorCc(std::move(task)),
-          is_finished_(false),
-          error_code_(CcErrorCode::NO_ERROR)
-    {
-    }
-
-    void Reset(std::function<void(CcShard &ccs)> task = {})
-    {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        RunOnTxProcessorCc::Reset(std::move(task));
-
-        is_finished_ = false;
-        error_code_ = CcErrorCode::NO_ERROR;
-    }
-
-    void Wait()
-    {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        while (!is_finished_)
-        {
-            cv_.wait(lk);
-        }
-    }
-
-    bool IsFinished() const
-    {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return is_finished_;
-    }
-
-    bool IsError() const
-    {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return error_code_ != CcErrorCode::NO_ERROR;
-    }
-
-    CcErrorCode ErrorCode() const
-    {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return error_code_;
-    }
-
-    void AbortCcRequest(CcErrorCode error_code) override
-    {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        is_finished_ = true;
-        error_code_ = error_code;
-        cv_.notify_one();
-    }
-
-    bool Execute(CcShard &ccs) override
-    {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        RunOnTxProcessorCc::Execute(ccs);
-        is_finished_ = true;
-        error_code_ = CcErrorCode::NO_ERROR;
-        cv_.notify_one();
-        return false;
-    }
-
-private:
-    void *operator new(size_t) noexcept
-    {
-        return nullptr;
-    }
-
-    void operator delete(void *)
-    {
-    }
-
-private:
-    mutable bthread::Mutex mux_;
-    bthread::ConditionVariable cv_;
-
-    bool is_finished_;
-    CcErrorCode error_code_;
+    std::function<void(CcShard &)> handle_resp_;
 };
 
 struct UpdateCceCkptTsCc : public CcRequestBase

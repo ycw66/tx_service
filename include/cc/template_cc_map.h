@@ -10160,8 +10160,8 @@ protected:
 
         shard_->local_shards_.KickoutPage(clean_guard);
 
-        // The above method has assigned those to-be-cleaned entries to nullptr.
-        if (page->entries_[0] == nullptr)
+        // The above method has marked those to-be-cleaned entries.
+        if (clean_guard->ToCleanPageHeadKey())
         {
             // The page's first key will be cleaned, needs to locate the page
             // position to update the map.

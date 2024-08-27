@@ -502,7 +502,7 @@ protected:
 };
 
 template <typename KeyT>
-class TemplateStoreSlice : public StoreSlice
+class TemplateStoreSlice final : public StoreSlice
 {
 public:
     TemplateStoreSlice(const KeyT *start,
@@ -815,7 +815,7 @@ protected:
 };
 
 template <typename KeyT>
-class TemplateStoreRange : public StoreRange
+class TemplateStoreRange final : public StoreRange
 {
 public:
     TemplateStoreRange(const KeyT *start_key,

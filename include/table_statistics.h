@@ -44,7 +44,7 @@ template <typename KeyT>
 class TableStatistics;
 
 template <typename KeyT>
-class TemplateCcMapSamplePool : public CcMapSamplePool
+class TemplateCcMapSamplePool final : public CcMapSamplePool
 {
 public:
     struct CopyKey
@@ -512,7 +512,7 @@ private:
 };
 
 template <typename KeyT>
-class IndexDistribution : public Distribution
+class IndexDistribution final : public Distribution
 {
 public:
     explicit IndexDistribution(const KeySchema *key_schema)
@@ -669,7 +669,7 @@ private:
 };
 
 template <typename KeyT>
-class TableStatistics : public Statistics
+class TableStatistics final : public Statistics
 {
 public:
     TableStatistics(const TableSchema *table_schema, NodeGroupId cc_ng_id)
