@@ -1793,7 +1793,7 @@ void txservice::remote::RemoteKickoutCcEntry::Reset(
     }
 }
 
-txservice::remote::RemoteApplyCc::RemoteApplyCc()
+txservice::remote::RemoteApplyCc::RemoteApplyCc() : ApplyCc(false)
 {
     res_ = &cc_res_;
 

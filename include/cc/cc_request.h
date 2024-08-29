@@ -5291,10 +5291,21 @@ private:
     };
 
 public:
-    ApplyCc() : is_local_(true)
+    explicit ApplyCc(bool is_local = true)
     {
-        local_input_.key_ = nullptr;
-        local_input_.cmd_ = nullptr;
+        is_local_ = is_local;
+        if (is_local_)
+        {
+            local_input_.key_ = nullptr;
+            local_input_.cmd_ = nullptr;
+        }
+        else
+        {
+            remote_input_.key_str_ = nullptr;
+            remote_input_.cmd_str_ = nullptr;
+            remote_input_.cmd_ = nullptr;
+            remote_input_.is_owner_ = false;
+        }
     }
 
     ~ApplyCc() override
