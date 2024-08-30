@@ -237,7 +237,7 @@ public:
                 if (req.skip_kv_)
                 {
                     hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return false;
+                    return true;
                 }
                 // Otherwise, block the request by putting it into wait list
                 // util capacity is available.
