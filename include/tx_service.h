@@ -330,7 +330,10 @@ public:
 
 #ifdef EXT_TX_PROC_ENABLED
         size_t loop_cnt = 3;
-        CheckWaitingTxs();
+        if (is_ext_proc)
+        {
+            CheckWaitingTxs();
+        }
 #else
         size_t loop_cnt = 5;
 #endif
@@ -364,6 +367,7 @@ public:
                         if (txm_status == TxmStatus::Finished)
                         {
                             active_tx_lock_.Lock();
+
                             auto it = active_tx_map_.find(tx_ptr);
                             if (it == active_tx_map_.end())
                             {
@@ -780,18 +784,49 @@ public:
     {
         static const uint64_t check_progress_period = 2000000;
         uint64_t now_ts = LocalCcShards::ClockTs();
-        if (now_ts - progress_check_ts_ <= check_progress_period)
+#ifdef ON_KEY_OBJECT
+
+        static const uint64_t check_progress_block_period = 10000;
+        if (now_ts - progress_check_ts_block_ <= check_progress_block_period)
         {
             return;
         }
 
-        for (auto &[tx, progress] : tx_progress_)
+        for (auto &[tx, progress] : tx_progress_block_)
         {
+            if (tx->state_stack_.empty())
+            {
+                continue;
+            }
             // If the tx has been stuck on the same command for a while, enlists
             // the tx for execution.
             uint16_t cmd_id = tx->CommandId();
-            if (now_ts - progress.wait_clock_ts_ > check_progress_period &&
-                cmd_id == progress.cmd_id_)
+            if (cmd_id == progress.cmd_id_)
+            {
+                EnlistTx(tx);
+            }
+            else if (cmd_id > progress.cmd_id_)
+            {
+                progress.cmd_id_ = cmd_id;
+            }
+        }
+
+        progress_check_ts_block_ = now_ts;
+#endif
+        if (now_ts - progress_check_ts_ <= check_progress_period)
+        {
+            return;
+        }
+        for (auto &[tx, progress] : tx_progress_)
+        {
+            if (tx->state_stack_.empty())
+            {
+                continue;
+            }
+            // If the tx has been stuck on the same command for a while, enlists
+            // the tx for execution.
+            uint16_t cmd_id = tx->CommandId();
+            if (cmd_id == progress.cmd_id_)
             {
                 EnlistTx(tx);
             }
@@ -808,11 +843,28 @@ public:
     {
         uint16_t cmd_id = txm->CommandId();
         uint64_t clock_ts = LocalCcShards::ClockTs();
-        auto tx_it = tx_progress_.try_emplace(txm, cmd_id, clock_ts);
-        if (!tx_it.second)
+
+#ifdef ON_KEY_OBJECT
+        auto op =
+            txm->state_stack_.empty() ? nullptr : txm->state_stack_.back();
+        if (op != nullptr && op->IsBlockCommand())
         {
-            tx_it.first->second.cmd_id_ = cmd_id;
-            tx_it.first->second.wait_clock_ts_ = clock_ts;
+            auto tx_it = tx_progress_block_.try_emplace(txm, cmd_id, clock_ts);
+            if (!tx_it.second)
+            {
+                tx_it.first->second.cmd_id_ = cmd_id;
+                tx_it.first->second.wait_clock_ts_ = clock_ts;
+            }
+        }
+        else
+#endif
+        {
+            auto tx_it = tx_progress_.try_emplace(txm, cmd_id, clock_ts);
+            if (!tx_it.second)
+            {
+                tx_it.first->second.cmd_id_ = cmd_id;
+                tx_it.first->second.wait_clock_ts_ = clock_ts;
+            }
         }
     }
 #endif
@@ -903,6 +955,11 @@ private:
         uint64_t wait_clock_ts_;
     };
 
+#ifdef ON_KEY_OBJECT
+    // The map of transaction with blocked operation and its TxProcess
+    std::unordered_map<TransactionExecution *, TxProgress> tx_progress_block_;
+    uint64_t progress_check_ts_block_{0};
+#endif
     std::unordered_map<TransactionExecution *, TxProgress> tx_progress_;
     uint64_t progress_check_ts_{0};
 #endif

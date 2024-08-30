@@ -6203,6 +6203,11 @@ MultiObjectCommandOp::MultiObjectCommandOp(
 {
 }
 
+bool MultiObjectCommandOp::IsBlockCommand()
+{
+    return is_block_command_;
+}
+
 void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
 {
     tx_req_ = req;
@@ -6284,10 +6289,12 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
             vct_abort_hd_result_.emplace_back(std::move(hr));
         }
 
+        is_block_command_ = true;
         atm_block_cnt_.store(num, std::memory_order_relaxed);
     }
     else
     {
+        is_block_command_ = false;
         atm_block_cnt_.store(len, std::memory_order_relaxed);
     }
 
@@ -6391,6 +6398,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
         if (!mcmd->IsExpired() &&
             atm_block_cnt_.load(std::memory_order_relaxed) > 0)
         {
+            LOG(INFO) << "Not Expired";
             return;
         }
 
@@ -6400,6 +6408,8 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             {
                 txm->PostProcess(*this);
             }
+
+            LOG(INFO) << "ForwardResult";
             return;
         }
 
@@ -6460,6 +6470,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             atm_local_cnt_.fetch_add(local_cnt, std::memory_order_relaxed);
             atm_cnt_.fetch_add(local_cnt, std::memory_order_release);
         }
+        LOG(INFO) << "Send Discard";
     }
     else if (atm_cnt_.load(std::memory_order_acquire) == 0)
     {

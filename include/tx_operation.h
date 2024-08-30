@@ -71,6 +71,15 @@ struct TransactionOperation
      *
      */
     void ReRunOp(TransactionExecution *txm);
+    /**
+     * @brief If the operation is running block command and the command is
+     * blocking. True: the operation need to call Forward frequently to know if
+     * the commmand has expired.
+     */
+    virtual bool IsBlockCommand()
+    {
+        return false;
+    }
 
     int retry_num_{RETRY_NUM};
     bool is_running_{false};
@@ -1077,6 +1086,7 @@ struct MultiObjectCommandOp : TransactionOperation
     void Reset(MultiObjectCommandTxRequest *tx_req);
 
     void Forward(TransactionExecution *txm) override;
+    bool IsBlockCommand() override;
 
     TransactionExecution *txm_{};
     MultiObjectCommandTxRequest *tx_req_{};
@@ -1095,6 +1105,8 @@ struct MultiObjectCommandOp : TransactionOperation
     std::atomic<CcErrorCode> atm_err_code_{CcErrorCode::NO_ERROR};
     // Used to abort blocked commands
     std::vector<CcHandlerResult<ObjectCommandResult>> vct_abort_hd_result_;
+    // The op is blocking when running block commands
+    bool is_block_command_;
 
 #ifdef RANGE_PARTITION_ENABLED
     // The current position of TxKey* to get key_shard_code in

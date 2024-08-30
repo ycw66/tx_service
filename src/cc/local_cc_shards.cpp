@@ -237,7 +237,7 @@ void LocalCcShards::TimerRun()
         UpdateTsBase(clock_ts);
 
         timer_terminate_cv_.wait_for(
-            lk, 1s, [this]() { return timer_terminate_ == true; });
+            lk, 10ms, [this]() { return timer_terminate_ == true; });
     } while (!timer_terminate_);
 }
 
