@@ -170,19 +170,23 @@ int Sharder::Init(
             std::make_unique<TxWorkerPool>(local_shards_->Count());
 #endif
         sharder_worker_ = std::make_unique<TxWorkerPool>(1);
-        log_replay_service_ = std::make_unique<fault::ReplayService>(
-            *local_shards_,
-            GetLogAgent(),
-            cluster_config_.ng_configs_.at(node_id_).front().host_name_,
-            GET_LOG_REPLAY_RPC_PORT(
-                cluster_config_.ng_configs_.at(node_id_).front().port_));
-        if (log_replay_server_.AddService(log_replay_service_.get(),
-                                          brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
+        if (!txservice_skip_wal)
         {
-            LOG(FATAL)
-                << "Failed to start add the log replay service to the log "
-                   "replay server.";
-            return -1;
+            log_replay_service_ = std::make_unique<fault::ReplayService>(
+                *local_shards_,
+                GetLogAgent(),
+                cluster_config_.ng_configs_.at(node_id_).front().host_name_,
+                GET_LOG_REPLAY_RPC_PORT(
+                    cluster_config_.ng_configs_.at(node_id_).front().port_));
+            if (log_replay_server_.AddService(
+                    log_replay_service_.get(),
+                    brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
+            {
+                LOG(FATAL)
+                    << "Failed to start add the log replay service to the log "
+                       "replay server.";
+                return -1;
+            }
         }
 
         for (uint32_t ng_id = 0; ng_id < cluster_config_.ng_configs_.size();
@@ -254,13 +258,16 @@ int Sharder::Init(
     // The log replay server uses local_port+3 for receiving streams from log
     // groups.
 
-    if (log_replay_server_.Start(
-            GET_LOG_REPLAY_RPC_PORT(
-                cluster_config_.ng_configs_.at(node_id_).front().port_),
-            &server_options) != 0)
+    if (!txservice_skip_wal)
     {
-        LOG(FATAL) << "Failed to start the log replay server.";
-        return -1;
+        if (log_replay_server_.Start(
+                GET_LOG_REPLAY_RPC_PORT(
+                    cluster_config_.ng_configs_.at(node_id_).front().port_),
+                &server_options) != 0)
+        {
+            LOG(FATAL) << "Failed to start the log replay server.";
+            return -1;
+        }
     }
 
     // Notify host manager that this node has been started

@@ -12,6 +12,8 @@
 
 namespace txservice
 {
+extern bool txservice_skip_wal;
+
 struct DataSyncStatus
 {
     explicit DataSyncStatus(bool need_truncate_log)
@@ -102,10 +104,13 @@ public:
                               << status_->truncate_log_ts_;
                     Sharder::Instance().UpdateNodeGroupCkptTs(
                         node_group_id_, status_->truncate_log_ts_);
-                    Sharder::Instance().GetLogAgent()->UpdateCheckpointTs(
-                        node_group_id_,
-                        node_group_term_,
-                        status_->truncate_log_ts_);
+                    if (!txservice_skip_wal)
+                    {
+                        Sharder::Instance().GetLogAgent()->UpdateCheckpointTs(
+                            node_group_id_,
+                            node_group_term_,
+                            status_->truncate_log_ts_);
+                    }
                 }
                 else
                 {

@@ -11,6 +11,7 @@
 
 namespace txservice
 {
+extern bool txservice_skip_wal;
 #if defined(DISABLE_CKPT_REPORT) && !defined(DEBUG)
 DEFINE_bool(report_ckpt, false, "Print log on do checkpoint.");
 #else
@@ -358,7 +359,15 @@ void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
                                      uint64_t ckpt_ts)
 {
 #ifndef RUNNING_TXSERVICE_ALONE
-    log_agent_->UpdateCheckpointTs(node_group, term, ckpt_ts);
+    if (!txservice_skip_wal)
+    {
+        assert(log_agent_ != nullptr);
+        log_agent_->UpdateCheckpointTs(node_group, term, ckpt_ts);
+    }
+    else
+    {
+        assert(log_agent_ == nullptr);
+    }
 #endif
 }
 
