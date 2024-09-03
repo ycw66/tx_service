@@ -681,19 +681,19 @@ public:
 
     std::function<bool(bool)> OverrideShardHeapFunctor()
     {
-        return [this](bool yield)
+        return [this, coordi = coordi_](bool yield)
         {
             if (yield)
             {
                 // Since only brpc worker thread will read and modify
                 // coordi_->ext_tx_proc_heap_, it is safe to directly
                 // access without lock.
-                if (coordi_->ext_tx_proc_heap_)
+                if (coordi->ext_tx_proc_heap_)
                 {
                     // tx proc is occupied by ext tx processor.
-                    mi_heap_set_default(coordi_->ext_tx_proc_heap_);
+                    mi_heap_set_default(coordi->ext_tx_proc_heap_);
                     mi_restore_default_thread_id();
-                    coordi_->ext_tx_proc_heap_ = nullptr;
+                    coordi->ext_tx_proc_heap_ = nullptr;
                     return true;
                 }
             }
@@ -703,7 +703,7 @@ public:
                 CcShardHeap *shard_heap = shard->GetShardHeap();
                 assert(shard_heap);
                 shard->OverrideHeapThread();
-                coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
+                coordi->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
             }
             return false;
         };
