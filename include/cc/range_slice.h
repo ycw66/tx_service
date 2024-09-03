@@ -502,7 +502,7 @@ protected:
 };
 
 template <typename KeyT>
-class TemplateStoreSlice final : public StoreSlice
+class TemplateStoreSlice : public StoreSlice
 {
 public:
     TemplateStoreSlice(const KeyT *start,
@@ -815,7 +815,7 @@ protected:
 };
 
 template <typename KeyT>
-class TemplateStoreRange final : public StoreRange
+class TemplateStoreRange : public StoreRange
 {
 public:
     TemplateStoreRange(const KeyT *start_key,
@@ -1287,6 +1287,11 @@ public:
                 pin_status = RangeSliceOpStatus::NotPinned;
                 assert(prefetch_size == 0);
             }
+        }
+
+        if (slice_lk.owns_lock())
+        {
+            slice_lk.unlock();
         }
 
         if (to_prefetch)

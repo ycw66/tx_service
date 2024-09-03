@@ -1412,7 +1412,7 @@ public:
                     range_table_name, cc_ng_id, TxKey(&key)));
             if (range_entry == nullptr)
             {
-                clean_guard->MarkCleanForOrphanKey(idx, key, cce);
+                clean_guard->MarkCleanForOrphanKey(key, cce);
                 idx++;
                 continue;
             }
@@ -1422,7 +1422,7 @@ public:
                 range_entry->PinStoreRange());
             if (store_range == nullptr)
             {
-                clean_guard->MarkCleanForOrphanKey(idx, key, cce);
+                clean_guard->MarkCleanForOrphanKey(key, cce);
                 idx++;
                 continue;
             }
@@ -1461,7 +1461,7 @@ public:
         {
             const KeyT &key = page->keys_[idx];
             auto &cce = page->entries_[idx];
-            clean_guard->MarkCleanForOrphanKey(idx, key, cce);
+            clean_guard->MarkCleanForOrphanKey(key, cce);
         }
 
         if (clean_guard->cc_shard_->IsBucketsMigrating())

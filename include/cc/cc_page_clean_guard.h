@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <bitset>
 #include <memory>
 #include <utility>
 
@@ -17,9 +16,9 @@ namespace txservice
 {
 /**
  * Procedure of cleaning one page is divided into two subprocedure: Mark and
- * Compact. Mark marks those to-be-cleaned entries by bookeeping them. Compact
- * erase those to-be-cleaned key/entries. Note that when a page's first key can
- * be cleanned, the ccmp_ has to erase/update its node key.
+ * Compact. Mark marks those to-be-cleaned entries by assigning them to nullptr.
+ * Compact erase those to-be-cleaned key/entries. Note that when a page's first
+ * key can be cleanned, the ccmp_ has to erase/update its node key.
  *
  * Mark is done by LocalCcShards::KickoutPage.
  */
@@ -44,28 +43,26 @@ public:
 
     virtual void Compact()
     {
-        // Those to-be-cleaned entries have been marked. Erase them now.
-        auto key_it = page_->keys_.begin();
-        auto entry_it = page_->entries_.begin();
+        // Those to-be-cleaned entries have been assigned to nullptr. Erase
+        // those keys/entries now.
+        auto key_insert_it = page_->keys_.begin();
+        auto entry_insert_it = page_->entries_.begin();
         for (size_t idx = 0; idx < page_->Size(); ++idx)
         {
-            if (clean_set_[idx] == false)
+            if (page_->entries_[idx])
             {
-                // Reserve it and compact the CcPage.
-                *key_it = std::move(page_->keys_[idx]);
-                *entry_it = std::move(page_->entries_[idx]);
-                ++key_it;
-                ++entry_it;
+                *key_insert_it = std::move(page_->keys_[idx]);
+                *entry_insert_it = std::move(page_->entries_[idx]);
+                ++key_insert_it;
+                ++entry_insert_it;
             }
         }
-
-        page_->keys_.erase(key_it, page_->keys_.end());
-        page_->entries_.erase(entry_it, page_->entries_.end());
-    }
-
-    bool ToCleanPageHeadKey() const
-    {
-        return clean_set_[0];
+        page_->keys_.erase(key_insert_it, page_->keys_.end());
+        page_->entries_.erase(entry_insert_it, page_->entries_.end());
+        assert(std::all_of(page_->entries_.begin(),
+                           page_->entries_.end(),
+                           [](const std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
+                           { return cce.get() != nullptr; }));
     }
 
     size_t CleanCount() const
@@ -165,7 +162,7 @@ protected:
                                 key, cc_shard_->core_id_, store_slice);
                         }
 
-                        MarkClean(cc_ng_id_, idx, cce, delay_free);
+                        MarkClean(cc_ng_id_, cce, delay_free);
                         continue;
                     }
                 }
@@ -188,8 +185,7 @@ protected:
      * been kicked out.
      * Under hash partition, regards every key as OrphanKey.
      */
-    void MarkCleanForOrphanKey(size_t idx_in_page,
-                               const KeyT &key,
+    void MarkCleanForOrphanKey(const KeyT &key,
                                std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
     {
         bool is_clean_target = IsCleanTarget(key, cce.get());
@@ -197,7 +193,7 @@ protected:
 
         if (is_clean_target && can_be_cleaned)
         {
-            MarkClean(cc_ng_id_, idx_in_page, cce, delay_free);
+            MarkClean(cc_ng_id_, cce, delay_free);
         }
         else
         {
@@ -206,7 +202,6 @@ protected:
     }
 
     void MarkClean(NodeGroupId cc_ng_id,
-                   size_t idx_in_page,
                    std::unique_ptr<CcEntry<KeyT, ValueT>> &cce,
                    bool delay_free)
     {
@@ -218,13 +213,16 @@ protected:
             DLOG(WARNING) << "Cleanning up cce that still being referenced, "
                              "adding it to invalid cce list. cce: "
                           << cce.get();
-            cce->ClearLocks(*cc_shard_, cc_ng_id);
+            delay_free = true;
+        }
+        cce->ClearLocks(*cc_shard_, cc_ng_id);
+        if (delay_free)
+        {
             cc_shard_->AddInvalidCce(std::move(cce));
         }
         else
         {
-            // Set bitset to indicate deleting.
-            clean_set_.set(idx_in_page);
+            cce.reset(nullptr);  // Set cce to nullptr to indicate deleting.
         }
         ++clean_cnt_;
     }
@@ -236,10 +234,6 @@ protected:
     CcPage<KeyT, ValueT> *page_{nullptr};
     uint64_t last_commit_ts_{0};
     uint64_t clean_cnt_{0};
-
-    // Bookeeping for to-be-cleanned cc entries, and BATCH erase them. Which
-    // helps to do performance test.
-    std::bitset<CcPage<KeyT, ValueT>::split_threshold_> clean_set_;
 
     friend class LocalCcShards;
 };
