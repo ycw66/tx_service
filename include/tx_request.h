@@ -930,13 +930,15 @@ struct MultiObjectCommandTxRequest
                                 const ObjectTableOption *table_option,
                                 MultiObjectTxCommand *cmd,
                                 bool auto_commit = true,
-                                TransactionExecution *txm = nullptr)
+                                TransactionExecution *txm = nullptr,
+                                bool is_watch_keys = false)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
           table_option_(table_option),
           auto_commit_(auto_commit),
           multi_obj_cmd_(cmd),
-          is_cmd_owner_(false)
+          is_cmd_owner_(false),
+          is_watch_keys_(is_watch_keys)
     {
     }
 
@@ -944,13 +946,15 @@ struct MultiObjectCommandTxRequest
                                 const ObjectTableOption *table_option,
                                 std::unique_ptr<MultiObjectTxCommand> cmd_uptr,
                                 bool auto_commit = true,
-                                TransactionExecution *txm = nullptr)
+                                TransactionExecution *txm = nullptr,
+                                bool is_watch_keys = false)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
           table_option_(table_option),
           auto_commit_(auto_commit),
           multi_obj_cmd_uptr_(std::move(cmd_uptr)),
-          is_cmd_owner_(true)
+          is_cmd_owner_(true),
+          is_watch_keys_(is_watch_keys)
     {
     }
 
@@ -961,7 +965,8 @@ struct MultiObjectCommandTxRequest
         : TemplateTxRequest(nullptr, nullptr, rhs.txm_),
           table_name_(rhs.table_name_),
           table_option_(rhs.table_option_),
-          auto_commit_(rhs.auto_commit_)
+          auto_commit_(rhs.auto_commit_),
+          is_watch_keys_(rhs.is_watch_keys_)
     {
         if (is_cmd_owner_)
         {
@@ -1048,6 +1053,7 @@ struct MultiObjectCommandTxRequest
         std::unique_ptr<MultiObjectTxCommand> multi_obj_cmd_uptr_;
     };
     bool is_cmd_owner_{};
+    bool is_watch_keys_{};
 };
 
 inline bool ObjectCommandTxRequest::operator<(

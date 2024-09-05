@@ -6255,6 +6255,13 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
         dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
     // bool commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
     uint32_t local_cnt = 0;  // Count the commands executed on local node
+    // For read operation, the objects will be locked only when  iso_level_ >=
+    // IsolationLevel::RepeatableRead. So if is is watch keys request, it will
+    // change isolevel into RepeatableRead if it less than RepeatableRead.
+    IsolationLevel iso =
+        (req->is_watch_keys_ && iso_level_ < IsolationLevel::RepeatableRead)
+            ? IsolationLevel::RepeatableRead
+            : iso_level_;
 
     for (size_t i = 0; i < vct_key->size(); i++)
     {
@@ -6283,7 +6290,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
                                    command_id_.load(std::memory_order_relaxed),
                                    current_ts,
                                    hd_res,
-                                   iso_level_,
+                                   iso,
                                    protocol_,
                                    commit,
                                    skip_kv);
