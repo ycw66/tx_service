@@ -60,7 +60,6 @@ void SkGenerator::Reset(const std::string &start_key_str,
                         std::vector<TableName> &new_indexes_name)
 {
     base_table_name_ = &base_table_name;
-    node_group_id_ = node_group_id;
     task_status_ = nullptr;
     start_key_str_ = &start_key_str;
     end_key_str_ = &end_key_str;
@@ -68,9 +67,10 @@ void SkGenerator::Reset(const std::string &start_key_str,
     scan_ts_ = scan_ts;
     new_indexes_name_ = &new_indexes_name;
     partition_id_ = partition_id;
-    upload_index_ctx_.Reset(node_group_id);
-    if (tx_number_ != tx_number || tx_term_ != tx_term)
+    if (node_group_id_ != node_group_id || tx_number_ != tx_number ||
+        tx_term_ != tx_term)
     {
+        node_group_id_ = node_group_id;
         tx_number_ = tx_number;
         tx_term_ = tx_term;
         sk_encoder_vec_.clear();
@@ -83,6 +83,7 @@ void SkGenerator::Reset(const std::string &start_key_str,
             encoder->Reset();
         }
     }
+    upload_index_ctx_.Reset(node_group_id_);
     scan_batch_size_ = LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE;
     task_result_ = CcErrorCode::NO_ERROR;
     scanned_items_count_ = 0;

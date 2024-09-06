@@ -605,7 +605,6 @@ void TransactionExecution::StartTiming()
 #ifdef EXT_TX_PROC_ENABLED
     if (bind_to_ext_proc_)
     {
-        auto op = state_stack_.back();
         tx_processor_->EnlistWaitingTx(this);
     }
 #endif
