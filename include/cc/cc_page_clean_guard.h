@@ -70,6 +70,13 @@ public:
         return clean_cnt_;
     }
 
+#ifdef ON_KEY_OBJECT
+    size_t CleanObjectCount() const
+    {
+        return clean_obj_cnt_;
+    }
+#endif
+
 protected:
     struct CanBeCleanedResult
     {
@@ -205,6 +212,13 @@ protected:
                    std::unique_ptr<CcEntry<KeyT, ValueT>> &cce,
                    bool delay_free)
     {
+#ifdef ON_KEY_OBJECT
+        if (cce->PayloadStatus() == RecordStatus::Normal)
+        {
+            ++clean_obj_cnt_;
+        }
+#endif
+
         if (delay_free)
         {
             // Do not free this cce directly since it might be visited
@@ -234,6 +248,9 @@ protected:
     CcPage<KeyT, ValueT> *page_{nullptr};
     uint64_t last_commit_ts_{0};
     uint64_t clean_cnt_{0};
+#ifdef ON_KEY_OBJECT
+    uint64_t clean_obj_cnt_{0};
+#endif
 
     friend class LocalCcShards;
 };

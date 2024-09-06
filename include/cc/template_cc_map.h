@@ -7771,6 +7771,9 @@ public:
             }
         }
 
+#ifdef ON_KEY_OBJECT
+        normal_obj_sz_ = 0;
+#endif
         size_ = 0;
         ccmp_.clear();
     }
@@ -7789,6 +7792,12 @@ public:
 
             for (auto &cce : page->entries_)
             {
+#ifdef ON_KEY_OBJECT
+                if (cce->PayloadStatus() == RecordStatus::Normal)
+                {
+                    normal_obj_sz_--;
+                }
+#endif
                 cce->ClearLocks(*shard_, cc_ng_id_);
             }
 
@@ -7805,6 +7814,9 @@ public:
         }
 
         assert(size_ == 0);
+#ifdef ON_KEY_OBJECT
+        assert(normal_obj_sz_ == 0);
+#endif
         return true;
     }
 
@@ -10170,6 +10182,10 @@ protected:
         }
         clean_guard->Compact();
         free_cnt += clean_guard->CleanCount();
+#ifdef ON_KEY_OBJECT
+        normal_obj_sz_ -= clean_guard->CleanObjectCount();
+#endif
+
         success = clean_guard->CleanSuccess();
 
         std::destroy_at(buffer);
@@ -10456,5 +10472,8 @@ protected:
     size_t size_{};
 
     TemplateCcMapSamplePool<KeyT> *sample_pool_;
+#ifdef ON_KEY_OBJECT
+    size_t normal_obj_sz_{0};  // The count of all normal status objects
+#endif
 };
 }  // namespace txservice

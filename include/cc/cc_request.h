@@ -6519,4 +6519,114 @@ private:
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
 };
 
+struct DbSizeCc : public CcRequestBase
+{
+public:
+    DbSizeCc()
+    {
+    }
+
+    void Reset(const TableName *table_name)
+    {
+        Clear();
+        table_name_ = table_name;
+        remote_shard_cnt_ = Sharder::Instance().NodeGroupCount() - 1;
+        local_shard_cnt_ = Sharder::Instance().GetLocalCcShardsCount();
+        total_obj_size_ = 0;
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        assert(vct_ng_id_.size() >= 1);
+
+        for (uint32_t ng_id : vct_ng_id_)
+        {
+            CcMap *map = ccs.GetCcm(*table_name_, ng_id);
+            if (map != nullptr)
+            {
+                total_obj_size_.fetch_add(map->NormalObjectSize(),
+                                          std::memory_order_relaxed);
+            }
+        }
+
+        local_shard_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        if (local_shard_cnt_.load(std::memory_order_relaxed) == 0 &&
+            remote_shard_cnt_.load(std::memory_order_relaxed) == 0)
+        {
+            std::unique_lock lk(mux_);
+            cv_.notify_one();
+        }
+
+        return false;
+    }
+
+    int32_t GetLocalShardCnt()
+    {
+        return local_shard_cnt_.load(std::memory_order_relaxed);
+    }
+
+    int32_t GetRemoteShardCnt()
+    {
+        return remote_shard_cnt_.load(std::memory_order_relaxed);
+    }
+
+    int64_t GetTotalObjSize()
+    {
+        return total_obj_size_.load(std::memory_order_relaxed);
+    }
+
+    void AddLocalNodeGroupId(uint32_t ng_id)
+    {
+        vct_ng_id_.push_back(ng_id);
+        if (vct_ng_id_.size() >= 2)
+        {
+            remote_shard_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+
+    void AddRemoteObjSize(int32_t term, int64_t total_obj_size)
+    {
+        if (term != term_)
+        {
+            return;
+        }
+
+        total_obj_size_.fetch_add(total_obj_size, std::memory_order_relaxed);
+        remote_shard_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        if (GetLocalShardCnt() == 0 && GetRemoteShardCnt() == 0)
+        {
+            std::unique_lock lk(mux_);
+            cv_.notify_one();
+        }
+    }
+
+    int32_t GetTerm()
+    {
+        return term_;
+    }
+    void IncTerm()
+    {
+        term_++;
+    }
+
+    void Clear()
+    {
+        total_obj_size_.store(0, std::memory_order_relaxed);
+        local_shard_cnt_.store(0, std::memory_order_relaxed);
+        remote_shard_cnt_.store(0, std::memory_order_relaxed);
+        table_name_ = nullptr;
+        vct_ng_id_.clear();
+    }
+
+    bthread::Mutex mux_;
+    bthread::ConditionVariable cv_;
+
+protected:
+    std::atomic<int64_t> total_obj_size_;
+    std::atomic<int32_t> local_shard_cnt_;
+    std::atomic<int32_t> remote_shard_cnt_;
+    int32_t term_{0};
+    std::vector<uint32_t> vct_ng_id_;
+    const TableName *table_name_;
+};
 }  // namespace txservice

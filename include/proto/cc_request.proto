@@ -933,6 +933,19 @@ message PublishRequest {
     string message = 2;
 }
 
+message DBSizeRequest {
+    uint32 src_node_id = 1;
+    string table_name_str = 2;
+    CcTableType table_type = 3;
+    uint32 node_group_id = 4;
+    int32 dbsize_term = 5;
+}
+
+message DBSizeResponse {
+    int64 node_obj_size = 1;
+    int32 dbsize_term = 2;
+}
+
 message CcMessage {
     enum MessageType {
         AcquireRequest = 0;
@@ -976,6 +989,8 @@ message CcMessage {
         ApplyResponse = 51;
         PublishRequest = 52;
         UploadTxCommandsRequest = 53;
+        DBSizeRequest = 54;
+        DBSizeResponse = 55;
     }
 
     MessageType type = 1;
@@ -1025,6 +1040,8 @@ message CcMessage {
         ApplyRequest apply_cc_req = 58;
         ApplyResponse apply_cc_resp = 59;
         PublishRequest publish_req = 60;
-        UploadTxCommandsRequest upload_cmds_req=61;
+        UploadTxCommandsRequest upload_cmds_req = 61;
+        DBSizeRequest dbsize_req = 62;
+        DBSizeResponse db_size_resp = 63;
     }
 }

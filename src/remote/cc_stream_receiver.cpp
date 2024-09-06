@@ -40,6 +40,7 @@ thread_local CcRequestPool<ProcessRemoteScanRespCc>
     process_remote_scan_resp_pool_;
 thread_local CcRequestPool<RemoteApplyCc> apply_pool_;
 thread_local CcRequestPool<RemoteUploadTxCommandsCc> upload_cmds_pool_;
+thread_local CcRequestPool<RemoteDbSizeCc> dbsize_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -1762,7 +1763,28 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         local_shards_.EnqueueCcRequest(cmds_req->CceAddr()->CoreId(), cmds_req);
         break;
     }
+    case CcMessage::MessageType::CcMessage_MessageType_DBSizeRequest:
+    {
+        RemoteDbSizeCc *dbsize = dbsize_pool_.NextRequest();
+        TX_TRACE_ASSOCIATE(msg.get(), dbsize);
+        dbsize->Reset(std::move(msg));
+        int32_t cnt = dbsize->GetLocalShardCnt();
 
+        for (int32_t i = 0; i < cnt; i++)
+        {
+            local_shards_.EnqueueCcRequest(i, dbsize);
+        }
+
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_DBSizeResponse:
+    {
+        const DBSizeResponse &resp = msg->db_size_resp();
+        DbSizeCc *dbcc = reinterpret_cast<DbSizeCc *>(msg->handler_addr());
+        dbcc->AddRemoteObjSize(resp.dbsize_term(), resp.node_obj_size());
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
     default:
         break;
     }

@@ -406,6 +406,10 @@ public:
                     obj_result.rec_status_ = RecordStatus::Deleted;
                     obj_result.commit_ts_ = obj->GetTTL();
                     hd_res->SetFinished();
+                    // If the object is expired, it should decrease 1 for object
+                    // count
+                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+
                     return true;
                 }
                 // mark deleted on cce if not read only
@@ -788,6 +792,17 @@ public:
             {
                 cce->PopBlockRequest(shard_, cce->payload_.get());
             }
+
+            if (object_not_exist &&
+                cce->PayloadStatus() == RecordStatus::Normal)
+            {
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+            }
+            else if (!object_not_exist &&
+                     cce->PayloadStatus() != RecordStatus::Normal)
+            {
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+            }
         }
 
         // Updates last_vali_ts after successfully acquiring the write
@@ -856,6 +871,8 @@ public:
         CcPage<KeyT, ValueT> *ccp =
             static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
         assert(ccp != nullptr);
+        bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
+
         if (commit_ts > 0)
         {
             RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
@@ -911,6 +928,15 @@ public:
         cce->SetDirtyPayload(nullptr);
         cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
         cce->SetPendingCmd(nullptr);
+
+        if (s_obj_exist && cce->PayloadStatus() != RecordStatus::Normal)
+        {
+            TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+        }
+        else if (!s_obj_exist && cce->PayloadStatus() == RecordStatus::Normal)
+        {
+            TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+        }
 
         ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
         cce->PopBlockRequest(shard_, cce->payload_.get());
@@ -1049,12 +1075,20 @@ public:
 
             if (rec_status == RecordStatus::Normal)
             {
+                if (cce->PayloadStatus() != RecordStatus::Normal)
+                {
+                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                }
                 cce->payload_.reset(
                     static_cast<ValueT *>(object_uptr.release()));
                 object_uptr = nullptr;
             }
             else
             {
+                if (cce->PayloadStatus() == RecordStatus::Normal)
+                {
+                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+                }
                 cce->payload_ = nullptr;
             }
 
@@ -1171,6 +1205,8 @@ public:
             // Emplace txn_cmd and try to commit all pending commands.
             uint64_t commit_version = cce->CommitTs();
             RecordStatus payload_status = cce->PayloadStatus();
+            bool s_obj_exist = (payload_status == RecordStatus::Normal);
+
             if (txn_cmd.obj_version_ >= commit_version)
             {
                 EmplaceAndCommitReplayTxnCommand(cce->payload_,
@@ -1179,6 +1215,15 @@ public:
                                                  commit_version,
                                                  payload_status);
                 cce->SetCommitTsPayloadStatus(commit_version, payload_status);
+            }
+
+            if (s_obj_exist && payload_status != RecordStatus::Normal)
+            {
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+            }
+            else if (!s_obj_exist && payload_status == RecordStatus::Normal)
+            {
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
             }
 
             // if replay_cmd_list is null, key_lock_extra_data will be recycled
@@ -1361,6 +1406,7 @@ public:
             // Emplace txn_cmd and try to commit all pending commands.
             uint64_t current_version = cce->CommitTs();
             RecordStatus payload_status = cce->PayloadStatus();
+            bool s_obj_exist = (payload_status == RecordStatus::Normal);
 
             ReplayTxnCmdList &replay_cmd_list = cce->ReplayCommandList();
             TxnCmd txn_cmd(
@@ -1391,6 +1437,15 @@ public:
                     assert(lock_recycled);
                 }
                 (void) lock_recycled;
+            }
+
+            if (s_obj_exist && payload_status != RecordStatus::Normal)
+            {
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+            }
+            else if (!s_obj_exist && payload_status == RecordStatus::Normal)
+            {
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
             }
 
             // Must update dirty_commit_ts. Otherwise, this entry may be
@@ -1527,9 +1582,19 @@ public:
                     cce->RecycleKeyLock(*shard_);
                 }
             }
+
+            if (cce->PayloadStatus() == RecordStatus::Normal)
+            {
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+            }
         }
 
         return true;
+    }
+
+    size_t NormalObjectSize() override
+    {
+        return TemplateCcMap<KeyT, ValueT>::normal_obj_sz_;
     }
 
 private:

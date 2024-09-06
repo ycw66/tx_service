@@ -162,6 +162,11 @@ public:
     virtual bool Execute(UpdateKeyCacheCc &req) = 0;
 
     virtual size_t size() const = 0;
+    virtual size_t NormalObjectSize()
+    {
+        assert(false);
+        return 0;
+    }
 
     virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *page,

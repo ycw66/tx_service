@@ -1988,3 +1988,73 @@ void txservice::remote::RemoteUploadTxCommandsCc::Reset(
         hd_ = Sharder::Instance().GetCcStreamSender();
     }
 }
+
+txservice::remote::RemoteDbSizeCc::RemoteDbSizeCc()
+{
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_DBSizeResponse);
+
+    post_lambda_ = [this]()
+    {
+        assert(local_shard_cnt_ == 0);
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+
+        const DBSizeRequest &req = input_msg_->dbsize_req();
+        DBSizeResponse *resp = output_msg_.mutable_db_size_resp();
+        resp->set_node_obj_size(total_obj_size_);
+        resp->set_dbsize_term(req.dbsize_term());
+
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemoteDbSizeCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    Clear();
+    assert(input_msg->has_dbsize_req());
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_db_size_resp();
+
+    {
+        const DBSizeRequest &cmds_req = input_msg->dbsize_req();
+        std::string_view table_name_sv{cmds_req.table_name_str()};
+        remote_table_name_ =
+            TableName(table_name_sv,
+                      ToLocalType::ConvertCcTableType(cmds_req.table_type()));
+        table_name_ = &remote_table_name_;
+        AddLocalNodeGroupId(cmds_req.node_group_id());
+        local_shard_cnt_ = Sharder::Instance().GetLocalCcShardsCount();
+    }
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+bool txservice::remote::RemoteDbSizeCc::Execute(CcShard &ccs)
+{
+    assert(vct_ng_id_.size() == 1);
+    CcMap *map = ccs.GetCcm(*table_name_, vct_ng_id_[0]);
+    if (map != nullptr)
+    {
+        total_obj_size_.fetch_add(map->NormalObjectSize(),
+                                  std::memory_order_relaxed);
+    }
+
+    int32_t cnt = local_shard_cnt_.fetch_sub(1, std::memory_order_relaxed);
+    if (cnt == 1)
+    {
+        post_lambda_();
+        return true;
+    }
+
+    return false;
+}
