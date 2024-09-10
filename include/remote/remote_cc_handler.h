@@ -254,7 +254,8 @@ public:
                          uint16_t command_id,
                          const CcEntryAddr &cce_addr,
                          CcHandlerResultBase *hres,
-                         ResultTemplateType type);
+                         ResultTemplateType type,
+                         size_t acq_key_result_vec_idx = 0);
 
     void BlockAcquireAllCcReqCheck(uint32_t src_node_id,
                                    uint32_t node_group_id,

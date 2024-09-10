@@ -1,5 +1,6 @@
 #include "local_cc_handler.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -55,6 +56,8 @@ void txservice::LocalCcHandler::AcquireWrite(
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
+        acquire_result.remote_hd_result_is_set_->store(
+            true, std::memory_order_relaxed);
         AcquireCc *req = acquire_pool.NextRequest();
         req->Reset(&table_name,
                    &key,
@@ -75,6 +78,8 @@ void txservice::LocalCcHandler::AcquireWrite(
     else
     {
         acquire_result.remote_ack_cnt_->fetch_add(1, std::memory_order_relaxed);
+        acquire_result.remote_hd_result_is_set_->store(
+            false, std::memory_order_relaxed);
         remote_hd_.AcquireWrite(cc_shards_.node_id_,
                                 ng_id,
                                 table_name,
@@ -1977,7 +1982,8 @@ void txservice::LocalCcHandler::BlockCcReqCheck(uint64_t tx_number,
                                                 uint16_t command_id,
                                                 const CcEntryAddr &cce_addr,
                                                 CcHandlerResultBase *hres,
-                                                ResultTemplateType type)
+                                                ResultTemplateType type,
+                                                size_t acq_key_result_vec_idx)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -1995,7 +2001,8 @@ void txservice::LocalCcHandler::BlockCcReqCheck(uint64_t tx_number,
                                    command_id,
                                    cce_addr,
                                    hres,
-                                   type);
+                                   type,
+                                   acq_key_result_vec_idx);
     }
 }
 

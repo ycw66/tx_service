@@ -212,7 +212,6 @@ struct AcquireWriteOperation : TransactionOperation
 public:
     explicit AcquireWriteOperation(TransactionExecution *txm);
     void Reset(size_t acquire_write_cnt, size_t wentry_cnt);
-    void Reset();
     void AggregateAcquiredKeys(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
@@ -1129,7 +1128,6 @@ struct CmdForwardAcquireWriteOp : TransactionOperation
 public:
     explicit CmdForwardAcquireWriteOp(TransactionExecution *txm);
     void Reset(size_t acquire_write_cnt);
-    void Reset();
     void AggregateAcquiredKeys(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 

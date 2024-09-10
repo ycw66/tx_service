@@ -1630,7 +1630,7 @@ void txservice::remote::RemoteBlockReqCheckCc::Reset(
 bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
 {
     const BlockedCcReqCheckRequest &req = input_msg_->blocked_check_req();
-    AckStatus status = AckStatus::Unknown;
+    AckStatus status = AckStatus::Finished;
     for (const auto &caddr : req.cce_addr())
     {
         if (caddr.core_id() == ccs.core_id_)
@@ -1669,8 +1669,6 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
         status = AckStatus::ErrorTerm;
         FaultInject::Instance().InjectFault("block_req_term_changed", "remove");
     });
-
-    assert(status != AckStatus::Unknown);
 
     std::lock_guard<std::mutex> lk(mux_);
     assert(unfinish_core_cnt_ > 0);
@@ -1712,6 +1710,14 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
         resp->set_req_status((int32_t) req_status);
         resp->set_result_temp_type(
             input_msg_->blocked_check_req().result_temp_type());
+        ResultTemplateType type =
+            (ResultTemplateType) input_msg_->blocked_check_req()
+                .result_temp_type();
+        if (type == ResultTemplateType::AcquireKeyResult)
+        {
+            resp->set_acq_key_result_vec_idx(
+                input_msg_->blocked_check_req().acq_key_result_vec_idx());
+        }
 
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));

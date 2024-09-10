@@ -826,7 +826,8 @@ void txservice::remote::RemoteCcHandler::BlockCcReqCheck(
     uint16_t command_id,
     const CcEntryAddr &cce_addr,
     CcHandlerResultBase *hres,
-    ResultTemplateType type)
+    ResultTemplateType type,
+    size_t acq_key_result_vec_idx)
 {
     CcMessage send_msg;
 
@@ -840,6 +841,11 @@ void txservice::remote::RemoteCcHandler::BlockCcReqCheck(
     BlockedCcReqCheckRequest *req = send_msg.mutable_blocked_check_req();
     req->set_src_node_id(src_node_id);
     req->set_result_temp_type((uint32_t) type);
+
+    if (type == ResultTemplateType::AcquireKeyResult)
+    {
+        req->set_acq_key_result_vec_idx(acq_key_result_vec_idx);
+    }
 
     req->set_node_group_id(cce_addr.NodeGroupId());
 

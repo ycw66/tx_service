@@ -281,6 +281,10 @@ void ReadOperation::Forward(TransactionExecution *txm)
         }
         else if (cce_addr.Term() > 0 && timeout)
         {
+            // Unset timeout status. So the cc_stream_reciver can handle
+            // response.
+            hd_result_.UnsetByTimeoutThread();
+
             txm->cc_handler_->BlockCcReqCheck(
                 txm->TxNumber(),
                 txm->TxTerm(),
@@ -288,9 +292,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
                 cce_addr,
                 &hd_result_,
                 ResultTemplateType::ReadKeyResult);
-            // Unset timeout status. So the cc_stream_reciver can handle
-            // response.
-            hd_result_.UnsetByTimeoutThread();
         }
     }
     // TODO: for locking-based protocols, even though the tx may be blocked
@@ -411,23 +412,14 @@ void AcquireWriteOperation::Reset(size_t acquire_write_cnt, size_t wentry_cnt)
     for (size_t idx = old_size; idx < acquire_write_cnt; ++idx)
     {
         acquire_key_vec[idx].remote_ack_cnt_ = &remote_ack_cnt_;
+        acquire_key_vec[idx].remote_hd_result_is_set_ =
+            std::make_unique<std::atomic<bool>>(false);
     }
 
     remote_ack_cnt_.store(0, std::memory_order_relaxed);
     acquire_write_entries_.resize(wentry_cnt);
 
     rset_has_expired_ = false;
-    op_start_ = metrics::TimePoint::max();
-}
-
-void AcquireWriteOperation::Reset()
-{
-    std::vector<AcquireKeyResult> &acquire_key_vec = hd_result_.Value();
-    if (acquire_key_vec.capacity() > TransactionExecution::LargeTxKeySize)
-    {
-        acquire_key_vec.resize(16);
-        acquire_key_vec.shrink_to_fit();
-    }
     op_start_ = metrics::TimePoint::max();
 }
 
@@ -586,12 +578,18 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
         }
         else if (timeout)
         {
+            // Unset timeout status. So the cc_stream_reciver can handle
+            // response.
+            hd_result_.UnsetByTimeoutThread();
+
             std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
             for (size_t i = 0; i < vct_akr.size(); i++)
             {
                 AcquireKeyResult &akr = vct_akr[i];
 
-                if (akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
+                if (akr.remote_hd_result_is_set_->load(
+                        std::memory_order_acquire) == false &&
+                    akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
                 {
                     txm->cc_handler_->BlockCcReqCheck(
                         txm->TxNumber(),
@@ -599,12 +597,10 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
                         txm->CommandId(),
                         akr.cce_addr_,
                         &hd_result_,
-                        ResultTemplateType::AcquireKeyResult);
+                        ResultTemplateType::AcquireKeyResult,
+                        i);
                 }
             }
-            // Unset timeout status. So the cc_stream_reciver can handle
-            // response.
-            hd_result_.UnsetByTimeoutThread();
         }
     }
 }
@@ -1777,6 +1773,9 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
     }
     else if (txm->IsTimeOut())
     {
+        // For non-blocking concurrency control protocols, the AcquireAllOp is
+        // expected to return instantly. For 2PL, if the request is blocked, the
+        // cc node will send an acknowledgement to update the node term.
         for (size_t hd_idx = 0; hd_idx < hd_results_.size(); ++hd_idx)
         {
             auto &hd_res = hd_results_[hd_idx];
@@ -1792,8 +1791,13 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
 
             AcquireAllResult &ac_res = hd_results_[hd_idx].Value();
 
-            if (ac_res.node_term_ > 0 &&
-                !ac_res.blocked_remote_cce_addr_.empty())
+            bool has_blocked_remote_cce =
+                ac_res.blocked_remote_cce_addr_.size() > 0;
+            // Unset timeout status. So the cc_stream_reciver can handle
+            // response.
+            hd_res.UnsetByTimeoutThread();
+
+            if (ac_res.node_term_ > 0 && has_blocked_remote_cce)
             {
                 uint32_t node_group_id = hd_idx / keys_.size();
                 // Check the liveness of remote node
@@ -1805,8 +1809,6 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                     ac_res.blocked_remote_cce_addr_,
                     &hd_results_[hd_idx]);
             }
-
-            hd_res.UnsetByTimeoutThread();
         }
     }
 }
@@ -6173,6 +6175,10 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             }
             else if (cce_addr.Term() > 0)
             {
+                // Unset timeout status. So the cc_stream_reciver can handle
+                // response.
+                hd_result_.UnsetByTimeoutThread();
+
                 txm->cc_handler_->BlockCcReqCheck(
                     txm->TxNumber(),
                     txm->TxTerm(),
@@ -6180,10 +6186,6 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
                     cce_addr,
                     &hd_result_,
                     ResultTemplateType::ReadKeyResult);
-
-                // Unset timeout status. So the cc_stream_reciver can handle
-                // response.
-                hd_result_.UnsetByTimeoutThread();
             }
         }
     }
@@ -6544,22 +6546,13 @@ void CmdForwardAcquireWriteOp::Reset(size_t acquire_write_cnt)
     for (size_t idx = old_size; idx < acquire_write_cnt; ++idx)
     {
         acquire_key_vec[idx].remote_ack_cnt_ = &remote_ack_cnt_;
+        acquire_key_vec[idx].remote_hd_result_is_set_ =
+            std::make_unique<std::atomic<bool>>(false);
     }
 
     remote_ack_cnt_.store(0, std::memory_order_relaxed);
     acquire_write_entries_.resize(acquire_write_cnt);
 
-    op_start_ = metrics::TimePoint::max();
-}
-
-void CmdForwardAcquireWriteOp::Reset()
-{
-    std::vector<AcquireKeyResult> &acquire_key_vec = hd_result_.Value();
-    if (acquire_key_vec.capacity() > 16)
-    {
-        acquire_key_vec.resize(16);
-        acquire_key_vec.shrink_to_fit();
-    }
     op_start_ = metrics::TimePoint::max();
 }
 
@@ -6628,12 +6621,18 @@ void CmdForwardAcquireWriteOp::Forward(TransactionExecution *txm)
         }
         else if (timeout)
         {
+            // Unset timeout status. So the cc_stream_reciver can handle
+            // response.
+            hd_result_.UnsetByTimeoutThread();
+
             std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
             for (size_t i = 0; i < vct_akr.size(); i++)
             {
                 AcquireKeyResult &akr = vct_akr[i];
 
-                if (akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
+                if (akr.remote_hd_result_is_set_->load(
+                        std::memory_order_acquire) == false &&
+                    akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
                 {
                     txm->cc_handler_->BlockCcReqCheck(
                         txm->TxNumber(),
@@ -6641,13 +6640,10 @@ void CmdForwardAcquireWriteOp::Forward(TransactionExecution *txm)
                         txm->CommandId(),
                         akr.cce_addr_,
                         &hd_result_,
-                        ResultTemplateType::AcquireKeyResult);
+                        ResultTemplateType::AcquireKeyResult,
+                        i);
                 }
             }
-
-            // Unset timeout status. So the cc_stream_reciver can handle
-            // response.
-            hd_result_.UnsetByTimeoutThread();
         }
     }
 }
@@ -9159,6 +9155,9 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                 }
                 else
                 {
+                    // Unset timeout status. So the cc_stream_reciver can handle
+                    // response.
+                    hd_result.UnsetByTimeoutThread();
                     txm->cc_handler_->BlockCcReqCheck(
                         txm->TxNumber(),
                         txm->TxTerm(),
@@ -9166,9 +9165,6 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                         cce_addr,
                         &hd_result,
                         ResultTemplateType::ReadKeyResult);
-                    // Unset timeout status. So the cc_stream_reciver can handle
-                    // response.
-                    hd_result.UnsetByTimeoutThread();
                 }
             }
         }

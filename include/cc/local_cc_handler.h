@@ -423,7 +423,8 @@ public:
                          uint16_t command_id,
                          const CcEntryAddr &cce_addr,
                          CcHandlerResultBase *hres,
-                         ResultTemplateType type) override;
+                         ResultTemplateType type,
+                         size_t acq_key_result_vec_idx = 0) override;
 
     void BlockAcquireAllCcReqCheck(uint32_t ng_id,
                                    uint64_t tx_number,

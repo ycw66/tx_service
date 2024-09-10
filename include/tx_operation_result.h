@@ -42,6 +42,10 @@ struct AcquireKeyResult
     // blocked. An acknowledgement is a special response notifying the sender
     // the address and the term of the cc entry on which the request is blocked.
     std::atomic<int32_t> *remote_ack_cnt_{nullptr};
+    // Use this flag to indicate wheatear the hd_result of remote request has
+    // been called SetFinish()/SetError(). Local request always set this flag to
+    // `true`.
+    std::unique_ptr<std::atomic<bool>> remote_hd_result_is_set_{nullptr};
 };
 
 struct AcquireAllResult

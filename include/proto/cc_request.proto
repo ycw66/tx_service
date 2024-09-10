@@ -838,6 +838,7 @@ message BlockedCcReqCheckRequest {
     repeated CceAddr_msg cce_addr = 3;
     // CcHandlerResult template type
     uint32 result_temp_type = 4;
+    uint32 acq_key_result_vec_idx = 5;
 }
 
 message BlockedCcReqCheckResponse {
@@ -846,6 +847,7 @@ message BlockedCcReqCheckResponse {
     int32 req_status = 1;
     // CcHandlerResult template type
     uint32 result_temp_type = 2;
+    uint32 acq_key_result_vec_idx = 3;
 }
 
 message FlushDataAllRequest {

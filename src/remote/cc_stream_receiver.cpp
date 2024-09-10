@@ -2,6 +2,8 @@
 
 #include <brpc/controller.h>
 
+#include <atomic>
+
 #include "cc/local_cc_shards.h"
 #include "error_messages.h"  //CcErrorCode
 #include "remote/remote_type.h"
@@ -315,8 +317,6 @@ void CcStreamReceiver::PreProcessScanResp(
     // No more data.
     if (all_remote_core_no_more_data)
     {
-        hd_res->DecreaseCurrentHandlingResponse();
-
         if (msg->error_code() != 0)
         {
             hd_res->SetError(
@@ -326,6 +326,8 @@ void CcStreamReceiver::PreProcessScanResp(
         {
             hd_res->SetFinished();
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
 
         RecycleScanSliceResp(std::move(msg));
         return;
@@ -423,6 +425,13 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         const CceAddr_msg &cce_addr_res = cc_res.cce_addr();
         AcquireKeyResult &acq_res = hd_res->Value()[cc_res.vec_idx()];
 
+        if (acq_res.remote_hd_result_is_set_->load(std::memory_order_acquire))
+        {
+            msg_pool_.enqueue(std::move(msg));
+            hd_res->DecreaseCurrentHandlingResponse();
+            break;
+        }
+
         if (cc_res.error_code() != 0)
         {
             if (acq_res.cce_addr_.Term() < 0)
@@ -430,10 +439,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.remote_ack_cnt_->fetch_sub(1);
             }
 
-            hd_res->DecreaseCurrentHandlingResponse();
-
+            acq_res.remote_hd_result_is_set_->store(true,
+                                                    std::memory_order_release);
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
+            hd_res->DecreaseCurrentHandlingResponse();
         }
         else
         {
@@ -473,16 +483,18 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_res.commit_ts_ = cc_res.commit_ts();
-                // call `DecreaseCurrentHandlingResponse` before `SetFinished`
-                hd_res->DecreaseCurrentHandlingResponse();
+                acq_res.remote_hd_result_is_set_->store(
+                    true, std::memory_order_release);
+
                 hd_res->SetFinished();
             }
             else
             {
                 acq_res.last_vali_ts_ = 0;
                 acq_res.commit_ts_ = 0;
-                hd_res->DecreaseCurrentHandlingResponse();
             }
+
+            hd_res->DecreaseCurrentHandlingResponse();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -539,9 +551,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->DecreaseCurrentHandlingResponse();
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
+            hd_res->DecreaseCurrentHandlingResponse();
         }
         else
         {
@@ -578,12 +590,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 }
             }
 
-            hd_res->DecreaseCurrentHandlingResponse();
-
             if (!cc_res.is_ack())
             {
                 hd_res->SetFinished();
             }
+
+            hd_res->DecreaseCurrentHandlingResponse();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -683,8 +695,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             conflicting_txs.AddConflictingTx(cc_res.txs(i));
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
-
         if (cc_res.error_code() != 0)
         {
             hd_res->SetError(
@@ -694,6 +704,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetFinished();
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
+
         msg_pool_.enqueue(std::move(msg));
         break;
     }
@@ -737,8 +750,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         const PostprocessResponse &cc_res = msg->post_resp();
 
-        hd_res->DecreaseCurrentHandlingResponse();
-
         if (cc_res.error_code() != 0)
         {
             hd_res->SetRemoteError(
@@ -748,6 +759,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetRemoteFinished();
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
 
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -814,9 +827,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (read_res.error_code() != 0)
         {
-            hd_res->DecreaseCurrentHandlingResponse();
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(read_res.error_code()));
+            hd_res->DecreaseCurrentHandlingResponse();
         }
         else
         {
@@ -847,12 +860,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     ToLocalType::ConvertLockType(read_res.lock_type());
             }
 
-            hd_res->DecreaseCurrentHandlingResponse();
-
             if (!read_res.is_ack())
             {
                 hd_res->SetFinished();
             }
+
+            hd_res->DecreaseCurrentHandlingResponse();
         }
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -1059,8 +1072,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res->Value().cc_node_terms_[ng_id] = term;
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
-
         if (scan_open_res.error_code() != 0)
         {
             hd_res->SetError(
@@ -1070,6 +1081,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetFinished();
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
 
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -1165,8 +1178,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
-
         if (scan_next_res.error_code() != 0)
         {
             hd_res->SetError(
@@ -1176,6 +1187,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetFinished();
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
 
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -1238,8 +1251,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
-
         const ReloadCacheResponse &reload_resp = msg->reload_cache_resp();
         if (reload_resp.error_code() != 0)
         {
@@ -1250,6 +1261,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetRemoteFinished();
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
         msg_pool_.enqueue(std::move(msg));
         break;
     }
@@ -1341,8 +1354,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
-
         const AnalyzeTableAllResponse &analyze_resp =
             msg->analyze_table_all_resp();
         if (analyze_resp.error_code() != 0)
@@ -1354,6 +1365,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetRemoteFinished();
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
         msg_pool_.enqueue(std::move(msg));
         break;
     }
@@ -1529,6 +1542,38 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 reinterpret_cast<
                     CcHandlerResult<std::vector<AcquireKeyResult>> *>(
                     msg->handler_addr());
+
+            if (!hd_res->SetResultByStreamThread())
+            {
+                LOG(INFO) << "BlockedCcReqCheck rejected due to txm timeout ";
+                msg_pool_.enqueue(std::move(msg));
+                break;
+            }
+
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
+            {
+                // The original tx has terminated and the tx machine has been
+                // recycled. The response message is directed to an obsolete tx.
+                // Skips setting the cc handler result.
+                msg_pool_.enqueue(std::move(msg));
+                hd_res->DecreaseCurrentHandlingResponse();
+                break;
+            }
+
+            auto &acq_key_result_vec = hd_res->Value();
+            if (acq_key_result_vec.at(resp.acq_key_result_vec_idx())
+                    .remote_hd_result_is_set_->load(std::memory_order_acquire))
+            {
+                msg_pool_.enqueue(std::move(msg));
+                hd_res->DecreaseCurrentHandlingResponse();
+                break;
+            }
+
+            acq_key_result_vec.at(resp.acq_key_result_vec_idx())
+                .remote_hd_result_is_set_->store(true,
+                                                 std::memory_order_release);
+
             AckStatus status = (AckStatus) resp.req_status();
             if (status == AckStatus::ErrorTerm)
             {
@@ -1538,12 +1583,33 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             {
                 hd_res->SetError(CcErrorCode::REQUEST_LOST);
             }
+
+            hd_res->DecreaseCurrentHandlingResponse();
         }
         else if (type == ResultTemplateType::ReadKeyResult)
         {
             CcHandlerResult<ReadKeyResult> *hd_res =
                 reinterpret_cast<CcHandlerResult<ReadKeyResult> *>(
                     msg->handler_addr());
+
+            if (!hd_res->SetResultByStreamThread())
+            {
+                LOG(INFO) << "BlockedCcReqCheck rejected due to txm timeout ";
+                msg_pool_.enqueue(std::move(msg));
+                break;
+            }
+
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
+            {
+                // The original tx has terminated and the tx machine has been
+                // recycled. The response message is directed to an obsolete tx.
+                // Skips setting the cc handler result.
+                msg_pool_.enqueue(std::move(msg));
+                hd_res->DecreaseCurrentHandlingResponse();
+                break;
+            }
+
             AckStatus status = (AckStatus) resp.req_status();
             if (status == AckStatus::ErrorTerm)
             {
@@ -1553,12 +1619,33 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             {
                 hd_res->SetError(CcErrorCode::REQUEST_LOST);
             }
+
+            hd_res->DecreaseCurrentHandlingResponse();
         }
         else if (type == ResultTemplateType::AcquireAllResult)
         {
             CcHandlerResult<AcquireAllResult> *hd_res =
                 reinterpret_cast<CcHandlerResult<AcquireAllResult> *>(
                     msg->handler_addr());
+
+            if (!hd_res->SetResultByStreamThread())
+            {
+                LOG(INFO) << "BlockedCcReqCheck rejected due to txm timeout ";
+                msg_pool_.enqueue(std::move(msg));
+                break;
+            }
+
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
+            {
+                // The original tx has terminated and the tx machine has been
+                // recycled. The response message is directed to an obsolete tx.
+                // Skips setting the cc handler result.
+                msg_pool_.enqueue(std::move(msg));
+                hd_res->DecreaseCurrentHandlingResponse();
+                break;
+            }
+
             AckStatus status = (AckStatus) resp.req_status();
             if (status == AckStatus::ErrorTerm)
             {
@@ -1568,6 +1655,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             {
                 hd_res->SetError(CcErrorCode::REQUEST_LOST);
             }
+
+            hd_res->DecreaseCurrentHandlingResponse();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -1641,8 +1730,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
-
         // Handle the result.
         const KickoutDataResponse &cc_resp = msg->kickout_data_resp();
 
@@ -1655,6 +1742,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetRemoteFinished();
         }
+
+        hd_res->DecreaseCurrentHandlingResponse();
 
         // Recycle the cc message
         msg_pool_.enqueue(std::move(msg));
