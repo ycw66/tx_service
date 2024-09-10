@@ -5211,32 +5211,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         update_key_cache.Wait();
                     }
 
-                    std::vector<std::unique_ptr<std::vector<FlushRecord>>>
-                        data_sync_vec_per_core(local_shards->Count()),
-                        archive_vec_per_core(local_shards->Count());
-
-                    for (size_t core_idx = 0; core_idx < local_shards->Count();
-                         core_idx++)
-                    {
-                        data_sync_vec_per_core[core_idx] =
-                            std::make_unique<std::vector<FlushRecord>>();
-                        data_sync_vec_per_core[core_idx]->reserve(reserve_size);
-                    }
-
-                    for (size_t i = 0; i < data_sync_vec->size(); i++)
-                    {
-                        auto flush_record = std::move(data_sync_vec->at(i));
-                        size_t record_core_id =
-                            (flush_record.Key().Hash() & 0x3FF) %
-                            local_shards->Count();
-                        data_sync_vec_per_core[record_core_id]->emplace_back(
-                            std::move(flush_record));
-                    }
-
                     ReleaseDataSyncScanHeapCc release_scan_heap_cc(
-                        local_shards->Count(),
-                        std::move(data_sync_vec_per_core),
-                        std::move(archive_vec_per_core));
+                        local_shards->Count(), data_sync_vec, nullptr);
                     for (size_t core_idx = 0; core_idx < local_shards->Count();
                          ++core_idx)
                     {

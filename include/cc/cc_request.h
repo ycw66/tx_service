@@ -3226,6 +3226,12 @@ public:
             }
             accumulated_scan_cnt_.at(i) = 0;
         }
+#ifdef ON_KEY_OBJECT
+        if (force_flush_)
+        {
+            data_sync_vec_[0].resize(scan_batch_size_);
+        }
+#endif
         err_ = CcErrorCode::NO_ERROR;
         force_flush_ = false;
     }
@@ -3303,29 +3309,9 @@ public:
         return data_sync_vec_[core_id];
     }
 
-    std::unique_ptr<std::vector<FlushRecord>> MoveOutDataSyncVec(
-        uint16_t core_id)
-    {
-        auto moved = std::make_unique<std::vector<FlushRecord>>(
-            std::move(data_sync_vec_[core_id]));
-        data_sync_vec_[core_id] = std::vector<FlushRecord>();
-        data_sync_vec_[core_id].resize(scan_batch_size_);
-        return moved;
-    }
-
     std::vector<FlushRecord> &ArchiveVec(uint16_t core_id)
     {
         return archive_vec_[core_id];
-    }
-
-    std::unique_ptr<std::vector<FlushRecord>> MoveOutArchiveVec(
-        uint16_t core_id)
-    {
-        auto moved = std::make_unique<std::vector<FlushRecord>>(
-            std::move(archive_vec_[core_id]));
-        archive_vec_[core_id] = std::vector<FlushRecord>();
-        archive_vec_[core_id].resize(scan_batch_size_);
-        return moved;
     }
 
     std::vector<size_t> &MoveBaseIdxVec(uint16_t core_id)
@@ -4952,18 +4938,19 @@ private:
 struct ReleaseDataSyncScanHeapCc : public CcRequestBase
 {
 public:
-    static const size_t VEC_ERASE_BATCH_SIZE = 1000;
+    static constexpr size_t VEC_ERASE_BATCH_SIZE = 1000;
 
-    explicit ReleaseDataSyncScanHeapCc(
-        size_t core_cnt,
-        std::vector<std::unique_ptr<std::vector<FlushRecord>>>
-            data_sync_vec_per_core,
-        std::vector<std::unique_ptr<std::vector<FlushRecord>>>
-            archive_vec_per_core)
+    ReleaseDataSyncScanHeapCc(size_t core_cnt,
+                              std::vector<FlushRecord> *data_sync_vec,
+                              std::vector<FlushRecord> *archive_vec)
         : pending_shard_(core_cnt),
-          data_sync_vec_per_core_(std::move(data_sync_vec_per_core)),
-          archive_vec_per_core_(std::move(archive_vec_per_core))
+          data_sync_vec_(data_sync_vec),
+          archive_vec_(archive_vec)
     {
+#ifdef RANGE_PARTITION_ENABLED
+        data_sync_paused_pos_.resize(pending_shard_, 0);
+        archive_paused_pos_.resize(pending_shard_, 0);
+#endif
     }
 
     bool Execute(CcShard &ccs) override
@@ -4972,74 +4959,106 @@ public:
         // memory freed can be directly refelct to the mi stats allocated and
         // committed, otherwise the the stats updates will delayed to next
         // allocation
-        if (data_sync_vec_per_core_.size() != 0)
-        {
 #ifdef RANGE_PARTITION_ENABLED
-            auto &data_sync_vec = data_sync_vec_per_core_[ccs.core_id_];
-#else
-            auto &data_sync_vec = data_sync_vec_per_core_[0];
-#endif
-            if (data_sync_vec != nullptr)
+        size_t count = 0;
+        auto &data_sync_paused_pos = data_sync_paused_pos_[ccs.core_id_];
+        while (data_sync_vec_ != nullptr &&
+               data_sync_paused_pos < data_sync_vec_->size() &&
+               count < VEC_ERASE_BATCH_SIZE)
+        {
+            auto &ref = data_sync_vec_->at(data_sync_paused_pos);
+            if (((ref.Key().Hash() & 0x3FF) % ccs.core_cnt_) == ccs.core_id_)
             {
-                // to avoid large jitter when releasing big memory chunck,
-                // we release memory incremently in batch
-                size_t vec_size = data_sync_vec->size();
-                if (vec_size != 0)
-                {
-                    CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
-                    mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
-                    if (vec_size > VEC_ERASE_BATCH_SIZE)
-                    {
-                        data_sync_vec->resize(vec_size - VEC_ERASE_BATCH_SIZE);
-                    }
-                    else
-                    {
-                        data_sync_vec->resize(0);
-                    }
-                    data_sync_vec->shrink_to_fit();
-                    mi_heap_set_default(prev_heap);
+#ifndef ONE_KEY_OBJECT
+                ref.ReleasePayload();
+#endif
+            }
+            ++data_sync_paused_pos;
+            ++count;
+        }
+        if (data_sync_vec_ != nullptr &&
+            data_sync_paused_pos < data_sync_vec_->size())
+        {
+            ccs.Enqueue(this);
+            return false;
+        }
 
-                    if (data_sync_vec->size() != 0)
-                    {
-                        ccs.Enqueue(this);
-                        return false;
-                    }
+        count = 0;
+        auto &archive_paused_pos = archive_paused_pos_[ccs.core_id_];
+        while (archive_vec_ != nullptr &&
+               archive_paused_pos < archive_vec_->size() &&
+               count < VEC_ERASE_BATCH_SIZE)
+        {
+            auto &ref = archive_vec_->at(archive_paused_pos);
+            if (((ref.Key().Hash() & 0x3FF) % ccs.core_cnt_) == ccs.core_id_)
+            {
+#ifndef ONE_KEY_OBJECT
+                ref.ReleasePayload();
+#endif
+            }
+            ++archive_paused_pos;
+            ++count;
+        }
+        if (archive_vec_ != nullptr &&
+            archive_paused_pos < archive_vec_->size())
+        {
+            ccs.Enqueue(this);
+            return false;
+        }
+#else
+        if (data_sync_vec_ != nullptr && data_sync_vec_->size() != 0)
+        {
+            // to avoid large jitter when releasing big memory chunck,
+            // we release memory incremently in batch
+            size_t vec_size = data_sync_vec_->size();
+            if (vec_size != 0)
+            {
+                CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
+                mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+                if (vec_size > VEC_ERASE_BATCH_SIZE)
+                {
+                    data_sync_vec_->resize(vec_size - VEC_ERASE_BATCH_SIZE);
+                }
+                else
+                {
+                    data_sync_vec_->resize(0);
+                }
+                data_sync_vec_->shrink_to_fit();
+                mi_heap_set_default(prev_heap);
+
+                if (data_sync_vec_->size() != 0)
+                {
+                    ccs.Enqueue(this);
+                    return false;
                 }
             }
         }
 
-        if (archive_vec_per_core_.size() != 0)
+        if (archive_vec_ != nullptr && archive_vec_->size() != 0)
         {
-#ifdef RANGE_PARTITION_ENABLED
-            auto &archive_vec = archive_vec_per_core_[ccs.core_id_];
-#else
-            auto &archive_vec = archive_vec_per_core_[0];
-#endif
-            if (archive_vec != nullptr)
+            size_t vec_size = archive_vec_->size();
+            if (vec_size != 0)
             {
-                size_t vec_size = archive_vec->size();
-                if (vec_size != 0)
+                CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
+                mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+                if (vec_size > VEC_ERASE_BATCH_SIZE)
                 {
-                    CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
-                    mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
-                    if (vec_size > VEC_ERASE_BATCH_SIZE)
-                    {
-                        archive_vec->resize(vec_size - VEC_ERASE_BATCH_SIZE);
-                    }
-                    else
-                    {
-                        archive_vec->resize(0);
-                    }
-                    mi_heap_set_default(prev_heap);
+                    archive_vec_->resize(vec_size - VEC_ERASE_BATCH_SIZE);
+                }
+                else
+                {
+                    archive_vec_->resize(0);
+                }
+                mi_heap_set_default(prev_heap);
 
-                    if (archive_vec->size() != 0)
-                    {
-                        ccs.Enqueue(this);
-                        return false;
-                    }
+                if (archive_vec_->size() != 0)
+                {
+                    ccs.Enqueue(this);
+                    return false;
                 }
             }
         }
+#endif
 
         {
             std::lock_guard<std::mutex> lk(mux_);
@@ -5065,10 +5084,12 @@ public:
     std::mutex mux_;
     std::condition_variable cv_;
     size_t pending_shard_;
-    std::vector<std::unique_ptr<std::vector<FlushRecord>>>
-        data_sync_vec_per_core_;
-    std::vector<std::unique_ptr<std::vector<FlushRecord>>>
-        archive_vec_per_core_;
+    std::vector<FlushRecord> *const data_sync_vec_{nullptr};
+    std::vector<FlushRecord> *const archive_vec_{nullptr};
+#ifdef RANGE_PARTITION_ENABLED
+    std::vector<size_t> data_sync_paused_pos_;
+    std::vector<size_t> archive_paused_pos_;
+#endif
 };
 
 struct PostFlushDataCc : public CcRequestBase
