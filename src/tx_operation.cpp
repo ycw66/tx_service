@@ -6011,13 +6011,11 @@ ObjectCommandOp::ObjectCommandOp(
 }
 
 void ObjectCommandOp::Reset(const TableName *table_name,
-                            const ObjectTableOption *table_option,
                             const TxKey *key,
                             TxCommand *command,
                             bool auto_commit)
 {
     table_name_ = table_name;
-    table_option_ = table_option;
     key_ = key;
     command_ = command;
     hd_result_.Reset();
@@ -6419,7 +6417,6 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             key_shard_code = vct_key_shard_code_[i].first;
 #endif
             bool commit = false;
-            bool skip_kv = !tx_req_->table_option_->enable_data_store_;
             txm->cc_handler_->ObjectCommand(
                 *tx_req_->table_name_,
                 key,
@@ -6432,8 +6429,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 hd_res,
                 txm->iso_level_,
                 txm->protocol_,
-                commit,
-                skip_kv);
+                commit);
 
             if (hd_res.Value().is_local_)
             {

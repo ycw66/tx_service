@@ -1771,18 +1771,6 @@ private:
                                  size_t worker_idx);
 #endif
 
-    // If one table is a prebuilt table, it means that its enable_data_store
-    // option is disabled.
-    bool PrebuiltTable(const TableName &table_name) const
-    {
-        auto it = prebuilt_tables_.find(table_name);
-        if (it != prebuilt_tables_.end())
-        {
-            return !it->second.empty();
-        }
-        return false;
-    }
-
     const uint32_t node_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
@@ -1856,10 +1844,6 @@ private:
     std::atomic_bool buckets_migrating_{false};
 #endif
 
-    // If enable_data_store is disabled for one table, its catalog needs to be
-    // created at launch or on_leader_start. enable_data_store option comes from
-    // configuration instead of table schema, hence we need a separate place to
-    // store this information.
     std::unordered_map<TableName, std::string> prebuilt_tables_;
 
     TxService *tx_service_;

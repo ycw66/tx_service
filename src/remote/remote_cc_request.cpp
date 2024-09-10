@@ -787,7 +787,6 @@ void txservice::remote::RemoteScanOpen::Reset(
     snapshot_ts_ = scan_open.ts();
 
 #ifdef ON_KEY_OBJECT
-    is_skip_kv_ = scan_open.is_skip_kv();
     obj_type_ = scan_open.obj_type();
     scan_pattern_ = scan_open.scan_pattern();
 #endif
@@ -965,7 +964,6 @@ void txservice::remote::RemoteScanNextBatch::Reset(
                            cce_addr.core_id());
 
 #ifdef ON_KEY_OBJECT
-    is_skip_kv_ = scan_next.is_skip_kv();
     obj_type_ = scan_next.obj_type();
     scan_pattern_ = scan_next.scan_pattern();
 #endif
@@ -1881,8 +1879,7 @@ void txservice::remote::RemoteApplyCc::Reset(
                    &cc_res_,
                    ToLocalType::ConvertProtocol(req.protocol()),
                    ToLocalType::ConvertIsolation(req.iso_level()),
-                   req.apply_and_commit(),
-                   req.skip_kv());
+                   req.apply_and_commit());
 
     input_msg_ = std::move(input_msg);
 

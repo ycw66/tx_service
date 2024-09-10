@@ -568,8 +568,6 @@ public:
                           uint64_t last_vali_ts,
                           const TxKey *key,
                           const TxCommand *cmd,
-                          bool object_modified,
-                          bool enable_wal,
                           uint32_t forward_key_shard = UINT32_MAX)
     {
 #ifdef ON_KEY_OBJECT
@@ -591,26 +589,20 @@ public:
         CmdSetEntry &entry = cce_it->second;
         assert(cce_version >= entry.object_version_);
         entry.object_version_ = cce_version;
-
-        if (object_modified)
+        if (cmd != nullptr)
         {
-            entry.object_modified_ = object_modified;
+            // The command modifies the object. Put it into the command
+            // set for writing log and post-processing. If the command
+            // fails, only to release the write lock.
+            entry.AddCommand(cmd);
 
-            if (enable_wal)
+            if (forward_key_shard != UINT32_MAX &&
+                entry.forward_entry_ == nullptr)
             {
-                // The command modifies the object. Put it into the command
-                // set for writing log and post-processing. If the command
-                // fails, only to release the write lock.
-                entry.AddCommand(cmd);
-
-                if (forward_key_shard != UINT32_MAX &&
-                    entry.forward_entry_ == nullptr)
-                {
-                    assert(cmd != nullptr);
-                    entry.forward_entry_ = std::make_unique<CmdForwardEntry>(
-                        key->Clone(), forward_key_shard);
-                    need_forward_cmd_cnt_++;
-                }
+                assert(cmd != nullptr);
+                entry.forward_entry_ = std::make_unique<CmdForwardEntry>(
+                    key->Clone(), forward_key_shard);
+                need_forward_cmd_cnt_++;
             }
         }
 #endif

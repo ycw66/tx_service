@@ -867,23 +867,28 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
 
 void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id, int64_t term)
 {
-    for (auto &[table, image] : prebuilt_tables_)
+    if (txservice_skip_kv)
     {
-        if (image.empty())
+        for (const auto &[table, image] : prebuilt_tables_)
+        {
+            auto table_it = table_catalogs_.try_emplace(table);
+            auto ng_it = table_it.first->second.try_emplace(ng_id);
+            if (ng_it.second)
+            {
+                ng_it.first->second.InitSchema(
+                    catalog_factory_->CreateTableSchema(table, image, 2), 2);
+            }
+        }
+    }
+    else
+    {
+        for (const auto &[table, image] : prebuilt_tables_)
         {
             // FetchCatalog from data store
             for (auto &shard : cc_shards_)
             {
                 shard->FetchCatalog(table, ng_id, term, nullptr);
             }
-            continue;
-        }
-        auto table_it = table_catalogs_.try_emplace(table);
-        auto ng_it = table_it.first->second.try_emplace(ng_id);
-        if (ng_it.second)
-        {
-            ng_it.first->second.InitSchema(
-                catalog_factory_->CreateTableSchema(table, image, 2), 2);
         }
     }
 }

@@ -621,9 +621,8 @@ message ScanOpenRequest {
     CcProtocolType protocol = 13;
     bool is_for_write = 14;
     bool is_covering_keys = 15;
-    bool is_skip_kv = 16;
-    int32 obj_type = 17; // Only used for redis scan command
-    string scan_pattern = 18; // Only used for redis scan command
+    int32 obj_type = 16; // Only used for redis scan command
+    string scan_pattern = 17; // Only used for redis scan command
 }
 
 message ScanCache_msg {
@@ -648,9 +647,8 @@ message ScanNextRequest {
     CcProtocolType protocol = 9;
     bool is_for_write = 10;
     bool is_covering_keys = 11;
-    bool is_skip_kv = 12;
-    int32 obj_type = 13; // Only used for redis scan command
-    string scan_pattern = 14; // Only used for redis scan command
+    int32 obj_type = 12; // Only used for redis scan command
+    string scan_pattern = 13; // Only used for redis scan command
 }
 
 message ScanNextResponse {
@@ -904,7 +902,6 @@ message ApplyRequest {
     IsolationType iso_level = 8;
     CcProtocolType protocol = 9;
     bool apply_and_commit = 10;
-    bool skip_kv = 11;
 }
 
 message ApplyResponse {

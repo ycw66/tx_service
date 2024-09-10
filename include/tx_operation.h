@@ -1052,14 +1052,12 @@ struct ObjectCommandOp : TransactionOperation
         TransactionExecution *txm,
         CcHandlerResult<ReadKeyResult> *lock_range_bucket_result = nullptr);
     void Reset(const TableName *table_name,
-               const ObjectTableOption *table_option,
                const TxKey *key,
                TxCommand *command,
                bool auto_commit = false);
     void Forward(TransactionExecution *txm) override;
 
     const TableName *table_name_{};
-    const ObjectTableOption *table_option_{};
     const TxKey *key_{};
     TxCommand *command_{};
 

@@ -179,7 +179,7 @@ void TransactionExecution::Reset()
         ReleaseCatalogsRead();
     }
 #endif
-    obj_cmd_.Reset(nullptr, nullptr, nullptr, nullptr);
+    obj_cmd_.Reset(nullptr, nullptr, nullptr);
 
     acquire_write_.Reset(0, 0);
     set_ts_.Reset();
@@ -926,8 +926,7 @@ void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
     rec_resp_ = &req.tx_result_;
     TxCommand *command = req.Command();
     const TxKey *key = req.Key();
-    obj_cmd_.Reset(
-        req.table_name_, req.table_option_, key, command, req.auto_commit_);
+    obj_cmd_.Reset(req.table_name_, key, command, req.auto_commit_);
 
     PushOperation(&obj_cmd_);
     Process(obj_cmd_);
@@ -2115,7 +2114,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               is_require_sort
 #ifdef ON_KEY_OBJECT
                               ,
-                              scan_open.tx_req_->is_skip_kv_,
                               scan_open.tx_req_->obj_type_,
                               scan_open.tx_req_->scan_pattern_
 #endif
@@ -2281,7 +2279,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 scan_next.hd_result_
 #ifdef ON_KEY_OBJECT
                 ,
-                scan_next.tx_req_->is_skip_kv_,
                 scan_next.tx_req_->obj_type_,
                 scan_next.tx_req_->scan_pattern_
 #endif
@@ -5926,12 +5923,10 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     }
 #endif
 
-    // Directly commit the new value to the object if autocommit and
-    // skip_wal are both set, on contrary to acquiring lock and committing
-    // the command in postprocess.
-    bool commit =
-        obj_cmd_op.auto_commit_ && !obj_cmd_op.table_option_->enable_wal_;
-    bool skip_kv = !obj_cmd_op.table_option_->enable_data_store_;
+    // Directly commit the new value to the object if autocommit and skip_wal
+    // are both set, on contrary to acquiring lock and committing the command in
+    // postprocess.
+    bool commit = obj_cmd_op.auto_commit_ && txservice_skip_wal;
     cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
                                *obj_cmd_op.key_,
                                key_shard_code,
@@ -5943,8 +5938,7 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
                                hd_res,
                                iso_level_,
                                protocol_,
-                               commit,
-                               skip_kv);
+                               commit);
 
     StartTiming();
 }
@@ -5980,10 +5974,9 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const ObjectCommandResult &cmd_result = hd_result.Value();
         RecordStatus obj_status = cmd_result.rec_status_;
         LockType lock_acquired = cmd_result.lock_acquired_;
+        bool object_modified = cmd_result.object_modified_;
         const TxCommand *cmd = obj_cmd_op.command_;
         const TableName *table_name = obj_cmd_op.table_name_;
-        const ObjectTableOption *table_option = obj_cmd_op.table_option_;
-        bool object_modified = cmd_result.object_modified_;
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
         uint64_t commit_ts = cmd_result.commit_ts_;
         uint64_t last_vali_ts = cmd_result.last_vali_ts_;
@@ -6009,11 +6002,9 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                                          commit_ts,
                                          last_vali_ts,
                                          obj_cmd_.key_,
-                                         retire_command.get(),
-                                         object_modified,
-                                         table_option->enable_wal_
+                                         retire_command.get()
 #ifndef RANGE_PARTITION_ENABLED
-                                         ,
+                                             ,
                                          obj_cmd_op.forward_key_shard_
 #endif
                 );
@@ -6021,17 +6012,16 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             // The command modifies the object. Put it into the command set
             // for writing log and post-processing. If the command fails, only
             // to release the write lock.
-            rw_set_.AddObjectCommand(*table_name,
-                                     cce_addr,
-                                     commit_ts,
-                                     last_vali_ts,
-                                     obj_cmd_op.key_,
-                                     obj_cmd_op.command_,
-                                     object_modified,
-                                     table_option->enable_wal_
+            rw_set_.AddObjectCommand(
+                *table_name,
+                cce_addr,
+                commit_ts,
+                last_vali_ts,
+                obj_cmd_op.key_,
+                object_modified ? obj_cmd_op.command_ : nullptr
 #ifndef RANGE_PARTITION_ENABLED
-                                     ,
-                                     obj_cmd_op.forward_key_shard_
+                ,
+                obj_cmd_op.forward_key_shard_
 #endif
             );
 
@@ -6084,8 +6074,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // For autocommit read-modify-write commands, the ObjectCommandTxRequest
         // sender will be notified after auto commit succeeds, i.e. after
         // PostProcess or WriteLog.
-        bool already_committed =
-            obj_cmd_op.auto_commit_ && !obj_cmd_op.table_option_->enable_wal_;
+        bool already_committed = obj_cmd_op.auto_commit_ && txservice_skip_wal;
 
         // Whether we should notify the request sender.
         if (!obj_cmd_op.auto_commit_ || already_committed || cmd->IsReadOnly())
@@ -6277,9 +6266,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 #endif
         // NOTICE: For MultiObjectCommand, must not commit commands in ApplyCc
         hd_res.Reset();
-
         bool commit = false;
-        bool skip_kv = !obj_cmd_op.tx_req_->table_option_->enable_data_store_;
         cc_handler_->ObjectCommand(*req->table_name_,
                                    key,
                                    key_shard_code,
@@ -6291,8 +6278,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
                                    hd_res,
                                    iso,
                                    protocol_,
-                                   commit,
-                                   skip_kv);
+                                   commit);
 
         if (hd_res.Value().is_local_)
         {
@@ -6342,7 +6328,6 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
     }
 #endif
     MultiObjectCommandTxRequest *req = obj_cmd_op.tx_req_;
-    bool enable_wal = req->table_option_->enable_wal_;
     const std::vector<TxKey> *vct_key = req->VctKey();
     const std::vector<TxCommand *> *vct_cmd = req->VctCommand();
 
@@ -6356,15 +6341,12 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
             // Add the locked objects into read write set for future unlock.
             if (cmd_res.lock_acquired_ == LockType::WriteLock)
             {
-                constexpr bool object_modified = false;
                 rw_set_.AddObjectCommand(*req->table_name_,
                                          cmd_res.cce_addr_,
                                          cmd_res.commit_ts_,
                                          cmd_res.last_vali_ts_,
                                          &vct_key->at(i),
-                                         vct_cmd->at(i),
-                                         object_modified,
-                                         enable_wal);
+                                         nullptr);
             }
             else if (cmd_res.lock_acquired_ != LockType::NoLock &&
                      !rw_set_.FindObjectCommand(*req->table_name_,
@@ -6421,11 +6403,9 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                             cmd_res.commit_ts_,
                             cmd_res.last_vali_ts_,
                             &vct_key->at(i),
-                            retire_command.get(),
-                            cmd_res.object_modified_,
-                            enable_wal
+                            retire_command.get()
 #ifndef RANGE_PARTITION_ENABLED
-                            ,
+                                ,
                             obj_cmd_op.vct_key_shard_code_[i].second
 #endif
                         );
@@ -6439,9 +6419,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         cmd_res.commit_ts_,
                         cmd_res.last_vali_ts_,
                         &vct_key->at(i),
-                        vct_cmd->at(i),
-                        cmd_res.object_modified_,
-                        enable_wal
+                        cmd_res.object_modified_ ? vct_cmd->at(i) : nullptr
 #ifndef RANGE_PARTITION_ENABLED
                         ,
                         obj_cmd_op.vct_key_shard_code_[i].second

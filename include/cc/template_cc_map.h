@@ -2321,8 +2321,7 @@ public:
             if (FilterRecord(key_ptr,
                              cce,
                              req.GetRedisObjectType(),
-                             req.GetRedisScanPattern(),
-                             req.IsSkipKv()))
+                             req.GetRedisScanPattern()))
             {
 #endif
                 if (scan_type != ScanType::ScanGap)
@@ -2397,8 +2396,7 @@ public:
                 if (!FilterRecord(key_ptr,
                                   cce,
                                   req.GetRedisObjectType(),
-                                  req.GetRedisScanPattern(),
-                                  req.IsSkipKv()))
+                                  req.GetRedisScanPattern()))
                 {
                     continue;
                 }
@@ -2471,8 +2469,7 @@ public:
                 if (!FilterRecord(key_ptr,
                                   cce,
                                   req.GetRedisObjectType(),
-                                  req.GetRedisScanPattern(),
-                                  req.IsSkipKv()))
+                                  req.GetRedisScanPattern()))
                 {
                     continue;
                 }
@@ -2707,8 +2704,7 @@ public:
                 if (!FilterRecord(key,
                                   cce,
                                   req.GetRedisObjectType(),
-                                  req.GetRedisScanPattern(),
-                                  req.IsSkipKv()))
+                                  req.GetRedisScanPattern()))
                 {
                     continue;
                 }
@@ -2801,8 +2797,7 @@ public:
                     if (!FilterRecord(key,
                                       cce,
                                       req.GetRedisObjectType(),
-                                      req.GetRedisScanPattern(),
-                                      req.IsSkipKv()))
+                                      req.GetRedisScanPattern()))
                     {
                         continue;
                     }
@@ -3138,8 +3133,7 @@ public:
             if (FilterRecord(key_ptr,
                              cce,
                              req.GetRedisObjectType(),
-                             req.GetRedisScanPattern(),
-                             req.IsSkipKv()))
+                             req.GetRedisScanPattern()))
             {
 #endif
                 if (scan_type != ScanType::ScanGap)
@@ -3221,8 +3215,7 @@ public:
                 if (!FilterRecord(key_ptr,
                                   cce,
                                   req.GetRedisObjectType(),
-                                  req.GetRedisScanPattern(),
-                                  req.IsSkipKv()))
+                                  req.GetRedisScanPattern()))
                 {
                     continue;
                 }
@@ -3302,8 +3295,7 @@ public:
                 if (!FilterRecord(key_ptr,
                                   cce,
                                   req.GetRedisObjectType(),
-                                  req.GetRedisScanPattern(),
-                                  req.IsSkipKv()))
+                                  req.GetRedisScanPattern()))
                 {
                     continue;
                 }
@@ -3529,8 +3521,7 @@ public:
                 if (!FilterRecord(key,
                                   cce,
                                   req.GetRedisObjectType(),
-                                  req.GetRedisScanPattern(),
-                                  req.IsSkipKv()))
+                                  req.GetRedisScanPattern()))
                 {
                     continue;
                 }
@@ -3622,8 +3613,7 @@ public:
                     if (!FilterRecord(key,
                                       cce,
                                       req.GetRedisObjectType(),
-                                      req.GetRedisScanPattern(),
-                                      req.IsSkipKv()))
+                                      req.GetRedisScanPattern()))
                     {
                         continue;
                     }
@@ -10113,8 +10103,7 @@ protected:
     virtual bool FilterRecord(const KeyT *key,
                               const CcEntry<KeyT, ValueT> *cce,
                               int32_t obj_type,
-                              const std::string_view &scan_pattern,
-                              bool is_skip_kv)
+                              const std::string_view &scan_pattern)
     {
         return true;
     }
