@@ -916,8 +916,22 @@ void txservice::LocalCcHandler::ScanOpen(
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
     open_result.Reset(ng_cnt);
     size_t core_cnt = cc_shards_.Count();
+
     // A scan sends requests to local cores and remote cc nodes.
-    uint32_t dependent_cnt = ng_cnt - 1 + core_cnt;
+    uint32_t dependent_cnt = 0;
+    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    {
+        uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
+        if (node_id == cc_shards_.node_id_)
+        {
+            dependent_cnt += core_cnt;
+        }
+        else
+        {
+            // remote
+            dependent_cnt++;
+        }
+    }
     hd_res.SetRefCnt(dependent_cnt);
 
     for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
