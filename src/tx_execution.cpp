@@ -114,7 +114,6 @@ void TransactionExecution::Reset()
     cache_miss_read_cce_addr_.SetCce(0, -1, 0, 0);
     state_stack_.clear();
     txid_.Reset();
-    tx_term_ = -1;
     commit_ts_ = UINT64_MAX;
     commit_ts_bound_ = 0;
     rw_set_.Reset();
@@ -194,6 +193,7 @@ void TransactionExecution::Reset()
     fault_inject_op_.Reset();
     clean_entry_op_.Reset();
     abundant_lock_op_.Reset();
+    tx_term_ = -1;
 }
 
 void TransactionExecution::Restart(CcHandler *handler,
@@ -319,6 +319,17 @@ void TransactionExecution::ClearCachedBucketInfos()
 
 void TransactionExecution::ReleaseCatalogsRead()
 {
+    NodeGroupId ng_id = TxCcNodeId();
+    if (!Sharder::Instance().CheckLeaderTerm(ng_id, TxTerm()))
+    {
+        for (auto &db_idx : locked_db_)
+        {
+            db_idx = nullptr;
+        }
+
+        return;
+    }
+
     for (auto &db_idx : locked_db_)
     {
         if (db_idx != nullptr)
