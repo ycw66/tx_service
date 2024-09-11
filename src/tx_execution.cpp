@@ -184,7 +184,7 @@ void TransactionExecution::Reset()
     set_ts_.Reset();
     validate_.Reset(0);
     update_txn_.Reset();
-    post_process_.Reset(0, 0, 0);
+    post_process_.Reset(0, 0, 0, true);
     write_log_.Reset();
 
     analyze_table_all_op_.Reset(0);
@@ -3245,15 +3245,9 @@ void TransactionExecution::Abort()
         return;
     }
 
-    bool is_recovering = TxStatus() == TxnStatus::Recovering;
+    bool need_update_tentry = TxStatus() != TxnStatus::Recovering;
     tx_status_.store(TxnStatus::Aborted, std::memory_order_relaxed);
 
-    if (!is_recovering)
-    {
-        PushOperation(&update_txn_);
-        Process(update_txn_);
-    }
-    else
     {
         // No need to update txn status since we did not assign
         // TEntry for recovering tx.
@@ -3285,7 +3279,8 @@ void TransactionExecution::Abort()
 #endif
         post_process_.Reset(acquire_write_cnt,
                             rw_set_.ReadSetSize(),
-                            rw_set_.CatalogRangeSetSize());
+                            rw_set_.CatalogRangeSetSize(),
+                            need_update_tentry);
         PushOperation(&post_process_);
         Process(post_process_);
     }
@@ -3771,16 +3766,10 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
             }
             else
             {
-                bool is_recovering = TxStatus() == TxnStatus::Recovering;
+                bool need_update_tentry = TxStatus() != TxnStatus::Recovering;
                 tx_status_.store(TxnStatus::Committed,
                                  std::memory_order_relaxed);
 
-                if (!is_recovering)
-                {
-                    PushOperation(&update_txn_);
-                    Process(update_txn_);
-                }
-                else
                 {
                     // No need to update txn status since we did not assign
                     // TEntry for recovering tx.
@@ -3789,8 +3778,10 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
 #ifdef ON_KEY_OBJECT
                     acquire_write_cnt += rw_set_.ObjectCntWithWriteLock();
 #endif
-                    post_process_.Reset(
-                        acquire_write_cnt, 0, rw_set_.CatalogRangeSetSize());
+                    post_process_.Reset(acquire_write_cnt,
+                                        0,
+                                        rw_set_.CatalogRangeSetSize(),
+                                        need_update_tentry);
                     PushOperation(&post_process_);
                     Process(post_process_);
                 }
@@ -3954,7 +3945,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
         }
         else
         {
-            bool is_recovering = TxStatus() == TxnStatus::Recovering;
+            bool need_update_tentry = TxStatus() != TxnStatus::Recovering;
             tx_status_.store(TxnStatus::Committed, std::memory_order_relaxed);
 
             // This is either a read-only tx or a tx that acquires write lock on
@@ -3968,12 +3959,6 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
                 bool_resp_ = nullptr;
             }
 
-            if (!is_recovering)
-            {
-                PushOperation(&update_txn_);
-                Process(update_txn_);
-            }
-            else
             {
                 // No need to update txn status since we did not assign TEntry
                 // for recovering tx.
@@ -3981,7 +3966,8 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
                                         rw_set_.ForwardWriteCnt() +
                                         rw_set_.ObjectCntWithWriteLock(),
                                     0,
-                                    rw_set_.CatalogRangeSetSize());
+                                    rw_set_.CatalogRangeSetSize(),
+                                    need_update_tentry);
                 PushOperation(&post_process_);
                 Process(post_process_);
             }
@@ -4413,6 +4399,11 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
 
     if (state_stack_.empty())
     {
+        // Only multi stage op has recovering status
+        bool need_update_tentry = TxStatus() != TxnStatus::Recovering;
+        assert(need_update_tentry &&
+               "Only multi stage op has recovering status");
+
         if (!log_op->hd_result_.IsError())
         {
             tx_status_.store(TxnStatus::Committed, std::memory_order_relaxed);
@@ -4476,8 +4467,38 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                 tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             }
         }
-        PushOperation(&update_txn_);
-        Process(update_txn_);
+
+        uint32_t acquire_write_cnt =
+            rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
+        TxnStatus status = TxStatus();
+        if (status == TxnStatus::Committed)
+        {
+            // The tx is committed. The tx must have finished validation.
+            // Post-processing includes both primary keys that have locks and
+            // secondary keys without locks.
+            post_process_.Reset(
+                acquire_write_cnt + rw_set_.ObjectCntWithWriteLock(),
+                0,
+                rw_set_.CatalogRangeSetSize(),
+                need_update_tentry);
+        }
+        else if (status == TxnStatus::Aborted)
+        {
+            post_process_.Reset(
+                acquire_write_cnt + rw_set_.ObjectCntWithWriteLock(),
+                rw_set_.ReadSetSize(),
+                rw_set_.CatalogRangeSetSize(),
+                need_update_tentry);
+        }
+        else if (status == TxnStatus::Unknown)
+        {
+            post_process_.Reset(0,
+                                rw_set_.ReadSetSize(),
+                                rw_set_.CatalogRangeSetSize(),
+                                need_update_tentry);
+        }
+        PushOperation(&post_process_);
+        Process(post_process_);
     }
     else
     {
@@ -4518,60 +4539,46 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    state_stack_.pop_back();
 
-    uint32_t acquire_write_cnt =
-        rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
-    // If the lock range failed, the acquire write operation will not be
-    // executed at all. Therefore, should first check whether the acquire write
-    // operation has been executed.
-    if (acquire_write_cnt > 0 && acquire_write_.hd_result_.IsFinished() &&
-        acquire_write_.hd_result_.IsError())
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    if (bool_resp_ != nullptr && bool_resp_ != &commit_tx_req_->tx_result_)
     {
-        std::vector<AcquireKeyResult> &acquire_key_vec =
-            acquire_write_.hd_result_.Value();
-        size_t error_cnt = 0;
-        for (const AcquireKeyResult &acq_key : acquire_key_vec)
+        if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
         {
-            if (acq_key.cce_addr_.Term() < 0)
-            {
-                ++error_cnt;
-            }
+            bool_resp_->Finish(true);
         }
-        acquire_write_cnt -= error_cnt;
+        else
+        {
+            bool_resp_->Finish(false);
+        }
     }
-#ifdef RANGE_PARTITION_ENABLED
-    else if (lock_write_ranges_.lock_range_result_->IsError())
+#ifdef ON_KEY_OBJECT
+    else if (rec_resp_ != nullptr)
     {
-        acquire_write_cnt = 0;
+        // auto committed ObjectCommandTxRequest
+        rec_resp_->Finish(obj_cmd_.hd_result_.Value().rec_status_);
+        rec_resp_ = nullptr;
+    }
+    else if (vct_rec_resp_ != nullptr)
+    {
+        // auto committed MultiObjectCommandTxRequest
+        std::vector<RecordStatus> vct_rec;
+        vct_rec.reserve(multi_obj_cmd_.vct_hd_result_.size());
+        for (const auto &hresult : multi_obj_cmd_.vct_hd_result_)
+        {
+            vct_rec.push_back(hresult.Value().rec_status_);
+        }
+
+        vct_rec_resp_->Finish(std::move(vct_rec));
+        vct_rec_resp_ = nullptr;
     }
 #endif
+    // transaction can be recycled and put into free list.
+    tx_status_.store(TxnStatus::Finished, std::memory_order_release);
 
-    TxnStatus status = TxStatus();
-    if (status == TxnStatus::Committed)
-    {
-        // The tx is committed. The tx must have finished validation.
-        // Post-processing includes both primary keys that have locks and
-        // secondary keys without locks.
-        post_process_.Reset(
-            acquire_write_cnt + rw_set_.ObjectCntWithWriteLock(),
-            0,
-            rw_set_.CatalogRangeSetSize());
-    }
-    else if (status == TxnStatus::Aborted)
-    {
-        post_process_.Reset(
-            acquire_write_cnt + rw_set_.ObjectCntWithWriteLock(),
-            rw_set_.ReadSetSize(),
-            rw_set_.CatalogRangeSetSize());
-    }
-    else if (status == TxnStatus::Unknown)
-    {
-        post_process_.Reset(
-            0, rw_set_.ReadSetSize(), rw_set_.CatalogRangeSetSize());
-    }
-    PushOperation(&post_process_);
-    Process(post_process_);
+    Reset();
 }
 
 void TransactionExecution::Process(PostProcessOp &post_process)
@@ -4876,42 +4883,55 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
     }
     assert(state_stack_.empty());
 
-    if (bool_resp_ != nullptr && bool_resp_ != &commit_tx_req_->tx_result_)
+    if (post_process.forward_to_update_txn_op_)
     {
-        if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
-        {
-            bool_resp_->Finish(true);
-        }
-        else
-        {
-            bool_resp_->Finish(false);
-        }
+        PushOperation(&update_txn_);
+        Process(update_txn_);
     }
+    else
+    {
+        // For recover tx commit, commit_ts is already determined and
+        // we don't need to update TEntry since it is not assigned for
+        // a recovering tx.
+
+        if (bool_resp_ != nullptr && bool_resp_ != &commit_tx_req_->tx_result_)
+        {
+            if (tx_status_.load(std::memory_order_relaxed) ==
+                TxnStatus::Committed)
+            {
+                bool_resp_->Finish(true);
+            }
+            else
+            {
+                bool_resp_->Finish(false);
+            }
+        }
 #ifdef ON_KEY_OBJECT
-    else if (rec_resp_ != nullptr)
-    {
-        // auto committed ObjectCommandTxRequest
-        rec_resp_->Finish(obj_cmd_.hd_result_.Value().rec_status_);
-        rec_resp_ = nullptr;
-    }
-    else if (vct_rec_resp_ != nullptr)
-    {
-        // auto committed MultiObjectCommandTxRequest
-        std::vector<RecordStatus> vct_rec;
-        vct_rec.reserve(multi_obj_cmd_.vct_hd_result_.size());
-        for (const auto &hresult : multi_obj_cmd_.vct_hd_result_)
+        else if (rec_resp_ != nullptr)
         {
-            vct_rec.push_back(hresult.Value().rec_status_);
+            // auto committed ObjectCommandTxRequest
+            rec_resp_->Finish(obj_cmd_.hd_result_.Value().rec_status_);
+            rec_resp_ = nullptr;
         }
+        else if (vct_rec_resp_ != nullptr)
+        {
+            // auto committed MultiObjectCommandTxRequest
+            std::vector<RecordStatus> vct_rec;
+            vct_rec.reserve(multi_obj_cmd_.vct_hd_result_.size());
+            for (const auto &hresult : multi_obj_cmd_.vct_hd_result_)
+            {
+                vct_rec.push_back(hresult.Value().rec_status_);
+            }
 
-        vct_rec_resp_->Finish(std::move(vct_rec));
-        vct_rec_resp_ = nullptr;
-    }
+            vct_rec_resp_->Finish(std::move(vct_rec));
+            vct_rec_resp_ = nullptr;
+        }
 #endif
-    // transaction can be recycled and put into free list.
-    tx_status_.store(TxnStatus::Finished, std::memory_order_release);
+        // transaction can be recycled and put into free list.
+        tx_status_.store(TxnStatus::Finished, std::memory_order_release);
 
-    Reset();
+        Reset();
+    }
 }
 
 void TransactionExecution::Process(AcquireAllOp &acq_all_op)

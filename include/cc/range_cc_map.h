@@ -711,7 +711,7 @@ public:
         if (ng_term < 0)
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return false;
+            return true;
         }
 
         // restore the SplitRangeOpMessage
@@ -791,6 +791,18 @@ public:
             assert(it->first);
             old_range_cce = it->second;
             old_range_page = it.GetPage();
+        }
+
+        if (shard_->core_id_ == 0 && is_coordinator)
+        {
+            if (old_range_cce != nullptr &&
+                old_range_cce->GetKeyLock() != nullptr &&
+                old_range_cce->GetKeyLock()->SearchLock(req.Txn()) !=
+                    LockType::NoLock)
+            {
+                req.SetFinish();
+                return true;
+            }
         }
 
         // Restore range end key
@@ -1180,7 +1192,7 @@ public:
             }
         }
 
-        return false;
+        return true;
     }
 
     bool Execute(UploadRangeSlicesCc &req) override

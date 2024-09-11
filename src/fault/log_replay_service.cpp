@@ -851,6 +851,7 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
 
         tx_status = res.tx_status();
     }
+
     if (tx_status == remote::CheckTxStatusResponse_TxStatus_ONGOING)
     {
         LOG(INFO) << "The tx " << task.tx_number_

@@ -976,6 +976,19 @@ public:
         std::string_view table_name_sv{schema_op_msg.table_name_str()};
         TableName table_name{table_name_sv, table_type};
 
+        if (shard_->core_id_ == 0 && is_coordinator)
+        {
+            CatalogKey table_key(table_name);
+            Iterator it = Find(table_key);
+            CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+            if (cce != nullptr && cce->GetKeyLock() != nullptr &&
+                cce->GetKeyLock()->SearchLock(req.Txn()) != LockType::NoLock)
+            {
+                req.SetFinish();
+                return true;
+            }
+        }
+
         // 1. Replay the table catalog and table schema.
         // The first shard is in charge of creating catalog_entry.
         if (shard_->core_id_ == 0)

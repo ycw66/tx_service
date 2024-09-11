@@ -961,19 +961,27 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
                     return;
                 });
 
-                LOG(WARNING)
-                    << "Write Log Request result unknown, retrying, tx_number: "
-                    << txm->TxNumber();
-                // log request return unknown status, we need to set retry flag
-                // to inform log service that this is a retried request
-                ::txlog::LogRequest &log_req = log_closure_.LogRequest();
-                ::txlog::WriteLogRequest *log_rec =
-                    log_req.mutable_write_log_request();
-                log_rec->set_retry(true);
-                // ReRunOp sleep for 2 seconds
-                retry_num_ = 4;
-
-                ReRunOp(txm);
+                if (retry_num_ > 0)
+                {
+                    LOG(WARNING)
+                        << "Write Log Request result unknown, "
+                           "remain retrying time: "
+                        << retry_num_ << ", tx_number: " << txm->TxNumber();
+                    // log request return unknown status, we need to set retry
+                    // flag to inform log service that this is a retried request
+                    ::txlog::LogRequest &log_req = log_closure_.LogRequest();
+                    ::txlog::WriteLogRequest *log_rec =
+                        log_req.mutable_write_log_request();
+                    log_rec->set_retry(true);
+                    ReRunOp(txm);
+                }
+                else
+                {
+                    LOG(WARNING) << "Write Log Request result unknown, stop "
+                                    "retrying, tx_number: "
+                                 << txm->TxNumber();
+                    txm->PostProcess(*this);
+                }
                 return;
             }
             else if (hd_result_.ErrorCode() == CcErrorCode::WRITE_LOG_FAILED)
@@ -985,7 +993,15 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
                     txm->PostProcess(*this);
                     return;
                 });
-                ReRunOp(txm);
+
+                if (retry_num_ > 0)
+                {
+                    ReRunOp(txm);
+                }
+                else
+                {
+                    txm->PostProcess(*this);
+                }
                 return;
             }
         }
@@ -1071,8 +1087,11 @@ PostProcessOp::PostProcessOp(TransactionExecution *txm)
 
 void PostProcessOp::Reset(size_t write_cnt,
                           size_t data_read_cnt,
-                          size_t catalog_range_read_cnt)
+                          size_t catalog_range_read_cnt,
+                          bool forward_to_update_txn_op)
 {
+    forward_to_update_txn_op_ = forward_to_update_txn_op;
+
     hd_result_.Reset();
     hd_result_.Value().Clear();
 

@@ -360,9 +360,11 @@ struct PostProcessOp : TransactionOperation
     PostProcessOp(TransactionExecution *txm);
     void Reset(size_t write_cnt,
                size_t data_read_cnt,
-               size_t catalog_range_read_cnt);
+               size_t catalog_range_read_cnt,
+               bool forward_to_update_txn_op);
     void Forward(TransactionExecution *txm) override;
 
+    bool forward_to_update_txn_op_{true};
     CcHandlerResult<PostProcessResult> hd_result_;
     CcHandlerResult<PostProcessResult> catalog_range_hd_result_;
 };

@@ -693,7 +693,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
             LOG(WARNING)
                 << "orphan lock detected, lock holding txn: "
                 << lock_holding_txn
-                << ", txn is initiated by this machine, no need to recover.";
+                << ", txn is initiated by this machine, try to recover";
 
             std::unordered_map<std::string_view, std::unordered_set<LockType>>
                 tbl_set;
@@ -720,9 +720,8 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                         << tbl_lk.first << ", lock type: " << (int) lk_type;
                 }
             }
-            // no need to check and recover local txn, it must be ongoing
-            return;
         }
+
         LOG(WARNING) << "orphan lock detected, lock holding txn: "
                      << lock_holding_txn << ", try to recover";
         Sharder::Instance().RecoverTx(lock_holding_txn,
