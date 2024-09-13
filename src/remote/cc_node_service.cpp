@@ -1,15 +1,30 @@
 #include "remote/cc_node_service.h"
 
+#include <brpc/controller.h>
+#include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
+
+#include <mutex>
+
 #include "cc/local_cc_shards.h"
+#include "cc_handler_result.h"
+#include "cc_protocol.h"
+#include "cc_req_misc.h"
+#include "cc_request.h"
+#include "cc_request.pb.h"
 #include "error_messages.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
 #include "sk_generator.h"
+#include "tx_operation_result.h"
 #include "tx_request.h"
 #include "tx_service.h"
+#include "type.h"
 
 namespace txservice
 {
+thread_local CcRequestPool<ResendStandbyMessageCc> resend_standby_msg_pool_;
+
 namespace remote
 {
 CcNodeService::CcNodeService(LocalCcShards &local_shards)
@@ -19,14 +34,17 @@ CcNodeService::CcNodeService(LocalCcShards &local_shards)
 
 void CcNodeService::OnLeaderStart(::google::protobuf::RpcController *controller,
                                   const OnLeaderStartRequest *request,
-                                  OnLeaderChangeResponse *response,
+                                  OnLeaderStartResponse *response,
                                   ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
     NodeGroupId ng_id = request->node_group_id();
     int64_t term = request->node_group_term();
-    bool success = Sharder::Instance().OnLeaderStart(ng_id, term);
+    uint64_t replay_start_ts = 0;
+    bool success =
+        Sharder::Instance().OnLeaderStart(ng_id, term, replay_start_ts);
     response->set_error(!success);
+    response->set_log_replay_start_ts(replay_start_ts);
 }
 
 void CcNodeService::OnLeaderStop(::google::protobuf::RpcController *controller,
@@ -39,6 +57,28 @@ void CcNodeService::OnLeaderStop(::google::protobuf::RpcController *controller,
     int64_t term = request->node_group_term();
     bool success = Sharder::Instance().OnLeaderStop(ng_id, term);
     response->set_error(!success);
+}
+
+void CcNodeService::OnStartFollowing(
+    ::google::protobuf::RpcController *controller,
+    const OnStartFollowingRequest *request,
+    OnLeaderChangeResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    if (request->node_group_id() != Sharder::Instance().NativeNodeGroup())
+    {
+        DLOG(ERROR) << "start-following, ng mismatch:"
+                    << request->node_group_id()
+                    << "!=" << Sharder::Instance().NativeNodeGroup();
+        // only call on start following to subscribe on standby nodes
+        response->set_error(true);
+        return;
+    }
+    Sharder::Instance().OnStartFollowing(request->node_group_id(),
+                                         request->node_group_term(),
+                                         request->leader_node_id());
+    response->set_error(false);
 }
 
 void CcNodeService::CheckTxStatus(::google::protobuf::RpcController *controller,
@@ -1147,6 +1187,328 @@ void CcNodeService::UploadBatchSlices(
 
     response->set_error_code(ToRemoteType::ConvertCcErrorCode(err));
     response->set_ng_term(ng_term);
+}
+
+void CcNodeService::FetchPayload(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::FetchPayloadRequest *request,
+    ::txservice::remote::FetchPayloadResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    int64_t primary_term = request->primary_leader_term();
+    // Verify leader term
+    if (!Sharder::Instance().CheckLeaderTerm(request->node_group_id(),
+                                             primary_term))
+    {
+        response->set_error_code((int) CcErrorCode::NG_TERM_CHANGED);
+        return;
+    }
+
+    ReadCc read_cc;
+    bthread::Mutex mux;
+    bthread::ConditionVariable cv;
+    bool finished = false;
+    CcHandlerResult<ReadKeyResult> res(nullptr);
+    res.post_lambda_ = [&mux, &cv, &finished](CcHandlerResult<ReadKeyResult> *)
+    {
+        std::unique_lock<bthread::Mutex> lk(mux);
+        finished = true;
+        cv.notify_all();
+    };
+    TableName table_name(
+        request->table_name_str(),
+        ToLocalType::ConvertCcTableType(request->table_type()));
+    // The first 32bits of standby term is the primary node ng term.
+    read_cc.Reset(
+        &table_name,
+        &request->key_str(),
+        request->key_shard_code(),
+        response->mutable_payload(),
+        ReadType::Inside,
+        FetchRecordCc::GetFetchRecordTxNumber(request->node_group_id()),
+        primary_term,
+        0,
+        &res,
+        IsolationLevel::ReadCommitted,
+        CcProtocol::OCC,
+        false,
+        false,
+        nullptr,
+        true);
+
+    // Send read cc to get the payload
+    local_shards_.EnqueueCcRequest(request->key_shard_code(), &read_cc);
+    {
+        std::unique_lock<bthread::Mutex> lk(mux);
+        while (!res.IsFinished())
+        {
+            cv.wait(lk);
+        }
+    }
+
+    if (res.IsError())
+    {
+        response->set_error_code(
+            remote::ToRemoteType::ConvertCcErrorCode(res.ErrorCode()));
+        DLOG(INFO) << "Fetch payload failed with " << res.ErrorMsg();
+    }
+    else
+    {
+        assert(res.Value().lock_type_ == LockType::NoLock);
+        if (res.Value().rec_status_ == RecordStatus::Normal)
+        {
+            response->set_is_deleted(false);
+        }
+        else
+        {
+            assert(res.Value().rec_status_ == RecordStatus::Deleted);
+            response->set_is_deleted(true);
+        }
+        response->set_version(res.Value().ts_);
+        response->set_error_code(0);
+    }
+}
+
+void CcNodeService::FetchCatalog(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::FetchPayloadRequest *request,
+    ::txservice::remote::FetchPayloadResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    int64_t primary_term = request->primary_leader_term();
+    // Verify leader term
+    if (!Sharder::Instance().CheckLeaderTerm(request->node_group_id(),
+                                             primary_term))
+    {
+        response->set_error_code((int) CcErrorCode::NG_TERM_CHANGED);
+        return;
+    }
+
+    ReadCc read_cc;
+    bthread::Mutex mux;
+    bthread::ConditionVariable cv;
+    bool finished = false;
+    CcHandlerResult<ReadKeyResult> res(nullptr);
+    res.post_lambda_ = [&mux, &cv, &finished](CcHandlerResult<ReadKeyResult> *)
+    {
+        std::unique_lock<bthread::Mutex> lk(mux);
+        finished = true;
+        cv.notify_all();
+    };
+    TableName table_name(
+        request->table_name_str(),
+        ToLocalType::ConvertCcTableType(request->table_type()));
+    CatalogKey catalog_key;
+    const std::string key_str = request->key_str();
+    size_t offset = 0;
+    catalog_key.Deserialize(key_str.c_str(), offset, nullptr);
+    TxKey tx_key(&catalog_key);
+    CatalogRecord catalog_rec;
+    // The first 32bits of standby term is the primary node ng term.
+    read_cc.Reset(
+        &table_name,
+        &tx_key,
+        request->key_shard_code(),
+        &catalog_rec,
+        ReadType::Inside,
+        FetchRecordCc::GetFetchRecordTxNumber(request->node_group_id()),
+        primary_term,
+        0,
+        &res,
+        IsolationLevel::ReadCommitted,
+        CcProtocol::OCC,
+        false,
+        false,
+        nullptr,
+        false,
+        false);
+
+    // Send read cc to get the payload
+    local_shards_.EnqueueCcRequest(request->key_shard_code(), &read_cc);
+    {
+        std::unique_lock<bthread::Mutex> lk(mux);
+        while (!res.IsFinished())
+        {
+            cv.wait(lk);
+        }
+    }
+
+    if (res.IsError())
+    {
+        response->set_error_code(
+            remote::ToRemoteType::ConvertCcErrorCode(res.ErrorCode()));
+        DLOG(INFO) << "Fetch catalog failed with " << res.ErrorMsg();
+    }
+    else
+    {
+        assert(res.Value().lock_type_ == LockType::NoLock);
+        if (res.Value().rec_status_ == RecordStatus::Normal)
+        {
+            response->set_payload(catalog_rec.Schema()->SchemaImage());
+            response->set_is_deleted(false);
+        }
+        else
+        {
+            assert(res.Value().rec_status_ == RecordStatus::Deleted);
+            response->set_is_deleted(true);
+        }
+        response->set_version(res.Value().ts_);
+        response->set_error_code(0);
+    }
+}
+
+void CcNodeService::StandbyStartFollowing(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::StandbyStartFollowingRequest *request,
+    ::txservice::remote::StandbyStartFollowingResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    bthread::Mutex mux;
+    bool err = false;
+    uint64_t start_seq;
+    WaitableCc add_sub_cc;
+    for (uint16_t core_id = 0; core_id < local_shards_.Count(); core_id++)
+    {
+        add_sub_cc.Reset(
+
+            [ng_id = request->node_group_id(),
+             ng_term = request->ng_term(),
+             node_id = request->node_id(),
+             &err,
+             &mux,
+             &start_seq](CcShard &ccs)
+            {
+                if (!Sharder::Instance().CheckLeaderTerm(ng_id, ng_term))
+                {
+                    std::unique_lock<bthread::Mutex> lk(mux);
+                    err = true;
+                }
+                else
+                {
+                    std::unique_lock<bthread::Mutex> lk(mux);
+                    start_seq = ccs.AddSubscribedStandby(node_id);
+                }
+            });
+        local_shards_.EnqueueCcRequest(core_id, &add_sub_cc);
+        add_sub_cc.Wait();
+        std::unique_lock<bthread::Mutex> lk(mux);
+        if (err)
+        {
+            response->set_error(true);
+            return;
+        }
+
+        response->add_start_sequence_id(start_seq);
+    }
+
+    response->set_error(false);
+}
+void CcNodeService::UpdateStandbyConsistentTs(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::UpdateStandbyConsistentTsRequest *request,
+    ::txservice::remote::UpdateStandbyConsistentTsResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    Sharder::Instance().UpdateNodeGroupCkptTs(request->node_group_id(),
+                                              request->consistent_ts());
+    WaitableCc update_consistent_ts_cc;
+    for (int32_t seq_grp = 0; seq_grp < request->seq_ids_size(); seq_grp++)
+    {
+        update_consistent_ts_cc.Reset(
+            [ng_id = request->node_group_id(),
+             primary_term = request->ng_term(),
+             seq_id = request->seq_ids(seq_grp),
+             seq_grp,
+             consistent_ts = request->consistent_ts()](CcShard &ccs)
+            {
+                if (Sharder::Instance().PrimaryNodeTerm() == primary_term)
+                {
+                    ccs.UpdateStandbyConsistentTs(
+                        seq_grp, seq_id, consistent_ts, primary_term);
+                }
+                else
+                {
+                    LOG(INFO) << "term mismatch " << primary_term << " , "
+                              << Sharder::Instance().PrimaryNodeTerm();
+                }
+            }
+
+        );
+        local_shards_.EnqueueCcRequest(seq_grp, &update_consistent_ts_cc);
+        update_consistent_ts_cc.Wait();
+    }
+
+    // response does not matter
+    response->set_error(false);
+}
+
+void CcNodeService::RequestResendStandbyMessage(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::RequestResendStandbyMessageRequest *request,
+    ::txservice::remote::RequestResendStandbyMessageResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    // done->Run() will be called by ResendStandbyMessage when it is finished.
+    ResendStandbyMessageCc *cc = resend_standby_msg_pool_.NextRequest();
+    cc->Reset(request->node_group_id(),
+              request->ng_term(),
+              request->seq_id(),
+              request->src_node_id(),
+              response,
+              done);
+    assert(request->seq_grp() < local_shards_.Count());
+    local_shards_.EnqueueCcRequest(request->seq_grp(), cc);
+}
+
+void CcNodeService::RequestStorageSnapshotSync(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::StorageSnapshotSyncRequest *request,
+    ::txservice::remote::StorageSnapshotSyncResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+    if (!store_hd || store_hd->IsSharedStorage())
+    {
+        // kv store not enabled or does not need to sync
+        response->set_error(true);
+        return;
+    }
+
+    if (!Sharder::Instance().CheckLeaderTerm(request->ng_id(),
+                                             request->ng_term()))
+    {
+        response->set_error(true);
+        return;
+    }
+
+    store_hd->OnSnapshotSyncRequested(request);
+    response->set_error(false);
+}
+
+void CcNodeService::OnSnapshotSynced(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::OnSnapshotSyncedRequest *request,
+    ::txservice::remote::OnSnapshotSyncedResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+    if (!store_hd || store_hd->IsSharedStorage())
+    {
+        // kv store not enabled or does not need to sync
+        response->set_error(true);
+        return;
+    }
+
+    store_hd->OnSnapshotReceived(request);
+    response->set_error(false);
 }
 
 }  // namespace remote

@@ -114,6 +114,7 @@ enum class TxnStatus
     Recycled
 };
 
+using NodeId = uint32_t;
 using NodeGroupId = uint32_t;
 
 enum class TableType : uint8_t
@@ -493,8 +494,6 @@ inline static const uint16_t total_range_buckets = 0x4000;
 #else
 inline static const uint16_t total_range_buckets = 4096;
 #endif
-
-inline static const uint64_t fetch_record_txn = UINT64_MAX;
 
 enum struct SlicePosition
 {

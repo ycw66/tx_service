@@ -32,10 +32,12 @@ struct ReplayLogTask
     ReplayLogTask(uint32_t cc_ng_id,
                   int64_t cc_ng_term,
                   int log_group,
+                  uint64_t replay_start_ts,
                   uint64_t queued_clock)
         : cc_ng_id_(cc_ng_id),
           cc_ng_term_(cc_ng_term),
           log_group_(log_group),
+          replay_start_ts_(replay_start_ts),
           queued_clock_(queued_clock)
     {
     }
@@ -43,6 +45,7 @@ struct ReplayLogTask
     uint32_t cc_ng_id_;
     int64_t cc_ng_term_;
     int log_group_;
+    uint64_t replay_start_ts_;
     // the clock when the request is put into the replay queue.
     // set queued_clock_ to 0, if it's not a delayed request.
     uint64_t queued_clock_;
@@ -119,6 +122,7 @@ public:
     void ReplayLog(uint32_t cc_ng_id,
                    int64_t cc_ng_term,
                    int log_group = -1,
+                   uint64_t replay_start_ts = 0,
                    bool delayed_request = false);
 
     void RecoverTx(uint64_t tx_number,
@@ -155,11 +159,13 @@ private:
         ConnectionInfo(uint32_t lg_id,
                        uint32_t cc_ng_id,
                        int64_t cc_ng_term,
+                       uint64_t replay_start_ts,
                        bool recovering)
             : log_group_id_(lg_id),
               cc_ng_id_(cc_ng_id),
               cc_ng_term_(cc_ng_term),
               mux_(),
+              replay_start_ts_(replay_start_ts),
               recovering_(recovering)
         {
         }
@@ -172,6 +178,7 @@ private:
         bthread::Mutex mux_;
         std::atomic<WaitingStatus> status_{WaitingStatus::Active};
         std::atomic<size_t> on_fly_cnt_{0};
+        uint64_t replay_start_ts_{0};
         // Only true if this stream is for log replay.
         bool recovering_;
         bool recovery_error_{false};

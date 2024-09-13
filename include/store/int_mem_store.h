@@ -67,10 +67,7 @@ public:
     }
 
     bool InitializeClusterConfig(
-        const std::vector<std::string> &ips,
-        const std::vector<uint16_t> &ports,
-        const uint16_t ng_rep_cnt,
-        std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
+        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         int32_t &seed) override
     {
         assert(false);
@@ -94,7 +91,10 @@ public:
         NodeGroupId ng_id,
         int64_t tx_term,
         txservice::CcHandlerResult<txservice::Void> *hd_res,
-        const txservice::AlterTableInfo *alter_table_info = nullptr) override
+        const txservice::AlterTableInfo *alter_table_info = nullptr,
+        CcRequestBase *cc_req = nullptr,
+        CcShard *ccs = nullptr,
+        CcErrorCode *err_code = nullptr) override
     {
     }
 

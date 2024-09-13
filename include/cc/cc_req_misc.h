@@ -68,8 +68,11 @@ public:
     FetchCatalogCc(const TableName &table_name,
                    CcShard &ccs,
                    NodeGroupId cc_ng_id,
-                   int64_t cc_ng_term);
+                   int64_t cc_ng_term,
+                   bool fetch_from_primary = false);
     ~FetchCatalogCc() = default;
+
+    bool ValidTermCheck();
 
     bool Execute(CcShard &ccs) override;
 
@@ -96,6 +99,7 @@ private:
     uint64_t commit_ts_;
     RecordStatus status_;
     int error_code_{0};
+    bool fetch_from_primary_{false};
 };
 
 struct FetchTableStatisticsCc : public FetchCc
@@ -722,12 +726,23 @@ public:
                   CcShard &ccs,
                   NodeGroupId cc_ng_id,
                   int64_t cc_ng_term,
-                  int32_t range_id_ = -1);
+                  int32_t range_id_ = -1,
+                  bool fetch_from_primary = false,
+                  uint32_t seq_grp = 0,
+                  uint64_t initial_seq_id = 0);
     ~FetchRecordCc() = default;
+
+    bool ValidTermCheck();
 
     bool Execute(CcShard &ccs) override;
 
     void SetFinish(int err);
+
+    static uint64_t GetFetchRecordTxNumber(uint32_t node_id)
+    {
+        // Use a special local tx num for fetch record read intent lock
+        return ((uint64_t) node_id << 10) << 32L | UINT32_MAX;
+    }
 
     const TableName *table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
@@ -736,10 +751,16 @@ public:
     CcMap *ccm_;
     uint64_t rec_ts_{0};
     RecordStatus rec_status_{RecordStatus::Unknown};
-    std::unique_ptr<TxRecord> rec_{nullptr};
+    std::string rec_str_;
     int error_code_{0};
     // Only used in range partition
     int range_id_;
+    bool fetch_from_primary_{false};
+    // Only used for fetch record from primary
+    int64_t standby_term_;
+    uint32_t seq_grp_;
+    uint64_t initial_seq_id_;
+    std::function<void(CcShard &)> handle_resp_;
 };
 
 struct RunOnTxProcessorCc : public CcRequestBase
@@ -771,26 +792,28 @@ private:
 struct WaitableCc : public RunOnTxProcessorCc
 {
 public:
-    explicit WaitableCc(std::function<void(CcShard &ccs)> task = {})
+    explicit WaitableCc(std::function<void(CcShard &ccs)> task = {},
+                        uint32_t core_cnt = 1)
         : RunOnTxProcessorCc(std::move(task)),
-          is_finished_(false),
+          unfinished_cnt_(core_cnt),
           error_code_(CcErrorCode::NO_ERROR)
     {
     }
 
-    void Reset(std::function<void(CcShard &ccs)> task = {})
+    void Reset(std::function<void(CcShard &ccs)> task = {},
+               uint16_t core_cnt = 1)
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
         RunOnTxProcessorCc::Reset(std::move(task));
 
-        is_finished_ = false;
+        unfinished_cnt_ = core_cnt;
         error_code_ = CcErrorCode::NO_ERROR;
     }
 
     void Wait()
     {
         std::unique_lock<bthread::Mutex> lk(mux_);
-        while (!is_finished_)
+        while (unfinished_cnt_)
         {
             cv_.wait(lk);
         }
@@ -799,7 +822,7 @@ public:
     bool IsFinished() const
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
-        return is_finished_;
+        return unfinished_cnt_ == 0;
     }
 
     bool IsError() const
@@ -817,18 +840,23 @@ public:
     void AbortCcRequest(CcErrorCode error_code) override
     {
         std::unique_lock<bthread::Mutex> lk(mux_);
-        is_finished_ = true;
+        unfinished_cnt_--;
         error_code_ = error_code;
-        cv_.notify_one();
+        if (unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
     }
 
     bool Execute(CcShard &ccs) override
     {
         std::unique_lock<bthread::Mutex> lk(mux_);
         RunOnTxProcessorCc::Execute(ccs);
-        is_finished_ = true;
         error_code_ = CcErrorCode::NO_ERROR;
-        cv_.notify_one();
+        if (--unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
         return false;
     }
 
@@ -846,10 +874,9 @@ private:
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
-    bool is_finished_;
+    uint32_t unfinished_cnt_{0};
     CcErrorCode error_code_;
 };
-
 struct UpdateCceCkptTsCc : public CcRequestBase
 {
 public:

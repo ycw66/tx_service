@@ -1,5 +1,7 @@
 #include "checkpointer.h"
 
+#include <brpc/controller.h>
+
 #include <cstdint>
 
 #include "catalog_key_record.h"
@@ -75,6 +77,7 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
 #ifdef RANGE_PARTITION_ENABLED
     local_shards_.TableRangeHeapUsageReport();
 #endif
+    ckpt_req.UpdateStandbyConsistentTs();
 
     uint64_t ckpt_ts = UINT64_MAX;
     ckpt_ts = ckpt_req.GetCkptTs();
@@ -102,6 +105,57 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
     if (local_shards_.Count() == 0 || store_hd_ == nullptr)
     {
         return;
+    }
+    int64_t primary_term = Sharder::Instance().PrimaryNodeTerm();
+    if (primary_term > 0)
+    {
+        if (!store_hd_->IsCaughtUpWithPrimary())
+        {
+            // request snapshot from primary if standby is not synced on every
+            // checkpoint attempt. This request can be called multiple times and
+            // will be deduped on the primary node based on requested term.
+            assert(!store_hd_->IsSharedStorage());
+            std::shared_ptr<brpc::Channel> channel =
+                Sharder::Instance().GetCcNodeServiceChannel(
+                    Sharder::Instance().LeaderNodeId(
+                        Sharder::Instance().NativeNodeGroup()));
+            if (channel != nullptr)
+            {
+                remote::CcRpcService_Stub stub(channel.get());
+                remote::StorageSnapshotSyncRequest snapshot_req;
+                remote::StorageSnapshotSyncResponse snapshot_resp;
+
+                snapshot_req.set_ng_id(Sharder::Instance().NativeNodeGroup());
+                snapshot_req.set_ng_term(primary_term);
+                snapshot_req.set_standby_node_id(Sharder::Instance().NodeId());
+                auto init_seq_ids =
+                    Sharder::Instance().StandbyInitialMsgSequences();
+                for (auto seq_id : init_seq_ids)
+                {
+                    snapshot_req.add_subscribe_init_ids(seq_id);
+                }
+                std::array<char, 128> buffer;
+                std::string username;
+                FILE *output_stream = popen("echo $USER", "r");
+                while (fgets(buffer.data(), 200, output_stream) != nullptr)
+                {
+                    username.append(buffer.data());
+                }
+                if (!username.empty())
+                {
+                    // remove the trailing \n of output.
+                    assert(username.back() == '\n');
+                    username.pop_back();
+                }
+                pclose(output_stream);
+
+                snapshot_req.set_user(username);
+                snapshot_req.set_dest_path(store_hd_->SnapshotSyncDestPath());
+                brpc::Controller cntl;
+                stub.RequestStorageSnapshotSync(
+                    &cntl, &snapshot_req, &snapshot_resp, nullptr);
+            }
+        }
     }
     std::vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
     for (uint32_t node_group : node_groups)

@@ -1,17 +1,24 @@
 #pragma once
 
 #include <brpc/controller.h>
+#include <brpc/errno.pb.h>
+#include <bthread/condition_variable.h>
 
+#include <atomic>
 #include <condition_variable>
+#include <mutex>
 
 #include "cc/cc_handler_result.h"
+#include "cc_req_misc.h"
 #include "cc_request.h"
 #include "data_sync_task.h"
 #include "error_messages.h"
 #include "local_cc_shards.h"
 #include "proto/cc_request.pb.h"
 #include "remote/remote_type.h"
+#include "sharder.h"
 #include "tx_operation_result.h"
+#include "tx_record.h"
 #include "type.h"
 
 namespace txservice
@@ -664,5 +671,418 @@ private:
 
     uint16_t eagain_wait_ms_{100};
 };
+class FetchRecordClosure : public ::google::protobuf::Closure
+{
+public:
+    FetchRecordClosure(FetchRecordCc *fetch_cc) : fetch_cc_(fetch_cc)
+    {
+    }
 
+    FetchRecordClosure(const FetchRecordClosure &rhs) = delete;
+    FetchRecordClosure(FetchRecordClosure &&rhs) = delete;
+
+    // Run() will be called when rpc request is processed by cc node service.
+    void Run() override
+    {
+        // Free closure on exit
+        std::unique_ptr<FetchRecordClosure> self_guard(this);
+        if (!fetch_cc_->ValidTermCheck())
+        {
+            channel_ = nullptr;
+            return;
+        }
+        if (cntl_.Failed())
+        {
+            // RPC failed.
+            LOG(ERROR) << "Failed for Fetch Payload RPC request of ng#"
+                       << request_.node_group_id()
+                       << ", with Error code: " << cntl_.ErrorCode()
+                       << ". Error Msg: " << cntl_.ErrorText();
+            if (cntl_.ErrorCode() == brpc::EOVERCROWDED ||
+                cntl_.ErrorCode() == EAGAIN)
+            {
+                bthread_usleep(10000);
+
+                self_guard.release();
+                // Retry if timeout.
+                DLOG(INFO) << "Retry after EOVERCROWDED fetch record "
+                              "service of ng#"
+                           << request_.node_group_id();
+                cntl_.Reset();
+                response_.Clear();
+                remote::CcRpcService_Stub stub(channel_.get());
+                cntl_.set_timeout_ms(5000);
+                cntl_.set_write_to_socket_in_background(true);
+                stub.FetchPayload(&cntl_, &request_, &response_, this);
+                return;
+            }
+            if (cntl_.ErrorCode() == brpc::ERPCTIMEDOUT)
+            {
+                self_guard.release();
+                // Retry if timeout.
+                DLOG(INFO) << "Fetch payload request timed out. Retry fetch "
+                              "payload service of ng#"
+                           << request_.node_group_id();
+                cntl_.Reset();
+                response_.Clear();
+                remote::CcRpcService_Stub stub(channel_.get());
+                cntl_.set_timeout_ms(5000);
+                cntl_.set_write_to_socket_in_background(true);
+                stub.FetchPayload(&cntl_, &request_, &response_, this);
+                return;
+            }
+            Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
+        }
+        else
+        {
+            CcErrorCode err_code =
+                remote::ToLocalType::ConvertCcErrorCode(response_.error_code());
+            if (err_code == CcErrorCode::NO_ERROR)
+            {
+                fetch_cc_->rec_status_ = response_.is_deleted()
+                                             ? RecordStatus::Deleted
+                                             : RecordStatus::Normal;
+                if (fetch_cc_->rec_status_ == RecordStatus::Normal)
+                {
+                    fetch_cc_->rec_str_ = response_.payload();
+                    fetch_cc_->rec_ts_ = response_.version();
+                }
+            }
+            else if (err_code != CcErrorCode::NG_TERM_CHANGED &&
+                     err_code != CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+            {
+                self_guard.release();
+                // Retry until primary node term has changed.
+                DLOG(INFO) << "Fetch payload failed with "
+                           << CcErrorMessage(err_code)
+                           << ". Retry fetch "
+                              "payload service of ng#"
+                           << request_.node_group_id();
+                cntl_.Reset();
+                response_.Clear();
+                remote::CcRpcService_Stub stub(channel_.get());
+                cntl_.set_timeout_ms(5000);
+                cntl_.set_write_to_socket_in_background(true);
+                stub.FetchPayload(&cntl_, &request_, &response_, this);
+                return;
+            }
+
+            fetch_cc_->SetFinish((int) err_code);
+        }
+        channel_ = nullptr;
+    }
+
+    brpc::Controller *Controller()
+    {
+        return &cntl_;
+    }
+
+    remote::FetchPayloadResponse *FetchPayloadResponse()
+    {
+        return &response_;
+    }
+
+    remote::FetchPayloadRequest *FetchPayloadRequest()
+    {
+        return &request_;
+    }
+
+    void SetChannel(uint32_t node_id, std::shared_ptr<brpc::Channel> channel)
+    {
+        node_id_ = node_id;
+        channel_ = channel;
+    }
+
+    brpc::Channel *Channel()
+    {
+        return channel_.get();
+    }
+
+    uint32_t NodeId() const
+    {
+        return node_id_;
+    }
+
+private:
+    brpc::Controller cntl_;
+    remote::FetchPayloadRequest request_;
+    remote::FetchPayloadResponse response_;
+    std::shared_ptr<brpc::Channel> channel_;
+    uint32_t node_id_;
+    FetchRecordCc *fetch_cc_;
+};
+
+class FetchCatalogClosure : public ::google::protobuf::Closure
+{
+public:
+    FetchCatalogClosure(FetchCatalogCc *fetch_cc) : fetch_cc_(fetch_cc)
+    {
+    }
+
+    FetchCatalogClosure(const FetchCatalogClosure &rhs) = delete;
+    FetchCatalogClosure(FetchCatalogClosure &&rhs) = delete;
+
+    // Run() will be called when rpc request is processed by cc node service.
+    void Run() override
+    {
+        // Free closure on exit
+        std::unique_ptr<FetchCatalogClosure> self_guard(this);
+        if (!fetch_cc_->ValidTermCheck())
+        {
+            channel_ = nullptr;
+            fetch_cc_->SetFinish(RecordStatus::Deleted,
+                                 (int) CcErrorCode::NG_TERM_CHANGED);
+            return;
+        }
+        if (cntl_.Failed())
+        {
+            // RPC failed.
+            LOG(ERROR) << "Failed for Fetch Payload RPC request of ng#"
+                       << request_.node_group_id()
+                       << ", with Error code: " << cntl_.ErrorCode()
+                       << ". Error Msg: " << cntl_.ErrorText();
+            if (cntl_.ErrorCode() == brpc::EOVERCROWDED ||
+                cntl_.ErrorCode() == EAGAIN)
+            {
+                bthread_usleep(10000);
+
+                self_guard.release();
+                // Retry if timeout.
+                DLOG(INFO) << "Retry after EOVERCROWDED fetch record "
+                              "service of ng#"
+                           << request_.node_group_id();
+                cntl_.Reset();
+                response_.Clear();
+                remote::CcRpcService_Stub stub(channel_.get());
+                cntl_.set_timeout_ms(5000);
+                cntl_.set_write_to_socket_in_background(true);
+                stub.FetchPayload(&cntl_, &request_, &response_, this);
+                return;
+            }
+            if (cntl_.ErrorCode() == brpc::ERPCTIMEDOUT)
+            {
+                self_guard.release();
+                // Retry if timeout.
+                DLOG(INFO) << "Fetch payload request timed out. Retry fetch "
+                              "payload service of ng#"
+                           << request_.node_group_id();
+                cntl_.Reset();
+                response_.Clear();
+                remote::CcRpcService_Stub stub(channel_.get());
+                cntl_.set_timeout_ms(5000);
+                cntl_.set_write_to_socket_in_background(true);
+                stub.FetchPayload(&cntl_, &request_, &response_, this);
+                return;
+            }
+            Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
+        }
+        else
+        {
+            CcErrorCode err_code =
+                remote::ToLocalType::ConvertCcErrorCode(response_.error_code());
+
+            if (err_code == CcErrorCode::NO_ERROR)
+            {
+                RecordStatus rec_status = response_.is_deleted()
+                                              ? RecordStatus::Deleted
+                                              : RecordStatus::Normal;
+                if (rec_status == RecordStatus::Normal)
+                {
+                    assert(response_.payload().size() > 0);
+                    std::string &catalog_image = fetch_cc_->CatalogImage();
+                    catalog_image.clear();
+                    catalog_image.append(response_.payload());
+                }
+                fetch_cc_->CommitTs() = response_.version();
+                fetch_cc_->SetFinish(rec_status, 0);
+            }
+            else if (err_code != CcErrorCode::NG_TERM_CHANGED &&
+                     err_code != CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+            {
+                self_guard.release();
+                // Retry until primary node term has changed.
+                DLOG(INFO) << "Fetch payload failed with "
+                           << CcErrorMessage(err_code)
+                           << ". Retry fetch "
+                              "payload service of ng#"
+                           << request_.node_group_id();
+                cntl_.Reset();
+                response_.Clear();
+                remote::CcRpcService_Stub stub(channel_.get());
+                cntl_.set_timeout_ms(5000);
+                cntl_.set_write_to_socket_in_background(true);
+                stub.FetchPayload(&cntl_, &request_, &response_, this);
+                return;
+            }
+            else
+            {
+                fetch_cc_->SetFinish(RecordStatus::Unknown, (int) err_code);
+            }
+        }
+        channel_ = nullptr;
+    }
+
+    brpc::Controller *Controller()
+    {
+        return &cntl_;
+    }
+
+    remote::FetchPayloadResponse *FetchPayloadResponse()
+    {
+        return &response_;
+    }
+
+    remote::FetchPayloadRequest *FetchPayloadRequest()
+    {
+        return &request_;
+    }
+
+    void SetChannel(uint32_t node_id, std::shared_ptr<brpc::Channel> channel)
+    {
+        node_id_ = node_id;
+        channel_ = channel;
+    }
+
+    brpc::Channel *Channel()
+    {
+        return channel_.get();
+    }
+
+    uint32_t NodeId() const
+    {
+        return node_id_;
+    }
+
+private:
+    brpc::Controller cntl_;
+    remote::FetchPayloadRequest request_;
+    remote::FetchPayloadResponse response_;
+    std::shared_ptr<brpc::Channel> channel_;
+    uint32_t node_id_;
+    FetchCatalogCc *fetch_cc_;
+};
+
+struct RequestStandbyMessageClosure : public ::google::protobuf::Closure
+{
+public:
+    bool IsValidSubscription()
+    {
+        return Sharder::Instance().PrimaryNodeTerm() == request_.ng_term() &&
+               Sharder::Instance().StandbyInitialMsgSequence(
+                   request_.seq_grp()) <= request_.seq_id();
+    }
+    // Run() will be called when rpc request is processed by cc node service.
+    void Run() override
+    {
+        // Free closure on exit
+        std::unique_ptr<RequestStandbyMessageClosure> self_guard(this);
+        if (!IsValidSubscription())
+        {
+            channel_ = nullptr;
+            return;
+        }
+        if (cntl_.Failed())
+        {
+            // RPC failed. Keep retrying until this request expires
+            LOG(ERROR)
+                << "Failed for fetching missed message RPC request of ng#"
+                << request_.node_group_id()
+                << ", with Error code: " << cntl_.ErrorCode()
+                << ". Error Msg: " << cntl_.ErrorText() << " Retrying";
+            if (cntl_.ErrorCode() == brpc::EOVERCROWDED ||
+                cntl_.ErrorCode() == EAGAIN)
+            {
+                bthread_usleep(10000);
+            }
+            else if (cntl_.ErrorCode() != brpc::ERPCTIMEDOUT)
+            {
+                Sharder::Instance().UpdateCcNodeServiceChannel(node_id_,
+                                                               channel_);
+            }
+
+            self_guard.release();
+            // Retry if timeout.
+            DLOG(INFO) << "Retry after EOVERCROWDED request missing "
+                          "standby message service"
+                          " of ng#"
+                       << request_.node_group_id();
+            cntl_.Reset();
+            remote::CcRpcService_Stub stub(channel_.get());
+            cntl_.set_timeout_ms(5000);
+            cntl_.set_write_to_socket_in_background(true);
+            stub.RequestResendStandbyMessage(
+                &cntl_, &request_, &response_, this);
+        }
+        else
+        {
+            channel_ = nullptr;
+            // If request fails due to term change or latency too high, no need
+            // to do anything since standby will resubscribe by itself.
+            if (!response_.error())
+            {
+                CcHandlerResult<Void> hres(nullptr);
+                bthread::Mutex mux;
+                bthread::ConditionVariable cv;
+                bool done = false;
+                hres.post_lambda_ =
+                    [&done, &mux, &cv](CcHandlerResult<Void> *res)
+                {
+                    std::unique_lock<bthread::Mutex> lk(mux);
+                    done = true;
+                    cv.notify_one();
+                };
+
+                KeyObjectStandbyForwardCc *cc =
+                    key_obj_standby_forward_pool_.NextRequest();
+                cc->Reset(response_.msg(), &hres);
+                Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(
+                    cc->ForwardMessageGroup(), cc);
+
+                std::unique_lock<bthread::Mutex> lk(mux);
+                while (!done)
+                {
+                    cv.wait(lk);
+                }
+            }
+        }
+    }
+
+    brpc::Controller *Controller()
+    {
+        return &cntl_;
+    }
+
+    remote::RequestResendStandbyMessageRequest *ResendRequest()
+    {
+        return &request_;
+    }
+
+    remote::RequestResendStandbyMessageResponse *ResendResponse()
+    {
+        return &response_;
+    }
+
+    void SetChannel(uint32_t node_id, std::shared_ptr<brpc::Channel> channel)
+    {
+        node_id_ = node_id;
+        channel_ = channel;
+    }
+
+    brpc::Channel *Channel()
+    {
+        return channel_.get();
+    }
+
+    uint32_t NodeId() const
+    {
+        return node_id_;
+    }
+
+private:
+    remote::RequestResendStandbyMessageRequest request_;
+    remote::RequestResendStandbyMessageResponse response_;
+    brpc::Controller cntl_;
+    std::shared_ptr<brpc::Channel> channel_{nullptr};
+    uint32_t node_id_;
+};
 }  // namespace txservice

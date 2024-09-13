@@ -166,12 +166,9 @@ public:
     static const size_t DATA_SYNC_SCAN_BATCH_SIZE = 3 * 1024;
 
     LocalCcShards(
-        uint32_t node_id,                 // = 0,
-        uint16_t core_cnt,                // = 1,
-        uint16_t range_split_worker_cnt,  // =0
-        uint32_t memory_limit_mb,         // = 1000,
-        uint32_t log_limit_mb,            // = 1000,
-        bool realtime_sampling,           // = false,
+        uint32_t node_id,  // = 0,
+        uint32_t ng_id,    // = 0,
+        const std::map<std::string, uint32_t> &conf,
         CatalogFactory *catalog_factory,  // = nullptr,
         SystemHandler *system_handler,    // = nullptr,
         std::unordered_map<uint32_t, std::vector<NodeConfig>>
@@ -185,9 +182,7 @@ public:
         metrics::CommonLabels common_labels = {},
         std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr,
         std::function<void(std::string_view, std::string_view)> publish_func =
-            nullptr,
-        bool enable_shard_heap_defragment = false,
-        bool enable_key_cache = false);
+            nullptr);
 
     ~LocalCcShards();
 
@@ -1772,6 +1767,8 @@ private:
 #endif
 
     const uint32_t node_id_;
+    // Native node group
+    const NodeGroupId ng_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
     // The background thread that periodically advances the timers of the local

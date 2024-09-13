@@ -1,14 +1,18 @@
 #include "remote/cc_stream_receiver.h"
 
 #include <brpc/controller.h>
+#include <bvar/latency_recorder.h>
 
 #include <atomic>
+#include <chrono>
 
 #include "cc/local_cc_shards.h"
+#include "cc_req_pool.h"
+#include "cc_request.h"
+#include "cc_request.pb.h"
 #include "error_messages.h"  //CcErrorCode
 #include "remote/remote_type.h"
 #include "sharder.h"
-#include "statistics.h"
 #include "tx_execution.h"
 #include "tx_operation_result.h"
 #include "tx_trace.h"
@@ -43,6 +47,10 @@ thread_local CcRequestPool<ProcessRemoteScanRespCc>
 thread_local CcRequestPool<RemoteApplyCc> apply_pool_;
 thread_local CcRequestPool<RemoteUploadTxCommandsCc> upload_cmds_pool_;
 thread_local CcRequestPool<RemoteDbSizeCc> dbsize_pool_;
+thread_local CcRequestPool<KeyObjectStandbyForwardCc>
+    key_obj_standby_forward_pool_;
+thread_local CcRequestPool<ResendStandbyMessageCc> resend_standby_msg_pool_;
+thread_local CcRequestPool<ParseCcMsgCc> parse_standby_forward_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -51,6 +59,7 @@ CcStreamReceiver::CcStreamReceiver(
 {
 }
 
+thread_local uint16_t next_core_ = 0;
 void CcStreamReceiver::Shutdown()
 {
     std::unique_lock<std::shared_mutex> lk(inbound_mux_);
@@ -154,13 +163,30 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
     else
     {
         assert(!long_msg);
-
-        for (size_t i = 0; i < size; ++i)
+        if (Sharder::Instance().PrimaryNodeTerm() > 0)
         {
-            std::unique_ptr<CcMessage> cc_msg = GetCcMsg();
-            butil::IOBufAsZeroCopyInputStream wrapper(*messages[i]);
-            cc_msg->ParseFromZeroCopyStream(&wrapper);
-            OnReceiveCcMsg(std::move(cc_msg));
+            // For standby node, all msgs are redirected from one stream
+            // by primary node. To maximize throughput, offload parsing
+            // to tx processor.
+            ParseCcMsgCc *cc = parse_standby_forward_pool_.NextRequest();
+            cc->Reset(messages, size, this);
+            local_shards_.EnqueueCcRequest(next_core_++, cc);
+            if (next_core_ == local_shards_.Count())
+            {
+                next_core_ = 0;
+            }
+        }
+        else
+        {
+            // For primary node, on received msg is usually not the bottleneck.
+            // Parse the msg immediately to minimize latency.
+            for (size_t i = 0; i < size; ++i)
+            {
+                std::unique_ptr<CcMessage> cc_msg = GetCcMsg();
+                butil::IOBufAsZeroCopyInputStream wrapper(*messages[i]);
+                cc_msg->ParseFromZeroCopyStream(&wrapper);
+                OnReceiveCcMsg(std::move(cc_msg));
+            }
         }
     }
 
@@ -1858,7 +1884,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         TX_TRACE_ASSOCIATE(msg.get(), dbsize);
         dbsize->Reset(std::move(msg));
         int32_t cnt = dbsize->GetLocalShardCnt();
-
         for (int32_t i = 0; i < cnt; i++)
         {
             local_shards_.EnqueueCcRequest(i, dbsize);
@@ -1872,6 +1897,16 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         DbSizeCc *dbcc = reinterpret_cast<DbSizeCc *>(msg->handler_addr());
         dbcc->AddRemoteObjSize(resp.dbsize_term(), resp.node_obj_size());
         msg_pool_.enqueue(std::move(msg));
+        break;
+    }
+    case CcMessage::MessageType::
+        CcMessage_MessageType_KeyObjectStandbyForwardRequest:
+    {
+        KeyObjectStandbyForwardCc *cc =
+            key_obj_standby_forward_pool_.NextRequest();
+        cc->Reset(std::move(msg));
+        local_shards_.EnqueueCcRequest(cc->ForwardMessageGroup(), cc);
+
         break;
     }
     default:

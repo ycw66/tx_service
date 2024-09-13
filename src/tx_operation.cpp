@@ -7349,6 +7349,7 @@ void ClusterScaleOp::FillPrepareLogRequest(TransactionExecution *txm)
         for (auto &node : conf_pair.second)
         {
             ng_conf->add_member_nodes(node.node_id_);
+            ng_conf->add_is_candidate(node.is_candidate_);
         }
         ::txlog::NodeConfig *node_conf = cluster_scale_msg->add_node_configs();
         node_conf->set_node_id(conf_pair.second[0].node_id_);

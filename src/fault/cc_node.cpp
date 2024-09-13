@@ -1,10 +1,23 @@
 #include "fault/cc_node.h"
 
-#include <atomic>
+#include <brpc/controller.h>
+#include <brpc/errno.pb.h>
+#include <bthread/bthread.h>
+#include <bthread/mutex.h>
 
+#include <atomic>
+#include <cstdio>
+#include <iostream>
+#include <mutex>
+
+#include "cc_map.h"
+#include "cc_node_service.h"
+#include "cc_req_misc.h"
+#include "cc_request.pb.h"
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "tx_service.h"
+#include "tx_service_common.h"
 
 namespace txservice::fault
 {
@@ -113,6 +126,25 @@ int64_t CcNode::PinData()
     return leader_term;
 }
 
+int64_t CcNode::StandbyPinData()
+{
+    std::unique_lock lk(pinning_threads_mux_);
+    int64_t standby_term = Sharder::Instance().PrimaryNodeTerm();
+    if (standby_term > 0)
+    {
+        pinning_threads_++;
+    }
+    else
+    {
+        standby_term = Sharder::Instance().CandidatePrimaryNodeTerm();
+        if (standby_term > 0)
+        {
+            pinning_threads_++;
+        }
+    }
+    return standby_term;
+}
+
 void CcNode::UnpinData()
 {
     std::unique_lock lk(pinning_threads_mux_);
@@ -209,7 +241,7 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
     }
 }
 
-bool CcNode::OnLeaderStart(int64_t term)
+bool CcNode::OnLeaderStart(int64_t term, uint64_t &replay_start_ts)
 {
     bool expected = false;
     if (!is_processing_.compare_exchange_strong(
@@ -239,6 +271,12 @@ bool CcNode::OnLeaderStart(int64_t term)
 
     // Invalidate terms smaller than the new term on this ng.
     Sharder::Instance().SetInvalidLeaderTerm(ng_id_, term - 1);
+    int64_t prev_subsribe_term = Sharder::Instance().PrimaryNodeTerm();
+    if (prev_subsribe_term > 0)
+    {
+        // no longer subscribed to previous term
+        Sharder::Instance().ClearPrimarySubscription();
+    }
 
     {
         // replay thread and leader election thread may update
@@ -254,9 +292,85 @@ bool CcNode::OnLeaderStart(int64_t term)
     LOG(INFO) << "CC node " << node_id_ << " becomes the leader of ng#"
               << ng_id_ << ". Term: " << term;
 
+    if (!txservice_skip_kv && !local_cc_shards_.store_hd_->IsSharedStorage())
+    {
+        local_cc_shards_.store_hd_->OnLeaderStart();
+    }
+
+    if (ng_id_ == Sharder::Instance().NativeNodeGroup() &&
+        prev_subsribe_term > 0)
+    {
+        bool cache_survivied = false;
+
+        if (!txservice_skip_wal)
+        {
+            // If node was a follower, we can keep
+            // the cache and replay from the consistent ts of in memory
+            // cache.
+            bthread::Mutex mux;
+            uint64_t last_consistent_ts = UINT64_MAX;
+            WaitableCc get_consistent_ts_cc(
+                [&mux, &last_consistent_ts](CcShard &ccs)
+                {
+                    uint64_t shard_ts = ccs.MinLastStandbyConsistentTs();
+                    std::unique_lock<bthread::Mutex> lk(mux);
+                    last_consistent_ts = std::min(last_consistent_ts, shard_ts);
+                },
+                local_cc_shards_.Count());
+            // Get the last consistent ts of the in memory cache and replay
+            // from then.
+            for (uint16_t core_id = 0; core_id < local_cc_shards_.Count();
+                 core_id++)
+            {
+                local_cc_shards_.EnqueueToCcShard(core_id,
+                                                  &get_consistent_ts_cc);
+            }
+            get_consistent_ts_cc.Wait();
+
+            if (last_consistent_ts != UINT64_MAX && last_consistent_ts != 0)
+            {
+                cache_survivied = true;
+                replay_start_ts = last_consistent_ts + 1;
+            }
+        }
+        else
+        {
+            cache_survivied = true;
+        }
+
+        if (!cache_survivied)
+        {
+            // if cache does not survive to the next term, clear ccm.
+            uint16_t core_cnt = local_cc_shards_.Count();
+            ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
+            for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+            {
+                local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
+            }
+            clear_ccm_req.Wait();
+            replay_start_ts = 0;
+        }
+        else if (!txservice_skip_kv &&
+                 !local_cc_shards_.store_hd_->IsSharedStorage())
+        {
+            // Update ckpt ts of cache. This is only needed since for
+            // none-shared kv standby does its own ckpt.
+            uint16_t core_cnt = local_cc_shards_.Count();
+            cache_survivied = true;
+            EscalateStandbyCcmCc escalate_cc(core_cnt, last_ckpt_ts_);
+            for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+            {
+                local_cc_shards_.EnqueueCcRequest(core_id, &escalate_cc);
+            }
+            escalate_cc.Wait();
+            // Notify checkpointer to flush the updated cache
+            local_cc_shards_.NotifyCheckPointer();
+        }
+    }
+
     if (!local_cc_shards_.IsRangeBucketsInitialized(ng_id_))
     {
-        if (txservice_skip_kv)
+        if (txservice_skip_kv || !local_cc_shards_.store_hd_->IsSharedStorage())
         {
             // TODO: HARDCORE SEED
             // If kv is not enabled, just copy bucket info from preferred ng.
@@ -301,8 +415,8 @@ bool CcNode::OnLeaderStart(int64_t term)
     {
         {
             // replay thread and leader election thread may update
-            // candidate_leader_term_, leader_term_ and recovered_log_groups_
-            // concurrently.
+            // candidate_leader_term_, leader_term_ and
+            // recovered_log_groups_ concurrently.
             std::lock_guard<std::mutex> lk(recovery_mux_);
             Sharder::Instance().SetLeaderTerm(ng_id_, term);
             LOG(INFO) << "Skipped log replay for cc node group #" << ng_id_
@@ -365,6 +479,294 @@ bool CcNode::OnLeaderStop(int64_t term)
     clear_ccm_req.Wait();
 
     return true;
+}
+
+void CcNode::RequestStandbyResubscribe(uint32_t node_id, int64_t term)
+{
+    bool expected = false;
+    if (requested_resubscribe_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel))
+    {
+        Sharder::Instance().GetTxWorkerPool()->SubmitWork(
+            [this, node_id, term] { OnStartFollowing(node_id, term, true); });
+    }
+}
+
+void CcNode::OnStartFollowing(uint32_t leader_node_id,
+                              int64_t ng_term,
+                              bool resubscribe)
+{
+    assert(ng_id_ == Sharder::Instance().NativeNodeGroup());
+    bool expected = false;
+    while (!is_processing_.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel))
+    {
+        bthread_usleep(100);
+        expected = false;
+    }
+    std::shared_ptr<void> defer_release(
+        nullptr,
+        [this, resubscribe](void *)
+        {
+            if (resubscribe)
+            {
+                requested_resubscribe_.store(false, std::memory_order_release);
+            }
+        });
+    if (Sharder::Instance().CandidateLeaderTerm(ng_id_) > ng_term ||
+        Sharder::Instance().LeaderTerm(ng_id_) > ng_term)
+    {
+        // Already a leader of a newer term
+        is_processing_.store(false, std::memory_order_release);
+        return;
+    }
+    LOG(INFO) << "Subscribing to primary node " << leader_node_id << " at term "
+              << ng_term;
+    int64_t prev_term = Sharder::Instance().PrimaryNodeTerm();
+    int64_t candidate_term = Sharder::Instance().CandidatePrimaryNodeTerm();
+    bool need_clear_ccm = false;
+    if (prev_term > 0)
+    {
+        if ((prev_term > ng_term && resubscribe) ||
+            (!resubscribe && prev_term >= ng_term))
+        {
+            // already subscribed to a newer term, no op
+            is_processing_.store(false, std::memory_order_release);
+            return;
+        }
+        else
+        {
+            // clean old term ccm cache since this node was following on an
+            // older term
+            Sharder::Instance().ClearPrimarySubscription();
+            need_clear_ccm = true;
+        }
+    }
+    else if (candidate_term >= ng_term)
+    {
+        // someone is already trying to subscribe to this term, no need to try
+        // again.
+
+        is_processing_.store(false, std::memory_order_release);
+        return;
+    }
+
+    if (!resubscribe &&
+        Sharder::Instance().LeaderNodeId(ng_id_) != leader_node_id)
+    {
+        Sharder::Instance().UpdateLeader(ng_id_, leader_node_id);
+    }
+    auto *store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+    if (!txservice_skip_kv)
+    {
+        store_hd->OnStartFollowing();
+    }
+
+    if (need_clear_ccm)
+    {
+        // Wait for data unpin then clear all node_group data
+        {
+            std::unique_lock lk(pinning_threads_mux_);
+            pinning_threads_cv_.wait(lk,
+                                     [this] { return pinning_threads_ == 0; });
+        }
+        uint16_t core_cnt = local_cc_shards_.Count();
+        ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
+        for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+        {
+            local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
+        }
+        clear_ccm_req.Wait();
+    }
+    Sharder::Instance().SetCandidatePrimaryNodeTerm(ng_term);
+    // Sharder::Instance().SetPrimaryNodeTerm(ng_term);
+    //  term is already updated. Release processing latch to allow other rpc
+    //  to proceed.
+    is_processing_.store(false, std::memory_order_release);
+
+    // Notify primary node to start forwarding data change to this node.
+    auto channel = Sharder::Instance().GetCcNodeServiceChannel(leader_node_id);
+    while (!channel)
+    {
+        if (Sharder::Instance().CandidatePrimaryNodeTerm() != ng_term)
+        {
+            // already at a newer term
+            return;
+        }
+        bthread_usleep(1000);
+        channel = Sharder::Instance().GetCcNodeServiceChannel(leader_node_id);
+    }
+
+    remote::CcRpcService_Stub stub(channel.get());
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(5000);
+
+    //  Ask primary to start forwarding msgs and get
+    // starting seq id.
+    remote::StandbyStartFollowingRequest start_follow_req;
+    remote::StandbyStartFollowingResponse start_follow_resp;
+    start_follow_req.set_node_group_id(ng_id_);
+    start_follow_req.set_node_id(node_id_);
+    start_follow_req.set_ng_term(ng_term);
+
+    stub.StandbyStartFollowing(
+        &cntl, &start_follow_req, &start_follow_resp, nullptr);
+
+    while (cntl.Failed() || start_follow_resp.error())
+    {
+        if (Sharder::Instance().CandidatePrimaryNodeTerm() != ng_term)
+        {
+            LOG(INFO) << "Failed to subscribe to primary node due to newer "
+                         "primary leader term "
+                      << Sharder::Instance().CandidatePrimaryNodeTerm()
+                      << ", requested term " << ng_term;
+            return;
+        }
+
+        cntl.Reset();
+        cntl.set_timeout_ms(5000);
+        start_follow_resp.Clear();
+        bthread_usleep(1000);
+        stub.StandbyStartFollowing(
+            &cntl, &start_follow_req, &start_follow_resp, nullptr);
+    }
+
+    expected = false;
+    while (!is_processing_.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel))
+    {
+        bthread_usleep(100);
+        expected = false;
+    }
+    // verify primary term hasn't changed
+    if (Sharder::Instance().CandidatePrimaryNodeTerm() != ng_term)
+    {
+        LOG(INFO) << "rejected subscribe req due to primary "
+                     "term mismatch";
+        is_processing_.store(false, std::memory_order_release);
+        return;
+    }
+    uint32_t seq_grp_cnt = start_follow_resp.start_sequence_id_size();
+    std::vector<uint64_t> init_seq_ids;
+    init_seq_ids.reserve(seq_grp_cnt);
+    for (uint32_t grp_id = 0; grp_id < seq_grp_cnt; grp_id++)
+    {
+        init_seq_ids.push_back(start_follow_resp.start_sequence_id(grp_id));
+    }
+    uint16_t core_cnt = local_cc_shards_.Count();
+
+    // reset start seq id
+    WaitableCc sub_cc(
+        [&init_seq_ids, core_cnt, seq_grp_cnt](CcShard &ccs)
+        {
+            for (uint32_t grp_id = 0; grp_id < seq_grp_cnt; grp_id++)
+            {
+                if (grp_id % core_cnt == ccs.core_id_)
+                {
+                    ccs.SubsribeToPrimaryNode(grp_id, init_seq_ids.at(grp_id));
+                }
+            }
+        },
+        core_cnt);
+    for (uint32_t core_id = 0; core_id < core_cnt; core_id++)
+    {
+        local_cc_shards_.EnqueueCcRequest(core_id, &sub_cc);
+    }
+    sub_cc.Wait();
+    // update initial msg seq id.
+    for (uint32_t i = 0; i < seq_grp_cnt; i++)
+    {
+        Sharder::Instance().SetStandbyInitialMsgSequence(
+            i, start_follow_resp.start_sequence_id(i));
+    }
+    Sharder::Instance().SetCandidatePrimaryNodeTerm(-1);
+    Sharder::Instance().SetPrimaryNodeTerm(ng_term);
+    LOG(INFO) << "subscribed to primary node at term " << ng_term;
+
+    is_processing_.store(false, std::memory_order_release);
+
+    // If the data store is not shared between standby and primary, ask primary
+    // to send a snapshot of previous data
+    if (!txservice_skip_kv && !store_hd->IsSharedStorage())
+    {
+        remote::StorageSnapshotSyncRequest snapshot_req;
+        remote::StorageSnapshotSyncResponse snapshot_resp;
+
+        snapshot_req.set_ng_id(ng_id_);
+        snapshot_req.set_ng_term(ng_term);
+        snapshot_req.set_standby_node_id(node_id_);
+        for (auto seq_id : init_seq_ids)
+        {
+            snapshot_req.add_subscribe_init_ids(seq_id);
+        }
+        std::array<char, 128> buffer;
+        std::string username;
+        FILE *output_stream = popen("echo $USER", "r");
+        while (fgets(buffer.data(), 200, output_stream) != nullptr)
+        {
+            username.append(buffer.data());
+        }
+        if (!username.empty())
+        {
+            // remove the trailing \n of output.
+            assert(username.back() == '\n');
+            username.pop_back();
+        }
+        pclose(output_stream);
+
+        snapshot_req.set_dest_path(store_hd->SnapshotSyncDestPath());
+        snapshot_req.set_user(username);
+        cntl.Reset();
+        cntl.set_timeout_ms(10000);
+        stub.RequestStorageSnapshotSync(
+            &cntl, &snapshot_req, &snapshot_resp, nullptr);
+        if (snapshot_resp.error())
+        {
+            LOG(ERROR) << "snapshot sync failed";
+        }
+    }
+
+    // for standby nodes, follower also need buckets info.
+
+    // TODO(lzx): fetch ng_configs from LeaderNode if storage is not shared
+    // and cluster scaling is enabled for eloqkv standby nodes feature.
+    if (txservice_skip_kv || !local_cc_shards_.store_hd_->IsSharedStorage())
+    {
+        // TODO: HARDCORE SEED
+        // If kv is not enabled, just copy bucket info from preferred ng.
+        local_cc_shards_.InitRangeBuckets(
+            ng_id_,
+            Sharder::Instance().NodeGroupCount(),
+            Sharder::Instance().ClusterConfigVersion(),
+            9001);
+    }
+    else
+    {
+        // We need to initialize range bucket info for new ng
+        // before replaying.
+        std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
+        uint64_t version;
+        int32_t seed;
+        bool uninitialized;
+        // read ng config from kv store
+        while (!local_cc_shards_.store_hd_->ReadClusterConfig(
+            ng_configs, version, seed, uninitialized))
+        {
+            ng_configs.clear();
+            assert(!uninitialized);
+        }
+        local_cc_shards_.InitRangeBuckets(
+            ng_id_, ng_configs.size(), version, seed);
+        if (Sharder::Instance().ClusterConfigVersion() < version)
+        {
+            // Use a dummy cc request that returns once it's put into cc
+            // queue.
+            WaitableCc cc;
+            Sharder::Instance().UpdateClusterConfig(
+                ng_configs, version, &cc, local_cc_shards_.GetCcShard(0));
+            cc.Wait();
+        }
+    }
 }
 
 }  // namespace txservice::fault

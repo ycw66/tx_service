@@ -16,6 +16,7 @@
 #include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "proto/cc_request.pb.h"
 #include "tx_serialize.h"
+#include "tx_service_common.h"
 #include "txlog.h"
 #include "type.h"
 
@@ -47,13 +48,22 @@ struct NodeConfig
 {
 public:
     NodeConfig() = default;
-    NodeConfig(uint32_t node_id, const std::string &host_name, uint16_t port)
-        : node_id_(node_id), host_name_(host_name), port_(port)
+    NodeConfig(uint32_t node_id,
+               const std::string &host_name,
+               uint16_t port,
+               bool is_candidate = false)
+        : node_id_(node_id),
+          host_name_(host_name),
+          port_(port),
+          is_candidate_(is_candidate)
     {
     }
 
     NodeConfig(const NodeConfig &rhs)
-        : node_id_(rhs.node_id_), host_name_(rhs.host_name_), port_(rhs.port_)
+        : node_id_(rhs.node_id_),
+          host_name_(rhs.host_name_),
+          port_(rhs.port_),
+          is_candidate_(rhs.is_candidate_)
     {
     }
 
@@ -62,12 +72,13 @@ public:
         SerializeToStr(&node_id_, buf);
         Serializer<std::string>::Serialize(host_name_, buf);
         SerializeToStr(&port_, buf);
+        SerializeToStr(&is_candidate_, buf);
     }
 
     size_t SerializedLength() const
     {
         return sizeof(uint32_t) + sizeof(uint16_t) + host_name_.length() +
-               sizeof(uint16_t);
+               sizeof(uint16_t) + sizeof(bool);
     }
 
     void Deserialize(const char *buf, size_t &offset)
@@ -75,11 +86,14 @@ public:
         DesrializeFrom(buf, offset, &node_id_);
         host_name_ = Serializer<std::string>::Deserialize(buf, offset);
         DesrializeFrom(buf, offset, &port_);
+        DesrializeFrom(buf, offset, &is_candidate_);
     }
 
     uint32_t node_id_{UINT32_MAX};
     std::string host_name_{""};
     uint16_t port_{0};
+    // Identify this is a candidate of node_group.
+    bool is_candidate_{false};
 };
 struct ClusterConfig
 {
@@ -233,6 +247,7 @@ public:
      * @return int Error code.
      */
     int Init(uint32_t node_id,
+             uint32_t ng_id,
              const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
                  *ng_configs,
              uint64_t config_version,
@@ -327,9 +342,14 @@ public:
      */
     void UpdateLeader(uint32_t ng_id, uint32_t node_id);
 
-    bool OnLeaderStart(uint32_t ng_id, int64_t term);
+    bool OnLeaderStart(uint32_t ng_id, int64_t term, uint64_t &replay_start_ts);
 
     bool OnLeaderStop(uint32_t ng_id, int64_t term);
+
+    void OnStartFollowing(uint32_t ng_id,
+                          int64_t term,
+                          uint32_t leader_node,
+                          bool resubscribe = false);
 
     /**
      * @brief Update the log group's leader node id when the log group leader
@@ -423,7 +443,7 @@ public:
     uint32_t GetNodeCount()
     {
         std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
-        return cluster_config_.ng_configs_.size();
+        return node_cnt_;
     }
 
     uint32_t NodeId() const
@@ -456,6 +476,8 @@ public:
      * @return leader term of cc_ng_id, -1 if not found
      */
     int64_t TryPinNodeGroupData(uint32_t cc_ng_id);
+
+    int64_t TryPinStandbyNodeGroupData();
 
     /**
      * Unpin data of cc_ng_id, clear ccmaps and catalogs if this node is no
@@ -528,6 +550,113 @@ public:
      */
     std::shared_ptr<brpc::Channel> UpdateCcNodeServiceChannel(
         uint32_t node_id, std::shared_ptr<brpc::Channel> old_channel);
+    uint32_t GetPrimaryNodeId()
+    {
+        return Sharder::Instance().LeaderNodeId(
+            Sharder::Instance().NativeNodeGroup());
+    }
+
+    void SetPrimaryNodeTerm(int64_t term)
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        primary_node_leader_term_cache_.store(term, std::memory_order_release);
+    }
+    void SetCandidatePrimaryNodeTerm(int64_t term)
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        candidate_primary_node_leader_term_cache_.store(
+            term, std::memory_order_release);
+    }
+
+    int64_t PrimaryNodeTerm()
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return -1;
+        }
+        return primary_node_leader_term_cache_.load(std::memory_order_acquire);
+    }
+
+    int64_t CandidatePrimaryNodeTerm()
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return -1;
+        }
+        return candidate_primary_node_leader_term_cache_.load(
+            std::memory_order_acquire);
+    }
+
+    void SetStandbyInitialMsgSequence(uint32_t seq_grp, uint64_t seq_num)
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        assert(standby_initial_seq_ids_[seq_grp].load() == UINT64_MAX ||
+               standby_initial_seq_ids_[seq_grp].load() <= seq_num);
+        standby_initial_seq_ids_[seq_grp].store(seq_num,
+                                                std::memory_order_release);
+    }
+
+    uint64_t StandbyInitialMsgSequence(uint32_t seq_grp)
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return 0;
+        }
+        return standby_initial_seq_ids_[seq_grp].load(
+            std::memory_order_acquire);
+    }
+
+    std::vector<uint64_t> StandbyInitialMsgSequences()
+    {
+        std::vector<uint64_t> ids;
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return ids;
+        }
+        for (int i = 0; i < 200; i++)
+        {
+            uint64_t id =
+                standby_initial_seq_ids_[i].load(std::memory_order_acquire);
+            if (id != UINT64_MAX)
+            {
+                ids.push_back(id);
+            }
+            else
+            {
+                break;
+            }
+        }
+        return ids;
+    }
+
+    uint32_t NativeNodeGroup() const
+    {
+        return native_ng_;
+    }
+
+    void ClearPrimarySubscription()
+    {
+        primary_node_leader_term_cache_.store(-1);
+        for (uint32_t seq_grp = 0; seq_grp < 200; seq_grp++)
+        {
+            standby_initial_seq_ids_[seq_grp].store(UINT64_MAX);
+        }
+    }
+
+    void SubscribeToPrimary(bool need_clear_ccm, int64_t ng_term);
+
+    bool CaughtupWithPrimary() const;
 
 private:
     Sharder();
@@ -538,23 +667,41 @@ private:
 
 private:
     uint32_t node_id_;
+    uint32_t native_ng_;
+    std::string host_name_;
+    uint16_t port_;
+    // Whether is candidate of native node group.
+    // bool is_candidate_;
 
     std::shared_mutex cluster_cnf_mux_;
     // Stores the current cluster config. It contains the mapping relation
-    // between node group id and node group members, current node group leader
-    // etc.
+    // between node group id and node group members, current node group
+    // leader etc.
     ClusterConfig cluster_config_;
     // The replicate number of node group.
     uint16_t rep_group_cnt_;
+    uint32_t node_cnt_;
 
     // Ng leader cache. We preallocate it to the max cluster size so that we
     // don't need to modify the size of it.
     std::atomic<uint32_t> ng_leader_cache_[1000];
     std::atomic<int64_t> leader_term_cache_[1000];
     std::atomic<int64_t> candidate_leader_term_cache_[1000];
-    // cache of the largest invalid term of each ng. Requests from nodes with
-    // invalid term will be rejected.
+    // cache of the largest invalid term of each ng. Requests from nodes
+    // with invalid term will be rejected.
     std::atomic<int64_t> invalid_leader_term_cache_[1000];
+
+    // The term that standby is subscribed to. Only used on standby node.
+    std::atomic<int64_t> primary_node_leader_term_cache_;
+    std::atomic<int64_t> candidate_primary_node_leader_term_cache_;
+    // The initial sequence id of each sequence group in this subscription
+    // period. Used with priamry leader term together to decide if the
+    // request is valid.
+    // This vector is protected by primary_node_leader_term_cache_. Any
+    // read/write on the initial ids needs to verify primary node term first.
+    std::atomic_uint64_t standby_initial_seq_ids_[200];
+    std::atomic<bool> requested_resubscribe_{false};
+
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
 
@@ -562,47 +709,48 @@ private:
     std::mutex recovery_state_mux_;
     std::condition_variable recovery_state_cv_;
 
-    // Used at node start stage to check whether all the involed tx_nodes finish
-    // the log recovery. If some nodes stepdown during cluster startup, the
-    // normal retry logic for each operation will handle it.
+    // Used at node start stage to check whether all the involed tx_nodes
+    // finish the log recovery. If some nodes stepdown during cluster
+    // startup, the normal retry logic for each operation will handle it.
     std::unordered_set<uint32_t> recovered_leader_set_;
 
     /**
-     * @brief Acts as a memory barrier such that initialized cc nodes are synced
-     * with following reads of cc nodes at all cores.
+     * @brief Acts as a memory barrier such that initialized cc nodes are
+     * synced with following reads of cc nodes at all cores.
      *
      */
     std::atomic<bool> cc_nodes_init_{false};
 
     moodycamel::ConcurrentQueue<std::unique_ptr<remote::CcMessage>> msg_pool_;
 
-    // The cc stream sender establishes connections to remote nodes and sends cc
-    // requests and responses to remote nodes via streams. It is initialized
-    // before the cc stream receiver, given that the cc stream receiver
-    // accepts and dispatches cc requests to tx processors, which process the
-    // requests and send the responses back via the cc stream sender.
+    // The cc stream sender establishes connections to remote nodes and
+    // sends cc requests and responses to remote nodes via streams. It is
+    // initialized before the cc stream receiver, given that the cc stream
+    // receiver accepts and dispatches cc requests to tx processors, which
+    // process the requests and send the responses back via the cc stream
+    // sender.
     std::unique_ptr<remote::CcStreamSender> cc_stream_sender_;
 
-    // The RPC server that listens on the port of local_port and serves the cc
-    // stream service.
+    // The RPC server that listens on the port of local_port and serves the
+    // cc stream service.
     brpc::Server cc_stream_server_;
     // The stream service that accepts a stream of cc requests from remote
     // nodes.
     std::unique_ptr<remote::CcStreamReceiver> cc_stream_receiver_;
 
-    // The RPC server that listens on the port of local_port+1. It provides sync
-    // RPCs toward this node and serves Raft communications within cc node
-    // groups.
+    // The RPC server that listens on the port of local_port+1. It provides
+    // sync RPCs toward this node and serves Raft communications within cc
+    // node groups.
     brpc::Server cc_node_server_;
     // The service that provides sync RPCs to remote nodes, i.e., leader
     // transfer and checking tx status.
     std::unique_ptr<remote::CcNodeService> cc_node_service_;
 
-    // The RPC server that listens on the port of local_port+3 and serves the
-    // log replay service.
+    // The RPC server that listens on the port of local_port+3 and serves
+    // the log replay service.
     brpc::Server log_replay_server_;
-    // The replay service that accepts a stream of log replay messages from all
-    // log groups.
+    // The replay service that accepts a stream of log replay messages from
+    // all log groups.
     std::unique_ptr<fault::ReplayService> log_replay_service_;
 
     // Worker pool for doing various aync works

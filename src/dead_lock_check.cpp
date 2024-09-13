@@ -16,7 +16,7 @@ uint64_t DeadLockCheck::time_interval_ = 60 * 1000000;
 CcRequestPool<AbortTransactionCc> abort_tran_pool;
 
 DeadLockCheck::DeadLockCheck(LocalCcShards &local_shards)
-    : reply_vct_(Sharder::Instance().GetNodeCount(), false),
+    : reply_map_(),
       stop_(false),
       local_shards_(local_shards),
       dead_lock_cc_(new CheckDeadLockCc),
@@ -65,7 +65,7 @@ void DeadLockCheck::MergeRemoteWaitingLockInfo(const tr::DeadLockResponse *rsp)
         it.first->second += te.ety_count();
     }
 
-    inst_->reply_vct_[node_id] = true;
+    inst_->reply_map_[node_id] = true;
     inst_->node_unfinished_--;
 
     if (inst_->node_unfinished_ == 0)
@@ -109,7 +109,7 @@ void DeadLockCheck::MergeLocalWaitingLockInfo(const CheckDeadLockResult &dlres)
         }
     }
 
-    inst_->reply_vct_[inst_->local_shards_.NodeId()] = true;
+    inst_->reply_map_[inst_->local_shards_.NodeId()] = true;
     inst_->node_unfinished_--;
 
     if (inst_->node_unfinished_ == 0)
@@ -136,27 +136,27 @@ void DeadLockCheck::GatherLockDependancy()
 {
     std::unique_lock<std::mutex> lk(mutex_);
     UpdateCheckNodeId(Sharder::Instance().NodeId());
-    node_unfinished_ = reply_vct_.size();
+    reply_map_.clear();
+    const uint32_t ng_count = Sharder::Instance().NodeGroupCount();
+    node_unfinished_ = 0;
     entry_locked_txid_map_.clear();
     txid_waited_entry_map_.clear();
     txid_ety_count_map_.clear();
 
     // Send dead lock request to local and remote nodes
-    for (uint32_t i = 0; i < (uint32_t) reply_vct_.size(); i++)
+    for (uint32_t i = 0; i < ng_count; i++)
     {
         uint32_t node_id = Sharder::Instance().LeaderNodeId(i);
-        // If this node group has drifted to other node, it is not need to visit
-        // this node again.
-        if (node_id != i)
+        // If this node is leader of multiple ngs and we've already asked it,
+        // no need to visit this node again.
+        if (reply_map_.find(node_id) != reply_map_.end())
         {
-            reply_vct_[i] = true;
-            node_unfinished_--;
             continue;
         }
 
-        reply_vct_[i] = false;
         if (node_id == Sharder::Instance().NodeId())
         {
+            reply_map_.try_emplace(node_id, false);
             dead_lock_cc_->GetDeadLockResult().Reset();
             for (size_t i = 0; i < local_shards_.Count(); i++)
             {
@@ -179,13 +179,13 @@ void DeadLockCheck::GatherLockDependancy()
             bool hr =
                 Sharder::Instance().GetCcStreamSender()->SendMessageToNode(
                     node_id, send_msg);
-            if (!hr)
+            if (hr)
             {
-                reply_vct_[i] = true;
-                node_unfinished_--;
+                reply_map_.try_emplace(node_id, false);
             }
         }
     }
+    node_unfinished_ = reply_map_.size();
 
     // Wait all nodes to finish dead check and return data. If exceed the half
     // of interval time, this time for dead lock will be neglect

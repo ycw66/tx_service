@@ -39,6 +39,7 @@
 #include "tx_key.h"
 #include "tx_record.h"
 #include "tx_service.h"
+#include "tx_service_common.h"
 #include "tx_service_metrics.h"
 #include "tx_trace.h"
 #include "type.h"
@@ -284,7 +285,7 @@ public:
                     req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
                     return true;
 #else
-                    shard_->EnqueueWaitList(&req);
+                    shard_->EnqueueWaitListIfMemoryFull(&req);
                     return false;
 #endif
                 }
@@ -872,7 +873,7 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                     return hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
 #else
-                    shard_->EnqueueWaitList(&req);
+                    shard_->EnqueueWaitListIfMemoryFull(&req);
                     return false;
 #endif
                 }
@@ -1102,7 +1103,7 @@ public:
             req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
             return true;
 #else
-            shard_->EnqueueWaitList(&req);
+            shard_->EnqueueWaitListIfMemoryFull(&req);
             return false;
 #endif
         }
@@ -1713,7 +1714,9 @@ public:
                             // special txn to avoid cce being kicked out before
                             // fetch record returns.
                             cce->GetOrCreateKeyLock(shard_, this, ccp)
-                                .AcquireReadIntent(fetch_record_txn);
+                                .AcquireReadIntent(
+                                    FetchRecordCc::GetFetchRecordTxNumber(
+                                        Sharder::Instance().NodeId()));
 
                             return false;
                         }
@@ -1746,7 +1749,7 @@ public:
                 // the cc map is full and cannot allocates a new entry.
                 if (cce == nullptr)
                 {
-                    shard_->EnqueueWaitList(&req);
+                    shard_->EnqueueWaitListIfMemoryFull(&req);
                     return false;
                 }
                 // if ccm contains all the ccentries, then unknown status means
@@ -1772,6 +1775,27 @@ public:
                         meter->Collect(
                             metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
                     }
+                }
+
+                if (cce->PayloadStatus() == RecordStatus::Unknown)
+                {
+                    shard_->FetchRecord(this->table_name_,
+                                        this->table_schema_,
+                                        TxKey(look_key),
+                                        cce,
+                                        this,
+                                        this->cc_ng_id_,
+                                        ng_term,
+                                        &req);
+
+                    // Acquire a read intent on this cce with the
+                    // special txn to avoid cce being kicked out before
+                    // fetch record returns.
+                    cce->GetOrCreateKeyLock(shard_, this, ccp)
+                        .AcquireReadIntent(
+                            FetchRecordCc::GetFetchRecordTxNumber(
+                                Sharder::Instance().NodeId()));
+                    return false;
                 }
 #endif
                 req.SetCcePtr(cce);
@@ -5640,7 +5664,7 @@ public:
             {
                 if (req.accumulated_scan_cnt_[shard_->core_id_] == 0)
                 {
-                    shard_->EnqueueWaitList(&req);
+                    shard_->EnqueueWaitListIfMemoryFull(&req);
                 }
                 else
                 {
@@ -5880,7 +5904,7 @@ public:
             uint64_t key_hash = key->Hash();
             if (req.filter_lambda_(key_hash))
             {
-                if (cce->HasReplayCommandList())
+                if (cce->HasBufferedCommandList())
                 {
                     // If the data is owned by this ng, fetch the record,
                     // otherwise only skip this record for now and don't
@@ -5909,9 +5933,9 @@ public:
                     else if (cce->PayloadStatus() == RecordStatus::Deleted &&
                              cce->CommitTs() == 1)
                     {
-                        ReplayTxnCmdList &replay_cmd_list =
-                            cce->ReplayCommandList();
-                        replay_cmd_list.Clear();
+                        BufferedTxnCmdList &buffered_cmd_list =
+                            cce->BufferedCommandList();
+                        buffered_cmd_list.Clear();
                         cce->RecycleKeyLock(*shard_);
                     }
                     else
@@ -6662,7 +6686,7 @@ public:
                 // Since we're not holding any range lock that would
                 // block data sync during replay, just keep retrying
                 // until we have free space in cc map.
-                shard_->EnqueueWaitList(&req);
+                shard_->EnqueueWaitListIfMemoryFull(&req);
                 return false;
             }
 
@@ -7660,6 +7684,37 @@ public:
 #endif
     }
 
+    bool Execute(EscalateStandbyCcmCc &req) override
+    {
+        auto it = Begin();
+        auto end_it = End();
+        uint64_t ckpt_ts = req.PrimaryCkptTs();
+        uint64_t now_ts = shard_->Now();
+        while (it != end_it)
+        {
+            CcEntry<KeyT, ValueT> *cce = it->second;
+            if (txservice_skip_wal)
+            {
+                // If wal log is disabled, we need to flush all in memory cache
+                // to overwrite potential newer version in kv.
+                RecordStatus status = cce->PayloadStatus();
+                cce->SetCommitTsPayloadStatus(now_ts, status);
+            }
+            else
+            {
+                // if log is enabled, we only need to flush data after primary
+                // last ckpt ts.
+                if (cce->CommitTs() <= ckpt_ts)
+                {
+                    cce->SetCkptTs(cce->CommitTs());
+                }
+            }
+            it++;
+        }
+
+        return true;
+    }
+
     bool Execute(ApplyCc &req) override
     {
         return true;
@@ -7671,6 +7726,12 @@ public:
     }
 
     bool Execute(UploadRangeSlicesCc &req) override
+    {
+        assert(false);
+        return true;
+    }
+
+    bool Execute(KeyObjectStandbyForwardCc &req) override
     {
         assert(false);
         return true;
@@ -9226,7 +9287,7 @@ protected:
     bool BackFill(LruEntry *entry,
                   uint64_t commit_ts,
                   RecordStatus status,
-                  std::unique_ptr<TxRecord> rec_uptr) override
+                  std::string &rec_str) override
     {
         CcEntry<KeyT, ValueT> *cce =
             static_cast<CcEntry<KeyT, ValueT> *>(entry);
@@ -9238,7 +9299,8 @@ protected:
             // fetch record fails. Remove the read intent
             ReleaseCceLock(cce->GetKeyLock(),
                            cce,
-                           fetch_record_txn,
+                           FetchRecordCc::GetFetchRecordTxNumber(
+                               Sharder::Instance().NodeId()),
                            cc_ng_id_,
                            LockType::ReadIntent);
             if (cce->IsFree())
@@ -9253,17 +9315,8 @@ protected:
             }
             return true;
         }
-        const ValueT *rec_ptr = static_cast<const ValueT *>(rec_uptr.get());
         const uint64_t cce_version = cce->CommitTs();
-#ifdef RANGE_PARTITION_ENABLED
-        if (cce->data_store_size_ == INT32_MAX)
-        {
-            cce->data_store_size_ =
-                status == RecordStatus::Deleted
-                    ? 0
-                    : rec_ptr->Size() + ccp->KeyOfEntry(cce)->Size();
-        }
-#endif
+
         cce->SetCkptTs(commit_ts);
 
         if (cce_version < commit_ts)
@@ -9296,20 +9349,16 @@ protected:
             }
             else
             {
+                size_t offset = 0;
 #ifndef ON_KEY_OBJECT
-                if (cce->payload_.use_count() == 1)
+                if (cce->payload_.use_count() != 1)
                 {
-                    *(cce->payload_) = *rec_ptr;
-                }
-                else
-                {
-                    cce->payload_ = std::make_shared<ValueT>(*rec_ptr);
+                    cce->payload_ = std::make_shared<ValueT>();
                 }
 #else
                 assert(false);
-                cce->payload_.reset(
-                    static_cast<ValueT *>(rec_ptr->Clone().release()));
 #endif
+                cce->payload_->Deserialize(rec_str.c_str(), offset);
             }
         }
 #ifndef ON_KEY_OBJECT
@@ -9319,16 +9368,28 @@ protected:
             // The cc entry's commit ts is 1 when it is initialized.
             // Commit ts greater than 1 means that the key is
             // already cached in memory.
-            cce->AddArchiveRecord(
-                std::make_shared<ValueT>(*rec_ptr), status, commit_ts);
+            auto payload = std::make_shared<ValueT>();
+            size_t offset = 0;
+            payload->Deserialize(rec_str.c_str(), offset);
+            cce->AddArchiveRecord(payload, status, commit_ts);
+        }
+#endif
+#ifdef RANGE_PARTITION_ENABLED
+        if (cce->data_store_size_ == INT32_MAX)
+        {
+            cce->data_store_size_ =
+                status == RecordStatus::Deleted
+                    ? 0
+                    : cce->payload_->Size() + ccp->KeyOfEntry(cce)->Size();
         }
 #endif
 
-        ReleaseCceLock(cce->GetKeyLock(),
-                       cce,
-                       fetch_record_txn,
-                       cc_ng_id_,
-                       LockType::ReadIntent);
+        ReleaseCceLock(
+            cce->GetKeyLock(),
+            cce,
+            FetchRecordCc::GetFetchRecordTxNumber(Sharder::Instance().NodeId()),
+            cc_ng_id_,
+            LockType::ReadIntent);
 
         return true;
     }

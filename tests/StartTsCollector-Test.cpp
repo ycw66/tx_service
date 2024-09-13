@@ -36,6 +36,7 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
     std::string local_path = "local://" + output_dir.string();
     std::cout << "output_dir: " << local_path << std::endl;
     uint32_t node_id = 0;
+    uint32_t ng_id = 0;
     uint32_t core_num = 3;
 
     std::map<std::string, uint32_t> tx_service_conf;
@@ -68,6 +69,7 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
                                     &MockSystemHandler::Instance(),
                                     tx_service_conf,
                                     node_id,
+                                    ng_id,
                                     &ng_configs,
                                     range_bucket_seed,
                                     cluster_config_version,
@@ -77,6 +79,7 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
                                     true);
 
     tx_service_->Start(node_id,
+                       ng_id,
                        &ng_configs,
                        cluster_config_version,
                        &tx_ips,

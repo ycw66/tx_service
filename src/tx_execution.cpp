@@ -637,7 +637,7 @@ void TransactionExecution::ProcessTxRequest(InitTxRequest &init_txn_req)
     iso_level_ = init_txn_req.iso_level_;
     protocol_ = init_txn_req.protocol_;
     init_txn_.tx_ng_id_ = init_txn_req.tx_ng_id_ == UINT32_MAX
-                              ? Sharder::Instance().NodeId()
+                              ? Sharder::Instance().NativeNodeGroup()
                               : init_txn_req.tx_ng_id_;
 
     init_txn_.log_group_id_ = init_txn_req.log_group_id_;
@@ -7130,9 +7130,11 @@ void TransactionExecution::RecoverClusterScale(
             int member_nid =
                 scale_op_msg.new_ng_configs(ng_idx).member_nodes(nidx);
             auto &member_node_msg = node_configs[member_nid];
-            ng_nodes.emplace_back(member_node_msg.node_id_,
-                                  member_node_msg.host_name_,
-                                  member_node_msg.port_);
+            ng_nodes.emplace_back(
+                member_node_msg.node_id_,
+                member_node_msg.host_name_,
+                member_node_msg.port_,
+                scale_op_msg.new_ng_configs(ng_idx).is_candidate(nidx));
         }
         new_ng_configs.try_emplace(ng_id, std::move(ng_nodes));
     }

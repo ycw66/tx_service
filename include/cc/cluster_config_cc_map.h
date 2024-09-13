@@ -164,7 +164,7 @@ public:
 
     bool Execute(PostWriteAllCc &req) override
     {
-        if (req.NodeGroupId() != shard_->node_id_)
+        if (!shard_->IsNative(req.NodeGroupId()))
         {
             // We only process cluster config update on preferred leader node
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
@@ -437,14 +437,16 @@ public:
                     scale_op_msg.new_ng_configs(ng_idx).member_nodes_size();
                 int ng_id = scale_op_msg.new_ng_configs(ng_idx).ng_id();
                 std::vector<NodeConfig> ng_nodes;
-                for (int nid = 0; nid < node_cnt; nid++)
+                for (int nidx = 0; nidx < node_cnt; nidx++)
                 {
                     int member_nid =
-                        scale_op_msg.new_ng_configs(ng_idx).member_nodes(nid);
+                        scale_op_msg.new_ng_configs(ng_idx).member_nodes(nidx);
                     auto &member_node_msg = node_configs[member_nid];
-                    ng_nodes.emplace_back(member_node_msg.node_id_,
-                                          member_node_msg.host_name_,
-                                          member_node_msg.port_);
+                    ng_nodes.emplace_back(
+                        member_node_msg.node_id_,
+                        member_node_msg.host_name_,
+                        member_node_msg.port_,
+                        scale_op_msg.new_ng_configs(ng_idx).is_candidate(nidx));
                 }
                 new_ng_configs.try_emplace(ng_id, std::move(ng_nodes));
             }

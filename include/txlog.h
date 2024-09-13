@@ -65,6 +65,7 @@ public:
                            const std::string &source_ip,
                            uint16_t source_port,
                            int log_group,
+                           uint64_t start_ts,
                            std::atomic<bool> &interrupt) = 0;
 
     virtual RecoverTxStatus RecoverTx(uint64_t tx_number,

@@ -1,5 +1,7 @@
 #include "sharder.h"
 
+#include <brpc/channel.h>
+
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -12,7 +14,9 @@
 #include "remote/cc_node_service.h"
 #include "remote/cc_stream_receiver.h"
 #include "remote/cc_stream_sender.h"
+#include "tx_command.h"
 #include "tx_service.h"
+#include "tx_service_common.h"
 #include "tx_worker_pool.h"
 
 // gflags 2.1.1 missing GFLAGS_NAMESPACE. This is a workaround to handle gflags
@@ -85,20 +89,29 @@ void Sharder::CloseStreamSender()
 void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
 {
     std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
-    if (node_id >= cluster_config_.ng_configs_.size())
+
+    // TODO(lzx): use another arg to manage all nodes infos.
+    for (const auto &pair : cluster_config_.ng_configs_)
     {
-        // Node is already removed from cluster
-        ip = "";
-        port = 0;
-        return;
+        for (const auto &config : pair.second)
+        {
+            if (config.node_id_ == node_id)
+            {
+                ip = config.host_name_;
+                port = config.port_;
+                return;
+            }
+        }
     }
 
-    ip = cluster_config_.ng_configs_.at(node_id).front().host_name_;
-    port = cluster_config_.ng_configs_.at(node_id).front().port_;
+    ip = "";
+    port = 0;
+    return;
 }
 
 int Sharder::Init(
     uint32_t node_id,
+    uint32_t ng_id,
     const std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
     uint64_t config_version,
     const std::vector<std::string> *txlog_ips,
@@ -113,9 +126,11 @@ int Sharder::Init(
     bool enable_brpc_builtin_services)
 {
     node_id_ = node_id;
+    native_ng_ = ng_id;
     local_shards_ = local_shards;
     rep_group_cnt_ = rep_group_cnt;
     log_agent_ = std::move(log_agent);
+    std::unordered_map<uint32_t, NodeConfig> nodes_configs;
 
     {
         std::lock_guard<std::shared_mutex> lk(cluster_cnf_mux_);
@@ -125,6 +140,11 @@ int Sharder::Init(
             leader_term_cache_[nid].store(-1);
             candidate_leader_term_cache_[nid].store(-1);
             invalid_leader_term_cache_[nid].store(-1);
+        }
+        primary_node_leader_term_cache_.store(-1);
+        for (uint32_t seq_grp = 0; seq_grp < 200; seq_grp++)
+        {
+            standby_initial_seq_ids_[seq_grp].store(UINT64_MAX);
         }
         if (ng_configs != nullptr)
         {
@@ -145,6 +165,9 @@ int Sharder::Init(
             cluster_config_.ng_configs_.try_emplace(0);
             cluster_config_.version_ = config_version;
         }
+
+        ExtractNodesConfigs(cluster_config_.ng_configs_, nodes_configs);
+        node_cnt_ = nodes_configs.size();
 
         if (txlog_ips != nullptr)
         {
@@ -170,21 +193,25 @@ int Sharder::Init(
             std::make_unique<TxWorkerPool>(local_shards_->Count());
 #endif
         sharder_worker_ = std::make_unique<TxWorkerPool>(1);
+
+        assert(nodes_configs.find(node_id_) != nodes_configs.end());
+        const NodeConfig &node_conf = nodes_configs.at(node_id_);
+        host_name_ = node_conf.host_name_;
+        port_ = node_conf.port_;
         if (!txservice_skip_wal)
         {
             log_replay_service_ = std::make_unique<fault::ReplayService>(
                 *local_shards_,
                 GetLogAgent(),
-                cluster_config_.ng_configs_.at(node_id_).front().host_name_,
-                GET_LOG_REPLAY_RPC_PORT(
-                    cluster_config_.ng_configs_.at(node_id_).front().port_));
+                host_name_,
+                GET_LOG_REPLAY_RPC_PORT(port_));
             if (log_replay_server_.AddService(
                     log_replay_service_.get(),
                     brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
             {
-                LOG(FATAL)
-                    << "Failed to start add the log replay service to the log "
-                       "replay server.";
+                LOG(FATAL) << "Failed to start add the log replay service "
+                              "to the log "
+                              "replay server.";
                 return -1;
             }
         }
@@ -229,7 +256,7 @@ int Sharder::Init(
     }
 
     cc_stream_sender_ = std::make_unique<remote::CcStreamSender>(msg_pool_);
-    cc_stream_sender_->UpdateRemoteNodes(cluster_config_.ng_configs_);
+    cc_stream_sender_->UpdateRemoteNodes(nodes_configs);
 
     cc_node_service_ = std::make_unique<remote::CcNodeService>(*local_shards_);
     if (cc_node_server_.AddService(cc_node_service_.get(),
@@ -246,10 +273,7 @@ int Sharder::Init(
     // server_options.num_threads 0 means use default bthread worker count.
     server_options.num_threads = 0;
     server_options.has_builtin_services = enable_brpc_builtin_services;
-    if (cc_node_server_.Start(
-            GET_CCNODE_RPC_PORT(
-                cluster_config_.ng_configs_.at(node_id_).front().port_),
-            &server_options) != 0)
+    if (cc_node_server_.Start(GET_CCNODE_RPC_PORT(port_), &server_options) != 0)
     {
         LOG(FATAL) << "Failed to start the cc node server.";
         return -1;
@@ -260,10 +284,8 @@ int Sharder::Init(
 
     if (!txservice_skip_wal)
     {
-        if (log_replay_server_.Start(
-                GET_LOG_REPLAY_RPC_PORT(
-                    cluster_config_.ng_configs_.at(node_id_).front().port_),
-                &server_options) != 0)
+        if (log_replay_server_.Start(GET_LOG_REPLAY_RPC_PORT(port_),
+                                     &server_options) != 0)
         {
             LOG(FATAL) << "Failed to start the log replay server.";
             return -1;
@@ -344,6 +366,7 @@ int Sharder::Init(
         remote::StartNodeRequest req;
         remote::StartNodeResponse response;
         req.set_node_id(node_id_);
+        req.set_ng_id(native_ng_);
         req.set_config_version(config_version);
         if (log_agent_)
         {
@@ -364,20 +387,29 @@ int Sharder::Init(
             req.clear_log_ips();
             req.clear_log_ports();
         }
+
+        // ng members
         for (const auto &ng_config : cluster_config_.ng_configs_)
         {
-            auto node_buf = req.add_node_configs();
-            auto &node_config = ng_config.second.front();
-            node_buf->set_node_id(node_config.node_id_);
-            node_buf->set_host_name(node_config.host_name_);
-            node_buf->set_port(GET_CCNODE_RPC_PORT(node_config.port_));
-            auto ng_buf = req.add_cluster_config();
+            remote::NodegroupConfigBuf *ng_buf = req.add_cluster_config();
             ng_buf->set_ng_id(ng_config.first);
             for (auto &member : ng_config.second)
             {
-                ng_buf->add_member_nodes(member.node_id_);
+                auto *member_node = ng_buf->add_member_nodes();
+                member_node->set_node_id(member.node_id_);
+                member_node->set_is_candidate(member.is_candidate_);
             }
         }
+
+        // nodes
+        for (const auto &[nid, node_config] : nodes_configs)
+        {
+            auto node_buf = req.add_node_configs();
+            node_buf->set_node_id(node_config.node_id_);
+            node_buf->set_host_name(node_config.host_name_);
+            node_buf->set_port(GET_CCNODE_RPC_PORT(node_config.port_));
+        }
+
         cntl.set_timeout_ms(500);
         stub.StartNode(&cntl, &req, &response, nullptr);
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -403,7 +435,8 @@ int Sharder::Init(
     }
     else
     {
-        cluster_config_.cc_nodes_.at(node_id_)->OnLeaderStart(1);
+        uint64_t start_ts;
+        cluster_config_.cc_nodes_.at(node_id_)->OnLeaderStart(1, start_ts);
     }
 
     return 0;
@@ -454,6 +487,7 @@ std::shared_ptr<brpc::Channel> Sharder::GetCcNodeServiceChannel(
             }
             return channel;
         }
+
         return channel_it->second;
     }
 
@@ -581,6 +615,12 @@ void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id)
     ng_leader_cache_[ng_id].store(node_id, std::memory_order_release);
 }
 
+bool Sharder::CaughtupWithPrimary() const
+{
+    return txservice_skip_kv ||
+           local_shards_->store_hd_->IsCaughtUpWithPrimary();
+}
+
 void Sharder::FinishLogReplay(uint32_t cc_ng_id,
                               int64_t cc_ng_term,
                               uint32_t log_group_id,
@@ -631,7 +671,8 @@ void Sharder::WaitClusterReady()
             if (recovered_leader_set_.find(ng_id) ==
                 recovered_leader_set_.end())
             {
-                if (ng_id == node_id_)
+                uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+                if (dest_node_id == node_id_)
                 {
                     // Wait FinishLogReplay emplace recovered_leader_set_.
                 }
@@ -683,7 +724,9 @@ void Sharder::RecoverTx(uint64_t lock_tx_number,
     }
 }
 
-bool Sharder::OnLeaderStart(uint32_t ng_id, int64_t term)
+bool Sharder::OnLeaderStart(uint32_t ng_id,
+                            int64_t term,
+                            uint64_t &replay_start_ts)
 {
     std::shared_ptr<fault::CcNode> node;
     {
@@ -694,7 +737,7 @@ bool Sharder::OnLeaderStart(uint32_t ng_id, int64_t term)
         node = find_it->second;
     }
 
-    return node->OnLeaderStart(term);
+    return node->OnLeaderStart(term, replay_start_ts);
 }
 
 bool Sharder::OnLeaderStop(uint32_t ng_id, int64_t term)
@@ -709,6 +752,34 @@ bool Sharder::OnLeaderStop(uint32_t ng_id, int64_t term)
     }
 
     return node->OnLeaderStop(term);
+}
+
+void Sharder::OnStartFollowing(uint32_t ng_id,
+                               int64_t term,
+                               uint32_t leader_node,
+                               bool resubscribe)
+{
+    std::shared_ptr<fault::CcNode> node;
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        auto find_it = cluster_config_.cc_nodes_.find(ng_id);
+        // TODO: is this always true when cluster config is changed?
+        assert(find_it != cluster_config_.cc_nodes_.end());
+        node = find_it->second;
+    }
+
+    if (resubscribe)
+    {
+        // resubscribe is called on tx processor and on start following needs
+        // to be handled on a worker thread.
+        GetTxWorkerPool()->SubmitWork(
+            [node, leader_node, term]
+            { node->OnStartFollowing(leader_node, term, true); });
+    }
+    else
+    {
+        node->OnStartFollowing(leader_node, term, false);
+    }
 }
 
 void Sharder::LogTransferLeader(uint32_t log_group_id, uint32_t leader_idx)
@@ -745,6 +816,19 @@ int64_t Sharder::TryPinNodeGroupData(uint32_t cc_ng_id)
     if (find_it != cluster_config_.cc_nodes_.end())
     {
         return find_it->second->PinData();
+    }
+    return -1;
+}
+
+int64_t Sharder::TryPinStandbyNodeGroupData()
+{
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+
+    auto find_it =
+        cluster_config_.cc_nodes_.find(Sharder::Instance().NativeNodeGroup());
+    if (find_it != cluster_config_.cc_nodes_.end())
+    {
+        return find_it->second->StandbyPinData();
     }
     return -1;
 }
@@ -818,7 +902,7 @@ std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
         NodeGroupId new_ng_id = new_ng_configs.size();
         // Add this node to the new node group as the preferred leader.
         std::vector<NodeConfig> members{
-            NodeConfig(new_ng_id, node.first, node.second)};
+            NodeConfig(new_ng_id, node.first, node.second, true)};
         new_ng_configs.try_emplace(new_ng_id, std::move(members));
     }
 
@@ -868,6 +952,8 @@ std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
             }
             assert(least_node_id != -1);
             members.emplace_back(new_ng_configs[least_node_id].front());
+            // the filled member should not be preferred leader.
+            members.back().is_candidate_ = false;
             node_ng_count[least_node_id]++;
         }
     }
@@ -958,6 +1044,7 @@ Sharder::RemoveNodeFromCluster(uint16_t removed_node_count)
             }
             assert(least_node_id != -1);
             members.emplace_back(new_ng_configs[least_node_id].front());
+            members.back().is_candidate_ = false;
             node_ng_count[least_node_id]++;
         }
     }
@@ -989,22 +1076,33 @@ void Sharder::UpdateClusterConfig(
             brpc::Controller cntl;
             remote::UpdateNodeGroupConfigRequest req;
             remote::UpdateNodeGroupConfigResponse resp;
-            for (auto &ng_pair : new_ng_configs)
-            {
-                auto node_buf = req.add_new_node_configs();
-                node_buf->set_node_id(ng_pair.first);
-                node_buf->set_host_name(ng_pair.second.front().host_name_);
-                node_buf->set_port(
-                    GET_CCNODE_RPC_PORT(ng_pair.second.front().port_));
 
-                auto ng_buf = req.add_new_cluster_config();
-                ng_buf->set_ng_id(ng_pair.first);
-                for (auto &node : ng_pair.second)
+            for (const auto &ng_config : new_ng_configs)
+            {
+                remote::NodegroupConfigBuf *ng_buf =
+                    req.add_new_cluster_config();
+                ng_buf->set_ng_id(ng_config.first);
+                for (auto &member : ng_config.second)
                 {
-                    ng_buf->add_member_nodes(node.node_id_);
+                    auto *member_node = ng_buf->add_member_nodes();
+                    member_node->set_node_id(member.node_id_);
+                    member_node->set_is_candidate(member.is_candidate_);
                 }
             }
+
+            // nodes
+            std::unordered_map<uint32_t, NodeConfig> new_nodes_configs;
+            ExtractNodesConfigs(new_ng_configs, new_nodes_configs);
+            for (const auto &[nid, node_config] : new_nodes_configs)
+            {
+                auto node_buf = req.add_new_node_configs();
+                node_buf->set_node_id(node_config.node_id_);
+                node_buf->set_host_name(node_config.host_name_);
+                node_buf->set_port(GET_CCNODE_RPC_PORT(node_config.port_));
+            }
+
             auto last_term = LeaderTerm(node_id_);
+            assert(node_id_ == native_ng_);
             req.set_ng_id(node_id_);
             req.set_config_version(version);
             cntl.set_timeout_ms(10000);
@@ -1090,7 +1188,7 @@ void Sharder::UpdateClusterConfig(
                 cluster_config_.version_ = version;
             }
 
-            cc_stream_sender_->UpdateRemoteNodes(cluster_config_.ng_configs_);
+            cc_stream_sender_->UpdateRemoteNodes(new_nodes_configs);
 
             cc_shard->Enqueue(cc_req);
         });
@@ -1104,11 +1202,130 @@ void Sharder::StartCcStreamReceiver(bool enable_brpc_builtin_services)
     // server_options.num_threads 0 means use default bthread worker count.
     server_options.num_threads = 0;
     server_options.has_builtin_services = enable_brpc_builtin_services;
-    if (cc_stream_server_.Start(
-            cluster_config_.ng_configs_.at(node_id_).front().port_,
-            &server_options) != 0)
+    if (cc_stream_server_.Start(port_, &server_options) != 0)
     {
         LOG(FATAL) << "Failed to start the cc stream server.";
+    }
+}
+
+void Sharder::SubscribeToPrimary(bool need_clear_ccm, int64_t ng_term)
+{
+    uint32_t ng_id = Sharder::Instance().NativeNodeGroup();
+    uint32_t leader_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (need_clear_ccm)
+    {
+        uint16_t core_cnt = local_shards_->Count();
+        ClearCcNodeGroup clear_ccm_req(ng_id, core_cnt);
+        for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+        {
+            local_shards_->EnqueueCcRequest(core_id, &clear_ccm_req);
+        }
+        clear_ccm_req.Wait();
+    }
+    // term is already updated. Release processing latch to allow other rpc
+    // to proceed. is_processing_.store(false, std::memory_order_release);
+
+    // Notify primary node to start forwarding data change to this node.
+    auto channel = Sharder::Instance().GetCcNodeServiceChannel(leader_node_id);
+    while (!channel)
+    {
+        if (Sharder::Instance().LeaderNodeId(ng_id) != leader_node_id)
+        {
+            DLOG(INFO) << "===GetCcNodeServiceChannel leader mimatch, "
+                          "leader_node_id:"
+                       << leader_node_id << ",Sharder::LeaderNode:"
+                       << Sharder::Instance().LeaderNodeId(ng_id);
+            return;
+        }
+        bthread_usleep(1000);
+        channel = Sharder::Instance().GetCcNodeServiceChannel(leader_node_id);
+    }
+
+    DLOG(INFO) << "===GetCcNodeServiceChannel, leader_node_id:"
+               << leader_node_id << ",channel:" << channel;
+
+    remote::CcRpcService_Stub stub(channel.get());
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(5000);
+
+    //  Ask primary to start forwarding msgs and get
+    // starting seq id.
+    remote::StandbyStartFollowingRequest start_follow_req;
+    remote::StandbyStartFollowingResponse start_follow_resp;
+    start_follow_req.set_node_group_id(ng_id);
+    start_follow_req.set_node_id(node_id_);
+    start_follow_req.set_ng_term(ng_term);
+
+    stub.StandbyStartFollowing(
+        &cntl, &start_follow_req, &start_follow_resp, nullptr);
+
+    while (cntl.Failed() || start_follow_resp.error())
+    {
+        if (Sharder::Instance().PrimaryNodeTerm() != ng_term)
+        {
+            LOG(INFO) << "failed due to newer primary leader term "
+                      << Sharder::Instance().PrimaryNodeTerm();
+            return;
+        }
+
+        LOG(INFO) << "retrying, last cntl status " << cntl.Failed()
+                  << ",start_follow_resp.error():" << start_follow_resp.error()
+                  << ",cntl.ErrorText():" << cntl.ErrorText();
+        cntl.Reset();
+        cntl.set_timeout_ms(5000);
+        start_follow_resp.Clear();
+        bthread_usleep(1000);
+        stub.StandbyStartFollowing(
+            &cntl, &start_follow_req, &start_follow_resp, nullptr);
+    }
+
+    uint32_t seq_grp_cnt = start_follow_resp.start_sequence_id_size();
+
+    // reset start seq id
+    for (uint32_t grp_id = 0; grp_id < seq_grp_cnt; grp_id++)
+    {
+        bool err = false;
+        bthread::Mutex mux;
+
+        WaitableCc sub_cc(
+            [grp_id, &start_follow_resp, ng_term, &mux, &err](CcShard &ccs)
+            {
+                // verify primary term hasn't changed
+                if (Sharder::Instance().PrimaryNodeTerm() != ng_term)
+                {
+                    std::unique_lock<bthread::Mutex> lk(mux);
+                    err = true;
+                    LOG(INFO) << "rejected subscribe req due to primary "
+                                 "term mismatch";
+                    return;
+                }
+
+                if (grp_id == 0)
+                {
+                    // update initial msg seq id when processing the first
+                    // grp. this is to avoid any concurrent update on the
+                    // initial seq id vector.
+                    for (int i = 0;
+                         i < start_follow_resp.start_sequence_id_size();
+                         i++)
+                    {
+                        Sharder::Instance().SetStandbyInitialMsgSequence(
+                            i, start_follow_resp.start_sequence_id(i));
+                    }
+                }
+
+                ccs.SubsribeToPrimaryNode(
+                    grp_id, start_follow_resp.start_sequence_id(grp_id));
+            });
+
+        local_shards_->EnqueueCcRequest(grp_id, &sub_cc);
+        sub_cc.Wait();
+
+        std::unique_lock<bthread::Mutex> lk(mux);
+        if (err)
+        {
+            return;
+        }
     }
 }
 }  // namespace txservice

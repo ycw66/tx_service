@@ -48,23 +48,44 @@ int64_t FetchCc::LeaderTerm() const
 FetchCatalogCc::FetchCatalogCc(const TableName &table_name,
                                CcShard &ccs,
                                uint32_t cc_ng_id,
-                               int64_t cc_ng_term)
+                               int64_t cc_ng_term,
+                               bool fetch_from_primary)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(table_name.StringView().data(),
                   table_name.StringView().size(),
-                  table_name.Type())
+                  table_name.Type()),
+      fetch_from_primary_(fetch_from_primary)
 {
+}
+
+bool FetchCatalogCc::ValidTermCheck()
+{
+    if (fetch_from_primary_)
+    {
+        if (Sharder::Instance().PrimaryNodeTerm() != cc_ng_term_)
+        {
+            return false;
+        }
+    }
+    else
+    {
+        int64_t cc_ng_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+        if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_)
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool FetchCatalogCc::Execute(CcShard &ccs)
 {
     if (error_code_ == 0)
     {
-        int64_t cc_ng_candid_term =
-            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
-        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-
-        if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
+        if (ValidTermCheck())
         {
             // If on_leader_stop and Enqueue(ClearCcNodeGroup) happens at this
             // time, the creating catalog will be cleaned by ClearCcNodeGroup,
@@ -352,8 +373,9 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
 {
     ccs.DropLockHoldingTxs(cc_ng_id_);
     ccs.DropCcms(cc_ng_id_);
+    ccs.ResetStandbySequence();
 
-    if (cc_ng_id_ == ccs.node_id_)
+    if (ccs.IsNative(cc_ng_id_))
     {
         ccs.ClearActvieSiTxs();
     }
@@ -726,66 +748,96 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              CcShard &ccs,
                              NodeGroupId cc_ng_id,
                              int64_t cc_ng_term,
-                             int32_t range_id)
+                             int32_t range_id,
+                             bool fetch_from_primary,
+                             uint32_t seq_grp,
+                             uint64_t initial_seq_id)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(tbl_name),
       table_schema_(tbl_schema),
       tx_key_(std::move(tx_key)),
       cce_(cce),
       ccm_(ccm),
-      range_id_(range_id)
+      range_id_(range_id),
+      fetch_from_primary_(fetch_from_primary),
+      seq_grp_(seq_grp),
+      initial_seq_id_(initial_seq_id)
 {
 }
 
-bool FetchRecordCc::Execute(CcShard &ccs)
+bool FetchRecordCc::ValidTermCheck()
 {
-    // if the referenced cce is already invalid, we do not need to care about
-    // the fetch result and pending reqs since they are all invalid.
-    if (cce_->PayloadStatus() != RecordStatus::Invalid)
+    if (fetch_from_primary_)
+    {
+        if (Sharder::Instance().PrimaryNodeTerm() != cc_ng_term_ ||
+            Sharder::Instance().StandbyInitialMsgSequence(seq_grp_) !=
+                initial_seq_id_)
+        {
+            return false;
+        }
+    }
+    else
     {
         int64_t cc_ng_candid_term =
             Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
         if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_)
         {
-            // term has changed and the ccm has been erased already. It is no
-            // longer safe to access cce. Just abort all the reqs.
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool FetchRecordCc::Execute(CcShard &ccs)
+{
+    if (!ValidTermCheck())
+    {
+        // term has changed and the ccm has been erased already. It is no
+        // longer safe to access cce. Just abort all the reqs.
+        for (CcRequestBase *req : requesters_)
+        {
+            bool succ = ccm_->BackFill(cce_, rec_ts_, rec_status_, rec_str_);
+            if (!succ && req)
+            {
+                req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+            }
+        }
+    }
+    else if (cce_->PayloadStatus() != RecordStatus::Invalid)
+    {
+        if (handle_resp_)
+        {
+            handle_resp_(ccs);
+        }
+        // if the referenced cce is already invalid, we do not need to care
+        // about the fetch result and pending reqs since they are all
+        // invalid.
+        bool succ = ccm_->BackFill(cce_, rec_ts_, rec_status_, rec_str_);
+        if (!succ)
+        {
+            // Retry if backfill failed.
+            ccs.Enqueue(ccs.core_id_, this);
+            return false;
+        }
+        if (error_code_ == 0)
+        {
             for (CcRequestBase *req : requesters_)
             {
                 if (req)
                 {
-                    req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+                    ccs.Enqueue(ccs.core_id_, req);
                 }
             }
         }
         else
         {
-            bool succ =
-                ccm_->BackFill(cce_, rec_ts_, rec_status_, std::move(rec_));
-            if (!succ)
+            for (CcRequestBase *req : requesters_)
             {
-                // Retry if backfill failed.
-                ccs.Enqueue(ccs.core_id_, this);
-                return false;
-            }
-            if (error_code_ == 0)
-            {
-                for (CcRequestBase *req : requesters_)
+                if (req)
                 {
-                    if (req)
-                    {
-                        ccs.Enqueue(ccs.core_id_, req);
-                    }
-                }
-            }
-            else
-            {
-                for (CcRequestBase *req : requesters_)
-                {
-                    if (req)
-                    {
-                        req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
-                    }
+                    req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
                 }
             }
         }

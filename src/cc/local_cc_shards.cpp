@@ -23,6 +23,7 @@
 #include "range_slice.h"
 #include "sharder.h"
 #include "sk_generator.h"
+#include "standby.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_key.h"
@@ -36,11 +37,8 @@ std::atomic<uint64_t> LocalCcShards::local_clock(0);
 
 LocalCcShards::LocalCcShards(
     uint32_t node_id,
-    uint16_t core_cnt,
-    uint16_t range_split_worker_cnt,
-    uint32_t memory_limit_mb,
-    uint32_t log_limit_mb,
-    bool realtime_sampling,
+    uint32_t ng_id,
+    const std::map<std::string, uint32_t> &conf,
     CatalogFactory *catalog_factory,
     SystemHandler *system_handler,
     std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
@@ -52,53 +50,74 @@ LocalCcShards::LocalCcShards(
     metrics::MetricsRegistry *metrics_registry,
     metrics::CommonLabels common_labels,
     std::unordered_map<TableName, std::string> *prebuilt_tables,
-    std::function<void(std::string_view, std::string_view)> publish_func,
-    bool enable_shard_heap_defragment,
-    bool enable_key_cache)
+    std::function<void(std::string_view, std::string_view)> publish_func)
     : range_slice_memory_limit_(
-          ((uint64_t) MB(memory_limit_mb)) /
-          ((enable_key_cache && !enable_mvcc)
+          ((uint64_t) MB(conf.at("node_memory_limit_mb"))) /
+          ((conf.at("enable_key_cache") && !enable_mvcc)
                ? 10
                : 20)),  // If key cache is included in range slice mem use 10%,
                         // otherwise 5%
       store_hd_(store_hd),
       node_id_(node_id),
+      ng_id_(ng_id),
       timer_terminate_(false),
       is_waiting_ckpt_(false),
       catalog_factory_(catalog_factory),
       system_handler_(system_handler),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
-      realtime_sampling_(realtime_sampling),
+      realtime_sampling_(conf.at("realtime_sampling")),
 
 #ifdef RANGE_PARTITION_ENABLED
 #ifdef EXT_TX_PROC_ENABLED
-      range_split_worker_ctx_(range_split_worker_cnt > 0
-                                  ? range_split_worker_cnt
-                                  : (core_cnt >= 2 ? (core_cnt / 2) : 1)),
-#else
       range_split_worker_ctx_(
-          range_split_worker_cnt > 0 ? range_split_worker_cnt : core_cnt),
+          conf.at("range_split_worker_num") > 0
+              ? conf.at("range_split_worker_num")
+              : (conf.at("core_num") >= 2 ? (conf.at("core_num") / 2) : 1)),
+#else
+      range_split_worker_ctx_(conf.at("range_split_worker_num") > 0
+                                  ? conf.at("range_split_worker_num")
+                                  : conf.at("core_num")),
 #endif
 #endif
 
 #ifdef EXT_TX_PROC_ENABLED
 #ifdef RANGE_PARTITION_ENABLED
-      data_sync_worker_ctx_(core_cnt >= 2 ? (core_cnt / 2) : 1),
+      data_sync_worker_ctx_(conf.at("core_num") >= 2 ? (conf.at("core_num") / 2)
+                                                     : 1),
 #else
-      data_sync_worker_ctx_(core_cnt),
+      data_sync_worker_ctx_(conf.at("core_num")),
 #endif
-      slice_update_worker_ctx_(core_cnt),
-      flush_data_worker_ctx_(core_cnt >= 2 ? std::min(core_cnt / 2, 10) : 1),
+      slice_update_worker_ctx_(conf.at("core_num")),
+      flush_data_worker_ctx_(
+          conf.at("core_num") >= 2
+              ? std::min(conf.at("core_num") / 2, (uint32_t) 10)
+              : 1),
 #else
-      data_sync_worker_ctx_(core_cnt),
-      slice_update_worker_ctx_(core_cnt * 2),
-      flush_data_worker_ctx_(std::min(static_cast<int>(core_cnt), 10)),
+      data_sync_worker_ctx_(conf.at("core_num")),
+      slice_update_worker_ctx_(conf.at("core_num") * 2),
+      flush_data_worker_ctx_(
+          std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
       statistics_worker_ctx_(1),
       publish_func_(publish_func),
-      enable_shard_heap_defragment_(enable_shard_heap_defragment)
+      enable_shard_heap_defragment_(conf.at("enable_shard_heap_defragment"))
 {
+    if (conf.find("max_standby_lag") != conf.end())
+    {
+        txservice_max_standby_lag = conf.at("max_standby_lag");
+    }
+    if (conf.find("enable_key_cache") != conf.end())
+    {
+        if (enable_mvcc && conf.at("enable_key_cache"))
+        {
+            LOG(WARNING) << "Txservice key cache is disabled due to "
+                            "incompatibility with MVCC.";
+        }
+        // Key cache is only available in non-mvcc mode.
+        txservice_enable_key_cache =
+            conf.at("enable_key_cache") && !enable_mvcc;
+    }
     using namespace std::chrono_literals;
     uint64_t ts_base = std::chrono::duration_cast<std::chrono::microseconds>(
                            std::chrono::system_clock::now().time_since_epoch())
@@ -111,7 +130,7 @@ LocalCcShards::LocalCcShards(
     InitializeTableRangesHeap();
 
     InitRangeBuckets(
-        node_id, ng_configs->size(), cluster_config_version, range_bucket_seed);
+        ng_id_, ng_configs->size(), cluster_config_version, range_bucket_seed);
 
     if (prebuilt_tables)
     {
@@ -122,16 +141,16 @@ LocalCcShards::LocalCcShards(
             (void) ins_res;
         }
     }
-    for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
+    for (uint16_t thd_idx = 0; thd_idx < conf.at("core_num"); ++thd_idx)
     {
         common_labels["core_id"] = std::to_string(thd_idx);
         cc_shards_.emplace_back(
             std::make_unique<CcShard>(thd_idx,
-                                      core_cnt,
-                                      memory_limit_mb,
-                                      log_limit_mb,
-                                      realtime_sampling,
-                                      node_id,
+                                      conf.at("core_num"),
+                                      conf.at("node_memory_limit_mb"),
+                                      conf.at("node_log_limit_mb"),
+                                      conf.at("realtime_sampling"),
+                                      ng_id_,
                                       *this,
                                       catalog_factory_,
                                       system_handler,
@@ -1733,7 +1752,6 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
         auto res_pair = ng_buckets.try_emplace(ng_id, 0);
         res_pair.first->second++;
     }
-    // bucket_infos_.try_emplace(ng_id, std::move(ng_bucket_infos));
 }
 
 const BucketInfo *LocalCcShards::UploadNewBucketInfo(NodeGroupId ng_id,

@@ -8,6 +8,7 @@
 #include "cc/cc_request.h"
 #include "cc/cc_shard.h"
 #include "error_messages.h"
+#include "remote_cc_request.h"
 
 namespace txservice
 {
@@ -647,6 +648,16 @@ void KeyGapLockAndExtraData::AbortBlockRequest(TxNumber txid, CcErrorCode err)
             return;
         }
     }
+}
+
+void KeyGapLockAndExtraData::SetForwardEntry(StandbyForwardEntry *entry)
+{
+    forward_entry_ = entry;
+}
+
+StandbyForwardEntry *KeyGapLockAndExtraData::ForwardEntry()
+{
+    return forward_entry_;
 }
 #endif
 }  // namespace txservice

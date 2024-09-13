@@ -3,10 +3,13 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 #include <butil/iobuf.h>
+#include <bvar/latency_recorder.h>
+#include <google/protobuf/stubs/callback.h>
 #include <mimalloc-2.1/mimalloc.h>
 
 #include <algorithm>  // std::min
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -31,12 +34,13 @@
 #include "cc_protocol.h"
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
+#include "cc_req_pool.h"
+#include "cc_stream_sender.h"
 #include "constants.h"
 #include "dead_lock_check.h"
 #include "error_messages.h"  // CcErrorCode
 #include "fault/fault_inject.h"
 #include "proto/cc_request.pb.h"
-#include "raft_log.pb.h"
 #include "random_pairing.h"
 #include "range_slice.h"
 #include "read_write_entry.h"
@@ -55,6 +59,8 @@
 namespace txservice
 {
 thread_local inline CcRequestPool<ReplayLogCc> replay_cc_pool_;
+thread_local inline CcRequestPool<KeyObjectStandbyForwardCc>
+    key_obj_standby_forward_pool_;
 
 template <typename KeyT, typename ValueT>
 class TemplateCcMap;
@@ -2434,6 +2440,7 @@ public:
             memory_allocated_vec_.emplace_back(0);
             memory_committed_vec_.emplace_back(0);
             heap_full_vec_.emplace_back(false);
+            standby_msg_seq_id_vec_.emplace_back(0);
         }
     }
 
@@ -2444,6 +2451,12 @@ public:
     bool Execute(CcShard &ccs) override
     {
         uint64_t tx_min_ts = ccs.ActiveTxMinTs(cc_ng_id_);
+        standby_msg_seq_id_vec_[ccs.core_id_] =
+            ccs.NextStandbyMessageSequence() - 1;
+        if (ccs.core_id_ == 0)
+        {
+            subscribed_node_ids_ = ccs.GetSubscribedStandbys();
+        }
         int64_t allocated, committed;
         bool full = ccs.GetShardHeap()->Full(&allocated, &committed);
 
@@ -2506,6 +2519,11 @@ public:
         return total_cmt / 1024;
     }
 
+    std::vector<uint64_t> GetStandbySequenceIds() const
+    {
+        return standby_msg_seq_id_vec_;
+    }
+
     void ShardMemoryUsageReport(LocalCcShards &local_shards)
     {
         for (uint16_t core_id = 0; core_id < memory_allocated_vec_.size();
@@ -2523,6 +2541,43 @@ public:
         }
     }
 
+    void UpdateStandbyConsistentTs()
+    {
+        if (subscribed_node_ids_.empty())
+        {
+            return;
+        }
+        int64_t ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+        if (ng_term < 0)
+        {
+            return;
+        }
+        brpc::Controller cntl;
+        remote::UpdateStandbyConsistentTsRequest req;
+        remote::UpdateStandbyConsistentTsResponse resp;
+        req.set_ng_term(ng_term);
+        req.set_node_group_id(cc_ng_id_);
+        req.set_consistent_ts(ckpt_ts_);
+        for (uint64_t seq_id : standby_msg_seq_id_vec_)
+        {
+            req.add_seq_ids(seq_id);
+        }
+        for (uint32_t node_id : subscribed_node_ids_)
+        {
+            auto channel = Sharder::Instance().GetCcNodeServiceChannel(node_id);
+            if (channel)
+            {
+                remote::CcRpcService_Stub stub(channel.get());
+                cntl.Reset();
+                cntl.set_timeout_ms(500);
+                resp.Clear();
+
+                // We don't care about response
+                stub.UpdateStandbyConsistentTs(&cntl, &req, &resp, nullptr);
+            }
+        }
+    }
+
 private:
     std::atomic<uint64_t> ckpt_ts_;
     bthread::Mutex mux_;
@@ -2531,6 +2586,8 @@ private:
     size_t shard_cnt_;
     std::vector<uint64_t> memory_allocated_vec_;
     std::vector<uint64_t> memory_committed_vec_;
+    std::vector<uint64_t> standby_msg_seq_id_vec_;
+    std::vector<uint32_t> subscribed_node_ids_;
     std::vector<bool> heap_full_vec_;
     NodeGroupId cc_ng_id_;
 };
@@ -2822,7 +2879,7 @@ public:
         // dequeue wait list if heap is not full anymore every 20 scan batch
         if (run_count_ % 20 == 0 && !ccs.GetShardHeap()->Full())
         {
-            ccs.DequeueWaitList();
+            ccs.DequeueWaitListAfterMemoryFree();
         }
 
         if (static_cast<size_t>(current_node_group_idx_) < node_groups_.size())
@@ -2869,7 +2926,7 @@ public:
             ccs.SetDefragHeapCcOnFly(false);
             // deque cc request in wait list after
             // defragmentation
-            ccs.DequeueWaitList();
+            ccs.DequeueWaitListAfterMemoryFree();
 
             int64_t allocated, committed;
             mi_thread_stats(&allocated, &committed);
@@ -3539,6 +3596,45 @@ private:
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::CheckTxStatusCc *r);
+};
+
+struct ResendStandbyMessageCc : public CcRequestBase
+{
+    bool Execute(CcShard &ccs) override
+    {
+        brpc::ClosureGuard done_guard(done_);
+        if (!Sharder::Instance().CheckLeaderTerm(ng_id_, ng_term_))
+        {
+            response_->set_error(true);
+            return true;
+        }
+
+        response_->set_error(
+            !ccs.GetStandbyMessage(seq_id_, response_->mutable_msg()));
+        return true;
+    }
+
+    void Reset(uint32_t ng_id,
+               int64_t term,
+               uint64_t seq_id,
+               uint32_t req_node_id,
+               remote::RequestResendStandbyMessageResponse *response,
+               ::google::protobuf::Closure *done)
+    {
+        ng_term_ = term;
+        seq_id_ = seq_id;
+        ng_id_ = ng_id;
+        req_node_id_ = req_node_id;
+        response_ = response;
+        done_ = done;
+    }
+
+    int64_t ng_term_;
+    uint64_t seq_id_;
+    uint32_t ng_id_;
+    uint32_t req_node_id_;
+    remote::RequestResendStandbyMessageResponse *response_;
+    ::google::protobuf::Closure *done_;
 };
 
 struct ClearTxCc : public CcRequestBase
@@ -5086,7 +5182,7 @@ public:
     bool Execute(CcShard &ccs) override
     {
         ccs.ResetCleanStart();
-        ccs.DequeueWaitList();
+        ccs.DequeueWaitListAfterMemoryFree();
 
         {
             std::lock_guard<std::mutex> lk(mux_);
@@ -5491,6 +5587,11 @@ public:
         remote_input_.cmd_ = cmd;
         remote_input_.is_owner_ = true;
     }
+
+    TxCommand *GetCommand()
+    {
+        return is_local_ ? local_input_.cmd_ : remote_input_.cmd_;
+    }
     // For remote update command, if NOT apply_and_commit_, it will need move
     // the ownership into ccentry PendingCmd for executing in PostWriteCc.
     void RemoveOwnership()
@@ -5650,6 +5751,395 @@ private:
     //  bool is_remote_{false};
 };
 
+struct KeyObjectStandbyForwardCc
+    : public TemplatedCcRequest<KeyObjectStandbyForwardCc, Void>
+{
+public:
+    enum DDLPhase
+    {
+        AcquirePhase,
+        KvOpPhase,
+        ReleasePhase
+    };
+    KeyObjectStandbyForwardCc()
+        : remote_table_name_(empty_sv, TableType::Primary),
+          key_str_(nullptr),
+          object_version_(0),
+          commit_ts_(0),
+          has_overwrite_(false)
+    {
+    }
+
+    KeyObjectStandbyForwardCc(const KeyObjectStandbyForwardCc &rhs) = delete;
+    KeyObjectStandbyForwardCc(KeyObjectStandbyForwardCc &&rhs) = delete;
+
+    bool ValidTermCheck() override
+    {
+        if (Sharder::Instance().NativeNodeGroup() != node_group_id_)
+        {
+            return false;
+        }
+        if (Sharder::Instance().PrimaryNodeTerm() != primary_leader_term_)
+        {
+            return false;
+        }
+        uint64_t initial_seq_id =
+            Sharder::Instance().StandbyInitialMsgSequence(forward_msg_grp_);
+        if (seq_grp_initial_id_ == UINT64_MAX)
+        {
+            seq_grp_initial_id_ = initial_seq_id;
+        }
+        if (initial_seq_id != seq_grp_initial_id_ ||
+            seq_grp_initial_id_ == UINT64_MAX)
+        {
+            // standby node is not subscribed to primary node yet or it is an
+            // expired message.
+            return false;
+        }
+
+        if (ng_term_ < 0)
+        {
+            ng_term_ = primary_leader_term_;
+        }
+
+        return true;
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        SetFinish();
+        Free();
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            SetFinish();
+            return true;
+        }
+
+        if (!updated_local_seq_id_)
+        {
+            if (!ccs.UpdateLastReceivedStandbySequenceId(*fwd_req_))
+            {
+                // No need to process msg
+                SetFinish();
+                return true;
+            }
+            updated_local_seq_id_ = true;
+            if (table_name_->IsMeta())
+            {
+                // pin node group since it is unsafe to resubscribe/escalate
+                // during ddl change.
+                int64_t term = Sharder::Instance().TryPinStandbyNodeGroupData();
+                if (term < 0)
+                {
+                    SetFinish();
+                    return true;
+                }
+                else if (term != PrimaryLeaderTerm())
+                {
+                    SetFinish();
+                    Sharder::Instance().UnpinNodeGroupData(node_group_id_);
+                    return true;
+                }
+            }
+            uint16_t data_core_id = (key_shard_code_ & 0x3FF) % ccs.core_cnt_;
+            if (data_core_id != ccs.core_id_)
+            {
+                // Move the request to where the data belongs to.
+                ccs.Enqueue(ccs.core_id_, data_core_id, this);
+                return false;
+            }
+        }
+
+        if (ccm_ == nullptr)
+        {
+            assert(table_name_->StringView() != empty_sv);
+            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+
+            if (ccm_ == nullptr)
+            {
+                // Find base table name for index table.
+                // Fetch/Get Catalog is based on base table name, but Get
+                // ccmap is based on the real table name, for example, index
+                // should get the corresponding sk_ccmap.
+                assert(!table_name_->IsMeta());
+                const CatalogEntry *catalog_entry = ccs.InitCcm(
+                    *table_name_, node_group_id_, primary_leader_term_, this);
+                if (catalog_entry == nullptr)
+                {
+                    // The local node does not contain the table's schema
+                    // instance. The FetchCatalog() method will send an
+                    // async request toward the data store to fetch the
+                    // catalog. After fetching is finished, this cc request
+                    // is re-enqueued for re-execution.
+                    return false;
+                }
+                else
+                {
+                    if (catalog_entry->schema_ == nullptr)
+                    {
+                        // The local node (LocalCcShards) contains a schema
+                        // instance, which indicates that the table has been
+                        // dropped. Returns the request with an error.
+                        res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        return true;
+                    }
+
+                    ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+                }
+            }
+            assert(ccm_ != nullptr);
+            assert(ccs.core_id_ == ccm_->shard_->core_id_);
+            return ccm_->Execute(*this);
+        }
+        else
+        {
+            // non parallel request which is executed again, e.g. initial
+            // execution blocked by lock.
+            assert(ccm_ != nullptr);
+            assert(ccs.core_id_ == ccm_->shard_->core_id_);
+            return ccm_->Execute(*this);
+        }
+    }
+    void Reset(const remote::KeyObjectStandbyForwardRequest &fwd_req,
+               CcHandlerResult<Void> *hres)
+    {
+        fwd_req_ = &fwd_req;
+        TableType table_type =
+            remote::ToLocalType::ConvertCcTableType(fwd_req_->table_type());
+        remote_table_name_ = TableName(
+            std::string_view(fwd_req_->table_name().data()), table_type);
+        uint32_t ng_id = key_shard_code_ >> 10;
+        LOG(INFO) << "table name " << remote_table_name_.Trace();
+
+        // tx number here does not matter since we won't acquire any lock.
+        TemplatedCcRequest<KeyObjectStandbyForwardCc, Void>::Reset(
+            &remote_table_name_, hres, ng_id, 0, 0);
+        cmds_vec_.clear();
+        cmds_vec_.reserve(fwd_req_->cmd_list_size());
+        for (int idx = 0; idx < fwd_req_->cmd_list_size(); ++idx)
+        {
+            cmds_vec_.emplace_back(fwd_req_->cmd_list(idx).data());
+        }
+        key_str_ = &fwd_req_->key();
+        object_version_ = fwd_req_->object_version();
+        commit_ts_ = fwd_req_->commit_ts();
+        schema_version_ = fwd_req_->schema_version();
+        has_overwrite_ = fwd_req_->has_overwrite();
+        key_shard_code_ = fwd_req_->key_shard_code();
+        forward_msg_grp_ = fwd_req_->forward_seq_grp();
+        primary_leader_term_ = fwd_req_->primary_leader_term();
+        seq_grp_initial_id_ = UINT64_MAX;
+        updated_local_seq_id_ = false;
+        ddl_phase_ = DDLPhase::AcquirePhase;
+        ddl_kv_op_err_code_ = CcErrorCode::NO_ERROR;
+        cce_ptr_ = nullptr;
+        ccm_ = nullptr;
+    }
+
+    void Reset(std::unique_ptr<remote::CcMessage> msg)
+    {
+        fwd_req_ = &msg->key_obj_standby_forward_req();
+        TableType table_type =
+            remote::ToLocalType::ConvertCcTableType(fwd_req_->table_type());
+        remote_table_name_ = TableName(
+            std::string_view(fwd_req_->table_name().data()), table_type);
+        uint32_t ng_id = key_shard_code_ >> 10;
+        LOG(INFO) << "table name " << remote_table_name_.Trace();
+
+        // tx number here does not matter since we won't acquire any lock.
+        TemplatedCcRequest<KeyObjectStandbyForwardCc, Void>::Reset(
+            &remote_table_name_, nullptr, ng_id, 0, 0);
+        cmds_vec_.clear();
+        cmds_vec_.reserve(fwd_req_->cmd_list_size());
+        for (int idx = 0; idx < fwd_req_->cmd_list_size(); ++idx)
+        {
+            cmds_vec_.emplace_back(fwd_req_->cmd_list(idx).data());
+        }
+        key_str_ = &fwd_req_->key();
+        object_version_ = fwd_req_->object_version();
+        commit_ts_ = fwd_req_->commit_ts();
+        schema_version_ = fwd_req_->schema_version();
+        has_overwrite_ = fwd_req_->has_overwrite();
+        key_shard_code_ = fwd_req_->key_shard_code();
+        forward_msg_grp_ = fwd_req_->forward_seq_grp();
+        primary_leader_term_ = fwd_req_->primary_leader_term();
+        seq_grp_initial_id_ = UINT64_MAX;
+        updated_local_seq_id_ = false;
+        ddl_phase_ = DDLPhase::AcquirePhase;
+        ddl_kv_op_err_code_ = CcErrorCode::NO_ERROR;
+        cce_ptr_ = nullptr;
+        ccm_ = nullptr;
+        input_msg_ = std::move(msg);
+        if (hd_ == nullptr)
+        {
+            hd_ = Sharder::Instance().GetCcStreamSender();
+        }
+    }
+
+    void SetFinish()
+    {
+        if (updated_local_seq_id_ && table_name_->IsMeta())
+        {
+            // Unpin ng after ddl op is done.
+            Sharder::Instance().UnpinNodeGroupData(node_group_id_);
+        }
+        if (input_msg_)
+        {
+            hd_->RecycleCcMsg(std::move(input_msg_));
+        }
+        else
+        {
+            res_->SetFinished();
+        }
+    }
+
+    const std::string *KeyImage() const
+    {
+        return key_str_;
+    }
+
+    uint64_t ObjectVersion() const
+    {
+        return object_version_;
+    }
+
+    uint64_t CommitTs() const
+    {
+        return commit_ts_;
+    }
+
+    uint64_t SchemaVersion() const
+    {
+        return schema_version_;
+    }
+
+    void ResetCcm()
+    {
+        ccm_ = nullptr;
+    }
+
+    const std::vector<std::string_view> *CommandList() const
+    {
+        return &cmds_vec_;
+    }
+
+    bool HasOverWrite() const
+    {
+        return has_overwrite_;
+    }
+
+    uint64_t KeyShardCode() const
+    {
+        return key_shard_code_;
+    }
+
+    uint64_t ForwardMessageGroup() const
+    {
+        return forward_msg_grp_;
+    }
+
+    int64_t PrimaryLeaderTerm() const
+    {
+        return primary_leader_term_;
+    }
+
+    uint64_t InitialSequenceId() const
+    {
+        return seq_grp_initial_id_;
+    }
+
+    DDLPhase GetDDLPhase() const
+    {
+        return ddl_phase_;
+    }
+
+    void SetDDLPhase(DDLPhase phase)
+    {
+        ddl_phase_ = phase;
+    }
+
+    CcErrorCode &DDLKvOpErrorCode()
+    {
+        return ddl_kv_op_err_code_;
+    }
+
+    void SetCcePtr(LruEntry *ptr)
+    {
+        cce_ptr_ = ptr;
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
+    }
+
+private:
+    TableName remote_table_name_;
+    const std::string *key_str_;
+    uint64_t key_shard_code_;
+    uint32_t forward_msg_grp_;
+    int64_t primary_leader_term_;
+    uint64_t seq_grp_initial_id_;
+    // commit_ts of object before execute these tx commands
+    uint64_t object_version_;
+    // commit_ts of this transaction.
+    uint64_t commit_ts_;
+    uint64_t schema_version_;
+    std::vector<std::string_view> cmds_vec_;
+    bool has_overwrite_;
+    std::unique_ptr<remote::CcMessage> input_msg_{nullptr};
+    const remote::KeyObjectStandbyForwardRequest *fwd_req_{nullptr};
+    remote::CcStreamSender *hd_{nullptr};
+    bool updated_local_seq_id_{false};
+
+    // Used by DDL msg.
+    DDLPhase ddl_phase_{DDLPhase::AcquirePhase};
+    CcErrorCode ddl_kv_op_err_code_{CcErrorCode::NO_ERROR};
+    LruEntry *cce_ptr_{nullptr};
+};
+
+struct ParseCcMsgCc : public CcRequestBase
+{
+    ParseCcMsgCc()
+    {
+        sender_ = Sharder::Instance().GetCcStreamSender();
+        messages_.reserve(128);
+    }
+
+    void Reset(butil::IOBuf *const messages[],
+               size_t size,
+               remote::CcStreamReceiver *receiver)
+    {
+        receiver_ = receiver;
+        assert(messages_.empty());
+        for (size_t i = 0; i < size; i++)
+        {
+            messages_.push_back(messages[i]->movable());
+        }
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        for (auto &msg : messages_)
+        {
+            std::unique_ptr<remote::CcMessage> cc_msg = receiver_->GetCcMsg();
+            butil::IOBufAsZeroCopyInputStream wrapper(msg);
+            cc_msg->ParseFromZeroCopyStream(&wrapper);
+            receiver_->OnReceiveCcMsg(std::move(cc_msg));
+        }
+        messages_.clear();
+        return true;
+    }
+
+    remote::CcStreamReceiver *receiver_;
+    remote::CcStreamSender *sender_;
+    std::vector<butil::IOBuf> messages_;
+};
+
 struct RequestAborterCc : public CcRequestBase
 {
     explicit RequestAborterCc(std::vector<CcRequestBase *> &&reqs,
@@ -5698,7 +6188,7 @@ struct CollectMemStatsCc : public CcRequestBase
         //
         assert(mi_heap_get_default() == ccs.GetShardHeap()->heap_);
         mi_thread_stats(&stats_->allocated_, &stats_->committed_);
-        stats_->wait_list_size_ = ccs.WaitListSize();
+        stats_->wait_list_size_ = ccs.WaitListSizeForMemory();
         std::lock_guard<std::mutex> lk(mux_);
         finished_ = true;
         cv_.notify_one();
@@ -6626,4 +7116,58 @@ protected:
     std::vector<uint32_t> vct_ng_id_;
     const TableName *table_name_;
 };
+struct EscalateStandbyCcmCc : CcRequestBase
+{
+    EscalateStandbyCcmCc() = delete;
+
+    EscalateStandbyCcmCc(uint16_t core_cnt, uint64_t last_ckpt_ts)
+        : primary_ckpt_ts_(last_ckpt_ts), unfinished_cnt_(core_cnt)
+    {
+    }
+    bool Execute(CcShard &ccs) override
+    {
+        NodeGroupId ng = Sharder::Instance().NativeNodeGroup();
+        auto table_names = ccs.GetCatalogTableNameSnapshot(ng);
+        for (auto table_it : table_names)
+        {
+            CcMap *ccm = ccs.GetCcm(table_it.first, ng);
+            if (ccm)
+            {
+                ccm->Execute(*this);
+            }
+        }
+
+        SetFinish();
+
+        return true;
+    };
+
+    uint64_t PrimaryCkptTs() const
+    {
+        return primary_ckpt_ts_;
+    }
+    void Wait()
+    {
+        std::unique_lock<bthread::Mutex> lk(req_mux_);
+        while (unfinished_cnt_ != 0)
+        {
+            req_cv_.wait(lk);
+        }
+    }
+    void SetFinish()
+    {
+        std::unique_lock<bthread::Mutex> lk(req_mux_);
+        if (--unfinished_cnt_ == 0)
+        {
+            req_cv_.notify_one();
+        }
+    }
+
+private:
+    uint64_t primary_ckpt_ts_;
+    bthread::Mutex req_mux_{};
+    bthread::ConditionVariable req_cv_{};
+    uint16_t unfinished_cnt_{0};
+};
+
 }  // namespace txservice

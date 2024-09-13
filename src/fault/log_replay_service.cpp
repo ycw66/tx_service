@@ -169,6 +169,7 @@ void ReplayService::Connect(::google::protobuf::RpcController *controller,
     uint32_t cc_ng_id = request->cc_node_group_id();
     uint32_t log_group_id = request->log_group_id();
     int64_t cc_ng_term = request->cc_ng_term();
+    uint64_t replay_start_ts = request->replay_start_ts();
     std::unique_lock lk(inbound_mux_);
 
     // indicates whether this connection (<cc_ng_id, lg_id> pair) is still
@@ -242,8 +243,12 @@ void ReplayService::Connect(::google::protobuf::RpcController *controller,
         return;
     }
 
-    inbound_connections_.try_emplace(
-        stream_socket, log_group_id, cc_ng_id, cc_ng_term, recovering);
+    inbound_connections_.try_emplace(stream_socket,
+                                     log_group_id,
+                                     cc_ng_id,
+                                     cc_ng_term,
+                                     replay_start_ts,
+                                     recovering);
     response->set_success(true);
     LOG(INFO) << "replay service accepting new stream: " << stream_socket
               << " from log group: " << log_group_id
@@ -281,6 +286,7 @@ void ReplayService::NotifyCheckpointer(
 void ReplayService::ReplayLog(uint32_t cc_ng_id,
                               int64_t cc_ng_term,
                               int log_group,
+                              uint64_t replay_start_ts,
                               bool delayed_request)
 {
     std::unique_lock lk(queue_mux_);
@@ -288,11 +294,12 @@ void ReplayService::ReplayLog(uint32_t cc_ng_id,
     {
         uint64_t queued_clock = LocalCcShards::ClockTs();
         delayed_replay_queue_.emplace_back(
-            cc_ng_id, cc_ng_term, log_group, queued_clock);
+            cc_ng_id, cc_ng_term, log_group, replay_start_ts, queued_clock);
     }
     else
     {
-        replay_log_queue_.emplace_back(cc_ng_id, cc_ng_term, log_group, 0);
+        replay_log_queue_.emplace_back(
+            cc_ng_id, cc_ng_term, log_group, replay_start_ts, 0);
     }
     queue_cv_.notify_one();
 }
@@ -624,7 +631,7 @@ void ReplayService::on_idle_timeout(brpc::StreamId id)
                   << " timeouts, cc_node group: " << cc_ng_id
                   << ", log group: " << lg_id
                   << ", still recovering, resend ReplayLogRequest";
-        ReplayLog(cc_ng_id, cc_ng_term, lg_id);
+        ReplayLog(cc_ng_id, cc_ng_term, lg_id, info->replay_start_ts_);
         brpc::StreamClose(id);
     }
 }
@@ -704,10 +711,14 @@ void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
 
         error_node_group_id = it->second.cc_ng_id_;
         error_term = it->second.cc_ng_term_;
+        uint64_t replay_start_ts = 0;
 
         // close all the streams belonging to the current node group and term.
         for (const auto &[stream_id, info] : inbound_connections_)
         {
+            assert(replay_start_ts == 0 ||
+                   replay_start_ts == info.replay_start_ts_);
+            replay_start_ts = info.replay_start_ts_;
             if (info.cc_ng_id_ == error_node_group_id &&
                 info.cc_ng_term_ == error_term)
             {
@@ -717,7 +728,7 @@ void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
         // put the replay log request back to the replay queue, but the replay
         // request will be scheduled with 10 senconds delay. log_id = -1 means
         // replay from all the log groups.
-        ReplayLog(error_node_group_id, error_term, -1, true);
+        ReplayLog(error_node_group_id, error_term, -1, replay_start_ts, true);
     }
 }
 
@@ -743,8 +754,13 @@ void ReplayService::ProcessReplayLogTask(ReplayLogTask &task)
         return;
     }
     // call log agent replay log api
-    log_agent_->ReplayLog(
-        task.cc_ng_id_, task.cc_ng_term_, ip_, port_, task.log_group_, finish_);
+    log_agent_->ReplayLog(task.cc_ng_id_,
+                          task.cc_ng_term_,
+                          ip_,
+                          port_,
+                          task.log_group_,
+                          task.replay_start_ts_,
+                          finish_);
 }
 
 int ReplayService::ProcessDelayedReplayLogTask()
@@ -783,7 +799,7 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
     uint32_t tx_ng = (task.tx_number_ >> 32L) >> 10;
     uint32_t tx_leader = Sharder::Instance().LeaderNodeId(tx_ng);
     remote::CheckTxStatusResponse_TxStatus tx_status;
-    if (tx_ng >= Sharder::Instance().GetNodeCount())
+    if (tx_ng >= Sharder::Instance().NodeGroupCount())
     {
         // Node group is already removed from cluster. Need to ask log for
         // tx status.

@@ -25,13 +25,18 @@ public:
 
     void OnLeaderStart(::google::protobuf::RpcController *controller,
                        const OnLeaderStartRequest *request,
-                       OnLeaderChangeResponse *response,
+                       OnLeaderStartResponse *response,
                        ::google::protobuf::Closure *done) override;
 
     void OnLeaderStop(::google::protobuf::RpcController *controller,
                       const OnLeaderStopRequest *request,
                       OnLeaderChangeResponse *response,
                       ::google::protobuf::Closure *done) override;
+
+    void OnStartFollowing(::google::protobuf::RpcController *controller,
+                          const OnStartFollowingRequest *request,
+                          OnLeaderChangeResponse *response,
+                          ::google::protobuf::Closure *done) override;
 
     void CheckTxStatus(::google::protobuf::RpcController *controller,
                        const CheckTxStatusRequest *request,
@@ -116,6 +121,46 @@ public:
         ::google::protobuf::RpcController *controller,
         const ::txservice::remote::UploadBatchSlicesRequest *request,
         ::txservice::remote::UploadBatchResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void FetchPayload(::google::protobuf::RpcController *controller,
+                      const ::txservice::remote::FetchPayloadRequest *request,
+                      ::txservice::remote::FetchPayloadResponse *response,
+                      ::google::protobuf::Closure *done) override;
+
+    void FetchCatalog(::google::protobuf::RpcController *controller,
+                      const ::txservice::remote::FetchPayloadRequest *request,
+                      ::txservice::remote::FetchPayloadResponse *response,
+                      ::google::protobuf::Closure *done) override;
+
+    void StandbyStartFollowing(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::StandbyStartFollowingRequest *request,
+        ::txservice::remote::StandbyStartFollowingResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void UpdateStandbyConsistentTs(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::UpdateStandbyConsistentTsRequest *request,
+        ::txservice::remote::UpdateStandbyConsistentTsResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void RequestResendStandbyMessage(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::RequestResendStandbyMessageRequest *request,
+        ::txservice::remote::RequestResendStandbyMessageResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void RequestStorageSnapshotSync(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::StorageSnapshotSyncRequest *request,
+        ::txservice::remote::StorageSnapshotSyncResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void OnSnapshotSynced(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::OnSnapshotSyncedRequest *request,
+        ::txservice::remote::OnSnapshotSyncedResponse *response,
         ::google::protobuf::Closure *done) override;
 
 private:

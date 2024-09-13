@@ -13,6 +13,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <queue>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -30,12 +31,15 @@
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
 #include "cc_req_pool.h"
+#include "cc_request.pb.h"
+#include "cc_stream_sender.h"
 #include "error_messages.h"
 #include "meter.h"
 #include "metrics.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "sharder.h"
+#include "standby.h"
 #include "store/data_store_handler.h"
 #include "system_handler.h"
 #include "tentry.h"
@@ -54,6 +58,13 @@ class LocalCcShards;
 struct StatisticsEntry;
 struct CheckDeadLockResult;
 struct DefragShardHeapCc;
+/// struct StandbyForwardEntry;
+// struct StandbySequenceGroup;
+
+namespace remote
+{
+class CcStreamSender;
+};
 
 #define LOCK_VECTOR_SHRINK_THRESHOLD 4u
 #define RESIZE_LOCK_LIMIT 3u
@@ -130,7 +141,7 @@ public:
             uint32_t node_memory_limit_mb,
             uint32_t node_log_limit_mb,
             bool realtime_sampling,
-            uint32_t node_id,
+            uint32_t native_ng_id,
             LocalCcShards &local_shards,
             CatalogFactory *catalog_factory,
             SystemHandler *system_handler,
@@ -217,13 +228,13 @@ public:
      * @brief Puts a cc request into the shard's request wait list until memory
      * is avaliable.
      */
-    void EnqueueWaitList(CcRequestBase *req);
+    void EnqueueWaitListIfMemoryFull(CcRequestBase *req);
     /**
      * @brief Dequeue cc requests from the shard's request wait list to process.
      */
-    void DequeueWaitList();
+    void DequeueWaitListAfterMemoryFree();
 
-    size_t WaitListSize();
+    size_t WaitListSizeForMemory();
 
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
@@ -643,6 +654,7 @@ public:
                       NodeGroupId cc_ng_id,
                       int64_t cc_ng_term,
                       CcRequestBase *requester);
+    void RemoveFetchRequest(const TableName &table_name);
 
     void FetchTableStatistics(const TableName &table_name,
                               NodeGroupId cc_ng_id,
@@ -654,8 +666,6 @@ public:
                           NodeGroupId cc_ng_id,
                           int64_t cc_ng_term);
 
-    void RemoveFetchRequest(const TableName &table_name);
-
     void FetchRecord(const TableName &table_name,
                      const TableSchema *tbl_schema,
                      TxKey key,
@@ -664,7 +674,11 @@ public:
                      NodeGroupId cc_ng_id,
                      int64_t cc_ng_term,
                      CcRequestBase *requester,
-                     int32_t range_id = -1);
+                     int32_t range_id = -1,
+                     bool fetch_from_primary = false,
+                     uint32_t seq_grp = 0,
+                     uint64_t initial_seq_id = 0,
+                     uint32_t key_shard_code = 0);
 
     void RemoveFetchRecordRequest(LruEntry *cce);
 
@@ -742,7 +756,13 @@ public:
     std::unordered_map<TableName, bool> GetCatalogTableNameSnapshot(
         NodeGroupId cc_ng_id);
 
-    const uint32_t node_id_;
+    bool IsNative(NodeGroupId ng_id) const
+    {
+        return ng_id == ng_id_;
+    }
+
+    // native node group
+    const NodeGroupId ng_id_;
     const uint16_t core_id_;
     const uint16_t core_cnt_;
     LocalCcShards &local_shards_;
@@ -821,6 +841,61 @@ public:
         }
     }
 
+    // Called on primary node
+    StandbyForwardEntry *GetNextStandbyForwardEntry();
+    void ForwardStandbyMessage(StandbyForwardEntry *entry);
+    uint64_t AddSubscribedStandby(uint32_t node_id)
+    {
+        uint64_t start_seq_id = next_forward_sequence_id_;
+        LOG(INFO) << "start forwarding to node " << node_id << " from seq "
+                  << start_seq_id << ", seq grp " << core_id_;
+        for (auto it = subscribed_standby_nodes_.begin();
+             it != subscribed_standby_nodes_.end();
+             it++)
+        {
+            if (*it == node_id)
+            {
+                return start_seq_id;
+            }
+        }
+
+        subscribed_standby_nodes_.push_back(node_id);
+        return start_seq_id;
+    }
+    uint64_t NextStandbyMessageSequence() const
+    {
+        return next_forward_sequence_id_;
+    }
+
+    const std::vector<uint32_t> &GetSubscribedStandbys() const
+    {
+        return subscribed_standby_nodes_;
+    }
+    bool GetStandbyMessage(uint64_t seq_id,
+                           remote::KeyObjectStandbyForwardRequest *req);
+    void ResetStandbySequence();
+
+    // called on follower node
+    bool UpdateLastReceivedStandbySequenceId(
+        const remote::KeyObjectStandbyForwardRequest &msg);
+    void SubsribeToPrimaryNode(uint32_t seq_grp, uint64_t seq_id);
+
+    bool RequestMissingStandbyMessage(uint32_t seq_grp,
+                                      uint64_t seq_id,
+                                      int64_t ng_term,
+                                      uint32_t node_id);
+
+    void UpdateStandbyConsistentTs(uint32_t seq_grp,
+                                   uint64_t seq_id,
+                                   uint64_t consistent_ts,
+                                   int64_t primary_term);
+
+    uint64_t MinLastStandbyConsistentTs() const;
+
+    void EnqueueWaitListIfSchemaMismatch(CcRequestBase *req);
+
+    void DequeueWaitListAfterSchemaUpdated();
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
@@ -875,7 +950,7 @@ private:
     std::atomic<uint32_t> cc_queue_size_{0};
     CcRequestBase *req_buf_[100];
     std::vector<moodycamel::ProducerToken> thd_token_;
-    std::vector<CcRequestBase *> cc_wait_list_;
+    std::vector<CcRequestBase *> cc_wait_list_for_memory_;
 
     // all the transactions started on this ccshard. Some txs are Ongoing while
     // others are Available, new transaction request has to traverse the array
@@ -888,6 +963,22 @@ private:
     // after wraparound. Global tx_number is 64 bits: higher 32 bits are
     // global_core_id, while lower 32 bits are tx_ident.
     uint32_t next_tx_ident_;
+
+    // Standby forward msg related members used on primary node
+    // pool of actual standby msgs.
+    std::vector<StandbyForwardEntry> standby_fwd_vec_;
+    // Buffers the last "txservice_max_standby_lag" msgs sent to standby node.
+    // It is used to find the missed msg with sequence id.
+    std::vector<StandbyForwardEntry *> standby_fwded_msg_buffer_;
+    uint32_t next_foward_idx_{0};
+    uint64_t next_forward_sequence_id_{1};
+    std::vector<uint32_t> subscribed_standby_nodes_;
+
+    // Standby forward msg related members used on follower node
+    CcRequestPool<KeyObjectStandbyForwardCc> key_obj_standby_msg_cc_pool_;
+    absl::flat_hash_map<uint32_t, StandbySequenceGroup> standby_sequence_grps_;
+    // requests to execute after schema being modified
+    std::vector<CcRequestBase *> waiting_list_for_schema_;
 
     // Reserved head and tail for the double-linked list of cc entries, which
     // simplifies handling of empty and one-element lists.
@@ -961,6 +1052,8 @@ private:
     std::unique_ptr<DefragShardHeapCc> defrag_heap_cc_;
 
     std::list<std::pair<uint64_t, std::unique_ptr<LruEntry>>> invalid_cces_;
+
+    remote::CcStreamSender *stream_sender_{nullptr};
 
     // free invalid cces after 2 hours.
     static const uint64_t invalid_cce_expire_time_ = 7200000000;

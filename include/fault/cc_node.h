@@ -2,11 +2,13 @@
 
 #include <brpc/channel.h>
 
+#include <cstdint>
 #include <unordered_set>
 #include <vector>
 
 #include "log_replay_service.h"
 #include "sharder.h"
+#include "type.h"
 
 namespace txservice::fault
 {
@@ -48,6 +50,8 @@ public:
      */
     int64_t PinData();
 
+    int64_t StandbyPinData();
+
     /**
      * Unpin data of this node group so that ccmaps and catalogs can be cleared
      * if ccnode is no longer leader.
@@ -63,8 +67,11 @@ public:
         return last_ckpt_ts_.load(std::memory_order_relaxed);
     }
 
-    bool OnLeaderStart(int64_t term);
+    bool OnLeaderStart(int64_t term, uint64_t &replay_start_ts);
     bool OnLeaderStop(int64_t term);
+    // Only called when a standby node starts following
+    void OnStartFollowing(uint32_t node_id, int64_t term, bool resubscribe);
+    void RequestStandbyResubscribe(uint32_t node_id, int64_t term);
 
 private:
     void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);
@@ -75,6 +82,7 @@ private:
     const uint32_t node_id_;
 
     std::atomic<bool> is_processing_{false};
+    std::atomic<bool> requested_resubscribe_{false};
 
     std::atomic<uint64_t> last_ckpt_ts_;
 

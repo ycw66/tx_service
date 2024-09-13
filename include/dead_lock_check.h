@@ -183,7 +183,7 @@ protected:
     // The map for txids and the number that locked entrys
     std::unordered_map<uint64_t, uint32_t> txid_ety_count_map_;
     // The related nodes have send back the result or not.
-    std::vector<bool> reply_vct_;
+    std::unordered_map<uint32_t, bool> reply_map_;
     // The count of nodes without relay
     int32_t node_unfinished_ = 0;
 

@@ -214,11 +214,11 @@ private:
 #ifdef WITH_FAULT_INJECT
 #define ACTION_FAULT_INJECTOR(FaultName) \
     FaultInject::Instance().TriggerAction(FaultName)
-#define CODE_FAULT_INJECTOR(FaultName, code)               \
-    {                                                      \
-        FaultEntry *entry = FaultInject::Entry(FaultName); \
-        if (entry != nullptr)                              \
-            code;                                          \
+#define CODE_FAULT_INJECTOR(FaultName, code)                     \
+    {                                                            \
+        FaultEntry *fault_entry = FaultInject::Entry(FaultName); \
+        if (fault_entry != nullptr)                              \
+            code;                                                \
     }
 #define FAULT_INJECTOR_CONDITION_WRAP(FaultName, code) \
     (FaultInject::Entry(FaultName) ? true : false) || (code)

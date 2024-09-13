@@ -1,6 +1,7 @@
 #include "remote/cc_stream_sender.h"
 
 #include <arpa/inet.h>
+#include <bvar/latency_recorder.h>
 #include <ifaddrs.h>
 #include <netdb.h>  // getaddrinfo
 
@@ -135,6 +136,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                                        const CcMessage &msg,
                                        CcHandlerResultBase *res,
                                        bool resend,
+                                       bool resend_on_eagain,
                                        bool log_verbose)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -210,6 +212,10 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     {
         if (error_code == EAGAIN)
         {
+            if (!resend_on_eagain)
+            {
+                return false;
+            }
             if (log_verbose)
             {
                 LOG(INFO)
@@ -498,18 +504,18 @@ bool CcStreamSender::SendMessageToNg(uint32_t node_group_id,
 }
 
 void CcStreamSender::UpdateRemoteNodes(
-    const std::unordered_map<NodeGroupId, std::vector<NodeConfig>> &ng_config)
+    const std::unordered_map<NodeId, NodeConfig> &nodes_configs)
 {
     std::unique_lock<std::shared_mutex> lk(outbound_mux_);
 
-    for (auto &[node_id, config] : ng_config)
+    for (const auto &[node_id, config] : nodes_configs)
     {
         // Connect to new nodes in new cluster configs.
         if (outbound_channels_.find(node_id) == outbound_channels_.end())
         {
             auto channel_it = outbound_channels_.try_emplace(node_id);
-            const std::string &ip = config.front().host_name_;
-            uint16_t port = config.front().port_;
+            const std::string &ip = config.host_name_;
+            uint16_t port = config.port_;
             channel_it.first->second = ip + ":" + std::to_string(port);
             auto stream_it = outbound_streams_.try_emplace(node_id);
             std::get<0>(stream_it.first->second) = brpc::INVALID_STREAM_ID;
@@ -534,8 +540,8 @@ void CcStreamSender::UpdateRemoteNodes(
     std::unordered_set<uint32_t> removed_nodes;
     for (auto &[node_id, channel] : outbound_channels_)
     {
-        // node group is no longer in the new cluster config.
-        if (ng_config.find(node_id) == ng_config.end())
+        // node is no longer in the new cluster config.
+        if (nodes_configs.find(node_id) == nodes_configs.end())
         {
             {
                 std::unique_lock<std::mutex> to_connect_lk(to_connect_mux_);

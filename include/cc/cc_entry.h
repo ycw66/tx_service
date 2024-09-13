@@ -29,6 +29,7 @@ namespace txservice
 class CcMap;
 class CcShardHeap;
 class CcShard;
+struct StandbyForwardEntry;
 
 template <typename KeyT, typename ValueT>
 class TemplateCcMap;
@@ -367,16 +368,16 @@ public:
 #endif
 
 #ifdef ON_KEY_OBJECT
-    ReplayTxnCmdList &ReplayCommandList()
+    BufferedTxnCmdList &BufferedCommandList()
     {
         assert(cc_lock_and_extra_ != nullptr);
-        return cc_lock_and_extra_->ReplayCommandList();
+        return cc_lock_and_extra_->BufferedCommandList();
     }
 
-    bool HasReplayCommandList()
+    bool HasBufferedCommandList()
     {
         return cc_lock_and_extra_ != nullptr &&
-               cc_lock_and_extra_->HasReplayCommandList();
+               cc_lock_and_extra_->HasBufferedCommandList();
     }
 
     void PopBlockRequest(CcShard *ccs, txservice::TxObject *object)
@@ -676,6 +677,18 @@ public:
     {
         assert(cc_lock_and_extra_ != nullptr);
         cc_lock_and_extra_->SetDirtyPayloadStatus(status);
+    }
+
+    StandbyForwardEntry *ForwardEntry()
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        return cc_lock_and_extra_->ForwardEntry();
+    }
+
+    void SetForwardEntry(StandbyForwardEntry *entry)
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        cc_lock_and_extra_->SetForwardEntry(entry);
     }
 
     std::unique_ptr<ValueT> payload_{nullptr};

@@ -54,6 +54,8 @@ struct DefragShardHeapCc;
 struct UploadRangeSlicesCc;
 struct UploadBatchSlicesCc;
 struct UpdateKeyCacheCc;
+struct KeyObjectStandbyForwardCc;
+struct EscalateStandbyCcmCc;
 
 enum struct ScanType : uint8_t
 {
@@ -160,6 +162,8 @@ public:
     virtual bool Execute(UploadRangeSlicesCc &req) = 0;
     virtual bool Execute(UploadBatchSlicesCc &req) = 0;
     virtual bool Execute(UpdateKeyCacheCc &req) = 0;
+    virtual bool Execute(KeyObjectStandbyForwardCc &req) = 0;
+    virtual bool Execute(EscalateStandbyCcmCc &req) = 0;
 
     virtual size_t size() const = 0;
     virtual size_t NormalObjectSize()
@@ -184,7 +188,7 @@ public:
     virtual bool BackFill(LruEntry *cce,
                           uint64_t commit_ts,
                           RecordStatus status,
-                          std::unique_ptr<TxRecord> rec_uptr)
+                          std::string &rec_str)
     {
         assert(false);
         return false;

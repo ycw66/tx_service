@@ -27,6 +27,7 @@ struct CcEntry;
 
 class CcMap;
 struct LruPage;
+struct StandbyForwardEntry;
 
 class NonBlockingLock
 {
@@ -398,7 +399,7 @@ public:
                               nullptr) &&
                    dirty_payload_ == nullptr &&
                    dirty_payload_status_ == RecordStatus::NonExistent);
-            return queue_block_cmds_.Size() == 0 && !HasReplayCommandList();
+            return queue_block_cmds_.Size() == 0 && !HasBufferedCommandList();
         }
         else
         {
@@ -446,16 +447,16 @@ public:
         dirty_payload_status_ = status;
     }
 
-    ReplayTxnCmdList &ReplayCommandList()
+    BufferedTxnCmdList &BufferedCommandList()
     {
-        return replay_cmd_list_;
+        return buffered_cmd_list_;
     }
 
-    bool HasReplayCommandList()
+    bool HasBufferedCommandList()
     {
-        if (!replay_cmd_list_.IsNull())
+        if (!buffered_cmd_list_.IsNull())
         {
-            assert(!replay_cmd_list_.txn_cmd_list_.empty());
+            assert(!buffered_cmd_list_.txn_cmd_list_.empty());
             return true;
         }
         else
@@ -471,6 +472,9 @@ public:
 
     void PopBlockRequest(CcShard *ccs, txservice::TxObject *object);
     void AbortBlockRequest(TxNumber txid, CcErrorCode err);
+    StandbyForwardEntry *ForwardEntry();
+    void SetForwardEntry(StandbyForwardEntry *entry);
+
 #endif
 
 private:
@@ -488,7 +492,8 @@ private:
     // blocked commands that wait to pop and execute after the conditions are
     // satisfied.
     CircularQueue<CcRequestBase *> queue_block_cmds_;
-    ReplayTxnCmdList replay_cmd_list_;
+    BufferedTxnCmdList buffered_cmd_list_;
+    StandbyForwardEntry *forward_entry_;
 #endif
 };
 

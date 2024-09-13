@@ -13,6 +13,8 @@ namespace txservice
 inline bool txservice_skip_wal = false;
 // whether skip accessing KV when cc map cache misses.
 inline bool txservice_skip_kv = false;
+// max latency of each sequence group between primary and standby nodes.
+inline uint64_t txservice_max_standby_lag = 100000;
 
 enum struct TxShardStatus
 {

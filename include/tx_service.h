@@ -251,6 +251,7 @@ public:
             yield = true;
             return;
         }
+
         CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
         CcShardHeap *shard_heap = shard->GetShardHeap();
         if (shard_heap == nullptr)
@@ -990,6 +991,7 @@ public:
         SystemHandler *system_handler,
         const std::map<std::string, uint32_t> &conf,
         uint32_t node_id,  // = 0,
+        uint32_t ng_id,    // = 0,
         std::unordered_map<uint32_t, std::vector<NodeConfig>>
             *ng_configs,                    // = nullptr,
         int32_t range_bucket_seed,          // = -1,
@@ -1009,18 +1011,11 @@ public:
                                std::vector<metrics::LabelGroup>>>
             external_metrics = {})
         : local_cc_shards_(node_id,
-                           conf.at("core_num"),
-#ifdef RANGE_PARTITION_ENABLED
-                           conf.at("range_split_worker_num"),
-#else
-                           0,
-#endif
-                           conf.at("node_memory_limit_mb"),
-                           conf.at("node_log_limit_mb"),
-                           conf.at("realtime_sampling"),
+                           ng_id,
+                           conf,
                            catalog_factory,
                            system_handler,
-                           ng_configs,
+                           ng_configs,  // here only need ng_configs.size()
                            range_bucket_seed,
                            cluster_config_version,
                            store_hd,
@@ -1029,9 +1024,7 @@ public:
                            metrics_registry,
                            common_labels,
                            prebuilt_tables,
-                           publish_func,
-                           conf.at("enable_shard_heap_defragment"),
-                           conf.at("enable_key_cache")),
+                           publish_func),
           ckpt_(local_cc_shards_,
                 store_hd,
                 conf.at("checkpointer_interval"),
@@ -1065,20 +1058,10 @@ public:
 
         txservice_skip_wal = skip_wal;
         txservice_skip_kv = skip_kv;
-        if (conf.find("enable_key_cache") != conf.end())
-        {
-            if (enable_mvcc && conf.at("enable_key_cache"))
-            {
-                LOG(WARNING) << "Txservice key cache is disabled due to "
-                                "incompatibility with MVCC.";
-            }
-            // Key cache is only available in non-mvcc mode.
-            txservice_enable_key_cache =
-                conf.at("enable_key_cache") && !enable_mvcc;
-        }
     }
 
     int Start(uint32_t node_id,
+              uint32_t ng_id,
               const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
                   *ng_configs,
               uint64_t cluster_config_version,
@@ -1094,6 +1077,7 @@ public:
     {
         uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
         if (Sharder::Instance().Init(node_id,
+                                     ng_id,
                                      ng_configs,
                                      cluster_config_version,
                                      txlog_ips,

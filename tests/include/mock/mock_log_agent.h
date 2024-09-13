@@ -44,6 +44,7 @@ public:
                    const std::string &source_ip,
                    uint16_t source_port,
                    int log_group,
+                   uint64_t start_ts,
                    std::atomic<bool> &interrupt) override
     {
         log_agent_.ReplayLog(cc_node_group_id,
@@ -51,6 +52,7 @@ public:
                              source_ip,
                              source_port,
                              log_group,
+                             start_ts,
                              interrupt);
     }
 

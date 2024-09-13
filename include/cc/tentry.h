@@ -54,4 +54,5 @@ public:
     const uint32_t vec_idx_;
     int64_t term_;
 };
+
 }  // namespace txservice

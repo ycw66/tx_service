@@ -11,6 +11,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
+#include "cc_protocol.h"
 #include "cc_request.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault_inject.h"
@@ -21,7 +22,9 @@
 #include "range_cc_map.h"
 #include "sharder.h"
 #include "template_cc_map.h"
+#include "tx_command.h"
 #include "tx_operation.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -577,6 +580,37 @@ public:
                                         req.NodeGroupId(),
                                         new_schema,
                                         catalog_entry->DirtyVersion());
+
+                // Sync ddl op to standby nodes.
+                if (shard_->core_id_ == 0 &&
+                    !shard_->GetSubscribedStandbys().empty())
+                {
+                    StandbyForwardEntry *forward_entry =
+                        shard_->GetNextStandbyForwardEntry();
+                    auto *forward_req = &forward_entry->Request();
+                    forward_req->set_primary_leader_term(ng_term);
+                    forward_req->set_table_name(table_name_.String());
+                    forward_req->set_table_type(
+                        remote::ToRemoteType::ConvertTableType(
+                            table_name_.Type()));
+                    forward_req->set_key_shard_code(cc_ng_id_ << 10);
+                    std::string key_str;
+                    table_key->Serialize(key_str);
+                    forward_req->set_key(std::move(key_str));
+                    std::string rec_str;
+                    schema_rec->Serialize(rec_str);
+                    forward_req->add_cmd_list(std::move(rec_str));
+                    assert(schema_rec != nullptr);
+                    assert(schema_rec->SchemaTs() ==
+                           catalog_entry->DirtyVersion());
+                    assert(schema_rec->Schema() != nullptr);
+                    assert(schema_rec->SchemaImage().size() > 0);
+
+                    forward_req->set_commit_ts(catalog_entry->DirtyVersion());
+                    forward_req->set_schema_version(
+                        catalog_entry->DirtyVersion());
+                    shard_->ForwardStandbyMessage(forward_entry);
+                }
 #endif
             }
             else if (req.OpType() == OperationType::DropTable)
@@ -1468,6 +1502,229 @@ public:
         }
 
         hd_res->SetFinished();
+        return true;
+    }
+
+    bool Execute(KeyObjectStandbyForwardCc &req) override
+    {
+        uint64_t commit_ts = req.CommitTs();
+
+        const CatalogKey *table_key = nullptr;
+        const std::string *key_str = req.KeyImage();
+        assert(key_str != nullptr);
+        std::unique_ptr<CatalogKey> decoded_key =
+            std::make_unique<CatalogKey>();
+        size_t offset = 0;
+        decoded_key->Deserialize(key_str->data(), offset, KeySchema());
+        table_key = decoded_key.get();
+
+        CcEntry<CatalogKey, CatalogRecord> *cce;
+        CcPage<CatalogKey, CatalogRecord> *ccp;
+        if (req.CcePtr())
+        {
+            cce =
+                static_cast<CcEntry<CatalogKey, CatalogRecord> *>(req.CcePtr());
+            ccp = static_cast<CcPage<CatalogKey, CatalogRecord> *>(
+                cce->GetCcPage());
+        }
+        else
+        {
+            Iterator it = FindEmplace(*table_key);
+            cce = it->second;
+            ccp = it.GetPage();
+        }
+        LockType acquired_lock = LockType::NoLock;
+        CcErrorCode err_code = CcErrorCode::NO_ERROR;
+
+        if (req.GetDDLPhase() ==
+            KeyObjectStandbyForwardCc::DDLPhase::AcquirePhase)
+        {
+            // acquire write lock on catalog rec
+            if (req.CcePtr())
+            {
+                // resumed req.
+                std::tie(acquired_lock, err_code) = LockHandleForResumedRequest(
+                    cce,
+                    cce->PayloadStatus(),
+                    &req,
+                    Sharder::Instance().NativeNodeGroup(),
+                    req.PrimaryLeaderTerm(),
+                    req.TxTerm(),
+                    CcOperation::Write,
+                    IsolationLevel::RepeatableRead,
+                    CcProtocol::Locking,
+                    0,
+                    false);
+                assert(acquired_lock == LockType::WriteLock &&
+                       err_code == CcErrorCode::NO_ERROR);
+                req.SetCcePtr(nullptr);
+            }
+            else
+            {
+                std::tie(acquired_lock, err_code) =
+                    AcquireCceKeyLock(cce,
+                                      ccp,
+                                      cce->PayloadStatus(),
+                                      &req,
+                                      req.NodeGroupId(),
+                                      req.PrimaryLeaderTerm(),
+                                      req.TxTerm(),
+                                      CcOperation::Write,
+                                      IsolationLevel::RepeatableRead,
+                                      CcProtocol::Locking,
+                                      0,
+                                      false);
+            }
+            switch (err_code)
+            {
+            case CcErrorCode::NO_ERROR:
+            {
+                if (shard_->core_id_ != shard_->core_cnt_ - 1)
+                {
+                    req.ResetCcm();
+                    MoveRequest(&req, shard_->core_id_ + 1);
+                    return false;
+                }
+                break;
+            }
+            case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+            {
+                req.SetCcePtr(cce);
+                return false;
+            }
+            default:
+            {
+                // lock confilct: back off and retry.
+                assert(false);
+            }
+            }  //-- end: switch
+        }
+
+        if (shard_->core_id_ == shard_->core_cnt_ - 1)
+        {
+            if (req.GetDDLPhase() ==
+                KeyObjectStandbyForwardCc::DDLPhase::AcquirePhase)
+            {
+                // after locks are acquired on all cores, update catalog schema
+                // in local cc shards.
+                CatalogRecord tmp_rec;
+                const std::string_view payload_sv = req.CommandList()->front();
+                size_t offset = 0;
+                tmp_rec.Deserialize(payload_sv.data(), offset);
+                auto res = shard_->CreateCatalog(table_key->Name(),
+                                                 cc_ng_id_,
+                                                 tmp_rec.SchemaImage(),
+                                                 commit_ts);
+                const CatalogEntry *catalog_entry = res.second;
+                if (!txservice_skip_kv &&
+                    !shard_->local_shards_.store_hd_->IsSharedStorage())
+                {
+                    // If using non-shared kv, we need to perform kv op on
+                    // standby node as well.
+                    req.SetDDLPhase(
+                        KeyObjectStandbyForwardCc::DDLPhase::KvOpPhase);
+                    shard_->local_shards_.store_hd_->UpsertTable(
+                        catalog_entry->schema_.get(),
+                        OperationType::TruncateTable,
+                        commit_ts,
+                        cc_ng_id_,
+                        Sharder::Instance().PrimaryNodeTerm(),
+                        nullptr,
+                        nullptr,
+                        &req,
+                        shard_,
+                        &req.DDLKvOpErrorCode());
+                    return false;
+                }
+                // If there's no need to update kv store, move to install &
+                // release phase and move the req back to core 0.
+                req.SetDDLPhase(
+                    KeyObjectStandbyForwardCc::DDLPhase::ReleasePhase);
+                req.ResetCcm();
+                MoveRequest(&req, 0);
+                return false;
+            }
+            else if (req.GetDDLPhase() ==
+                     KeyObjectStandbyForwardCc::DDLPhase::KvOpPhase)
+            {
+                assert(!txservice_skip_kv &&
+                       !shard_->local_shards_.store_hd_->IsSharedStorage());
+                if (req.DDLKvOpErrorCode() == CcErrorCode::DATA_STORE_ERR)
+                {
+                    auto catalog_entry =
+                        shard_->GetCatalog(table_key->Name(), cc_ng_id_);
+                    // retry kv op
+                    req.DDLKvOpErrorCode() = CcErrorCode::NO_ERROR;
+                    shard_->local_shards_.store_hd_->UpsertTable(
+                        catalog_entry->schema_.get(),
+                        OperationType::TruncateTable,
+                        commit_ts,
+                        cc_ng_id_,
+                        Sharder::Instance().PrimaryNodeTerm(),
+                        nullptr,
+                        nullptr,
+                        &req,
+                        shard_,
+                        &req.DDLKvOpErrorCode());
+                    return false;
+                }
+                else if (req.DDLKvOpErrorCode() == CcErrorCode::NO_ERROR)
+                {
+                    req.SetDDLPhase(
+                        KeyObjectStandbyForwardCc::DDLPhase::ReleasePhase);
+                    req.ResetCcm();
+                    MoveRequest(&req, 0);
+                    return false;
+                }
+                else if (req.DDLKvOpErrorCode() == CcErrorCode::NG_TERM_CHANGED)
+                {
+                    // if ng term has changed, this cc should be rejected on
+                    // ValidTermCheck() and should not reach here.
+                    assert(false);
+                }
+                else
+                {
+                    assert(false);
+                }
+            }
+        }
+
+        if (req.GetDDLPhase() ==
+            KeyObjectStandbyForwardCc::DDLPhase::ReleasePhase)
+        {
+            // Install new schema image in record and release the lock
+            if (cce->PayloadStatus() == RecordStatus::Unknown)
+            {
+                cce->payload_ = std::make_unique<CatalogRecord>();
+            }
+            const CatalogEntry *catalog_entry =
+                shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+            cce->payload_->Set(catalog_entry->schema_, nullptr, commit_ts);
+            cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Normal);
+            // clean up data in ccm
+            CcMap *ccm = shard_->GetCcm(table_key->Name(), cc_ng_id_);
+            if (ccm != nullptr && ccm->SchemaTs() < commit_ts)
+            {
+                shard_->DropCcm(table_key->Name(), cc_ng_id_);
+                shard_->DequeueWaitListAfterSchemaUpdated();
+            }
+
+            ReleaseCceLock(cce->GetKeyLock(), cce, req.Txn(), cc_ng_id_);
+            if (shard_->core_id_ == (shard_->core_cnt_ - 1))
+            {
+                req.SetFinish();
+                return true;
+            }
+            else
+            {
+                req.ResetCcm();
+                MoveRequest(&req, shard_->core_id_ + 1);
+                return false;
+            }
+        }
+
+        // should not reach here
+        assert(false);
         return true;
     }
 

@@ -9,6 +9,9 @@
 #include "catalog_factory.h"
 #include "cc/cc_entry.h"
 #include "cc_handler_result.h"
+#include "cc_req_base.h"
+#include "cc_request.pb.h"
+#include "error_messages.h"
 #include "range_record.h"
 // #include "range_slice.h"
 #include "store/data_store_scanner.h"
@@ -78,10 +81,7 @@ public:
      * should only be called during bootstrap.
      */
     virtual bool InitializeClusterConfig(
-        const std::vector<std::string> &ips,
-        const std::vector<uint16_t> &ports,
-        const uint16_t ng_rep_cnt,
-        std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
+        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         int32_t &seed) = 0;
 
     /**
@@ -133,7 +133,10 @@ public:
         NodeGroupId ng_id,
         int64_t tx_term,
         CcHandlerResult<Void> *hd_res,
-        const txservice::AlterTableInfo *alter_table_info = nullptr) = 0;
+        const txservice::AlterTableInfo *alter_table_info = nullptr,
+        CcRequestBase *cc_req = nullptr,
+        CcShard *ccs = nullptr,
+        CcErrorCode *err_code = nullptr) = 0;
 
     virtual void FetchTableCatalog(const TableName &ccm_table_name,
                                    FetchCatalogCc *fetch_cc) = 0;
@@ -348,6 +351,41 @@ public:
     virtual bool ByPassDataStore() const
     {
         return false;
+    }
+
+    virtual bool IsSharedStorage() const
+    {
+        return true;
+    }
+
+    virtual void OnSnapshotSyncRequested(
+        const txservice::remote::StorageSnapshotSyncRequest *req)
+    {
+    }
+
+    virtual bool OnSnapshotReceived(
+        const txservice::remote::OnSnapshotSyncedRequest *req)
+    {
+        return true;
+    }
+
+    virtual void OnStartFollowing()
+    {
+    }
+
+    virtual bool OnLeaderStart()
+    {
+        return true;
+    }
+
+    virtual std::string SnapshotSyncDestPath() const
+    {
+        return std::string("");
+    }
+
+    virtual bool IsCaughtUpWithPrimary()
+    {
+        return true;
     }
 
 protected:

@@ -68,14 +68,14 @@ public:
                            const CcMessage &msg,
                            CcHandlerResultBase *res = nullptr,
                            bool resend = false,
+                           bool resend_on_eagain = true,
                            bool log_verbose = false);
     bool SendScanRespToNode(uint32_t dest_node_id,
                             const ScanSliceResponse &msg,
                             CcHandlerResultBase *res = nullptr,
                             bool resend = false);
     void UpdateRemoteNodes(
-        const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
-            &ng_config);
+        const std::unordered_map<NodeId, NodeConfig> &nodes_configs);
 
     /**
      * @brief Used by cc_stream_receiver. Nofity to setup stream to peer when

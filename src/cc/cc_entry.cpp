@@ -39,6 +39,12 @@ void LruEntry::SetCkptTs(uint64_t ts)
 
 bool LruEntry::IsPersistent() const
 {
+    if (Sharder::Instance().PrimaryNodeTerm() > 0)
+    {
+        // If this is a follower, all cce is treated as persisted since
+        // primary node will write them to kv.
+        return true;
+    }
 #ifndef ON_KEY_OBJECT
     return CommitTs() <= ckpt_ts_;
 #else
