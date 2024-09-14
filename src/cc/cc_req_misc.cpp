@@ -798,8 +798,7 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         // longer safe to access cce. Just abort all the reqs.
         for (CcRequestBase *req : requesters_)
         {
-            bool succ = ccm_->BackFill(cce_, rec_ts_, rec_status_, rec_str_);
-            if (!succ && req)
+            if (req)
             {
                 req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
             }
