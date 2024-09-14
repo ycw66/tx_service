@@ -64,7 +64,7 @@ Figure 2 TxProcessor Topology
 Sharder is the collection of services supplied by TxService, which includes:
 1. cc_stream rpc server, which transfers CcRequests between different TxService nodes. It also defines the **cc_stream_sender_** and **cc_stream_receiver_** respectively.
 2. cc_node rpc server and corresponding **cc_node_service_**, which is used by raft to communicate CcNodes among the raft group.
-3. log_replay rpc server and corresponding **log_replay_service_**, which receives redo log from log service by streaming.
+3. log_replay rpc server and corresponding **recovery_service_**, which receives redo log from log service by streaming.
 
 Sharder also provides sharding functions.
 1. The ShardCode function: given a hash code, convert it to shard code which contain the node_id and residual (used to calcualte core_id).

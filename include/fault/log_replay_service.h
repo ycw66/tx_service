@@ -81,8 +81,8 @@ struct RecoverTxTask
     int64_t cc_ng_term_;
 };
 
-class ReplayService : public brpc::StreamInputHandler,
-                      public ::txlog::LogReplayService
+class RecoveryService : public brpc::StreamInputHandler,
+                        public ::txlog::LogReplayService
 {
 public:
     enum struct WaitingStatus : int8_t
@@ -91,12 +91,12 @@ public:
         WaitForAll = 1,
         WaitForMany = 2,
     };
-    ReplayService() = delete;
-    ReplayService(LocalCcShards &local_shards,
-                  TxLog *log_agent,
-                  std::string ip,
-                  uint16_t port);
-    ~ReplayService() = default;
+    RecoveryService() = delete;
+    RecoveryService(LocalCcShards &local_shards,
+                    TxLog *log_agent,
+                    std::string ip,
+                    uint16_t port);
+    ~RecoveryService() = default;
 
     void Shutdown();
 

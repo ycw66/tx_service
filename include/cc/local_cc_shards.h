@@ -2229,7 +2229,7 @@ private:
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
     friend class Checkpointer;
-    friend class txservice::fault::ReplayService;
+    friend class txservice::fault::RecoveryService;
     friend class CcShard;
     friend class CcShardHeap;
 };

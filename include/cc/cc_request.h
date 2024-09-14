@@ -3693,7 +3693,7 @@ public:
         uint64_t commit_ts,
         uint64_t txn,
         bthread::Mutex &mux,
-        std::atomic<fault::ReplayService::WaitingStatus> &status,
+        std::atomic<fault::RecoveryService::WaitingStatus> &status,
         std::atomic<size_t> &on_fly_cnt,
         bool &recovery_error,
         std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr,
@@ -3961,7 +3961,7 @@ private:
     uint64_t commit_ts_;
     CcHandlerResult<Void> result_{nullptr};
     bthread::Mutex *external_mux_;
-    std::atomic<fault::ReplayService::WaitingStatus> *external_status_;
+    std::atomic<fault::RecoveryService::WaitingStatus> *external_status_;
     std::atomic<uint64_t> *external_on_fly_cnt_;
     // Reduces race condition by operating on ParseDataLogCc's local
     // on_fly_cnt. Only last ReplayLogCc decreases global on_fly_cnt.
@@ -3988,7 +3988,7 @@ public:
     void Reset(const std::string &log_records,
                uint32_t cc_ng_id,
                bthread::Mutex &mux,
-               std::atomic<fault::ReplayService::WaitingStatus> &status,
+               std::atomic<fault::RecoveryService::WaitingStatus> &status,
                std::atomic<uint64_t> &on_fly_cnt,
                bool &recovery_error)
     {
@@ -4115,7 +4115,7 @@ private:
     std::string log_records_;
     uint32_t cc_ng_id_;
     bthread::Mutex *mux_;
-    std::atomic<fault::ReplayService::WaitingStatus> *status_;
+    std::atomic<fault::RecoveryService::WaitingStatus> *status_;
     std::atomic<uint64_t> *on_fly_cnt_;
     bool *recovery_error_;
     uint16_t next_core_ = 0;

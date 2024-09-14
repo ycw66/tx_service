@@ -15,7 +15,7 @@
 #include "type.h"
 
 /**
- * LogReplayService serves three purposes:
+ * RecoveryService serves three purposes:
  * replay log after a ccnode becomes leader; recover orphan lock's belonging
  * txn; check whether this node is preferred node group's leader periodically
  * and request leader transfer if not.
@@ -47,16 +47,17 @@ namespace fault
 {
 thread_local CcRequestPool<ReplayLogCc> replay_cc_pool_;
 thread_local CcRequestPool<ParseDataLogCc> parse_datalog_cc_pool_;
-ReplayService::ReplayService(LocalCcShards &local_shards,
-                             TxLog *log_agent,
-                             std::string ip,
-                             uint16_t port)
+RecoveryService::RecoveryService(LocalCcShards &local_shards,
+                                 TxLog *log_agent,
+                                 std::string ip,
+                                 uint16_t port)
     : local_shards_(local_shards),
       log_agent_(log_agent),
       finish_(false),
       ip_(std::move(ip)),
       port_(port)
 {
+    CHECK((log_agent == nullptr) == txservice_skip_wal);
     notify_thread_ = std::thread(
         [this]
         {
@@ -112,7 +113,7 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
         });
 }
 
-bool ReplayService::ReplayNow(ReplayLogTask &task)
+bool RecoveryService::ReplayNow(ReplayLogTask &task)
 {
     // queued_clock_ == 0 means it's not a delayed request.
     if (task.queued_clock_ == 0)
@@ -136,7 +137,7 @@ bool ReplayService::ReplayNow(ReplayLogTask &task)
     }
 }
 
-void ReplayService::Shutdown()
+void RecoveryService::Shutdown()
 {
     // reap background thread
     {
@@ -158,10 +159,10 @@ void ReplayService::Shutdown()
     inbound_cv_.wait(lk, [this]() { return active_stream_cnt_ == 0; });
 }
 
-void ReplayService::Connect(::google::protobuf::RpcController *controller,
-                            const ::txlog::LogReplayConnectRequest *request,
-                            ::txlog::LogReplayConnectResponse *response,
-                            ::google::protobuf::Closure *done)
+void RecoveryService::Connect(::google::protobuf::RpcController *controller,
+                              const ::txlog::LogReplayConnectRequest *request,
+                              ::txlog::LogReplayConnectResponse *response,
+                              ::google::protobuf::Closure *done)
 {
     brpc::StreamId stream_socket;
     brpc::ClosureGuard done_guard(done);
@@ -211,7 +212,7 @@ void ReplayService::Connect(::google::protobuf::RpcController *controller,
                 else if (cc_ng_term == info.cc_ng_term_)
                 {
                     // the cc_ng is still recovering, and this request is a
-                    // response for ReplayService's stream timeout and resend
+                    // response for RecoveryService's stream timeout and resend
                     // ReplayLogRequest;
                 }
                 else
@@ -257,7 +258,7 @@ void ReplayService::Connect(::google::protobuf::RpcController *controller,
     active_stream_cnt_++;
 }
 
-void ReplayService::UpdateLogGroupLeader(
+void RecoveryService::UpdateLogGroupLeader(
     ::google::protobuf::RpcController *controller,
     const ::txlog::LogLeaderUpdateRequest *request,
     ::txlog::LogLeaderUpdateResponse *response,
@@ -272,7 +273,7 @@ void ReplayService::UpdateLogGroupLeader(
               << " leader to node_id:" << node_id;
 }
 
-void ReplayService::NotifyCheckpointer(
+void RecoveryService::NotifyCheckpointer(
     ::google::protobuf::RpcController *controller,
     const ::txlog::NotifyCheckpointerRequest *request,
     ::txlog::NotifyCheckpointerResponse *response,
@@ -283,11 +284,11 @@ void ReplayService::NotifyCheckpointer(
     LOG(INFO) << "Notified checkpointer.";
 }
 
-void ReplayService::ReplayLog(uint32_t cc_ng_id,
-                              int64_t cc_ng_term,
-                              int log_group,
-                              uint64_t replay_start_ts,
-                              bool delayed_request)
+void RecoveryService::ReplayLog(uint32_t cc_ng_id,
+                                int64_t cc_ng_term,
+                                int log_group,
+                                uint64_t replay_start_ts,
+                                bool delayed_request)
 {
     std::unique_lock lk(queue_mux_);
     if (delayed_request)
@@ -304,11 +305,11 @@ void ReplayService::ReplayLog(uint32_t cc_ng_id,
     queue_cv_.notify_one();
 }
 
-void ReplayService::RecoverTx(uint64_t tx_number,
-                              int64_t tx_term,
-                              uint64_t write_lock_ts,
-                              uint32_t cc_ng_id,
-                              int64_t cc_ng_term)
+void RecoveryService::RecoverTx(uint64_t tx_number,
+                                int64_t tx_term,
+                                uint64_t write_lock_ts,
+                                uint32_t cc_ng_id,
+                                int64_t cc_ng_term)
 {
     std::unique_lock lk(queue_mux_);
     recover_tx_queue_.emplace_back(
@@ -316,9 +317,9 @@ void ReplayService::RecoverTx(uint64_t tx_number,
     queue_cv_.notify_one();
 }
 
-int ReplayService::on_received_messages(brpc::StreamId stream_id,
-                                        butil::IOBuf *const messages[],
-                                        size_t size)
+int RecoveryService::on_received_messages(brpc::StreamId stream_id,
+                                          butil::IOBuf *const messages[],
+                                          size_t size)
 {
     std::shared_ptr<std::vector<::txlog::ReplayMessage>> msg_vec =
         std::make_shared<std::vector<::txlog::ReplayMessage>>(size);
@@ -602,7 +603,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
     return 0;
 }
 
-void ReplayService::on_idle_timeout(brpc::StreamId id)
+void RecoveryService::on_idle_timeout(brpc::StreamId id)
 {
     // if the cc_node is still recovering, resend replay request to
     // corresponding log group. on_idle_timeout will be triggered every
@@ -636,7 +637,7 @@ void ReplayService::on_idle_timeout(brpc::StreamId id)
     }
 }
 
-void ReplayService::on_closed(brpc::StreamId id)
+void RecoveryService::on_closed(brpc::StreamId id)
 {
     // If remote log group crashes, the stream will be closed, should check cc
     // node's recovering status and resend ReplayLogRequest here?
@@ -672,12 +673,12 @@ void ReplayService::on_closed(brpc::StreamId id)
     }
 }
 
-void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
-                                         bthread::Mutex &mux,
-                                         std::atomic<size_t> &on_fly_cnt_,
-                                         std::atomic<WaitingStatus> &status,
-                                         bool &recovery_error,
-                                         WaitingStatus waiting_status)
+void RecoveryService::WaitAndClearRequests(brpc::StreamId stream_id,
+                                           bthread::Mutex &mux,
+                                           std::atomic<size_t> &on_fly_cnt_,
+                                           std::atomic<WaitingStatus> &status,
+                                           bool &recovery_error,
+                                           WaitingStatus waiting_status)
 {
     size_t on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
     if (on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll ||
@@ -732,7 +733,7 @@ void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
     }
 }
 
-void ReplayService::ClearTx(uint64_t tx_number)
+void RecoveryService::ClearTx(uint64_t tx_number)
 {
     ClearTxCc req(local_shards_.Count());
     req.Set(tx_number);
@@ -745,7 +746,7 @@ void ReplayService::ClearTx(uint64_t tx_number)
     req.Wait();
 }
 
-void ReplayService::ProcessReplayLogTask(ReplayLogTask &task)
+void RecoveryService::ProcessReplayLogTask(ReplayLogTask &task)
 {
     if (Sharder::Instance().CandidateLeaderTerm(task.cc_ng_id_) < 0)
     {
@@ -763,7 +764,7 @@ void ReplayService::ProcessReplayLogTask(ReplayLogTask &task)
                           finish_);
 }
 
-int ReplayService::ProcessDelayedReplayLogTask()
+int RecoveryService::ProcessDelayedReplayLogTask()
 {
     // move the delayed replay requests whose timer is fired to
     // replay_log_queue_
@@ -785,7 +786,7 @@ int ReplayService::ProcessDelayedReplayLogTask()
     return ready_cnt;
 }
 
-void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
+void RecoveryService::ProcessRecoverTxTask(RecoverTxTask &task)
 {
     // process RecoverTx request
 
@@ -890,49 +891,62 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
         // the tx's log record to the cc node to recover the
         // committed record. Or, the tx must have aborted.
 
-        RecoverTxStatus status = log_agent_->RecoverTx(task.tx_number_,
-                                                       task.tx_term_,
-                                                       task.write_lock_ts_,
-                                                       task.cc_ng_id_,
-                                                       task.cc_ng_term_,
-                                                       ip_,
-                                                       port_);
-
-        if (status == RecoverTxStatus::NotCommitted ||
-            status == RecoverTxStatus::Alive)
+        if (!txservice_skip_wal)
         {
-            LOG(INFO) << "The tx " << task.tx_number_
-                      << " is to be cleared, after asking "
-                         "the log group.";
+            assert(log_agent_ != nullptr);
+            RecoverTxStatus status = log_agent_->RecoverTx(task.tx_number_,
+                                                           task.tx_term_,
+                                                           task.write_lock_ts_,
+                                                           task.cc_ng_id_,
+                                                           task.cc_ng_term_,
+                                                           ip_,
+                                                           port_);
 
-            // If the tx is not committed, sends a cc request to
-            // local cc shards to clear write intentions left by
-            // the tx. If the tx node is still alive according
-            // to the log group, and yet no log record is found,
-            // given that the prior inquiry of the tx status is
-            // inconclusive, the tx must have aborted
-            // proactively. Clears the tx's locks.
-            ClearTx(task.tx_number_);
-        }
-        else if (status == RecoverTxStatus::RecoverError)
-        {
-            LOG(INFO) << "There is a tx recovery error when asking "
-                         "the log group. Tx number "
-                      << task.tx_number_;
+            if (status == RecoverTxStatus::NotCommitted ||
+                status == RecoverTxStatus::Alive)
+            {
+                LOG(INFO) << "The tx " << task.tx_number_
+                          << " is to be cleared, after asking "
+                             "the log group.";
+
+                // If the tx is not committed, sends a cc request to
+                // local cc shards to clear write intentions left by
+                // the tx. If the tx node is still alive according
+                // to the log group, and yet no log record is found,
+                // given that the prior inquiry of the tx status is
+                // inconclusive, the tx must have aborted
+                // proactively. Clears the tx's locks.
+                ClearTx(task.tx_number_);
+            }
+            else if (status == RecoverTxStatus::RecoverError)
+            {
+                LOG(INFO) << "There is a tx recovery error when asking "
+                             "the log group. Tx number "
+                          << task.tx_number_;
+            }
+            else
+            {
+                LOG(INFO) << "The tx " << task.tx_number_
+                          << " to be recovered has committed.";
+                // For DML transactions, if the tx has committed,
+                // the log group will ship the tx's committed
+                // records to the cc node. If there is an error,
+                // does nothing. The next conflicting tx will try a
+                // new recovery.
+                // For multi-stage transactions, the tx has written
+                // log and is guaranteed to succeed and release the
+                // lock, do nothing and the lock will be released by
+                // the coordinator.
+            }
         }
         else
         {
-            LOG(INFO) << "The tx " << task.tx_number_
-                      << " to be recovered has committed.";
-            // For DML transactions, if the tx has committed,
-            // the log group will ship the tx's committed
-            // records to the cc node. If there is an error,
-            // does nothing. The next conflicting tx will try a
-            // new recovery.
-            // For multi-stage transactions, the tx has written
-            // log and is guaranteed to succeed and release the
-            // lock, do nothing and the lock will be released by
-            // the coordinator.
+            // ClearTx. The orphan lock must be cleared. Since there is
+            // no log service we have no way to know whether the txn
+            // committed or aborted, just treat it as aborted. User will
+            // experience some data loss but it's enevitable without logs.
+            assert(log_agent_ == nullptr);
+            ClearTx(task.tx_number_);
         }
     }
 }

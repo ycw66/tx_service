@@ -35,7 +35,7 @@ class CcShard;
 namespace fault
 {
 class CcNode;
-class ReplayService;
+class RecoveryService;
 }  // namespace fault
 
 namespace remote
@@ -751,7 +751,7 @@ private:
     brpc::Server log_replay_server_;
     // The replay service that accepts a stream of log replay messages from
     // all log groups.
-    std::unique_ptr<fault::ReplayService> log_replay_service_;
+    std::unique_ptr<fault::RecoveryService> recovery_service_;
 
     // Worker pool for doing various aync works
     std::unique_ptr<TxWorkerPool> tx_worker_pool_;

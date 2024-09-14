@@ -33,7 +33,7 @@ Sharder::~Sharder()
     // Shutdown() must be called during stop.
     assert(cc_stream_receiver_ == nullptr);
     assert(cc_node_service_ == nullptr);
-    assert(log_replay_service_ == nullptr);
+    assert(recovery_service_ == nullptr);
     assert(tx_worker_pool_ == nullptr);
     assert(sharder_worker_ == nullptr);
 }
@@ -50,21 +50,24 @@ void Sharder::Shutdown()
     cc_stream_server_.Join();
     cc_stream_receiver_ = nullptr;
 
-    if (log_replay_service_)
+    if (recovery_service_)
     {
-        log_replay_service_->Shutdown();
+        recovery_service_->Shutdown();
     }
-    log_replay_server_.Stop(0);
-    log_replay_server_.Join();
+    if (!txservice_skip_wal)
+    {
+        log_replay_server_.Stop(0);
+        log_replay_server_.Join();
+    }
 
     cc_node_server_.Stop(0);
     cc_node_server_.Join();
     cc_node_service_ = nullptr;
 
-    // CcNode will access log_replay_service_ to replay log when becoming node
-    // group leader, so log_replay_service_ should be destructed after all
+    // CcNode will access recovery_service_ to replay log when becoming node
+    // group leader, so recovery_service_ should be destructed after all
     // CcNodes are stopped.
-    log_replay_service_ = nullptr;
+    recovery_service_ = nullptr;
 
     if (tx_worker_pool_)
     {
@@ -198,22 +201,20 @@ int Sharder::Init(
         const NodeConfig &node_conf = nodes_configs.at(node_id_);
         host_name_ = node_conf.host_name_;
         port_ = node_conf.port_;
-        if (!txservice_skip_wal)
+        recovery_service_ = std::make_unique<fault::RecoveryService>(
+            *local_shards_,
+            GetLogAgent(),
+            cluster_config_.ng_configs_.at(node_id_).front().host_name_,
+            GET_LOG_REPLAY_RPC_PORT(
+                cluster_config_.ng_configs_.at(node_id_).front().port_));
+        if (!txservice_skip_wal &&
+            log_replay_server_.AddService(recovery_service_.get(),
+                                          brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
         {
-            log_replay_service_ = std::make_unique<fault::ReplayService>(
-                *local_shards_,
-                GetLogAgent(),
-                host_name_,
-                GET_LOG_REPLAY_RPC_PORT(port_));
-            if (log_replay_server_.AddService(
-                    log_replay_service_.get(),
-                    brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
-            {
-                LOG(FATAL) << "Failed to start add the log replay service "
-                              "to the log "
-                              "replay server.";
-                return -1;
-            }
+            LOG(FATAL)
+                << "Failed to start add the log replay service to the log "
+                   "replay server.";
+            return -1;
         }
 
         for (uint32_t ng_id = 0; ng_id < cluster_config_.ng_configs_.size();
@@ -282,14 +283,16 @@ int Sharder::Init(
     // The log replay server uses local_port+3 for receiving streams from log
     // groups.
 
-    if (!txservice_skip_wal)
+    if (!txservice_skip_wal &&
+        log_replay_server_.Start(
+            GET_LOG_REPLAY_RPC_PORT(
+                cluster_config_.ng_configs_.at(node_id_).front().port_),
+            &server_options) != 0 &&
+        log_replay_server_.Start(GET_LOG_REPLAY_RPC_PORT(port_),
+                                 &server_options) != 0)
     {
-        if (log_replay_server_.Start(GET_LOG_REPLAY_RPC_PORT(port_),
-                                     &server_options) != 0)
-        {
-            LOG(FATAL) << "Failed to start the log replay server.";
-            return -1;
-        }
+        LOG(FATAL) << "Failed to start the log replay server.";
+        return -1;
     }
 
     // Notify host manager that this node has been started
@@ -716,11 +719,11 @@ void Sharder::RecoverTx(uint64_t lock_tx_number,
 {
     if (LeaderTerm(lock_cc_ng_id) > 0)
     {
-        log_replay_service_->RecoverTx(lock_tx_number,
-                                       lock_tx_coord_term,
-                                       write_lock_ts,
-                                       lock_cc_ng_id,
-                                       lock_cc_ng_term);
+        recovery_service_->RecoverTx(lock_tx_number,
+                                     lock_tx_coord_term,
+                                     write_lock_ts,
+                                     lock_cc_ng_id,
+                                     lock_cc_ng_term);
     }
 }
 

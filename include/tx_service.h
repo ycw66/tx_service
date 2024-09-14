@@ -1218,7 +1218,7 @@ public:
     std::vector<std::thread> thd_pool_;
     Checkpointer ckpt_;
 
-    friend class txservice::fault::ReplayService;
+    friend class txservice::fault::RecoveryService;
 };
 
 }  // namespace txservice
