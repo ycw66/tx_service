@@ -1602,7 +1602,12 @@ public:
                     Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
                 int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
                 int64_t ng_term = std::max(cc_ng_candid_term, cc_ng_term);
-                assert(ng_term > 0);
+                if (ng_term < 0)
+                {
+                    req.SetFinish();
+                    return true;
+                }
+
                 // If kv is skipped then log should always be skipped too.
                 assert(!txservice_skip_kv);
 
