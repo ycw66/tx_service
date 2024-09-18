@@ -357,6 +357,15 @@ public:
         key_lock_.Reset();
         ccm_ = ccm;
         page_ = page;
+
+#ifdef ON_KEY_OBJECT
+        dirty_payload_ = nullptr;
+        dirty_payload_status_ = RecordStatus::NonExistent;
+        pending_cmd_ = nullptr;
+        queue_block_cmds_.Reset();
+        buffered_cmd_list_.Clear();
+        forward_entry_ = nullptr;
+#endif
     }
 
     void SetUsedStatus(bool is_used);
