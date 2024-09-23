@@ -284,10 +284,6 @@ int Sharder::Init(
     // groups.
 
     if (!txservice_skip_wal &&
-        log_replay_server_.Start(
-            GET_LOG_REPLAY_RPC_PORT(
-                cluster_config_.ng_configs_.at(node_id_).front().port_),
-            &server_options) != 0 &&
         log_replay_server_.Start(GET_LOG_REPLAY_RPC_PORT(port_),
                                  &server_options) != 0)
     {
