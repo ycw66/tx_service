@@ -139,7 +139,7 @@ struct CmdSetEntry
     // No need to write to the log if there is no successful command.
     bool HasSuccessfulCommand() const
     {
-        return has_overwrite_ || !cmd_str_list_.empty();
+        return object_modified_;
     }
 
     // commit_ts of the object cce when the commands apply to it, commands on
@@ -147,6 +147,8 @@ struct CmdSetEntry
     uint64_t object_version_{};
     // The cce's last_validation ts, for setting commit ts of this txn.
     uint64_t last_vali_ts_{};
+    // Whether the cc entry's object is modified by the cmd.
+    bool object_modified_{};
     // serialized key, for writing log
     std::string obj_key_str_{};
     // serialized commands, for writing log

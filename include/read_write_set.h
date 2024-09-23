@@ -13,6 +13,8 @@
 
 namespace txservice
 {
+extern bool txservice_skip_wal;
+
 using TableWriteSet = std::map<TxKey, WriteSetEntry>;
 
 enum class ReadEntryResult : uint8_t
@@ -591,10 +593,14 @@ public:
         entry.object_version_ = cce_version;
         if (cmd != nullptr)
         {
-            // The command modifies the object. Put it into the command
-            // set for writing log and post-processing. If the command
-            // fails, only to release the write lock.
-            entry.AddCommand(cmd);
+            entry.object_modified_ = true;
+            // The command modifies the object and wal is enabled. Put it
+            // into the command set for writing log and post-processing. If
+            // the command fails, only to release the write lock.
+            if (!txservice_skip_wal)
+            {
+                entry.AddCommand(cmd);
+            }
 
             if (forward_key_shard != UINT32_MAX &&
                 entry.forward_entry_ == nullptr)

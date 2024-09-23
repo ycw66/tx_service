@@ -6028,16 +6028,15 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             {
                 auto retire_command =
                     obj_cmd_.command_->RetireExpiredTTLObjectCommand();
-                rw_set_.AddObjectCommand(
-                    *table_name,
-                    cce_addr,
-                    commit_ts,
-                    last_vali_ts,
-                    obj_cmd_.key_,
-                    !txservice_skip_wal ? retire_command.get() : nullptr
+                rw_set_.AddObjectCommand(*table_name,
+                                         cce_addr,
+                                         commit_ts,
+                                         last_vali_ts,
+                                         obj_cmd_.key_,
+                                         retire_command.get()
 #ifndef RANGE_PARTITION_ENABLED
-                    ,
-                    obj_cmd_op.forward_key_shard_
+                                             ,
+                                         obj_cmd_op.forward_key_shard_
 #endif
                 );
             }
@@ -6050,8 +6049,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                 commit_ts,
                 last_vali_ts,
                 obj_cmd_op.key_,
-                !txservice_skip_wal && object_modified ? obj_cmd_op.command_
-                                                       : nullptr
+                object_modified ? obj_cmd_op.command_ : nullptr
 #ifndef RANGE_PARTITION_ENABLED
                 ,
                 obj_cmd_op.forward_key_shard_
@@ -6436,9 +6434,9 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                             cmd_res.commit_ts_,
                             cmd_res.last_vali_ts_,
                             &vct_key->at(i),
-                            !txservice_skip_wal ? retire_command.get() : nullptr
+                            retire_command.get()
 #ifndef RANGE_PARTITION_ENABLED
-                            ,
+                                ,
                             obj_cmd_op.vct_key_shard_code_[i].second
 #endif
                         );
@@ -6452,9 +6450,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         cmd_res.commit_ts_,
                         cmd_res.last_vali_ts_,
                         &vct_key->at(i),
-                        !txservice_skip_wal && cmd_res.object_modified_
-                            ? vct_cmd->at(i)
-                            : nullptr
+                        cmd_res.object_modified_ ? vct_cmd->at(i) : nullptr
 #ifndef RANGE_PARTITION_ENABLED
                         ,
                         obj_cmd_op.vct_key_shard_code_[i].second
