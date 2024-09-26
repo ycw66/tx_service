@@ -541,6 +541,11 @@ public:
      */
     void StartCcStreamReceiver(bool enable_brpc_builtin_services = true);
 
+    /**
+     * @brief Connect cc stream sender to remote nodes
+     */
+    void ConnectCcStreamSender();
+
     std::shared_ptr<brpc::Channel> GetCcNodeServiceChannel(uint32_t node_id);
 
     /**

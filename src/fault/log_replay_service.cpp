@@ -240,7 +240,7 @@ void RecoveryService::Connect(::google::protobuf::RpcController *controller,
     stream_options.idle_timeout_ms = recovering ? timeout_ms_ : -1;
     if (brpc::StreamAccept(&stream_socket, *cntl, &stream_options) != 0)
     {
-        cntl->SetFailed("Fail to accept stream");
+        cntl->SetFailed("Failed to accept stream");
         return;
     }
 
@@ -859,7 +859,7 @@ void RecoveryService::ProcessRecoverTxTask(RecoverTxTask &task)
 
         if (cntl.Failed())
         {
-            LOG(ERROR) << "Fail to check the tx status in ng#" << tx_ng
+            LOG(ERROR) << "Failed to check the tx status in ng#" << tx_ng
                        << ". Error code: " << cntl.ErrorCode()
                        << ". Msg: " << cntl.ErrorText();
             Sharder::Instance().UpdateCcNodeServiceChannel(tx_leader, channel);

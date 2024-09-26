@@ -139,13 +139,18 @@ public:
     static void MergeLocalWaitingLockInfo(const CheckDeadLockResult &dlres);
     static void SetStop()
     {
+        if (inst_)
         {
-            std::unique_lock<std::mutex> lk(inst_->mutex_);
-            inst_->stop_.store(true, std::memory_order_release);
-            inst_->con_var_.notify_one();
+            {
+                std::unique_lock<std::mutex> lk(inst_->mutex_);
+                inst_->stop_.store(true, std::memory_order_release);
+                inst_->con_var_.notify_one();
+            }
+            if (inst_->thd_.joinable())
+            {
+                inst_->thd_.join();
+            }
         }
-
-        inst_->thd_.join();
     }
     static void Free()
     {

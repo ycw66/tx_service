@@ -211,7 +211,7 @@ int Sharder::Init(
             log_replay_server_.AddService(recovery_service_.get(),
                                           brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
         {
-            LOG(FATAL)
+            LOG(ERROR)
                 << "Failed to start add the log replay service to the log "
                    "replay server.";
             return -1;
@@ -251,19 +251,18 @@ int Sharder::Init(
     if (cc_stream_server_.AddService(cc_stream_receiver_.get(),
                                      brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
-        LOG(FATAL)
+        LOG(ERROR)
             << "Failed to add the cc stream service to the cc stream server.";
         return -1;
     }
 
     cc_stream_sender_ = std::make_unique<remote::CcStreamSender>(msg_pool_);
-    cc_stream_sender_->UpdateRemoteNodes(nodes_configs);
 
     cc_node_service_ = std::make_unique<remote::CcNodeService>(*local_shards_);
     if (cc_node_server_.AddService(cc_node_service_.get(),
                                    brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
-        LOG(FATAL) << "Failed to add the cc node service to the server.";
+        LOG(ERROR) << "Failed to add the cc node service to the server.";
         return -1;
     }
 
@@ -276,7 +275,7 @@ int Sharder::Init(
     server_options.has_builtin_services = enable_brpc_builtin_services;
     if (cc_node_server_.Start(GET_CCNODE_RPC_PORT(port_), &server_options) != 0)
     {
-        LOG(FATAL) << "Failed to start the cc node server.";
+        LOG(ERROR) << "Failed to start the cc node server.";
         return -1;
     }
 
@@ -287,7 +286,7 @@ int Sharder::Init(
         log_replay_server_.Start(GET_LOG_REPLAY_RPC_PORT(port_),
                                  &server_options) != 0)
     {
-        LOG(FATAL) << "Failed to start the log replay server.";
+        LOG(ERROR) << "Failed to start the log replay server.";
         return -1;
     }
 
@@ -312,7 +311,7 @@ int Sharder::Init(
         }
         if (pid == 0)
         {
-            std::string log_path = local_path + "/cc_ng";
+            std::string log_path = local_path + "/tx_service";
             if (execl(hm_bin_path->c_str(),
                       "host_manager",
                       hm_ip_.c_str(),
@@ -354,7 +353,7 @@ int Sharder::Init(
         }
         if (!connected)
         {
-            LOG(FATAL) << "Failed to init channel to host manager after "
+            LOG(ERROR) << "Failed to init channel to host manager after "
                        << max_retries << " attempts.";
             return -1;
         }
@@ -1203,7 +1202,7 @@ void Sharder::StartCcStreamReceiver(bool enable_brpc_builtin_services)
     server_options.has_builtin_services = enable_brpc_builtin_services;
     if (cc_stream_server_.Start(port_, &server_options) != 0)
     {
-        LOG(FATAL) << "Failed to start the cc stream server.";
+        LOG(ERROR) << "Failed to start the cc stream server.";
     }
 }
 
@@ -1326,5 +1325,12 @@ void Sharder::SubscribeToPrimary(bool need_clear_ccm, int64_t ng_term)
             return;
         }
     }
+}
+
+void Sharder::ConnectCcStreamSender()
+{
+    std::unordered_map<uint32_t, NodeConfig> nodes_configs;  
+    ExtractNodesConfigs(cluster_config_.ng_configs_, nodes_configs);
+    cc_stream_sender_->UpdateRemoteNodes(nodes_configs);
 }
 }  // namespace txservice

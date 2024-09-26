@@ -812,7 +812,7 @@ void CcStreamSender::ConnectStreams()
             }
             else
             {
-                LOG(ERROR) << "Fail to connect the cc stream to node " << nid;
+                LOG(ERROR) << "Failed to connect the cc stream to node " << nid;
             }
         }
 
@@ -852,8 +852,9 @@ void CcStreamSender::ConnectStreams()
             }
             else
             {
-                LOG(ERROR) << "Fail to connect the long msg cc stream to node "
-                           << nid;
+                LOG(ERROR)
+                    << "Failed to connect the long msg cc stream to node "
+                    << nid;
             }
         }
     }
@@ -885,7 +886,7 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     err = channel.Init(ip_addr.c_str(), &options);
     if (err != 0)
     {
-        LOG(ERROR) << "Fail to init cc stream channel to node " << node_id
+        LOG(ERROR) << "Failed to init cc stream channel to node " << node_id
                    << ", ip: " << ip_addr << ", channel init error: " << err;
         return err;
     }
@@ -904,7 +905,7 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     err = brpc::StreamCreate(&stream_id, cntl, nullptr);
     if (err != 0)
     {
-        LOG(ERROR) << "Fail to create cc stream to node " << node_id
+        LOG(ERROR) << "Failed to create cc stream to node " << node_id
                    << ", ip: " << ip_addr
                    << ", connect error: " << cntl.ErrorCode() << ", "
                    << cntl.ErrorText();
@@ -1006,7 +1007,7 @@ int CcStreamSender::ConnectLongMsgStream(uint32_t node_id, int64_t version)
     int err = channel.Init(ip_addr.c_str(), &options);
     if (err != 0)
     {
-        LOG(ERROR) << "Fail to init long msg cc stream channel to node "
+        LOG(ERROR) << "Failed to init long msg cc stream channel to node "
                    << node_id << ", ip: " << ip_addr
                    << ", channel init error: " << err;
         return err;
@@ -1018,7 +1019,7 @@ int CcStreamSender::ConnectLongMsgStream(uint32_t node_id, int64_t version)
     err = brpc::StreamCreate(&long_msg_stream_id, long_msg_cntl, nullptr);
     if (err != 0)
     {
-        LOG(ERROR) << "Fail to create long msg cc stream to node " << node_id
+        LOG(ERROR) << "Failed to create long msg cc stream to node " << node_id
                    << ", ip: " << ip_addr
                    << ", connect error: " << long_msg_cntl.ErrorCode() << ", "
                    << long_msg_cntl.ErrorText();

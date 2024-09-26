@@ -98,7 +98,7 @@ void CcStreamReceiver::Connect(::google::protobuf::RpcController *controller,
     stream_options.handler = this;
     if (brpc::StreamAccept(&stream_socket, *cntl, &stream_options) != 0)
     {
-        cntl->SetFailed("Fail to accept stream");
+        cntl->SetFailed("Failed to accept stream");
         return;
     }
 

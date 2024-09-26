@@ -1113,6 +1113,9 @@ public:
         // Start cc stream receiver server.
         Sharder::Instance().StartCcStreamReceiver(enable_brpc_builtin_services);
 
+        // Connect cc stream sender to remote nodes
+        Sharder::Instance().ConnectCcStreamSender();
+
         if (local_cc_shards_.EnableMvcc())
         {
             TxStartTsCollector::Instance().Start();
