@@ -758,7 +758,12 @@ void CcShard::ClearTx(TxNumber txn)
             NonBlockingLock *lock = lru_ptr->GetKeyLock();
             if (lock != nullptr)
             {
-                lock->ClearTx(txn, this);
+                LockType lt = lock->ClearTx(txn, this);
+                if (lt == LockType::WriteLock)
+                {
+                    lru_ptr->GetKeyGapLockAndExtraData()->ClearTx();
+                }
+
                 lru_ptr->RecycleKeyLock(*this);
             }
         }

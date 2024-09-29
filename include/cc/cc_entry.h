@@ -403,6 +403,11 @@ public:
     }
 #endif
 
+    KeyGapLockAndExtraData *GetKeyGapLockAndExtraData()
+    {
+        return cc_lock_and_extra_;
+    }
+
     /**
      * @brief Updates the checkpoint timestamp such that it is no smaller than
      * the input timestamp. The method is called by the tx processor thread,

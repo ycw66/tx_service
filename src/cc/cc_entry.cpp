@@ -164,6 +164,7 @@ void LruEntry::ClearLocks(CcShard &ccs,
     // clean up blocked cc reqs
     key_lock->AbortAllQueuedRequests(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
 
+    cc_lock_and_extra_->Reset(nullptr, nullptr);
     // reset lock entry in ccshard lock array to make it reusable.
     cc_lock_and_extra_->SetUsedStatus(false);
     cc_lock_and_extra_ = nullptr;

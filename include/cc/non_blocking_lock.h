@@ -486,6 +486,16 @@ public:
 
 #endif
 
+    void ClearTx()
+    {
+#ifdef ON_KEY_OBJECT
+        pending_cmd_ = nullptr;
+        dirty_payload_ = nullptr;
+        dirty_payload_status_ = RecordStatus::NonExistent;
+        forward_entry_ = nullptr;
+#endif
+    }
+
 private:
     NonBlockingLock key_lock_;
     bool in_use_{false};

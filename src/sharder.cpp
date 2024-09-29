@@ -1329,7 +1329,7 @@ void Sharder::SubscribeToPrimary(bool need_clear_ccm, int64_t ng_term)
 
 void Sharder::ConnectCcStreamSender()
 {
-    std::unordered_map<uint32_t, NodeConfig> nodes_configs;  
+    std::unordered_map<uint32_t, NodeConfig> nodes_configs;
     ExtractNodesConfigs(cluster_config_.ng_configs_, nodes_configs);
     cc_stream_sender_->UpdateRemoteNodes(nodes_configs);
 }
