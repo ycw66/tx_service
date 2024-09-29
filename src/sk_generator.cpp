@@ -297,6 +297,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                             ,
                             false,
                             [](size_t hash_code) { return true; }
+
 #endif
     );
 

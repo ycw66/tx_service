@@ -243,6 +243,12 @@ public:
         return false;
     }
 
+    bool CheckStandbyTerm() const
+    {
+        return TxCcNodeId() == Sharder::Instance().NativeNodeGroup() &&
+               Sharder::Instance().StandbyNodeTerm() == TxTerm();
+    }
+
 #ifdef EXT_TX_PROC_ENABLED
     void Enlist();
     void ExternalForward(bool enlist_txm_if_fails = true);

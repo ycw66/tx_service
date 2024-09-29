@@ -62,17 +62,26 @@ bool FetchCatalogCc::ValidTermCheck()
 {
     if (fetch_from_primary_)
     {
-        if (Sharder::Instance().PrimaryNodeTerm() != cc_ng_term_)
+        int64_t standby_term = Sharder::Instance().StandbyNodeTerm();
+        if (standby_term < 0)
+        {
+            standby_term = Sharder::Instance().CandidateStandbyNodeTerm();
+        }
+
+        if (standby_term != cc_ng_term_)
         {
             return false;
         }
     }
     else
     {
-        int64_t cc_ng_candid_term =
-            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-        if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_)
+        if (cc_ng_term < 0)
+        {
+            cc_ng_term = Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+        }
+
+        if (cc_ng_term != cc_ng_term_)
         {
             return false;
         }
@@ -749,9 +758,7 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              NodeGroupId cc_ng_id,
                              int64_t cc_ng_term,
                              int32_t range_id,
-                             bool fetch_from_primary,
-                             uint32_t seq_grp,
-                             uint64_t initial_seq_id)
+                             bool fetch_from_primary)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(tbl_name),
       table_schema_(tbl_schema),
@@ -759,9 +766,7 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
       cce_(cce),
       ccm_(ccm),
       range_id_(range_id),
-      fetch_from_primary_(fetch_from_primary),
-      seq_grp_(seq_grp),
-      initial_seq_id_(initial_seq_id)
+      fetch_from_primary_(fetch_from_primary)
 {
 }
 
@@ -769,9 +774,8 @@ bool FetchRecordCc::ValidTermCheck()
 {
     if (fetch_from_primary_)
     {
-        if (Sharder::Instance().PrimaryNodeTerm() != cc_ng_term_ ||
-            Sharder::Instance().StandbyInitialMsgSequence(seq_grp_) !=
-                initial_seq_id_)
+        if (Sharder::Instance().StandbyNodeTerm() != cc_ng_term_ &&
+            Sharder::Instance().CandidateStandbyNodeTerm() != cc_ng_term_)
         {
             return false;
         }
@@ -781,7 +785,10 @@ bool FetchRecordCc::ValidTermCheck()
         int64_t cc_ng_candid_term =
             Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-        if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_)
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+
+        if (std::max({cc_ng_candid_term, cc_ng_term, standby_node_term}) !=
+            cc_ng_term_)
         {
             return false;
         }
@@ -848,13 +855,20 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 
 void FetchRecordCc::SetFinish(int err)
 {
+    this->end_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
     error_code_ = err;
     ccs_.Enqueue(this);
 }
 
 bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 {
-    if (!Sharder::Instance().CheckLeaderTerm(node_group_, term_))
+    int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group_);
+    int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+    int64_t current_term = std::max(ng_leader_term, standby_node_term);
+
+    if (current_term < 0 || current_term != term_)
     {
         SetFinished(CcErrorCode::NG_TERM_CHANGED);
         return false;

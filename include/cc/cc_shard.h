@@ -453,6 +453,11 @@ public:
         uint64_t min_ts = UINT64_MAX;
 
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id);
+        if (cc_ng_term < 0)
+        {
+            cc_ng_term = Sharder::Instance().StandbyNodeTerm();
+        }
+
         auto it = lock_holding_txs_.find(cc_ng_id);
         if (it != lock_holding_txs_.end())
         {
@@ -676,8 +681,6 @@ public:
                      CcRequestBase *requester,
                      int32_t range_id = -1,
                      bool fetch_from_primary = false,
-                     uint32_t seq_grp = 0,
-                     uint64_t initial_seq_id = 0,
                      uint32_t key_shard_code = 0);
 
     void RemoveFetchRecordRequest(LruEntry *cce);
@@ -877,7 +880,8 @@ public:
 
     // called on follower node
     bool UpdateLastReceivedStandbySequenceId(
-        const remote::KeyObjectStandbyForwardRequest &msg);
+        const remote::KeyObjectStandbyForwardRequest &msg,
+        int64_t standby_node_term);
     void SubsribeToPrimaryNode(uint32_t seq_grp, uint64_t seq_id);
 
     bool RequestMissingStandbyMessage(uint32_t seq_grp,
@@ -888,7 +892,7 @@ public:
     void UpdateStandbyConsistentTs(uint32_t seq_grp,
                                    uint64_t seq_id,
                                    uint64_t consistent_ts,
-                                   int64_t primary_term);
+                                   int64_t standby_node_term);
 
     uint64_t MinLastStandbyConsistentTs() const;
 

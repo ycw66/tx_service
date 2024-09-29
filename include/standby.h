@@ -2,6 +2,7 @@
 
 #include <queue>
 
+#include "glog/logging.h"
 #include "proto/cc_request.pb.h"
 #include "tx_id.h"
 
@@ -30,7 +31,10 @@ struct StandbyForwardEntry
 
     void Reset()
     {
+        assert(!in_use_);
+        in_use_ = true;
         msg.clear_key_obj_standby_forward_req();
+        sequence_id_ = UINT64_MAX;
     }
 
     remote::KeyObjectStandbyForwardRequest &Request()

@@ -40,6 +40,8 @@ bool CcHandlerResult<T>::SetFinished()
     // Copy the runtime_resume_func_ since it could be set to empty once
     // is_finished_ is set.
     const std::function<void()> *resume_func = runtime_resume_func_;
+    TransactionExecution *txm = txm_;
+    bool is_blocking = is_blocking_;
 #endif
 
     if (ref_cnted_)
@@ -60,9 +62,9 @@ bool CcHandlerResult<T>::SetFinished()
                 {
                     (*resume_func)();
                 }
-                else if (txm_ != nullptr && is_blocking_)
+                else if (txm != nullptr && is_blocking)
                 {
-                    txm_->Enlist();
+                    txm->Enlist();
                 }
 #endif
                 return true;
@@ -85,9 +87,9 @@ bool CcHandlerResult<T>::SetFinished()
             {
                 (*resume_func)();
             }
-            else if (txm_ != nullptr && is_blocking_)
+            else if (txm != nullptr && is_blocking)
             {
-                txm_->Enlist();
+                txm->Enlist();
             }
 #endif
             return true;
@@ -150,6 +152,8 @@ bool CcHandlerResult<T>::ForceError()
     // Copy the runtime_resume_func_ since it could be set to empty once
     // is_finished_ is set.
     const std::function<void()> *resume_func = runtime_resume_func_;
+    TransactionExecution *txm = txm_;
+    bool is_blocking = is_blocking_;
 #endif
 
     bool expect = false;
@@ -172,9 +176,9 @@ bool CcHandlerResult<T>::ForceError()
         {
             (*resume_func)();
         }
-        else if (txm_ != nullptr && is_blocking_)
+        else if (txm != nullptr && is_blocking)
         {
-            txm_->Enlist();
+            txm->Enlist();
         }
 #endif
     }

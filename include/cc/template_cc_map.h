@@ -1266,8 +1266,11 @@ public:
                 }
             });
 
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
-                                                 cce_addr.Term()))
+                                                 cce_addr.Term()) &&
+            (standby_node_term < 0 || standby_node_term != cce_addr.Term()))
         {
             LOG(INFO) << "PostReadCc, node_group(#" << cce_addr.NodeGroupId()
                       << ") term < 0, tx:" << req.Txn() << " ,cce: "
@@ -1430,6 +1433,7 @@ public:
         else
         {
             ng_term = Sharder::Instance().LeaderTerm(ng_id);
+            ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
         }
 
         if (ng_term < 0)
@@ -5749,7 +5753,10 @@ public:
         }
 
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        int64_t current_term = std::max(ng_term, standby_node_term);
+
+        if (current_term < 0 || current_term != req.node_group_term_)
         {
             req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             return false;
@@ -5906,6 +5913,16 @@ public:
             {
                 if (cce->HasBufferedCommandList())
                 {
+                    BufferedTxnCmdList &buffered_cmds =
+                        cce->BufferedCommandList();
+                    if (buffered_cmds.txn_cmd_list_.back().new_version_ >
+                        req.data_sync_ts_)
+                    {
+                        // Forward iterator
+                        it++;
+                        continue;
+                    }
+
                     // If the data is owned by this ng, fetch the record,
                     // otherwise only skip this record for now and don't
                     // truncate redo log.
@@ -5914,7 +5931,8 @@ public:
                         uint16_t bucket_id =
                             Sharder::Instance().MapKeyHashToBucketId(key_hash);
                         if (shard_->GetBucketOwner(bucket_id, cc_ng_id_) ==
-                            cc_ng_id_)
+                                cc_ng_id_ &&
+                            ng_term > 0)
                         {
                             TxKey tx_key(key);
                             shard_->FetchRecord(table_name_,

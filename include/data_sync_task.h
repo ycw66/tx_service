@@ -53,7 +53,8 @@ public:
 #ifndef RANGE_PARTITION_ENABLED
                  ,
                  std::function<bool(size_t)> filter_lambda,
-                 bool forward_cache
+                 bool forward_cache,
+                 bool is_standby_node_ckpt
 #endif
                  )
         : table_name_(table_name),
@@ -65,7 +66,8 @@ public:
 #ifndef RANGE_PARTITION_ENABLED
           ,
           filter_lambda_(filter_lambda),
-          forward_cache_(forward_cache)
+          forward_cache_(forward_cache),
+          is_standby_node_ckpt_(is_standby_node_ckpt)
 #endif
           ,
           status_(status),
@@ -102,14 +104,25 @@ public:
                     LOG(INFO) << "Checkpoint of node group #" << node_group_id_
                               << " succeeded with timestamp: "
                               << status_->truncate_log_ts_;
-                    Sharder::Instance().UpdateNodeGroupCkptTs(
-                        node_group_id_, status_->truncate_log_ts_);
-                    if (!txservice_skip_wal)
+                    if (status_->truncate_log_ts_ != UINT64_MAX)
                     {
-                        Sharder::Instance().GetLogAgent()->UpdateCheckpointTs(
-                            node_group_id_,
-                            node_group_term_,
-                            status_->truncate_log_ts_);
+                        Sharder::Instance().UpdateNodeGroupCkptTs(
+                            node_group_id_, status_->truncate_log_ts_);
+                    }
+
+                    if (!txservice_skip_wal &&
+                        status_->truncate_log_ts_ != UINT64_MAX)
+                    {
+#ifndef RANGE_PARTITION_ENABLED
+                        if (!is_standby_node_ckpt_)
+#endif
+                        {
+                            Sharder::Instance()
+                                .GetLogAgent()
+                                ->UpdateCheckpointTs(node_group_id_,
+                                                     node_group_term_,
+                                                     status_->truncate_log_ts_);
+                        }
                     }
                 }
                 else
@@ -204,6 +217,7 @@ public:
     CkptErrorCode ckpt_err_{CkptErrorCode::NO_ERROR};
     std::function<bool(size_t)> filter_lambda_;
     bool forward_cache_{false};
+    bool is_standby_node_ckpt_{false};
 #endif
 
     std::shared_ptr<DataSyncStatus> status_{nullptr};

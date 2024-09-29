@@ -55,6 +55,7 @@
 #include "tx_operation_result.h"
 #include "tx_record.h"
 #include "type.h"
+#include "util.h"
 
 namespace txservice
 {
@@ -90,6 +91,7 @@ public:
             return false;
         }
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+
         if (ng_term_ < 0)
         {
             ng_term_ = cc_ng_term;
@@ -1035,6 +1037,9 @@ public:
     bool ValidTermCheck() override
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        cc_ng_term = std::max(cc_ng_term, standby_node_term);
+
         assert(cce_addr_ != nullptr);
         if (cce_addr_->Term() != cc_ng_term)
         {
@@ -1147,6 +1152,8 @@ public:
         if (cc_ng_term < 0)
         {
             cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+            cc_ng_term =
+                std::max(cc_ng_term, Sharder::Instance().StandbyNodeTerm());
         }
 
         auto &tmp_cce_addr = res_->Value().cce_addr_;
@@ -2450,13 +2457,22 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        uint64_t tx_min_ts = ccs.ActiveTxMinTs(cc_ng_id_);
-        standby_msg_seq_id_vec_[ccs.core_id_] =
-            ccs.NextStandbyMessageSequence() - 1;
-        if (ccs.core_id_ == 0)
+        uint64_t tx_min_ts = 0;
+        if (Sharder::Instance().StandbyNodeTerm() > 0)
         {
-            subscribed_node_ids_ = ccs.GetSubscribedStandbys();
+            tx_min_ts = ccs.MinLastStandbyConsistentTs();
         }
+        else
+        {
+            tx_min_ts = ccs.ActiveTxMinTs(cc_ng_id_);
+            standby_msg_seq_id_vec_[ccs.core_id_] =
+                ccs.NextStandbyMessageSequence() - 1;
+            if (ccs.core_id_ == 0)
+            {
+                subscribed_node_ids_ = ccs.GetSubscribedStandbys();
+            }
+        }
+
         int64_t allocated, committed;
         bool full = ccs.GetShardHeap()->Full(&allocated, &committed);
 
@@ -3086,6 +3102,9 @@ public:
 #endif
 
     DataSyncScanCc() = delete;
+    DataSyncScanCc(const DataSyncScanCc &) = delete;
+    DataSyncScanCc &operator=(const DataSyncScanCc &) = delete;
+
     ~DataSyncScanCc() = default;
 
     DataSyncScanCc(const TableName &table_name,
@@ -3171,12 +3190,15 @@ public:
     bool ValidTermCheck()
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        int64_t current_term = std::max(cc_ng_term, standby_node_term);
+
         if (node_group_term_ < 0)
         {
-            node_group_term_ = cc_ng_term;
+            node_group_term_ = current_term;
         }
 
-        if (cc_ng_term < 0 || cc_ng_term != node_group_term_)
+        if (current_term < 0 || current_term != node_group_term_)
         {
             return false;
         }
@@ -3603,7 +3625,11 @@ struct ResendStandbyMessageCc : public CcRequestBase
     bool Execute(CcShard &ccs) override
     {
         brpc::ClosureGuard done_guard(done_);
-        if (!Sharder::Instance().CheckLeaderTerm(ng_id_, ng_term_))
+
+        int64_t primary_node_leader_term =
+            PrimaryTermFromStandbyTerm(standby_node_term_);
+        if (!Sharder::Instance().CheckLeaderTerm(ng_id_,
+                                                 primary_node_leader_term))
         {
             response_->set_error(true);
             return true;
@@ -3615,13 +3641,13 @@ struct ResendStandbyMessageCc : public CcRequestBase
     }
 
     void Reset(uint32_t ng_id,
-               int64_t term,
+               int64_t standby_node_term,
                uint64_t seq_id,
                uint32_t req_node_id,
                remote::RequestResendStandbyMessageResponse *response,
                ::google::protobuf::Closure *done)
     {
-        ng_term_ = term;
+        standby_node_term_ = standby_node_term;
         seq_id_ = seq_id;
         ng_id_ = ng_id;
         req_node_id_ = req_node_id;
@@ -3629,7 +3655,7 @@ struct ResendStandbyMessageCc : public CcRequestBase
         done_ = done;
     }
 
-    int64_t ng_term_;
+    int64_t standby_node_term_;
     uint64_t seq_id_;
     uint32_t ng_id_;
     uint32_t req_node_id_;
@@ -5421,6 +5447,41 @@ public:
         }
     };
 
+    bool ValidTermCheck() override
+    {
+        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
+        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
+        {
+            return false;
+        }
+
+        bool is_standby_tx = IsStandbyTx(TxTerm());
+        int64_t cc_ng_term = -1;
+        if (is_standby_tx)
+        {
+            assert(node_group_id_ == Sharder::Instance().NativeNodeGroup());
+            cc_ng_term = Sharder::Instance().StandbyNodeTerm();
+        }
+        else
+        {
+            cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        }
+
+        if (ng_term_ < 0)
+        {
+            ng_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != ng_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
     void Free() override
     {
         if (!is_local_)
@@ -5779,27 +5840,29 @@ public:
         {
             return false;
         }
-        if (Sharder::Instance().PrimaryNodeTerm() != primary_leader_term_)
+
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        if (standby_node_term < 0)
+        {
+            standby_node_term = Sharder::Instance().CandidateStandbyNodeTerm();
+        }
+
+        if (standby_node_term < 0)
         {
             return false;
         }
-        uint64_t initial_seq_id =
-            Sharder::Instance().StandbyInitialMsgSequence(forward_msg_grp_);
-        if (seq_grp_initial_id_ == UINT64_MAX)
-        {
-            seq_grp_initial_id_ = initial_seq_id;
-        }
-        if (initial_seq_id != seq_grp_initial_id_ ||
-            seq_grp_initial_id_ == UINT64_MAX)
-        {
-            // standby node is not subscribed to primary node yet or it is an
-            // expired message.
-            return false;
-        }
+        int64_t primary_node_term =
+            PrimaryTermFromStandbyTerm(standby_node_term);
 
         if (ng_term_ < 0)
         {
-            ng_term_ = primary_leader_term_;
+            ng_term_ = standby_node_term;
+        }
+
+        if (ng_term_ < 0 || standby_node_term != ng_term_ ||
+            primary_node_term != primary_leader_term_)
+        {
+            return false;
         }
 
         return true;
@@ -5821,7 +5884,8 @@ public:
 
         if (!updated_local_seq_id_)
         {
-            if (!ccs.UpdateLastReceivedStandbySequenceId(*fwd_req_))
+            if (!ccs.UpdateLastReceivedStandbySequenceId(*fwd_req_,
+                                                         StandbyNodeTerm()))
             {
                 // No need to process msg
                 SetFinish();
@@ -5838,12 +5902,6 @@ public:
                     SetFinish();
                     return true;
                 }
-                else if (term != PrimaryLeaderTerm())
-                {
-                    SetFinish();
-                    Sharder::Instance().UnpinNodeGroupData(node_group_id_);
-                    return true;
-                }
             }
             uint16_t data_core_id = (key_shard_code_ & 0x3FF) % ccs.core_cnt_;
             if (data_core_id != ccs.core_id_)
@@ -5854,55 +5912,44 @@ public:
             }
         }
 
-        if (ccm_ == nullptr)
-        {
-            assert(table_name_->StringView() != empty_sv);
-            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+        assert(table_name_->StringView() != empty_sv);
+        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
 
-            if (ccm_ == nullptr)
+        if (ccm == nullptr)
+        {
+            // Find base table name for index table.
+            // Fetch/Get Catalog is based on base table name, but Get
+            // ccmap is based on the real table name, for example, index
+            // should get the corresponding sk_ccmap.
+            assert(!table_name_->IsMeta());
+            const CatalogEntry *catalog_entry = ccs.InitCcm(
+                *table_name_, node_group_id_, StandbyNodeTerm(), this);
+            if (catalog_entry == nullptr)
             {
-                // Find base table name for index table.
-                // Fetch/Get Catalog is based on base table name, but Get
-                // ccmap is based on the real table name, for example, index
-                // should get the corresponding sk_ccmap.
-                assert(!table_name_->IsMeta());
-                const CatalogEntry *catalog_entry = ccs.InitCcm(
-                    *table_name_, node_group_id_, primary_leader_term_, this);
-                if (catalog_entry == nullptr)
-                {
-                    // The local node does not contain the table's schema
-                    // instance. The FetchCatalog() method will send an
-                    // async request toward the data store to fetch the
-                    // catalog. After fetching is finished, this cc request
-                    // is re-enqueued for re-execution.
-                    return false;
-                }
-                else
-                {
-                    if (catalog_entry->schema_ == nullptr)
-                    {
-                        // The local node (LocalCcShards) contains a schema
-                        // instance, which indicates that the table has been
-                        // dropped. Returns the request with an error.
-                        res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                        return true;
-                    }
-
-                    ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
-                }
+                // The local node does not contain the table's schema
+                // instance. The FetchCatalog() method will send an
+                // async request toward the data store to fetch the
+                // catalog. After fetching is finished, this cc request
+                // is re-enqueued for re-execution.
+                return false;
             }
-            assert(ccm_ != nullptr);
-            assert(ccs.core_id_ == ccm_->shard_->core_id_);
-            return ccm_->Execute(*this);
+            else
+            {
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    // The local node (LocalCcShards) contains a schema
+                    // instance, which indicates that the table has been
+                    // dropped. Returns the request with an error.
+                    res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                    return true;
+                }
+
+                ccm = ccs.GetCcm(*table_name_, node_group_id_);
+            }
         }
-        else
-        {
-            // non parallel request which is executed again, e.g. initial
-            // execution blocked by lock.
-            assert(ccm_ != nullptr);
-            assert(ccs.core_id_ == ccm_->shard_->core_id_);
-            return ccm_->Execute(*this);
-        }
+        assert(ccm != nullptr);
+        assert(ccs.core_id_ == ccm->shard_->core_id_);
+        return ccm->Execute(*this);
     }
     void Reset(const remote::KeyObjectStandbyForwardRequest &fwd_req,
                CcHandlerResult<Void> *hres)
@@ -5912,8 +5959,7 @@ public:
             remote::ToLocalType::ConvertCcTableType(fwd_req_->table_type());
         remote_table_name_ = TableName(
             std::string_view(fwd_req_->table_name().data()), table_type);
-        uint32_t ng_id = key_shard_code_ >> 10;
-        LOG(INFO) << "table name " << remote_table_name_.Trace();
+        uint32_t ng_id = fwd_req_->key_shard_code() >> 10;
 
         // tx number here does not matter since we won't acquire any lock.
         TemplatedCcRequest<KeyObjectStandbyForwardCc, Void>::Reset(
@@ -5924,6 +5970,7 @@ public:
         {
             cmds_vec_.emplace_back(fwd_req_->cmd_list(idx).data());
         }
+
         key_str_ = &fwd_req_->key();
         object_version_ = fwd_req_->object_version();
         commit_ts_ = fwd_req_->commit_ts();
@@ -5937,7 +5984,6 @@ public:
         ddl_phase_ = DDLPhase::AcquirePhase;
         ddl_kv_op_err_code_ = CcErrorCode::NO_ERROR;
         cce_ptr_ = nullptr;
-        ccm_ = nullptr;
     }
 
     void Reset(std::unique_ptr<remote::CcMessage> msg)
@@ -5947,8 +5993,7 @@ public:
             remote::ToLocalType::ConvertCcTableType(fwd_req_->table_type());
         remote_table_name_ = TableName(
             std::string_view(fwd_req_->table_name().data()), table_type);
-        uint32_t ng_id = key_shard_code_ >> 10;
-        LOG(INFO) << "table name " << remote_table_name_.Trace();
+        uint32_t ng_id = fwd_req_->key_shard_code() >> 10;
 
         // tx number here does not matter since we won't acquire any lock.
         TemplatedCcRequest<KeyObjectStandbyForwardCc, Void>::Reset(
@@ -5972,7 +6017,6 @@ public:
         ddl_phase_ = DDLPhase::AcquirePhase;
         ddl_kv_op_err_code_ = CcErrorCode::NO_ERROR;
         cce_ptr_ = nullptr;
-        ccm_ = nullptr;
         input_msg_ = std::move(msg);
         if (hd_ == nullptr)
         {
@@ -6017,11 +6061,6 @@ public:
         return schema_version_;
     }
 
-    void ResetCcm()
-    {
-        ccm_ = nullptr;
-    }
-
     const std::vector<std::string_view> *CommandList() const
     {
         return &cmds_vec_;
@@ -6045,6 +6084,12 @@ public:
     int64_t PrimaryLeaderTerm() const
     {
         return primary_leader_term_;
+    }
+
+    int64_t StandbyNodeTerm() const
+    {
+        assert(ng_term_ >= 0);
+        return ng_term_;
     }
 
     uint64_t InitialSequenceId() const

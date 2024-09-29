@@ -287,6 +287,7 @@ private:
         {
             return false;
         }
+
         return read_locks_.empty() ||
                (read_locks_.size() == 1 && *read_locks_.begin() == tx_number);
     }

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -906,6 +907,7 @@ void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id, int64_t term)
             // FetchCatalog from data store
             for (auto &shard : cc_shards_)
             {
+                // TODO(lzx): here should wait table schema loaded.
                 shard->FetchCatalog(table, ng_id, term, nullptr);
             }
         }
@@ -1352,16 +1354,17 @@ void LocalCcShards::FlushData(const TableName &table_name,
                               bool during_range_split)
 {
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
-    pending_flush_work_.emplace_back(node_group,
-                                     term,
-                                     data_sync_ts,
-                                     table_name,
-                                     schema,
-                                     data_sync_vec,
-                                     archive_vec,
-                                     mv_vec,
-                                     &hres,
-                                     during_range_split);
+    pending_flush_work_.emplace_back(
+        std::make_unique<FlushDataTask>(node_group,
+                                        term,
+                                        data_sync_ts,
+                                        table_name,
+                                        schema,
+                                        data_sync_vec,
+                                        archive_vec,
+                                        mv_vec,
+                                        &hres,
+                                        during_range_split));
     flush_data_worker_ctx_.cv_.notify_one();
 }
 
@@ -1661,6 +1664,17 @@ const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
     *LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    auto ng_bucket_it = bucket_infos_.find(ng_id);
+    if (ng_bucket_it == bucket_infos_.end())
+    {
+        return nullptr;
+    }
+    return &ng_bucket_it->second;
+}
+
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+    *LocalCcShards::GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const
+{
     auto ng_bucket_it = bucket_infos_.find(ng_id);
     if (ng_bucket_it == bucket_infos_.end())
     {
@@ -2081,6 +2095,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
     int64_t ng_term,
     uint64_t data_sync_ts,
     uint16_t core_idx,
+    bool is_standby_node,
     bool is_dirty,
     bool can_be_skipped,
     std::shared_ptr<DataSyncStatus> status,
@@ -2118,7 +2133,8 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                    can_be_skipped,
                                                    hres,
                                                    filter_lambda,
-                                                   send_cache_for_migration);
+                                                   send_cache_for_migration,
+                                                   is_standby_node);
 
         // Push task to worker task queue.
         {
@@ -2151,7 +2167,8 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                    can_be_skipped,
                                                    hres,
                                                    filter_lambda,
-                                                   send_cache_for_migration));
+                                                   send_cache_for_migration,
+                                                   is_standby_node));
                 enqueued_task = true;
             }
             else
@@ -2181,7 +2198,8 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                can_be_skipped,
                                                hres,
                                                filter_lambda,
-                                               send_cache_for_migration));
+                                               send_cache_for_migration,
+                                               is_standby_node));
             enqueued_task = true;
         }
     }
@@ -2195,6 +2213,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
     int64_t ng_term,
     uint64_t data_sync_ts,
     uint64_t &last_data_sync_ts,
+    bool is_standby_node,
     bool is_dirty,
     bool can_be_skipped,
     std::shared_ptr<DataSyncStatus> status,
@@ -2231,6 +2250,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                                       ng_term,
                                       data_sync_ts,
                                       core_idx,
+                                      is_standby_node,
                                       is_dirty,
                                       can_be_skipped,
                                       status,
@@ -2398,6 +2418,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
                 Sharder::Instance().ShardBucketIdToCoreIdx(
                     bucket_ids[0]),  // all buckets passed in should land on the
                                      // same core
+                false,
                 false,
                 false,
                 status,
@@ -2695,16 +2716,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // in the case that there is no key schema corresponding to the index table
     // in the current table schema, should use the dirty table schema.
 
-    // FIXME(lokax): catalog_rec::CopySchema() If the node group is not
-    // pinned
-    const TableSchema *table_schema = catalog_rec.Schema();
+    std::shared_ptr<const TableSchema> table_schema = catalog_rec.CopySchema();
     if (table_name.Type() == TableType::Secondary ||
         table_name.Type() == TableType::UniqueSecondary)
     {
         if (catalog_rec.DirtySchema() &&
             !table_schema->IndexKeySchema(table_name))
         {
-            table_schema = catalog_rec.DirtySchema();
+            table_schema = catalog_rec.CopyDirtySchema();
         }
         // For index table, if this table has been dropped, skip it.
         if (!table_schema->IndexKeySchema(table_name))
@@ -2974,7 +2993,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         std::vector<TxKey> split_keys;
         bool ret =
             UpdateSliceAndCalculateRangeUpdate(table_name,
-                                               table_schema,
+                                               table_schema.get(),
                                                ng_id,
                                                ng_term,
                                                *data_sync_vec,
@@ -3022,14 +3041,15 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         // 4.2 Flush records into data store if the range in which the
         // records locate need't to split.
         std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-        pending_flush_work_.emplace_back(data_sync_task,
-                                         table_schema,
-                                         std::move(data_sync_vec),
-                                         std::move(archive_vec),
-                                         std::move(mv_base_vec),
-                                         data_sync_txm,
-                                         false,
-                                         worker_idx);
+        pending_flush_work_.emplace_back(
+            std::make_unique<FlushDataTask>(data_sync_task,
+                                            table_schema,
+                                            std::move(data_sync_vec),
+                                            std::move(archive_vec),
+                                            std::move(mv_base_vec),
+                                            data_sync_txm,
+                                            false,
+                                            worker_idx));
         flush_data_worker_ctx_.cv_.notify_one();
     }
     else
@@ -3048,7 +3068,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
 void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                                             TransactionExecution *data_sync_txm,
-                                            CatalogEntry *catalog_entry,
                                             DataSyncTask::CkptErrorCode err,
                                             size_t worker_idx)
 {
@@ -3083,7 +3102,6 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                            worker_idx);
 
             bool res = store_hd_->CkptEnd(task->table_name_,
-                                          catalog_entry->schema_.get(),
                                           task->node_group_id_,
                                           task->node_group_term_);
             if (!res)
@@ -3092,10 +3110,18 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                 return;
             }
 
-            if (catalog_entry)
             {
-                catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
-                                                    worker_idx);
+                std::shared_lock<std::shared_mutex> meta_data_lk(
+                    meta_data_mux_);
+                const TableName base_table_name{
+                    task->table_name_.GetBaseTableNameSV(), TableType::Primary};
+                CatalogEntry *catalog_entry =
+                    GetCatalogInternal(base_table_name, task->node_group_id_);
+                if (catalog_entry && task->data_sync_ts_ != UINT64_MAX)
+                {
+                    catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
+                                                        worker_idx);
+                }
             }
 
             task->SetFinish();
@@ -3112,10 +3138,23 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
         else
         {
             assert(task_ckpt_err == DataSyncTask::CkptErrorCode::FLUSH_ERROR);
-            CcErrorCode err_code =
-                Sharder::Instance().LeaderTerm(task->node_group_id_) > 0
-                    ? CcErrorCode::DATA_STORE_ERR
-                    : CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+            CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR;
+            if (task->is_standby_node_ckpt_)
+            {
+                if (Sharder::Instance().LeaderTerm(task->node_group_id_) !=
+                    task->node_group_term_)
+                {
+                    err_code = CcErrorCode::NG_TERM_CHANGED;
+                }
+            }
+            else
+            {
+                if (Sharder::Instance().StandbyNodeTerm() !=
+                    task->node_group_term_)
+                {
+                    err_code = CcErrorCode::NG_TERM_CHANGED;
+                }
+            }
 
             task->SetError(err_code);
 
@@ -3218,8 +3257,32 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
     meta_lk.unlock();
 
-    // Check the leader
-    int64_t ng_term = Sharder::Instance().TryPinNodeGroupData(ng_id);
+    int64_t ng_term = -1;
+    if (data_sync_task->is_standby_node_ckpt_)
+    {
+        assert(data_sync_task->node_group_id_ ==
+               Sharder::Instance().NativeNodeGroup());
+        ng_term = Sharder::Instance().StandbyNodeTerm();
+    }
+    else
+    {
+        assert(!data_sync_task->is_standby_node_ckpt_);
+        int64_t ng_candidate_leader_term =
+            Sharder::Instance().CandidateLeaderTerm(ng_id);
+        int64_t ng_leader_term = Sharder::Instance().LeaderTerm(ng_id);
+        ng_term = std::max(ng_candidate_leader_term, ng_leader_term);
+
+        if (ng_term >= 0 && ng_leader_term < 0)
+        {
+            // node is still candidate leader of node group. Log replay is not
+            // finished yet. In this case we can flush data and kickout cce, but
+            // we cannot truncate redo log based on this data sync ts since we
+            // might miss the data that has not been recovered yet.
+            data_sync_task->SetErrorCode(
+                CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        }
+    }
+
     if (ng_term < 0 || ng_term != expected_ng_term)
     {
         LOG(ERROR) << "DataSync: node is not the leader of ng#" << ng_id
@@ -3228,30 +3291,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         // Finish this task and notify the caller.
         data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
 
-        PopPendingTask(ng_id, expected_ng_term, table_name, worker_idx);
-
-        if (ng_term >= 0)
-        {
-            Sharder::Instance().UnpinNodeGroupData(ng_id);
-        }
+        ClearAllPendingTasks(ng_id, expected_ng_term, table_name, worker_idx);
 
         return;
     }
 
     assert(ng_term == expected_ng_term);
-    if (Sharder::Instance().LeaderTerm(ng_id) < 0)
-    {
-        // node is still candidate leader of node group. Log replay is not
-        // finished yet. In this case we can flush data and kickout cce, but we
-        // cannot truncate redo log based on this data sync ts since we might
-        // miss the data that has not been recovered yet.
-        data_sync_task->SetErrorCode(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-    }
 
-    // guard to unpin node group on finish.
-    std::shared_ptr<void> defer_unpin(
-        nullptr,
-        [ng_id](void *) { Sharder::Instance().UnpinNodeGroupData(ng_id); });
     // Process this task.
     // 1. Get a new txm and init
     TransactionExecution *data_sync_txm =
@@ -3303,7 +3349,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             // If table is deleted(!Normal), skip the table. Return finish
             // directly.
-            data_sync_task->SetError();
+            data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
 
             ClearAllPendingTasks(
                 ng_id, expected_ng_term, table_name, worker_idx);
@@ -3324,39 +3370,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         return;
     }
 
-    // Get the table schema. The basic strategy is that, 1) for pk table, must
-    // use the current table schema, 2) for the [Unique]secondary table, only
-    // in the case that there is no key schema corresponding to the index table
-    // in the current table schema, should use the dirty table schema.
-    const TableSchema *table_schema = catalog_rec.Schema();
-    if (table_name.Type() == TableType::Secondary ||
-        table_name.Type() == TableType::UniqueSecondary)
-    {
-        if (catalog_rec.DirtySchema() &&
-            !table_schema->IndexKeySchema(table_name))
-        {
-            table_schema = catalog_rec.DirtySchema();
-        }
-        // For index table, if this table has been dropped, skip it.
-        if (!table_schema->IndexKeySchema(table_name))
-        {
-            // Use CommitTx to release read lock.
-            txservice::CommitTx(data_sync_txm);
-            LOG(INFO) << "DataSync on the deleted table: " << table_name.Trace()
-                      << ". Return finish directly.";
-
-            data_sync_task->SetFinish();
-
-            PopPendingTask(ng_id, expected_ng_term, table_name, worker_idx);
-
-            return;
-        }
-    }
-
-    meta_lk.lock();
-    catalog_entry = GetCatalogInternal(primary_base_table_name, ng_id);
-    assert(catalog_entry != nullptr);
-    meta_lk.unlock();
+    assert(table_name.Type() == TableType::Primary);
 
     // 3. Scan records.
     bool scan_data_drained = false;
@@ -3383,7 +3397,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                            data_sync_task->forward_cache_,
                            true,
                            data_sync_task->filter_lambda_,
-                           table_schema->Version());
+                           catalog_rec.Schema()->Version());
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
@@ -3409,7 +3423,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             PostProcessDataSyncTask(std::move(data_sync_task),
                                     data_sync_txm,
-                                    catalog_entry,
                                     DataSyncTask::CkptErrorCode::SCAN_ERROR,
                                     worker_idx);
 
@@ -3428,7 +3441,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             if (data_sync_task->forward_cache_)
             {
                 std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
-                const auto bucket_infos = GetAllBucketInfos(ng_id);
+                const auto bucket_infos = GetAllBucketInfosNoLocking(ng_id);
                 if (bucket_infos == nullptr)
                 {
                     // no longer node group owner, abort the task
@@ -3438,7 +3451,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                     PostProcessDataSyncTask(
                         std::move(data_sync_task),
                         data_sync_txm,
-                        catalog_entry,
                         DataSyncTask::CkptErrorCode::SCAN_ERROR,
                         worker_idx);
                     return;
@@ -3481,17 +3493,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                             UploadBatchClosure *upload_batch_closure =
                                 new UploadBatchClosure(
                                     [this,
-                                     ng_term,
-                                     ng_id,
                                      data_sync_task,
                                      data_sync_txm,
-                                     catalog_entry,
                                      worker_idx](CcErrorCode res_code,
                                                  int32_t dest_ng_term)
                                     {
-                                        bool term_match =
-                                            Sharder::Instance().CheckLeaderTerm(
-                                                ng_id, ng_term);
                                         // We don't care if
                                         // the cache send
                                         // was succeed or
@@ -3503,10 +3509,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                         PostProcessDataSyncTask(
                                             std::move(data_sync_task),
                                             data_sync_txm,
-                                            // catalog entry ptr is only valid
-                                            // if the term hasn't changed
-                                            term_match ? catalog_entry
-                                                       : nullptr,
                                             DataSyncTask::CkptErrorCode::
                                                 NO_ERROR,
                                             worker_idx);
@@ -3671,14 +3673,16 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 {
                     std::lock_guard<std::mutex> worker_lk(
                         flush_data_worker_ctx_.mux_);
-                    pending_flush_work_.emplace_back(data_sync_task,
-                                                     table_schema,
-                                                     std::move(data_sync_vec),
-                                                     std::move(archive_vec),
-                                                     std::move(mv_base_vec),
-                                                     data_sync_txm,
-                                                     false,
-                                                     worker_idx);
+                    pending_flush_work_.emplace_back(
+                        std::make_unique<FlushDataTask>(
+                            data_sync_task,
+                            catalog_rec.CopySchema(),
+                            std::move(data_sync_vec),
+                            std::move(archive_vec),
+                            std::move(mv_base_vec),
+                            data_sync_txm,
+                            false,
+                            worker_idx));
 
                     flush_data_worker_ctx_.cv_.notify_one();
                 }
@@ -3719,21 +3723,21 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             flight_task_lk.unlock();
 
             std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-            pending_flush_work_.emplace_back(data_sync_task,
-                                             table_schema,
-                                             std::move(data_sync_vec),
-                                             std::move(archive_vec),
-                                             std::move(mv_base_vec),
-                                             data_sync_txm,
-                                             false,
-                                             worker_idx);
+            pending_flush_work_.emplace_back(
+                std::make_unique<FlushDataTask>(data_sync_task,
+                                                catalog_rec.CopySchema(),
+                                                std::move(data_sync_vec),
+                                                std::move(archive_vec),
+                                                std::move(mv_base_vec),
+                                                data_sync_txm,
+                                                false,
+                                                worker_idx));
             flush_data_worker_ctx_.cv_.notify_one();
         }
     }
 
     PostProcessDataSyncTask(std::move(data_sync_task),
                             data_sync_txm,
-                            catalog_entry,
                             DataSyncTask::CkptErrorCode::NO_ERROR,
                             worker_idx);
 }
@@ -3955,7 +3959,8 @@ void LocalCcShards::SplitFlushRange(
     const TableName range_table_name{table_name.String(),
                                      TableType::RangePartition};
     auto &split_keys = range_split_task->split_keys_;
-    const TableSchema *table_schema = range_split_task->schema_;
+    std::shared_ptr<const TableSchema> &table_schema =
+        range_split_task->schema_;
     TransactionExecution *split_txm = range_split_task->data_sync_txm_;
     NodeGroupId node_group = data_sync_task->node_group_id_;
 
@@ -4005,8 +4010,11 @@ void LocalCcShards::SplitFlushRange(
                 node_group, table_name, &updated_since_sync);
         if (updated_since_sync)
         {
-            BroadcastIndexStatistics(
-                split_txm, node_group, table_name, table_schema, *sample_pool);
+            BroadcastIndexStatistics(split_txm,
+                                     node_group,
+                                     table_name,
+                                     table_schema.get(),
+                                     *sample_pool);
         }
     }
 
@@ -4016,7 +4024,7 @@ void LocalCcShards::SplitFlushRange(
                << ", data size:" << range_split_task->data_sync_vec_->size();
 
     SplitFlushTxRequest split_req(table_name,
-                                  table_schema,
+                                  table_schema.get(),
                                   range_entry->RangeSlices(),
                                   range_entry->GetRangeInfo(),
                                   std::move(new_range_ids),
@@ -4066,52 +4074,57 @@ void LocalCcShards::SplitFlushRange(
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 {
     // Retrieve first pending work and pop it.
-    FlushDataTask &cur_work = pending_flush_work_.back();
-    uint32_t node_group = cur_work.node_group_id_;
-    int64_t leader_term = cur_work.node_group_term_;
-    TableName table_name = cur_work.table_name_;
-    const TableSchema *schema = cur_work.schema_;
+    std::unique_ptr<FlushDataTask> cur_work =
+        std::move(pending_flush_work_.back());
+    pending_flush_work_.pop_back();
+    flush_worker_lk.unlock();
+
+    uint32_t node_group = cur_work->node_group_id_;
+    int64_t leader_term = cur_work->node_group_term_;
+    TableName table_name = cur_work->table_name_;
+
+    const TableSchema *schema = cur_work->schema_ptr_;
+    assert(schema != nullptr);
+
 #ifdef RANGE_PARTITION_ENABLED
-    uint64_t data_sync_ts = cur_work.data_sync_ts_;
+    uint64_t data_sync_ts = cur_work->data_sync_ts_;
 #else
-    size_t scan_task_worker_idx = cur_work.scan_task_worker_idx_;
+    size_t scan_task_worker_idx = cur_work->scan_task_worker_idx_;
 #endif
 
-    bool during_range_split = cur_work.during_range_split;
+    bool during_range_split = cur_work->during_range_split;
     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_owner,
         archive_vec_owner;
     std::vector<FlushRecord> *data_sync_vec, *archive_vec;
     std::unique_ptr<std::vector<TxKey>> mv_base_owner;
     std::vector<TxKey> *mv_base_vec;
 #ifdef RANGE_PARTITION_ENABLED
-    bool vec_owner = cur_work.vec_owner_;
+    bool vec_owner = cur_work->vec_owner_;
 #endif
-    if (cur_work.vec_owner_)
+    if (cur_work->vec_owner_)
     {
-        data_sync_vec_owner = std::move(cur_work.data_sync_vec_);
+        data_sync_vec_owner = std::move(cur_work->data_sync_vec_);
         data_sync_vec = data_sync_vec_owner.get();
-        archive_vec_owner = std::move(cur_work.archive_vec_);
+        archive_vec_owner = std::move(cur_work->archive_vec_);
         archive_vec = archive_vec_owner.get();
-        mv_base_owner = std::move(cur_work.mv_base_vec_);
+        mv_base_owner = std::move(cur_work->mv_base_vec_);
         mv_base_vec = mv_base_owner.get();
     }
     else
     {
-        data_sync_vec = cur_work.data_sync_vec_ptr_;
-        archive_vec = cur_work.archive_vec_ptr_;
-        mv_base_vec = cur_work.mv_base_vec_ptr_;
+        data_sync_vec = cur_work->data_sync_vec_ptr_;
+        archive_vec = cur_work->archive_vec_ptr_;
+        mv_base_vec = cur_work->mv_base_vec_ptr_;
     }
 
-    CcHandlerResult<Void> *hand_res = cur_work.hand_res_;
-    std::shared_ptr<DataSyncTask> data_sync_task = cur_work.data_sync_task_;
-    TransactionExecution *data_sync_txm = cur_work.data_sync_txm_;
-
-    pending_flush_work_.pop_back();
-    flush_worker_lk.unlock();
+    CcHandlerResult<Void> *hand_res = cur_work->hand_res_;
+    std::shared_ptr<DataSyncTask> data_sync_task = cur_work->data_sync_task_;
+    TransactionExecution *data_sync_txm = cur_work->data_sync_txm_;
 
     bool succ = true;
     bool flush_ret = true;
 
+#ifdef RANGE_PARTITION_ENABLED
     // Check the leader
     // Try to pin node group data to avoid the potentail heap-use-after-free
     // error about the cc entry and table ranges info. NOTE: The
@@ -4129,6 +4142,20 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                 Sharder::Instance().UnpinNodeGroupData(node_group);
             }
         });
+#else
+    int64_t ng_term = -1;
+    if (data_sync_task->is_standby_node_ckpt_)
+    {
+        ng_term = Sharder::Instance().StandbyNodeTerm();
+    }
+    else
+    {
+        int64_t ng_candidate_leader_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group);
+        int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group);
+        ng_term = std::max(ng_candidate_leader_term, ng_leader_term);
+    }
+#endif
 
     if (ng_term < 0 || ng_term != leader_term)
     {
@@ -4358,14 +4385,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             data_sync_task->SetError(err_code);
         }
 #else
-        CatalogEntry *catalog_entry = nullptr;
-        if (ng_term >= 0 && ng_term == leader_term)
-        {
-            const TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                            TableType::Primary};
-            catalog_entry = GetCatalog(base_table_name, node_group);
-            assert(catalog_entry);
-        }
 
         auto ckpt_err = DataSyncTask::CkptErrorCode::NO_ERROR;
 
@@ -4376,7 +4395,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
         PostProcessDataSyncTask(std::move(data_sync_task),
                                 data_sync_txm,
-                                catalog_entry,
                                 ckpt_err,
                                 scan_task_worker_idx);
 #endif

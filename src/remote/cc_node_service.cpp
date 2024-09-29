@@ -20,6 +20,7 @@
 #include "tx_request.h"
 #include "tx_service.h"
 #include "type.h"
+#include "util.h"
 
 namespace txservice
 {
@@ -41,10 +42,14 @@ void CcNodeService::OnLeaderStart(::google::protobuf::RpcController *controller,
     NodeGroupId ng_id = request->node_group_id();
     int64_t term = request->node_group_term();
     uint64_t replay_start_ts = 0;
-    bool success =
-        Sharder::Instance().OnLeaderStart(ng_id, term, replay_start_ts);
+    uint32_t next_leader_node = UINT32_MAX;
+    bool retry = false;
+    bool success = Sharder::Instance().OnLeaderStart(
+        ng_id, term, replay_start_ts, retry, &next_leader_node);
     response->set_error(!success);
     response->set_log_replay_start_ts(replay_start_ts);
+    response->set_retry(retry);
+    response->set_next_leader_node(next_leader_node);
 }
 
 void CcNodeService::OnLeaderStop(::google::protobuf::RpcController *controller,
@@ -433,6 +438,7 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
                                                      ng_term,
                                                      data_sync_ts,
                                                      table_last_synced_ts,
+                                                     false,
                                                      is_dirty,
                                                      false,
                                                      status);
@@ -1211,12 +1217,14 @@ void CcNodeService::FetchPayload(
     bthread::ConditionVariable cv;
     bool finished = false;
     CcHandlerResult<ReadKeyResult> res(nullptr);
+
     res.post_lambda_ = [&mux, &cv, &finished](CcHandlerResult<ReadKeyResult> *)
     {
         std::unique_lock<bthread::Mutex> lk(mux);
         finished = true;
         cv.notify_all();
     };
+
     TableName table_name(
         request->table_name_str(),
         ToLocalType::ConvertCcTableType(request->table_type()));
@@ -1372,6 +1380,7 @@ void CcNodeService::StandbyStartFollowing(
     bool err = false;
     uint64_t start_seq;
     WaitableCc add_sub_cc;
+
     for (uint16_t core_id = 0; core_id < local_shards_.Count(); core_id++)
     {
         add_sub_cc.Reset(
@@ -1406,6 +1415,9 @@ void CcNodeService::StandbyStartFollowing(
         response->add_start_sequence_id(start_seq);
     }
 
+    auto subscribe_id = Sharder::Instance().GetNextSubscribeId();
+
+    response->set_subscribe_id(subscribe_id);
     response->set_error(false);
 }
 void CcNodeService::UpdateStandbyConsistentTs(
@@ -1415,8 +1427,12 @@ void CcNodeService::UpdateStandbyConsistentTs(
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
-    Sharder::Instance().UpdateNodeGroupCkptTs(request->node_group_id(),
-                                              request->consistent_ts());
+    if (Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
+    {
+        Sharder::Instance().UpdateNodeGroupCkptTs(request->node_group_id(),
+                                                  request->consistent_ts());
+    }
+
     WaitableCc update_consistent_ts_cc;
     for (int32_t seq_grp = 0; seq_grp < request->seq_ids_size(); seq_grp++)
     {
@@ -1427,15 +1443,23 @@ void CcNodeService::UpdateStandbyConsistentTs(
              seq_grp,
              consistent_ts = request->consistent_ts()](CcShard &ccs)
             {
-                if (Sharder::Instance().PrimaryNodeTerm() == primary_term)
+                int64_t standby_node_term =
+                    Sharder::Instance().StandbyNodeTerm();
+                if (standby_node_term < 0)
+                {
+                    return;
+                }
+                int64_t current_primary_term =
+                    PrimaryTermFromStandbyTerm(standby_node_term);
+                if (current_primary_term == primary_term)
                 {
                     ccs.UpdateStandbyConsistentTs(
-                        seq_grp, seq_id, consistent_ts, primary_term);
+                        seq_grp, seq_id, consistent_ts, standby_node_term);
                 }
                 else
                 {
-                    LOG(INFO) << "term mismatch " << primary_term << " , "
-                              << Sharder::Instance().PrimaryNodeTerm();
+                    LOG(INFO) << "primary node term mismatch " << primary_term
+                              << " , " << current_primary_term;
                 }
             }
 
@@ -1457,7 +1481,7 @@ void CcNodeService::RequestResendStandbyMessage(
     // done->Run() will be called by ResendStandbyMessage when it is finished.
     ResendStandbyMessageCc *cc = resend_standby_msg_pool_.NextRequest();
     cc->Reset(request->node_group_id(),
-              request->ng_term(),
+              request->standby_node_term(),
               request->seq_id(),
               request->src_node_id(),
               response,
@@ -1481,12 +1505,21 @@ void CcNodeService::RequestStorageSnapshotSync(
         return;
     }
 
+    int64_t standby_node_term = request->standby_node_term();
+    int64_t primary_leader_term = PrimaryTermFromStandbyTerm(standby_node_term);
+
     if (!Sharder::Instance().CheckLeaderTerm(request->ng_id(),
-                                             request->ng_term()))
+                                             primary_leader_term))
     {
         response->set_error(true);
         return;
     }
+
+    CODE_FAULT_INJECTOR("disable_sync_snapshot_to_standby", {
+        LOG(INFO) << "FaultInject  disable_sync_snapshot_to_standby";
+        response->set_error(true);
+        return;
+    });
 
     store_hd->OnSnapshotSyncRequested(request);
     response->set_error(false);
@@ -1507,8 +1540,53 @@ void CcNodeService::OnSnapshotSynced(
         return;
     }
 
-    store_hd->OnSnapshotReceived(request);
-    response->set_error(false);
+    bool succ = Sharder::Instance().OnSnapshotReceived(request);
+    response->set_error(!succ);
+}
+
+void CcNodeService::FetchNodeInfo(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::FetchNodeInfoRequest *request,
+    ::txservice::remote::FetchNodeInfoResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    uint32_t ng_id = request->ng_id();
+    uint32_t node_id = request->node_id();
+
+    response->set_ng_id(ng_id);
+    response->set_node_id(node_id);
+
+    if (Sharder::Instance().LeaderTerm(ng_id) > 0)
+    {
+        response->set_role(NodeRole::LeaderNode);
+        response->set_status(NodeStatus::Online);
+        return;
+    }
+    else if (Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
+    {
+        response->set_role(NodeRole::LeaderNode);
+        response->set_status(NodeStatus::Loading);
+        return;
+    }
+    else if (Sharder::Instance().NativeNodeGroup() == ng_id)
+    {
+        if (Sharder::Instance().StandbyNodeTerm() > 0)
+        {
+            response->set_role(NodeRole::StandbyNode);
+            response->set_status(NodeStatus::Online);
+            return;
+        }
+        else if (Sharder::Instance().CandidateStandbyNodeTerm() > 0)
+        {
+            response->set_role(NodeRole::StandbyNode);
+            response->set_status(NodeStatus::Loading);
+            return;
+        }
+    }
+
+    response->set_role(NodeRole::VoterNode);
+    response->set_status(NodeStatus::Loading);
 }
 
 }  // namespace remote

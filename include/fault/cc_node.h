@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "cc_request.pb.h"
 #include "log_replay_service.h"
 #include "sharder.h"
 #include "type.h"
@@ -67,14 +68,18 @@ public:
         return last_ckpt_ts_.load(std::memory_order_relaxed);
     }
 
-    bool OnLeaderStart(int64_t term, uint64_t &replay_start_ts);
+    bool OnLeaderStart(int64_t term,
+                       uint64_t &replay_start_ts,
+                       bool &retry,
+                       uint32_t *next_leader_node = nullptr);
     bool OnLeaderStop(int64_t term);
     // Only called when a standby node starts following
     void OnStartFollowing(uint32_t node_id, int64_t term, bool resubscribe);
-    void RequestStandbyResubscribe(uint32_t node_id, int64_t term);
+    bool OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req);
 
 private:
     void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);
+    void SubscribePrimaryNode(uint32_t node_id, int64_t term, bool resubscribe);
 
     //  CcNode belongs to node group: ng_id_.
     const uint32_t ng_id_;
@@ -82,7 +87,7 @@ private:
     const uint32_t node_id_;
 
     std::atomic<bool> is_processing_{false};
-    std::atomic<bool> requested_resubscribe_{false};
+    std::atomic<int64_t> requested_subscribe_primary_term_{-1};
 
     std::atomic<uint64_t> last_ckpt_ts_;
 

@@ -353,4 +353,19 @@ static inline void ExtractNodesConfigs(
     }
 }
 
+static inline int64_t PrimaryTermFromStandbyTerm(int64_t standby_term)
+{
+    return standby_term >> 32;
+}
+
+static inline uint32_t SubscribeIdFromStandbyTerm(int64_t standby_term)
+{
+    return standby_term & 0xFFFFFFFF;
+}
+
+static inline bool IsStandbyTx(int64_t tx_term)
+{
+    return (tx_term >> 32) > 0;
+}
+
 }  // namespace txservice

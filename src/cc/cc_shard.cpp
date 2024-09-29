@@ -23,6 +23,7 @@
 #include "store/data_store_handler.h"
 #include "tx_service.h"
 #include "tx_start_ts_collector.h"
+#include "util.h"
 
 namespace txservice
 {
@@ -697,7 +698,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
         // this node is not group leader, the data and locks are to be cleared;
         // orphan locks left on data belonging to other node groups that failed
         // over to this node still need be recovered.
-        if (txn_node_group == Sharder::Instance().NodeId() &&
+        if (txn_node_group == Sharder::Instance().NativeNodeGroup() &&
             cc_ng_id == txn_node_group)
         {
             LOG(WARNING)
@@ -732,13 +733,23 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
             }
         }
 
-        LOG(WARNING) << "orphan lock detected, lock holding txn: "
-                     << lock_holding_txn << ", try to recover";
-        Sharder::Instance().RecoverTx(lock_holding_txn,
-                                      lk_info.tx_coord_term_,
-                                      lk_info.wlock_ts_,
-                                      cc_ng_id,
-                                      cc_ng_term);
+        if (Sharder::Instance().LeaderTerm(cc_ng_id) > 0)
+        {
+            LOG(WARNING) << "orphan lock detected, lock holding txn: "
+                         << lock_holding_txn << ", try to recover";
+            Sharder::Instance().RecoverTx(lock_holding_txn,
+                                          lk_info.tx_coord_term_,
+                                          lk_info.wlock_ts_,
+                                          cc_ng_id,
+                                          cc_ng_term);
+        }
+        // else:
+        // 1. The cc node group of the participant(where lock resides) has
+        // failed over to a new leader. There is no need to recover the orphan
+        // lock in the old leader because the cc map will be cleared anyway.
+
+        // 2. This is standby node, all locks are acquired by local transaction.
+        // There is no need to recover the orphan lock.
     }
 }
 
@@ -823,17 +834,30 @@ size_t CcShard::Clean()
             {
                 defrag_heap_cc_on_fly_ = true;
                 std::vector<std::pair<uint32_t, int64_t>> node_groups_with_term;
-                std::vector<uint32_t> node_groups =
-                    Sharder::Instance().LocalNodeGroups();
-                for (auto node_group : node_groups)
+
+                int64_t standby_node_term =
+                    Sharder::Instance().StandbyNodeTerm();
+                if (standby_node_term < 0)
                 {
-                    int64_t leader_term =
-                        Sharder::Instance().LeaderTerm(node_group);
-                    if (leader_term < 0)
+                    std::vector<uint32_t> node_groups =
+                        Sharder::Instance().LocalNodeGroups();
+                    for (auto node_group : node_groups)
                     {
-                        continue;
+                        int64_t leader_term =
+                            Sharder::Instance().LeaderTerm(node_group);
+                        if (leader_term < 0)
+                        {
+                            continue;
+                        }
+                        node_groups_with_term.emplace_back(node_group,
+                                                           leader_term);
                     }
-                    node_groups_with_term.emplace_back(node_group, leader_term);
+                }
+                else
+                {
+                    node_groups_with_term.emplace_back(
+                        Sharder::Instance().NativeNodeGroup(),
+                        standby_node_term);
                 }
 
                 defrag_heap_cc_->Reset(std::move(node_groups_with_term));
@@ -994,6 +1018,7 @@ void CcShard::FetchCatalog(const TableName &table_name,
                            int64_t cc_ng_term,
                            CcRequestBase *requester)
 {
+    assert(cc_ng_term > 0);
     FetchCatalogCc *fetch_req = nullptr;
     auto tab_it = fetch_reqs_.find(table_name);
     if (tab_it != fetch_reqs_.end())
@@ -1002,14 +1027,16 @@ void CcShard::FetchCatalog(const TableName &table_name,
     }
     else
     {
+        assert(!(txservice_skip_kv && (Sharder::Instance().GetPrimaryNodeId() ==
+                                       Sharder::Instance().NodeId())));
         // All standby nodes should fetch catalog from primay node.
         bool fetch_from_primary =
-            (txservice_skip_kv) ||
-            (IsNative(cc_ng_id) && Sharder::Instance().GetPrimaryNodeId() !=
-                                       Sharder::Instance().NodeId());
+            Sharder::Instance().CandidateStandbyNodeTerm() > 0 ||
+            Sharder::Instance().StandbyNodeTerm() > 0;
         std::unique_ptr<FetchCatalogCc> fetch_catalog_cc =
             std::make_unique<FetchCatalogCc>(
                 table_name, *this, cc_ng_id, cc_ng_term, fetch_from_primary);
+
         fetch_req = fetch_catalog_cc.get();
         fetch_reqs_.emplace(table_name, std::move(fetch_catalog_cc));
         if (fetch_from_primary)
@@ -1036,7 +1063,8 @@ void CcShard::FetchCatalog(const TableName &table_name,
             req->set_key_str(std::move(key_str));
             req->set_node_group_id(cc_ng_id);
             req->set_table_name_str(catalog_ccm_name.String());
-            req->set_primary_leader_term(cc_ng_term);
+            int64_t primary_node_term = PrimaryTermFromStandbyTerm(cc_ng_term);
+            req->set_primary_leader_term(primary_node_term);
             req->set_table_type(remote::ToRemoteType::ConvertTableType(
                 catalog_ccm_name.Type()));
             req->set_key_shard_code(cc_ng_id << 10);
@@ -1319,8 +1347,6 @@ void CcShard::FetchRecord(const TableName &table_name,
                           CcRequestBase *requester,
                           int32_t range_id,
                           bool fetch_from_primary,
-                          uint32_t seq_grp,
-                          uint64_t initial_seq_id,
                           uint32_t key_shard_code)
 {
     auto tab_it = fetch_record_reqs_.try_emplace(cce,
@@ -1333,14 +1359,16 @@ void CcShard::FetchRecord(const TableName &table_name,
                                                  cc_ng_id,
                                                  cc_ng_term,
                                                  range_id,
-                                                 fetch_from_primary,
-                                                 seq_grp,
-                                                 initial_seq_id);
+                                                 fetch_from_primary);
     FetchRecordCc *fetch_req = &(tab_it.first->second);
 
     fetch_req->AddRequester(requester);
     if (fetch_req->RequesterCount() == 1)
     {
+        fetch_req->start_ts =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
         if (fetch_from_primary)
         {
             int64_t primary_node_id = Sharder::Instance().GetPrimaryNodeId();
@@ -1366,7 +1394,9 @@ void CcShard::FetchRecord(const TableName &table_name,
             req->set_key_str(std::move(key_str));
             req->set_node_group_id(cc_ng_id);
             req->set_table_name_str(table_name.String());
-            req->set_primary_leader_term(cc_ng_term);
+            int64_t primary_leader_term =
+                PrimaryTermFromStandbyTerm(cc_ng_term);
+            req->set_primary_leader_term(primary_leader_term);
             req->set_table_type(
                 remote::ToRemoteType::ConvertTableType(table_name.Type()));
             req->set_key_shard_code(key_shard_code);
@@ -2032,17 +2062,17 @@ std::unordered_map<TableName, bool> CcShard::GetCatalogTableNameSnapshot(
 StandbyForwardEntry *CcShard::GetNextStandbyForwardEntry()
 {
     size_t cnt = 0;
-    while (cnt < standby_fwd_vec_.size())
+    bool found = false;
+    while (!found && cnt < standby_fwd_vec_.size())
     {
         StandbyForwardEntry &ety = standby_fwd_vec_[next_foward_idx_];
-        if (ety.IsFree() && (ety.SequenceId() == UINT64_MAX ||
-                             next_forward_sequence_id_ - ety.SequenceId() >=
-                                 txservice_max_standby_lag))
-        {
-            // Only overwrite standby entry if it is already older than the
-            // oldest buffered msg.
-            break;
-        }
+        found =
+            (ety.IsFree() && (ety.SequenceId() == UINT64_MAX ||
+                              next_forward_sequence_id_ - ety.SequenceId() >=
+                                  txservice_max_standby_lag));
+
+        // Only overwrite standby entry if it is already older than the
+        // oldest buffered msg.
 
         ++next_foward_idx_;
         if (next_foward_idx_ >= standby_fwd_vec_.size())
@@ -2053,11 +2083,13 @@ StandbyForwardEntry *CcShard::GetNextStandbyForwardEntry()
         ++cnt;
     }
 
-    if (cnt == standby_fwd_vec_.size())
+    if (!found)
     {
         uint32_t old_size = (uint32_t) standby_fwd_vec_.size();
         // Increases the capacity of the forward vector.
         uint32_t new_size = (uint32_t) (standby_fwd_vec_.size() * 1.5);
+        LOG(INFO) << "Resize standby forward entry container, size:"
+                  << standby_fwd_vec_.size() << ",new_size:" << new_size;
         standby_fwd_vec_.resize(new_size);
 
         // position old_size must be an available slot.
@@ -2108,10 +2140,13 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
 }
 
 bool CcShard::UpdateLastReceivedStandbySequenceId(
-    const remote::KeyObjectStandbyForwardRequest &msg)
+    const remote::KeyObjectStandbyForwardRequest &msg,
+    int64_t standby_node_term)
 {
     uint16_t sequence_grp_id = msg.forward_seq_grp();
     uint64_t seq_id = msg.forward_seq_id();
+    assert(seq_id != UINT64_MAX);
+
     auto &seq_grp_info = standby_sequence_grps_.at(sequence_grp_id);
     if (!seq_grp_info.subscribed_)
     {
@@ -2121,9 +2156,15 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
     // Check if there's any missing msgs before this seq id
     if (seq_id <= seq_grp_info.last_consistent_standby_sequence_id_)
     {
+        assert(seq_grp_info.missing_standby_seqeunce_ids_.find(seq_id) ==
+               seq_grp_info.missing_standby_seqeunce_ids_.end());
         // discard msg since we've already applied it
         return false;
     }
+
+    assert(seq_grp_info.last_consistent_standby_sequence_id_ <=
+           seq_grp_info.next_expecting_standby_sequence_id_ - 1);
+
     if (seq_grp_info.next_expecting_standby_sequence_id_ > seq_id)
     {
         // should be one of the previous missing msgs
@@ -2133,8 +2174,6 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
             seq_grp_info.missing_standby_seqeunce_ids_.erase(seq_id);
             // update last consistent standby seq id
             // there must be missed msgs
-            assert(seq_grp_info.last_consistent_standby_sequence_id_ <
-                   seq_grp_info.next_expecting_standby_sequence_id_ - 1);
             while (seq_grp_info.last_consistent_standby_sequence_id_ <
                        seq_grp_info.next_expecting_standby_sequence_id_ - 1 &&
                    seq_grp_info.missing_standby_seqeunce_ids_.find(
@@ -2213,24 +2252,32 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
         // network. Request primary node to resend the msg.
         auto it = seq_grp_info.missing_standby_seqeunce_ids_.lower_bound(
             seq_grp_info.last_requested_resend_sequence_id_);
-        if (*it == seq_grp_info.last_requested_resend_sequence_id_)
+
+        if (it != seq_grp_info.missing_standby_seqeunce_ids_.end())
         {
-            it++;
-        }
-        uint32_t primary_node_id = Sharder::Instance().GetPrimaryNodeId();
-        while (it != seq_grp_info.missing_standby_seqeunce_ids_.end() &&
-               seq_grp_info.next_expecting_standby_sequence_id_ - *it > 1000)
-        {
-            if (!RequestMissingStandbyMessage(sequence_grp_id,
-                                              *it,
-                                              msg.primary_leader_term(),
-                                              primary_node_id))
+            if (*it == seq_grp_info.last_requested_resend_sequence_id_)
             {
-                // If the request fails due to broken channel, yield for now.
-                break;
+                it++;
             }
-            seq_grp_info.last_requested_resend_sequence_id_ = *it;
-            it++;
+
+            uint32_t primary_node_id = Sharder::Instance().GetPrimaryNodeId();
+            while (it != seq_grp_info.missing_standby_seqeunce_ids_.end() &&
+                   seq_grp_info.next_expecting_standby_sequence_id_ - *it >
+                       1000)
+            {
+                if (!RequestMissingStandbyMessage(sequence_grp_id,
+                                                  *it,
+                                                  standby_node_term,
+                                                  primary_node_id))
+                {
+                    // If the request fails due to broken channel, yield for
+                    // now.
+                    break;
+                }
+
+                seq_grp_info.last_requested_resend_sequence_id_ = *it;
+                it++;
+            }
         }
     }
 
@@ -2268,7 +2315,7 @@ void CcShard::ResetStandbySequence()
 
 bool CcShard::RequestMissingStandbyMessage(uint32_t seq_grp,
                                            uint64_t seq_id,
-                                           int64_t ng_term,
+                                           int64_t standby_node_term,
                                            uint32_t node_id)
 {
     std::shared_ptr<brpc::Channel> channel =
@@ -2284,7 +2331,7 @@ bool CcShard::RequestMissingStandbyMessage(uint32_t seq_grp,
     RequestStandbyMessageClosure *closure = new RequestStandbyMessageClosure;
     closure->SetChannel(node_id, channel);
     auto req = closure->ResendRequest();
-    req->set_ng_term(ng_term);
+    req->set_standby_node_term(standby_node_term);
     req->set_seq_grp(seq_grp);
     req->set_seq_id(seq_id);
     req->set_src_node_id(Sharder::Instance().NodeId());
@@ -2341,7 +2388,7 @@ uint64_t CcShard::MinLastStandbyConsistentTs() const
 void CcShard::UpdateStandbyConsistentTs(uint32_t seq_grp,
                                         uint64_t seq_id,
                                         uint64_t consistent_ts,
-                                        int64_t primary_term)
+                                        int64_t standby_node_term)
 
 {
     auto &seq_grp_info = standby_sequence_grps_.at(seq_grp);
@@ -2349,6 +2396,7 @@ void CcShard::UpdateStandbyConsistentTs(uint32_t seq_grp,
     {
         return;
     }
+
     // data before the follower subscribed to primary is always
     // consistent.
     if (seq_grp_info.last_consistent_standby_sequence_id_ >= seq_id)
@@ -2361,31 +2409,51 @@ void CcShard::UpdateStandbyConsistentTs(uint32_t seq_grp,
     {
         seq_grp_info.pending_standby_consistent_ts_.emplace(seq_id,
                                                             consistent_ts);
+
         // primary node is already starting checkpoint with this ckpt ts.
         // Request for missing messages before the given seq id if we
         // haven't done so.
         if (seq_grp_info.last_requested_resend_sequence_id_ < seq_id)
         {
-            auto it = seq_grp_info.missing_standby_seqeunce_ids_.lower_bound(
-                seq_grp_info.last_requested_resend_sequence_id_);
-            if (*it == seq_grp_info.last_requested_resend_sequence_id_)
+            if (seq_grp_info.next_expecting_standby_sequence_id_ <= seq_id)
             {
-                it++;
-            }
-            uint32_t primary_node = Sharder::Instance().GetPrimaryNodeId();
-
-            while (seq_grp_info.last_requested_resend_sequence_id_ < seq_id &&
-                   it != seq_grp_info.missing_standby_seqeunce_ids_.end())
-            {
-                if (!RequestMissingStandbyMessage(
-                        seq_grp, *it, primary_term, primary_node))
+                for (uint64_t missing_seq_id =
+                         seq_grp_info.next_expecting_standby_sequence_id_;
+                     missing_seq_id <= seq_id;
+                     ++missing_seq_id)
                 {
-                    // If the request fails due to broken channel, yield for
-                    // now.
-                    break;
+                    seq_grp_info.missing_standby_seqeunce_ids_.insert(
+                        missing_seq_id);
                 }
 
-                seq_grp_info.last_requested_resend_sequence_id_ = *it;
+                seq_grp_info.next_expecting_standby_sequence_id_ = seq_id + 1;
+            }
+
+            auto it = seq_grp_info.missing_standby_seqeunce_ids_.lower_bound(
+                seq_grp_info.last_requested_resend_sequence_id_);
+            if (it != seq_grp_info.missing_standby_seqeunce_ids_.end())
+            {
+                if (*it == seq_grp_info.last_requested_resend_sequence_id_)
+                {
+                    it++;
+                }
+                uint32_t primary_node = Sharder::Instance().GetPrimaryNodeId();
+
+                while (seq_grp_info.last_requested_resend_sequence_id_ <
+                           seq_grp_info.next_expecting_standby_sequence_id_ &&
+                       it != seq_grp_info.missing_standby_seqeunce_ids_.end())
+                {
+                    if (!RequestMissingStandbyMessage(
+                            seq_grp, *it, standby_node_term, primary_node))
+                    {
+                        // If the request fails due to broken channel, yield for
+                        // now.
+                        break;
+                    }
+
+                    seq_grp_info.last_requested_resend_sequence_id_ = *it;
+                    it++;
+                }
             }
         }
     }

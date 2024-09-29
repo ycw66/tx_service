@@ -742,10 +742,10 @@ public:
                 fetch_cc_->rec_status_ = response_.is_deleted()
                                              ? RecordStatus::Deleted
                                              : RecordStatus::Normal;
+                fetch_cc_->rec_ts_ = response_.version();
                 if (fetch_cc_->rec_status_ == RecordStatus::Normal)
                 {
                     fetch_cc_->rec_str_ = response_.payload();
-                    fetch_cc_->rec_ts_ = response_.version();
                 }
             }
             else if (err_code != CcErrorCode::NG_TERM_CHANGED &&
@@ -893,7 +893,7 @@ public:
                     catalog_image.clear();
                     catalog_image.append(response_.payload());
                 }
-                fetch_cc_->CommitTs() = response_.version();
+                fetch_cc_->SetCommitTs(response_.version());
                 fetch_cc_->SetFinish(rec_status, 0);
             }
             else if (err_code != CcErrorCode::NG_TERM_CHANGED &&
@@ -967,9 +967,10 @@ struct RequestStandbyMessageClosure : public ::google::protobuf::Closure
 public:
     bool IsValidSubscription()
     {
-        return Sharder::Instance().PrimaryNodeTerm() == request_.ng_term() &&
-               Sharder::Instance().StandbyInitialMsgSequence(
-                   request_.seq_grp()) <= request_.seq_id();
+        int64_t standby_term =
+            std::max(Sharder::Instance().StandbyNodeTerm(),
+                     Sharder::Instance().CandidateStandbyNodeTerm());
+        return standby_term == request_.standby_node_term();
     }
     // Run() will be called when rpc request is processed by cc node service.
     void Run() override
@@ -1005,7 +1006,9 @@ public:
             DLOG(INFO) << "Retry after EOVERCROWDED request missing "
                           "standby message service"
                           " of ng#"
-                       << request_.node_group_id();
+                       << request_.node_group_id()
+                       << ", seq id = " << request_.seq_id()
+                       << ", seq grp = " << request_.seq_grp();
             cntl_.Reset();
             remote::CcRpcService_Stub stub(channel_.get());
             cntl_.set_timeout_ms(5000);

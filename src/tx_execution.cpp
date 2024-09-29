@@ -111,6 +111,12 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
 
 void TransactionExecution::Reset()
 {
+#ifdef ON_KEY_OBJECT
+    if (FLAGS_cmd_read_catalog)
+    {
+        ReleaseCatalogsRead();
+    }
+#endif
     cache_miss_read_cce_addr_.SetCce(0, -1, 0, 0);
     state_stack_.clear();
     txid_.Reset();
@@ -172,12 +178,6 @@ void TransactionExecution::Reset()
     scan_open_.Reset();
     scan_next_.Reset();
 
-#ifdef ON_KEY_OBJECT
-    if (FLAGS_cmd_read_catalog)
-    {
-        ReleaseCatalogsRead();
-    }
-#endif
     obj_cmd_.Reset(nullptr, nullptr, nullptr);
 
     acquire_write_.Reset(0, 0);
@@ -320,7 +320,8 @@ void TransactionExecution::ClearCachedBucketInfos()
 void TransactionExecution::ReleaseCatalogsRead()
 {
     NodeGroupId ng_id = TxCcNodeId();
-    if (!Sharder::Instance().CheckLeaderTerm(ng_id, TxTerm()))
+    if (!Sharder::Instance().CheckLeaderTerm(ng_id, TxTerm()) &&
+        Sharder::Instance().StandbyNodeTerm() != TxTerm())
     {
         for (auto &db_idx : locked_db_)
         {
@@ -3232,7 +3233,9 @@ void TransactionExecution::Commit()
 
 void TransactionExecution::Abort()
 {
-    if (tx_term_ < 0 || !CheckLeaderTerm())
+    bool is_standby_tx = IsStandbyTx(TxTerm());
+
+    if (tx_term_ < 0 || (!is_standby_tx && !CheckLeaderTerm()))
     {
         if (bool_resp_ != nullptr)
         {
@@ -5915,8 +5918,8 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
             LocalCcHandler *local_hd =
                 dynamic_cast<LocalCcHandler *>(cc_handler_);
 
-            uint32_t ng_id = Sharder::Instance().NodeId();
-            int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+            uint32_t ng_id = TxCcNodeId();
+            int64_t ng_term = TxTerm();
 
             auto [err_code, lock_struct] = local_hd->ReadCatalog(
                 *obj_cmd_op.table_name_, ng_id, ng_term, TxNumber());
@@ -6244,8 +6247,8 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
             LocalCcHandler *local_hd =
                 dynamic_cast<LocalCcHandler *>(cc_handler_);
 
-            uint32_t ng_id = Sharder::Instance().NodeId();
-            int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+            uint32_t ng_id = TxCcNodeId();
+            int64_t ng_term = TxTerm();
 
             auto [err_code, lock_struct] = local_hd->ReadCatalog(
                 *req->table_name_, ng_id, ng_term, TxNumber());

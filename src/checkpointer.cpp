@@ -57,7 +57,7 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
 }
 
 std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
-    uint32_t node_group_id, bool is_last_ckpt)
+    uint32_t node_group_id, bool is_last_ckpt, bool is_standby_node)
 {
     size_t core_cnt = local_shards_.Count();
     CkptTsCc ckpt_req(core_cnt, node_group_id);
@@ -77,7 +77,11 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
 #ifdef RANGE_PARTITION_ENABLED
     local_shards_.TableRangeHeapUsageReport();
 #endif
-    ckpt_req.UpdateStandbyConsistentTs();
+
+    if (!is_standby_node)
+    {
+        ckpt_req.UpdateStandbyConsistentTs();
+    }
 
     uint64_t ckpt_ts = UINT64_MAX;
     ckpt_ts = ckpt_req.GetCkptTs();
@@ -106,77 +110,107 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
     {
         return;
     }
-    int64_t primary_term = Sharder::Instance().PrimaryNodeTerm();
-    if (primary_term > 0)
+    int64_t candidate_standby_node_term =
+        Sharder::Instance().CandidateStandbyNodeTerm();
+    if (candidate_standby_node_term > 0)
     {
-        if (!store_hd_->IsCaughtUpWithPrimary())
+        // request snapshot from primary if standby is not synced on every
+        // checkpoint attempt. This request can be called multiple times and
+        // will be deduped on the primary node based on requested term.
+        assert(!store_hd_->IsSharedStorage());
+        std::shared_ptr<brpc::Channel> channel =
+            Sharder::Instance().GetCcNodeServiceChannel(
+                Sharder::Instance().LeaderNodeId(
+                    Sharder::Instance().NativeNodeGroup()));
+        if (channel != nullptr)
         {
-            // request snapshot from primary if standby is not synced on every
-            // checkpoint attempt. This request can be called multiple times and
-            // will be deduped on the primary node based on requested term.
-            assert(!store_hd_->IsSharedStorage());
-            std::shared_ptr<brpc::Channel> channel =
-                Sharder::Instance().GetCcNodeServiceChannel(
-                    Sharder::Instance().LeaderNodeId(
-                        Sharder::Instance().NativeNodeGroup()));
-            if (channel != nullptr)
+            remote::CcRpcService_Stub stub(channel.get());
+            remote::StorageSnapshotSyncRequest snapshot_req;
+            remote::StorageSnapshotSyncResponse snapshot_resp;
+
+            snapshot_req.set_ng_id(Sharder::Instance().NativeNodeGroup());
+            // standby node term
+            snapshot_req.set_standby_node_term(candidate_standby_node_term);
+            snapshot_req.set_standby_node_id(Sharder::Instance().NodeId());
+
+            std::array<char, 128> buffer;
+            std::string username;
+            FILE *output_stream = popen("echo $USER", "r");
+            while (fgets(buffer.data(), 200, output_stream) != nullptr)
             {
-                remote::CcRpcService_Stub stub(channel.get());
-                remote::StorageSnapshotSyncRequest snapshot_req;
-                remote::StorageSnapshotSyncResponse snapshot_resp;
-
-                snapshot_req.set_ng_id(Sharder::Instance().NativeNodeGroup());
-                snapshot_req.set_ng_term(primary_term);
-                snapshot_req.set_standby_node_id(Sharder::Instance().NodeId());
-                auto init_seq_ids =
-                    Sharder::Instance().StandbyInitialMsgSequences();
-                for (auto seq_id : init_seq_ids)
-                {
-                    snapshot_req.add_subscribe_init_ids(seq_id);
-                }
-                std::array<char, 128> buffer;
-                std::string username;
-                FILE *output_stream = popen("echo $USER", "r");
-                while (fgets(buffer.data(), 200, output_stream) != nullptr)
-                {
-                    username.append(buffer.data());
-                }
-                if (!username.empty())
-                {
-                    // remove the trailing \n of output.
-                    assert(username.back() == '\n');
-                    username.pop_back();
-                }
-                pclose(output_stream);
-
-                snapshot_req.set_user(username);
-                snapshot_req.set_dest_path(store_hd_->SnapshotSyncDestPath());
-                brpc::Controller cntl;
-                stub.RequestStorageSnapshotSync(
-                    &cntl, &snapshot_req, &snapshot_resp, nullptr);
+                username.append(buffer.data());
             }
+            if (!username.empty())
+            {
+                // remove the trailing \n of output.
+                assert(username.back() == '\n');
+                username.pop_back();
+            }
+            pclose(output_stream);
+
+            snapshot_req.set_user(username);
+            snapshot_req.set_dest_path(store_hd_->SnapshotSyncDestPath());
+            brpc::Controller cntl;
+            stub.RequestStorageSnapshotSync(
+                &cntl, &snapshot_req, &snapshot_resp, nullptr);
         }
+
+        return;
     }
-    std::vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
+
+    int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+    bool is_standby_node = standby_node_term > 0;
+    if (is_standby_node &&
+        Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
+    {
+        // Standby only needs to do checkpoint if its using local disk storage.
+        return;
+    }
+
+    std::vector<uint32_t> node_groups;
+    if (is_standby_node)
+    {
+        node_groups.push_back(Sharder::Instance().NativeNodeGroup());
+        assert(!Sharder::Instance().GetDataStoreHandler()->IsSharedStorage());
+    }
+    else
+    {
+        node_groups = Sharder::Instance().LocalNodeGroups();
+    }
+
     for (uint32_t node_group : node_groups)
     {
+#ifdef RANGE_PARTITION_ENABLED
         // check whether this node is group leader, pin its data if it is
         int64_t leader_term =
             Sharder::Instance().TryPinNodeGroupData(node_group);
-        if (leader_term < 0)
+#else
+        int64_t leader_term = -1;
+        if (!is_standby_node)
+        {
+            int64_t ng_candidate_leader_term =
+                Sharder::Instance().CandidateLeaderTerm(node_group);
+            int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group);
+            leader_term = std::max(ng_candidate_leader_term, ng_leader_term);
+        }
+#endif
+
+        if (!is_standby_node && leader_term < 0)
         {
             continue;
         }
 
         auto [ckpt_ts, mem_usage] =
-            GetNewCheckpointTs(node_group, is_last_ckpt);
+            GetNewCheckpointTs(node_group, is_last_ckpt, is_standby_node);
         uint64_t last_ckpt_ts =
             Sharder::Instance().GetNodeGroupCkptTs(node_group);
 
         if (ckpt_ts <= last_ckpt_ts)
         {
+#ifdef RANGE_PARTITION_ENABLED
             // skip checkpoint for this node group
             Sharder::Instance().UnpinNodeGroupData(node_group);
+#endif
             continue;
         }
 
@@ -200,10 +234,20 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         // ckpt_vec.
         for (auto it = tables.begin(); it != tables.end(); ++it)
         {
+#ifdef RANGE_PARTITION_ENABLED
             if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
             {
                 break;
             }
+#else
+            // Check leader term for leader node
+            if (!is_standby_node &&
+                Sharder::Instance().LeaderTerm(node_group) != leader_term)
+            {
+                break;
+            }
+
+#endif
 
             const TableName &table_name = it->first;
             bool is_dirty = it->second;
@@ -228,14 +272,16 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 }
 
                 uint64_t table_last_synced_ts = UINT64_MAX;
-                local_shards_.EnqueueDataSyncTaskForTable(table_name,
-                                                          node_group,
-                                                          leader_term,
-                                                          ckpt_ts,
-                                                          table_last_synced_ts,
-                                                          is_dirty,
-                                                          can_be_skipped,
-                                                          status);
+                local_shards_.EnqueueDataSyncTaskForTable(
+                    table_name,
+                    node_group,
+                    is_standby_node ? standby_node_term : leader_term,
+                    ckpt_ts,
+                    table_last_synced_ts,
+                    is_standby_node,
+                    is_dirty,
+                    can_be_skipped,
+                    status);
 
                 // Maybe we couldn't truncate log in this round of checkpoint.
                 // Since some of the data sync tasks might be skipped due to
@@ -251,12 +297,21 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             }
         }
 
+#ifdef RANGE_PARTITION_ENABLED
         if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
         {
             // Skip the node groups that are no longer on this node.
             Sharder::Instance().UnpinNodeGroupData(node_group);
             continue;
         }
+#else
+        // Check leadter term for leader node
+        if (!is_standby_node &&
+            Sharder::Instance().LeaderTerm(node_group) != leader_term)
+        {
+            break;
+        }
+#endif
 
         if (last_succ_ckpt_ts != UINT64_MAX && last_succ_ckpt_ts > last_ckpt_ts)
         {
@@ -264,9 +319,15 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             LOG_IF(INFO, FLAGS_report_ckpt)
                 << "Checkpoint of node group #" << node_group
                 << " succeeded with timestamp: " << last_succ_ckpt_ts;
+
             Sharder::Instance().UpdateNodeGroupCkptTs(node_group,
                                                       last_succ_ckpt_ts);
-            NotifyLogOfCkptTs(node_group, leader_term, last_succ_ckpt_ts);
+
+            if (!is_standby_node)
+            {
+                assert(standby_node_term < 0 && leader_term >= 0);
+                NotifyLogOfCkptTs(node_group, leader_term, last_succ_ckpt_ts);
+            }
         }
 
         {
@@ -298,15 +359,22 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                     assert(status->truncate_log_ts_ >= ckpt_ts);
                     Sharder::Instance().UpdateNodeGroupCkptTs(
                         node_group, status->truncate_log_ts_);
-                    NotifyLogOfCkptTs(
-                        node_group, leader_term, status->truncate_log_ts_);
+
+                    if (!is_standby_node)
+                    {
+                        assert(standby_node_term < 0 && leader_term >= 0);
+                        NotifyLogOfCkptTs(
+                            node_group, leader_term, status->truncate_log_ts_);
+                    }
                 }
             }
         }
 
+#ifdef RANGE_PARTITION_ENABLED
         // finish checkpoint on this node group, unpin its data and clear its
         // ccmaps and catalogs if it is no longer leader
         Sharder::Instance().UnpinNodeGroupData(node_group);
+#endif
     }
 }
 

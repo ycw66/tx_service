@@ -273,6 +273,13 @@ struct BufferedTxnCmdList
 
         auto lb_it = std::lower_bound(
             txn_cmd_list.begin(), txn_cmd_list.end(), txn_cmd, cmp);
+        if (lb_it != txn_cmd_list.end() &&
+            lb_it->obj_version_ == txn_cmd.obj_version_)
+        {
+            assert(lb_it->new_version_ == txn_cmd.new_version_);
+            // same txn cmd already exists, discard duplicate cmd
+            return;
+        }
 
         if (txn_cmd.has_del_)
         {

@@ -33,7 +33,8 @@ public:
     void Ckpt(bool is_last_ckpt = false);
 
     std::pair<uint64_t, uint64_t> GetNewCheckpointTs(uint32_t node_group_id,
-                                                     bool is_last_ckpt);
+                                                     bool is_last_ckpt,
+                                                     bool is_standby_node);
 
     /**
      * @brief Checkpoint one Entry to KvStore synchronously.

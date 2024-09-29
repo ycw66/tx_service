@@ -240,6 +240,7 @@ bool NonBlockingLock::AcquireReadLockFast(TxNumber tx_number)
 
     if (NoWriteLockConflict(tx_number) && no_blocking_queue_conflict)
     {
+        assert(read_cnt_ >= 0);
         // Acquire read lock succeeds.
         // For fast path catalog read, only increment the read_cnt_.
         read_cnt_++;

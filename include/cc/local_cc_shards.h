@@ -1312,6 +1312,7 @@ public:
         int64_t ng_term,
         uint64_t data_sync_ts,
         uint64_t &last_data_sync_ts,
+        bool is_standby_node = false,
         bool is_dirty = false,
         bool can_be_skipped = false,
         std::shared_ptr<DataSyncStatus> status = nullptr,
@@ -1556,6 +1557,9 @@ public:
     const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
         *GetAllBucketInfos(const NodeGroupId ng_id) const;
 
+    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+        *GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const;
+
     void DropBucketInfo(NodeGroupId ng_id);
 
     void InitRangeBuckets(NodeGroupId ng_id,
@@ -1729,6 +1733,7 @@ private:
         int64_t ng_term,
         uint64_t data_sync_ts,
         uint16_t core_idx,
+        bool is_standby_node,
         bool is_dirty = false,
         bool can_be_skipped = false,
         std::shared_ptr<DataSyncStatus> status = nullptr,
@@ -1761,7 +1766,6 @@ private:
 #ifndef RANGE_PARTITION_ENABLED
     void PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                                  TransactionExecution *data_sync_txm,
-                                 CatalogEntry *catalog_entry,
                                  DataSyncTask::CkptErrorCode ckpt_err,
                                  size_t worker_idx);
 #endif
@@ -1853,7 +1857,7 @@ private:
     struct RangeSplitTask
     {
         RangeSplitTask(std::shared_ptr<DataSyncTask> data_sync_task,
-                       const TableSchema *schema,
+                       std::shared_ptr<const TableSchema> schema,
                        std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
                        std::unique_ptr<std::vector<FlushRecord>> archive_vec,
                        std::unique_ptr<std::vector<TxKey>> mv_base_vec,
@@ -1873,7 +1877,7 @@ private:
         {
         }
 
-        const TableSchema *schema_;
+        std::shared_ptr<const TableSchema> schema_;
         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
         std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
@@ -2132,7 +2136,7 @@ private:
     {
     public:
         FlushDataTask(std::shared_ptr<DataSyncTask> data_sync_task,
-                      const TableSchema *schema,
+                      std::shared_ptr<const TableSchema> schema,
                       std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
                       std::unique_ptr<std::vector<FlushRecord>> archive_vec,
                       std::unique_ptr<std::vector<TxKey>> mv_base_vec,
@@ -2144,6 +2148,7 @@ private:
               data_sync_ts_(data_sync_task->data_sync_ts_),
               table_name_(data_sync_task->table_name_),
               schema_(schema),
+              schema_ptr_(schema.get()),
               data_sync_vec_(std::move(data_sync_vec)),
               archive_vec_(std::move(archive_vec)),
               mv_base_vec_(std::move(mv_base_vec)),
@@ -2170,7 +2175,7 @@ private:
               node_group_term_(node_group_term),
               data_sync_ts_(data_sync_ts),
               table_name_(table_name),
-              schema_(schema),
+              schema_ptr_(schema),
               data_sync_vec_ptr_(data_sync_vec),
               archive_vec_ptr_(archive_vec),
               mv_base_vec_ptr_(mv_base_vec),
@@ -2184,7 +2189,8 @@ private:
         int64_t node_group_term_;
         uint64_t data_sync_ts_;
         TableName table_name_;
-        const TableSchema *schema_;
+        std::shared_ptr<const TableSchema> schema_{nullptr};
+        const TableSchema *schema_ptr_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
         std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
@@ -2203,7 +2209,7 @@ private:
     // For flush data work
     WorkerThreadContext flush_data_worker_ctx_;
     // Flush work from data sync, and split range
-    std::vector<FlushDataTask> pending_flush_work_;
+    std::vector<std::unique_ptr<FlushDataTask>> pending_flush_work_;
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);

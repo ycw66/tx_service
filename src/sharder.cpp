@@ -8,6 +8,7 @@
 #include <shared_mutex>
 
 #include "cc_req_base.h"
+#include "cc_request.pb.h"
 #include "cc_shard.h"
 #include "fault/cc_node.h"
 #include "fault/log_replay_service.h"
@@ -68,6 +69,11 @@ void Sharder::Shutdown()
     // group leader, so recovery_service_ should be destructed after all
     // CcNodes are stopped.
     recovery_service_ = nullptr;
+
+    if (local_shards_->store_hd_)
+    {
+        local_shards_->store_hd_->OnShutdown();
+    }
 
     if (tx_worker_pool_)
     {
@@ -144,11 +150,10 @@ int Sharder::Init(
             candidate_leader_term_cache_[nid].store(-1);
             invalid_leader_term_cache_[nid].store(-1);
         }
-        primary_node_leader_term_cache_.store(-1);
-        for (uint32_t seq_grp = 0; seq_grp < 200; seq_grp++)
-        {
-            standby_initial_seq_ids_[seq_grp].store(UINT64_MAX);
-        }
+
+        standby_node_term_cache_.store(-1, std::memory_order_relaxed);
+        candidate_standby_node_term_cache_.store(-1, std::memory_order_relaxed);
+
         if (ng_configs != nullptr)
         {
             for (const auto &pair : *ng_configs)
@@ -204,9 +209,8 @@ int Sharder::Init(
         recovery_service_ = std::make_unique<fault::RecoveryService>(
             *local_shards_,
             GetLogAgent(),
-            cluster_config_.ng_configs_.at(node_id_).front().host_name_,
-            GET_LOG_REPLAY_RPC_PORT(
-                cluster_config_.ng_configs_.at(node_id_).front().port_));
+            node_conf.host_name_,
+            GET_LOG_REPLAY_RPC_PORT(node_conf.port_));
         if (!txservice_skip_wal &&
             log_replay_server_.AddService(recovery_service_.get(),
                                           brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
@@ -433,8 +437,11 @@ int Sharder::Init(
     }
     else
     {
+        bool retry;
         uint64_t start_ts;
-        cluster_config_.cc_nodes_.at(node_id_)->OnLeaderStart(1, start_ts);
+        cluster_config_.cc_nodes_.at(node_id_)->OnLeaderStart(
+            1, start_ts, retry);
+        assert(!retry);
     }
 
     return 0;
@@ -613,12 +620,6 @@ void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id)
     ng_leader_cache_[ng_id].store(node_id, std::memory_order_release);
 }
 
-bool Sharder::CaughtupWithPrimary() const
-{
-    return txservice_skip_kv ||
-           local_shards_->store_hd_->IsCaughtUpWithPrimary();
-}
-
 void Sharder::FinishLogReplay(uint32_t cc_ng_id,
                               int64_t cc_ng_term,
                               uint32_t log_group_id,
@@ -724,7 +725,9 @@ void Sharder::RecoverTx(uint64_t lock_tx_number,
 
 bool Sharder::OnLeaderStart(uint32_t ng_id,
                             int64_t term,
-                            uint64_t &replay_start_ts)
+                            uint64_t &replay_start_ts,
+                            bool &retry,
+                            uint32_t *next_leader_node)
 {
     std::shared_ptr<fault::CcNode> node;
     {
@@ -735,7 +738,7 @@ bool Sharder::OnLeaderStart(uint32_t ng_id,
         node = find_it->second;
     }
 
-    return node->OnLeaderStart(term, replay_start_ts);
+    return node->OnLeaderStart(term, replay_start_ts, retry, next_leader_node);
 }
 
 bool Sharder::OnLeaderStop(uint32_t ng_id, int64_t term)
@@ -752,6 +755,20 @@ bool Sharder::OnLeaderStop(uint32_t ng_id, int64_t term)
     return node->OnLeaderStop(term);
 }
 
+bool Sharder::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
+{
+    std::shared_ptr<fault::CcNode> node;
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        auto find_it = cluster_config_.cc_nodes_.find(native_ng_);
+        // TODO: is this always true when cluster config is changed?
+        assert(find_it != cluster_config_.cc_nodes_.end());
+        node = find_it->second;
+    }
+
+    return node->OnSnapshotReceived(req);
+}
+
 void Sharder::OnStartFollowing(uint32_t ng_id,
                                int64_t term,
                                uint32_t leader_node,
@@ -766,18 +783,7 @@ void Sharder::OnStartFollowing(uint32_t ng_id,
         node = find_it->second;
     }
 
-    if (resubscribe)
-    {
-        // resubscribe is called on tx processor and on start following needs
-        // to be handled on a worker thread.
-        GetTxWorkerPool()->SubmitWork(
-            [node, leader_node, term]
-            { node->OnStartFollowing(leader_node, term, true); });
-    }
-    else
-    {
-        node->OnStartFollowing(leader_node, term, false);
-    }
+    node->OnStartFollowing(leader_node, term, resubscribe);
 }
 
 void Sharder::LogTransferLeader(uint32_t log_group_id, uint32_t leader_idx)
@@ -793,6 +799,11 @@ void Sharder::CleanCcTable(const TableName &tabname)
 void Sharder::NotifyCheckPointer()
 {
     return local_shards_->NotifyCheckPointer();
+}
+
+store::DataStoreHandler *Sharder::GetDataStoreHandler()
+{
+    return local_shards_->store_hd_;
 }
 
 std::vector<uint32_t> Sharder::LocalNodeGroups()
@@ -1145,7 +1156,7 @@ void Sharder::UpdateClusterConfig(
                         Sharder::Instance()
                             .GetLocalCcShards()
                             ->GetTxService()
-                            ->ckpt_.GetNewCheckpointTs(node_id_, true);
+                            ->ckpt_.GetNewCheckpointTs(node_id_, true, false);
                     log_agent_->UpdateCheckpointTs(
                         node_id_, last_term, last_ckpt_ts);
                 }
@@ -1203,127 +1214,6 @@ void Sharder::StartCcStreamReceiver(bool enable_brpc_builtin_services)
     if (cc_stream_server_.Start(port_, &server_options) != 0)
     {
         LOG(ERROR) << "Failed to start the cc stream server.";
-    }
-}
-
-void Sharder::SubscribeToPrimary(bool need_clear_ccm, int64_t ng_term)
-{
-    uint32_t ng_id = Sharder::Instance().NativeNodeGroup();
-    uint32_t leader_node_id = Sharder::Instance().LeaderNodeId(ng_id);
-    if (need_clear_ccm)
-    {
-        uint16_t core_cnt = local_shards_->Count();
-        ClearCcNodeGroup clear_ccm_req(ng_id, core_cnt);
-        for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
-        {
-            local_shards_->EnqueueCcRequest(core_id, &clear_ccm_req);
-        }
-        clear_ccm_req.Wait();
-    }
-    // term is already updated. Release processing latch to allow other rpc
-    // to proceed. is_processing_.store(false, std::memory_order_release);
-
-    // Notify primary node to start forwarding data change to this node.
-    auto channel = Sharder::Instance().GetCcNodeServiceChannel(leader_node_id);
-    while (!channel)
-    {
-        if (Sharder::Instance().LeaderNodeId(ng_id) != leader_node_id)
-        {
-            DLOG(INFO) << "===GetCcNodeServiceChannel leader mimatch, "
-                          "leader_node_id:"
-                       << leader_node_id << ",Sharder::LeaderNode:"
-                       << Sharder::Instance().LeaderNodeId(ng_id);
-            return;
-        }
-        bthread_usleep(1000);
-        channel = Sharder::Instance().GetCcNodeServiceChannel(leader_node_id);
-    }
-
-    DLOG(INFO) << "===GetCcNodeServiceChannel, leader_node_id:"
-               << leader_node_id << ",channel:" << channel;
-
-    remote::CcRpcService_Stub stub(channel.get());
-    brpc::Controller cntl;
-    cntl.set_timeout_ms(5000);
-
-    //  Ask primary to start forwarding msgs and get
-    // starting seq id.
-    remote::StandbyStartFollowingRequest start_follow_req;
-    remote::StandbyStartFollowingResponse start_follow_resp;
-    start_follow_req.set_node_group_id(ng_id);
-    start_follow_req.set_node_id(node_id_);
-    start_follow_req.set_ng_term(ng_term);
-
-    stub.StandbyStartFollowing(
-        &cntl, &start_follow_req, &start_follow_resp, nullptr);
-
-    while (cntl.Failed() || start_follow_resp.error())
-    {
-        if (Sharder::Instance().PrimaryNodeTerm() != ng_term)
-        {
-            LOG(INFO) << "failed due to newer primary leader term "
-                      << Sharder::Instance().PrimaryNodeTerm();
-            return;
-        }
-
-        LOG(INFO) << "retrying, last cntl status " << cntl.Failed()
-                  << ",start_follow_resp.error():" << start_follow_resp.error()
-                  << ",cntl.ErrorText():" << cntl.ErrorText();
-        cntl.Reset();
-        cntl.set_timeout_ms(5000);
-        start_follow_resp.Clear();
-        bthread_usleep(1000);
-        stub.StandbyStartFollowing(
-            &cntl, &start_follow_req, &start_follow_resp, nullptr);
-    }
-
-    uint32_t seq_grp_cnt = start_follow_resp.start_sequence_id_size();
-
-    // reset start seq id
-    for (uint32_t grp_id = 0; grp_id < seq_grp_cnt; grp_id++)
-    {
-        bool err = false;
-        bthread::Mutex mux;
-
-        WaitableCc sub_cc(
-            [grp_id, &start_follow_resp, ng_term, &mux, &err](CcShard &ccs)
-            {
-                // verify primary term hasn't changed
-                if (Sharder::Instance().PrimaryNodeTerm() != ng_term)
-                {
-                    std::unique_lock<bthread::Mutex> lk(mux);
-                    err = true;
-                    LOG(INFO) << "rejected subscribe req due to primary "
-                                 "term mismatch";
-                    return;
-                }
-
-                if (grp_id == 0)
-                {
-                    // update initial msg seq id when processing the first
-                    // grp. this is to avoid any concurrent update on the
-                    // initial seq id vector.
-                    for (int i = 0;
-                         i < start_follow_resp.start_sequence_id_size();
-                         i++)
-                    {
-                        Sharder::Instance().SetStandbyInitialMsgSequence(
-                            i, start_follow_resp.start_sequence_id(i));
-                    }
-                }
-
-                ccs.SubsribeToPrimaryNode(
-                    grp_id, start_follow_resp.start_sequence_id(grp_id));
-            });
-
-        local_shards_->EnqueueCcRequest(grp_id, &sub_cc);
-        sub_cc.Wait();
-
-        std::unique_lock<bthread::Mutex> lk(mux);
-        if (err)
-        {
-            return;
-        }
     }
 }
 

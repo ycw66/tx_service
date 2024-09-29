@@ -81,6 +81,11 @@ public:
         return catalog_image_;
     }
 
+    void SetCommitTs(uint64_t commit_ts)
+    {
+        commit_ts_ = commit_ts;
+    }
+
     uint64_t &CommitTs()
     {
         return commit_ts_;
@@ -716,6 +721,9 @@ private:
 
 struct FetchRecordCc : public FetchCc
 {
+    uint64_t start_ts{0};
+    uint64_t end_ts{0};
+
 public:
     FetchRecordCc() = delete;
     FetchRecordCc(const TableName *tbl_name,
@@ -727,9 +735,7 @@ public:
                   NodeGroupId cc_ng_id,
                   int64_t cc_ng_term,
                   int32_t range_id_ = -1,
-                  bool fetch_from_primary = false,
-                  uint32_t seq_grp = 0,
-                  uint64_t initial_seq_id = 0);
+                  bool fetch_from_primary = false);
     ~FetchRecordCc() = default;
 
     bool ValidTermCheck();
@@ -758,8 +764,6 @@ public:
     bool fetch_from_primary_{false};
     // Only used for fetch record from primary
     int64_t standby_term_;
-    uint32_t seq_grp_;
-    uint64_t initial_seq_id_;
     std::function<void(CcShard &)> handle_resp_;
 };
 
@@ -913,6 +917,9 @@ public:
     }
 
 #endif
+
+    UpdateCceCkptTsCc(const UpdateCceCkptTsCc &) = delete;
+    UpdateCceCkptTsCc &operator=(const UpdateCceCkptTsCc &) = delete;
 
     bool Execute(CcShard &ccs) override;
 

@@ -119,7 +119,6 @@ public:
      * @return whether all entries are written to data store successfully
      */
     virtual bool CkptEnd(const txservice::TableName &table_name,
-                         const txservice::TableSchema *table_schema,
                          uint32_t node_group,
                          uint64_t version)
     {
@@ -373,7 +372,7 @@ public:
     {
     }
 
-    virtual bool OnLeaderStart()
+    virtual bool OnLeaderStart(uint32_t *next_leader_node)
     {
         return true;
     }
@@ -383,9 +382,8 @@ public:
         return std::string("");
     }
 
-    virtual bool IsCaughtUpWithPrimary()
+    virtual void OnShutdown()
     {
-        return true;
     }
 
 protected:

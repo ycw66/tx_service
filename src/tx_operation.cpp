@@ -163,7 +163,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
         // Need to make sure current node is still leader since we will visit
         // bucket meta data which is only valid if current node is still ng
         // leader.
-        if (!txm->CheckLeaderTerm())
+        if (!txm->CheckLeaderTerm() && !txm->CheckStandbyTerm())
         {
             hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             hd_result_.ForceError();
@@ -313,7 +313,7 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
 {
     if (hd_result_->IsFinished())
     {
-        if (!txm->CheckLeaderTerm())
+        if (!txm->CheckLeaderTerm() && !txm->CheckStandbyTerm())
         {
             hd_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             hd_result_->ForceError();
@@ -1298,7 +1298,8 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
                     .append(std::to_string(txm->TxTerm()));
             });
 
-        if (retry_num_ > 0 && txm->CheckLeaderTerm())
+        if (retry_num_ > 0 &&
+            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
         {
             ReRunOp(txm);
             return;
@@ -6098,7 +6099,7 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
         // Need to make sure current node is still leader since we will visit
         // bucket meta data which is only valid if current node is still ng
         // leader.
-        if (!txm->CheckLeaderTerm())
+        if (!txm->CheckLeaderTerm() && !txm->CheckStandbyTerm())
         {
             hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             hd_result_.ForceError();
@@ -6373,7 +6374,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
         // Need to make sure current node is still leader since we will visit
         // bucket meta data which is only valid if current node is still ng
         // leader.
-        if (!txm->CheckLeaderTerm())
+        if (!txm->CheckLeaderTerm() && !txm->CheckStandbyTerm())
         {
             atm_err_code_.store(CcErrorCode::TX_NODE_NOT_LEADER,
                                 std::memory_order_relaxed);

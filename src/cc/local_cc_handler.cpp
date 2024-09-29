@@ -5,6 +5,7 @@
 #include <string>
 
 #include "catalog_cc_map.h"
+#include "cc_map.h"
 #include "cc_protocol.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
@@ -361,6 +362,22 @@ void txservice::LocalCcHandler::PostRead(
     bool is_local,
     bool need_remote_resp)
 {
+    if (IsStandbyTx(tx_term))
+    {
+        if (Sharder::Instance().StandbyNodeTerm() != cce_addr.Term())
+        {
+            hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return;
+        }
+        PostReadCc *req = postread_pool_.NextRequest();
+        req->Reset(
+            &cce_addr, tx_number, tx_term, commit_ts, key_ts, gap_ts, &hres);
+        TX_TRACE_ACTION(this, req);
+        TX_TRACE_DUMP(req);
+        cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
+        return;
+    }
+
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
 #ifdef EXT_TX_PROC_ENABLED
@@ -591,7 +608,9 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     }
     else
     {
-        term = Sharder::Instance().LeaderTerm(cc_ng_id);
+        int64_t ng_leader_term = Sharder::Instance().LeaderTerm(cc_ng_id);
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        term = std::max(ng_leader_term, standby_node_term);
     }
     cce_addr.SetNodeGroupId(cc_ng_id);
     cce_addr.SetCce(0, term, 0);
@@ -719,7 +738,9 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
 
     if (term < 0)
     {
-        term = Sharder::Instance().LeaderTerm(cc_ng_id);
+        int64_t ng_leader_term = Sharder::Instance().LeaderTerm(cc_ng_id);
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        term = std::max(ng_leader_term, standby_node_term);
     }
     cce_addr.SetNodeGroupId(cc_ng_id);
     cce_addr.SetCce(0, term, 0);
@@ -1431,6 +1452,10 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
 
     int64_t term = Sharder::Instance().LeaderTerm(tx_ng_id);
+    if (term < 0)
+    {
+        term = Sharder::Instance().StandbyNodeTerm();
+    }
 
     // Code injection for test InitTxRequest failure
     CODE_FAULT_INJECTOR("init_tx_error", {
@@ -1559,7 +1584,7 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
     else if (vct_node_id[0] == -1)
     {
         vct_node_id.clear();
-        for (int i = 0; i < (int) Sharder::Instance().NodeGroupCount(); i++)
+        for (int i = 0; i < (int) Sharder::Instance().GetNodeCount(); i++)
         {
             vct_node_id.push_back(i);
         }
@@ -1569,10 +1594,9 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
 #endif
-    for (int id : vct_node_id)
+    for (int dest_node_id : vct_node_id)
     {
-        uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(id);
-        if (dest_node_id == cc_shards_.node_id_)
+        if (dest_node_id == (int) cc_shards_.node_id_)
         {
             FaultInjectCC *req = fault_inject_pool.NextRequest();
             req->Reset(&fault_name, &fault_paras, &hres);
@@ -1588,7 +1612,7 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
                                    tx_term,
                                    command_id,
                                    txid,
-                                   id,
+                                   dest_node_id,
                                    hres);
         }
     }
@@ -1714,6 +1738,43 @@ void txservice::LocalCcHandler::ObjectCommand(
 #endif
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     hres.Value().cce_addr_.SetCce(0, -1, ng_id, 0);
+
+    bool is_standby_tx = IsStandbyTx(tx_term);
+    // Standby transaction only execute local request.
+    if (is_standby_tx)
+    {
+        if (Sharder::Instance().NativeNodeGroup() != ng_id)
+        {
+            // the standby node isn't allow to communicate with the master node
+            // of any other node group
+            hres.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
+            return;
+        }
+
+        if (!obj_cmd.IsReadOnly())
+        {
+            // redis smart client needs to resend this command to primary node
+            DLOG(WARNING) << "!!! DATA_NOT_ON_LOCAL_NODE !!";
+            hres.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
+            return;
+        }
+
+        ApplyCc *req = apply_pool.NextRequest();
+        req->Reset(&table_name,
+                   &key,
+                   key_shard_code,
+                   &obj_cmd,
+                   nullptr,
+                   txn,
+                   tx_term,
+                   tx_ts,
+                   &hres,
+                   proto,
+                   iso_level,
+                   commit);
+        cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
+        return;
+    }
 
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)

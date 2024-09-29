@@ -887,6 +887,8 @@ public:
 
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
+
         if (req.IsInRecovering())
         {
             ng_term = ng_term > 0
@@ -1536,6 +1538,25 @@ public:
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
+        CODE_FAULT_INJECTOR("standby_forward_ddl_trigger_start_following", {
+            // only trigger once
+            txservice::FaultInject::Instance().InjectFault(
+                "standby_forward_ddl_trigger_start_following", "remove");
+            DLOG(INFO)
+                << "fault inject: standby_forward_ddl_trigger_start_following";
+            NodeGroupId native_ng = Sharder::Instance().NativeNodeGroup();
+            int64_t cur_prim_term = Sharder::Instance().PrimaryNodeTerm();
+            assert(cur_prim_term > 0);
+            Sharder::Instance().OnStartFollowing(
+                native_ng,
+                cur_prim_term,
+                Sharder::Instance().LeaderNodeId(native_ng),
+                true);
+
+            req.SetFinish();
+            return true;
+        });
+
         if (req.GetDDLPhase() ==
             KeyObjectStandbyForwardCc::DDLPhase::AcquirePhase)
         {
@@ -1548,7 +1569,7 @@ public:
                     cce->PayloadStatus(),
                     &req,
                     Sharder::Instance().NativeNodeGroup(),
-                    req.PrimaryLeaderTerm(),
+                    req.StandbyNodeTerm(),
                     req.TxTerm(),
                     CcOperation::Write,
                     IsolationLevel::RepeatableRead,
@@ -1567,7 +1588,7 @@ public:
                                       cce->PayloadStatus(),
                                       &req,
                                       req.NodeGroupId(),
-                                      req.PrimaryLeaderTerm(),
+                                      req.StandbyNodeTerm(),
                                       req.TxTerm(),
                                       CcOperation::Write,
                                       IsolationLevel::RepeatableRead,
@@ -1581,7 +1602,6 @@ public:
             {
                 if (shard_->core_id_ != shard_->core_cnt_ - 1)
                 {
-                    req.ResetCcm();
                     MoveRequest(&req, shard_->core_id_ + 1);
                     return false;
                 }
@@ -1628,7 +1648,7 @@ public:
                         OperationType::TruncateTable,
                         commit_ts,
                         cc_ng_id_,
-                        Sharder::Instance().PrimaryNodeTerm(),
+                        req.StandbyNodeTerm(),
                         nullptr,
                         nullptr,
                         &req,
@@ -1640,7 +1660,6 @@ public:
                 // release phase and move the req back to core 0.
                 req.SetDDLPhase(
                     KeyObjectStandbyForwardCc::DDLPhase::ReleasePhase);
-                req.ResetCcm();
                 MoveRequest(&req, 0);
                 return false;
             }
@@ -1660,7 +1679,7 @@ public:
                         OperationType::TruncateTable,
                         commit_ts,
                         cc_ng_id_,
-                        Sharder::Instance().PrimaryNodeTerm(),
+                        req.StandbyNodeTerm(),
                         nullptr,
                         nullptr,
                         &req,
@@ -1672,7 +1691,6 @@ public:
                 {
                     req.SetDDLPhase(
                         KeyObjectStandbyForwardCc::DDLPhase::ReleasePhase);
-                    req.ResetCcm();
                     MoveRequest(&req, 0);
                     return false;
                 }
@@ -1709,7 +1727,12 @@ public:
                 shard_->DequeueWaitListAfterSchemaUpdated();
             }
 
-            ReleaseCceLock(cce->GetKeyLock(), cce, req.Txn(), cc_ng_id_);
+            ReleaseCceLock(cce->GetKeyLock(),
+                           cce,
+                           req.Txn(),
+                           cc_ng_id_,
+                           LockType::WriteLock,
+                           false);
             if (shard_->core_id_ == (shard_->core_cnt_ - 1))
             {
                 req.SetFinish();
@@ -1717,7 +1740,6 @@ public:
             }
             else
             {
-                req.ResetCcm();
                 MoveRequest(&req, shard_->core_id_ + 1);
                 return false;
             }

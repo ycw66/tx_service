@@ -229,6 +229,7 @@ protected:
                           << cce.get();
             delay_free = true;
         }
+
         cce->ClearLocks(*cc_shard_, cc_ng_id);
         if (delay_free)
         {

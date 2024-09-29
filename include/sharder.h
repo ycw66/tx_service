@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -31,6 +32,11 @@ class TxWorkerPool;
 struct TableName;
 struct CcRequestBase;
 class CcShard;
+
+namespace store
+{
+class DataStoreHandler;
+}
 
 namespace fault
 {
@@ -342,7 +348,11 @@ public:
      */
     void UpdateLeader(uint32_t ng_id, uint32_t node_id);
 
-    bool OnLeaderStart(uint32_t ng_id, int64_t term, uint64_t &replay_start_ts);
+    bool OnLeaderStart(uint32_t ng_id,
+                       int64_t term,
+                       uint64_t &replay_start_ts,
+                       bool &retry,
+                       uint32_t *next_leader_node = nullptr);
 
     bool OnLeaderStop(uint32_t ng_id, int64_t term);
 
@@ -350,6 +360,8 @@ public:
                           int64_t term,
                           uint32_t leader_node,
                           bool resubscribe = false);
+
+    bool OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req);
 
     /**
      * @brief Update the log group's leader node id when the log group leader
@@ -451,6 +463,11 @@ public:
         return node_id_;
     }
 
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> GetNodeGroupConfigs()
+    {
+        return cluster_config_.ng_configs_;
+    }
+
     void NodeGroupFinishRecovery(uint32_t ng_id)
     {
         std::lock_guard<std::mutex> lk(recovery_state_mux_);
@@ -463,6 +480,8 @@ public:
     {
         return local_shards_;
     }
+
+    store::DataStoreHandler *GetDataStoreHandler();
 
     void CleanCcTable(const TableName &tabname);
 
@@ -561,107 +580,79 @@ public:
             Sharder::Instance().NativeNodeGroup());
     }
 
-    void SetPrimaryNodeTerm(int64_t term)
+    void SetCandidateStandbyNodeTerm(int64_t standby_term)
     {
         if (!cc_nodes_init_.load(std::memory_order_acquire))
         {
             return;
         }
 
-        primary_node_leader_term_cache_.store(term, std::memory_order_release);
+        candidate_standby_node_term_cache_.store(standby_term,
+                                                 std::memory_order_release);
     }
-    void SetCandidatePrimaryNodeTerm(int64_t term)
+
+    void SetStandbyNodeTerm(int64_t standby_term)
     {
         if (!cc_nodes_init_.load(std::memory_order_acquire))
         {
             return;
         }
 
-        candidate_primary_node_leader_term_cache_.store(
-            term, std::memory_order_release);
+        standby_node_term_cache_.store(standby_term, std::memory_order_release);
+    }
+
+    int64_t StandbyNodeTerm()
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return -1;
+        }
+
+        return standby_node_term_cache_.load(std::memory_order_acquire);
     }
 
     int64_t PrimaryNodeTerm()
     {
+        int64_t term = standby_node_term_cache_.load(std::memory_order_acquire);
+        if (term < 0)
+        {
+            term = candidate_standby_node_term_cache_.load(
+                std::memory_order_acquire);
+            if (term < 0)
+            {
+                return -1;
+            }
+        }
+
+        return term >> 32;
+    }
+
+    int64_t CandidateStandbyNodeTerm()
+    {
         if (!cc_nodes_init_.load(std::memory_order_acquire))
         {
             return -1;
         }
-        return primary_node_leader_term_cache_.load(std::memory_order_acquire);
-    }
-
-    int64_t CandidatePrimaryNodeTerm()
-    {
-        if (!cc_nodes_init_.load(std::memory_order_acquire))
-        {
-            return -1;
-        }
-        return candidate_primary_node_leader_term_cache_.load(
+        return candidate_standby_node_term_cache_.load(
             std::memory_order_acquire);
     }
 
-    void SetStandbyInitialMsgSequence(uint32_t seq_grp, uint64_t seq_num)
+    uint32_t GetNextSubscribeId()
     {
-        if (!cc_nodes_init_.load(std::memory_order_acquire))
-        {
-            return;
-        }
-        assert(standby_initial_seq_ids_[seq_grp].load() == UINT64_MAX ||
-               standby_initial_seq_ids_[seq_grp].load() <= seq_num);
-        standby_initial_seq_ids_[seq_grp].store(seq_num,
-                                                std::memory_order_release);
+        uint32_t subscribe_id =
+            subscribe_counter_.fetch_add(1, std::memory_order_acq_rel);
+        return subscribe_id;
     }
 
-    uint64_t StandbyInitialMsgSequence(uint32_t seq_grp)
+    uint32_t GetCurrentSubscribeId()
     {
-        if (!cc_nodes_init_.load(std::memory_order_acquire))
-        {
-            return 0;
-        }
-        return standby_initial_seq_ids_[seq_grp].load(
-            std::memory_order_acquire);
-    }
-
-    std::vector<uint64_t> StandbyInitialMsgSequences()
-    {
-        std::vector<uint64_t> ids;
-        if (!cc_nodes_init_.load(std::memory_order_acquire))
-        {
-            return ids;
-        }
-        for (int i = 0; i < 200; i++)
-        {
-            uint64_t id =
-                standby_initial_seq_ids_[i].load(std::memory_order_acquire);
-            if (id != UINT64_MAX)
-            {
-                ids.push_back(id);
-            }
-            else
-            {
-                break;
-            }
-        }
-        return ids;
+        return subscribe_counter_.load(std::memory_order_acquire);
     }
 
     uint32_t NativeNodeGroup() const
     {
         return native_ng_;
     }
-
-    void ClearPrimarySubscription()
-    {
-        primary_node_leader_term_cache_.store(-1);
-        for (uint32_t seq_grp = 0; seq_grp < 200; seq_grp++)
-        {
-            standby_initial_seq_ids_[seq_grp].store(UINT64_MAX);
-        }
-    }
-
-    void SubscribeToPrimary(bool need_clear_ccm, int64_t ng_term);
-
-    bool CaughtupWithPrimary() const;
 
 private:
     Sharder();
@@ -696,16 +687,11 @@ private:
     // with invalid term will be rejected.
     std::atomic<int64_t> invalid_leader_term_cache_[1000];
 
-    // The term that standby is subscribed to. Only used on standby node.
-    std::atomic<int64_t> primary_node_leader_term_cache_;
-    std::atomic<int64_t> candidate_primary_node_leader_term_cache_;
-    // The initial sequence id of each sequence group in this subscription
-    // period. Used with priamry leader term together to decide if the
-    // request is valid.
-    // This vector is protected by primary_node_leader_term_cache_. Any
-    // read/write on the initial ids needs to verify primary node term first.
-    std::atomic_uint64_t standby_initial_seq_ids_[200];
-    std::atomic<bool> requested_resubscribe_{false};
+    // The term that standby is subsribed to. Only used on standby node.
+    std::atomic<int64_t> candidate_standby_node_term_cache_;
+    std::atomic<int64_t> standby_node_term_cache_;
+
+    std::atomic<uint32_t> subscribe_counter_{0};
 
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;

@@ -197,6 +197,9 @@ message OnLeaderStartResponse
 {
 	bool error = 1;
     uint64 log_replay_start_ts = 2;
+    bool retry = 3;
+    // if leader start fails, which node should the leader be transferred to.
+    uint32 next_leader_node = 4;
 }
 
 message OnLeaderStopRequest
@@ -283,6 +286,7 @@ message StandbyStartFollowingResponse
 {
     bool error = 1;
     repeated uint64 start_sequence_id = 2;
+    uint32 subscribe_id = 3;
 }
 
 message UpdateStandbyConsistentTsRequest
@@ -319,7 +323,7 @@ message RequestResendStandbyMessageRequest
     uint32 node_group_id = 2;
     uint32 seq_grp = 3;
     uint64 seq_id = 4;
-    int64 ng_term = 5;
+    int64 standby_node_term = 5;
 }
 
 message RequestResendStandbyMessageResponse 
@@ -330,11 +334,10 @@ message RequestResendStandbyMessageResponse
 
 message StorageSnapshotSyncRequest {
     uint32 ng_id = 1;
-    int64 ng_term = 2;
+    int64 standby_node_term = 2;
     uint32 standby_node_id = 3;
-    repeated uint64 subscribe_init_ids = 4;
-    string dest_path = 5;
-    string user = 6;
+    string dest_path = 4;
+    string user = 5;
 }
 
 message StorageSnapshotSyncResponse {
@@ -342,13 +345,36 @@ message StorageSnapshotSyncResponse {
 }
 
 message OnSnapshotSyncedRequest {
-    int64 ng_term = 1;
-    repeated uint64 subscribe_init_ids = 2;
-    string snapshot_path = 3;
+    int64 standby_node_term = 1;
+    string snapshot_path = 2;
 }
 
 message OnSnapshotSyncedResponse {
     bool error = 1;
+}
+
+
+enum NodeStatus{
+    Online = 0;
+    Loading = 1;
+}
+
+enum NodeRole{
+    LeaderNode = 0;
+    StandbyNode = 1;
+    VoterNode = 2; 
+}
+
+message FetchNodeInfoRequest{
+    uint32 ng_id = 1;
+    uint32 node_id = 2 ;
+}
+
+message FetchNodeInfoResponse{
+    uint32 ng_id = 1;
+    uint32 node_id = 2 ;
+    NodeRole role = 3 ;
+    NodeStatus status = 4;
 }
 
 service CcStreamService {
@@ -381,6 +407,7 @@ service CcRpcService {
     rpc RequestResendStandbyMessage(RequestResendStandbyMessageRequest) returns (RequestResendStandbyMessageResponse);
     rpc RequestStorageSnapshotSync(StorageSnapshotSyncRequest) returns (StorageSnapshotSyncResponse);
     rpc OnSnapshotSynced(OnSnapshotSyncedRequest) returns (OnSnapshotSyncedResponse);
+    rpc FetchNodeInfo(FetchNodeInfoRequest) returns (FetchNodeInfoResponse);
 }
 
 message NodeConfigBuf

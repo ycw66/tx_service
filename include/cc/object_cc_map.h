@@ -18,6 +18,7 @@
 #include "error_messages.h"
 #include "local_cc_shards.h"
 #include "non_blocking_lock.h"
+#include "sharder.h"
 #include "standby.h"
 #include "template_cc_map.h"
 #include "tx_command.h"
@@ -108,17 +109,41 @@ public:
 
         uint32_t ng_id = req.NodeGroupId();
         TxNumber txn = req.Txn();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_ApplyCc", {
-            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_ApplyCc";
-            ng_term = -1;
-        });
-        if (ng_term < 0)
+        int64_t is_standby_tx = IsStandbyTx(req.TxTerm());
+        int64_t ng_term = -1;
+        if (is_standby_tx)
         {
-            LOG(INFO) << "ApplyCc, node_group(#" << ng_id
-                      << ") term < 0, tx:" << txn;
-            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
+            ng_term = Sharder::Instance().StandbyNodeTerm();
+            if (ng_term < 0 || ng_term != req.TxTerm())
+            {
+                LOG(INFO) << "ApplyCc, the standby node of node_group(#"
+                          << ng_id << "), standby node term: " << ng_term
+                          << ", standby tx term: " << req.TxTerm()
+                          << ", txn: " << txn;
+                hd_res->SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
+                return true;
+            }
+
+            if (!req.IsReadOnly())
+            {
+                hd_res->SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
+                return true;
+            }
+        }
+        else
+        {
+            ng_term = Sharder::Instance().LeaderTerm(ng_id);
+            CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_ApplyCc", {
+                LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_ApplyCc";
+                ng_term = -1;
+            });
+            if (ng_term < 0)
+            {
+                LOG(INFO) << "ApplyCc, node_group(#" << ng_id
+                          << ") term < 0, tx:" << txn;
+                hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                return true;
+            }
         }
 
         // TODO(zkl): Read and PinRangeSlice, load from kv; wait for replay to
@@ -214,6 +239,7 @@ public:
                 *look_key, false, req.IsReadOnly() || req.IsDelete());
             cce = it->second;
             ccp = it.GetPage();
+
             if (cmd->GetBlockOperationType() == BlockOperation::Discard)
             {
                 assert(!req.apply_and_commit_);
@@ -249,6 +275,26 @@ public:
                 return false;
             }
 
+            CODE_FAULT_INJECTOR("disable_fetch_record_from_kv", {
+                if (is_standby_tx)
+                {
+                    LOG(INFO) << "FaultInject  "
+                                 "disable_fetch_record_from_kv";
+                    if (cce->PayloadStatus() == RecordStatus::Unknown &&
+                        (!cce->GetKeyLock() || cce->DirtyPayloadStatus() ==
+                                                   RecordStatus::NonExistent))
+                    {
+                        if (cmd->IsReadOnly())
+                        {
+                            assert(acquired_lock == LockType::NoLock);
+                            obj_result.rec_status_ = RecordStatus::Deleted;
+                            hd_res->SetFinished();
+                            return true;
+                        }
+                    }
+                }
+            });
+
             // Check if this cce does not exists in ccmap at all.
             // We need to double check that there is no dirty payload
             // status on the cce since a previous cmd might ignores
@@ -273,6 +319,7 @@ public:
                     // does not exist.
                     if (!cmd->IgnoreKvValue())
                     {
+                        // Fetch record from storage
                         shard_->FetchRecord(table_name_,
                                             table_schema_,
                                             TxKey(look_key),
@@ -655,7 +702,18 @@ public:
                     remote::ToRemoteType::ConvertTableType(table_name_.Type()));
                 forward_req->set_key_shard_code(req.key_shard_code_ & 0x3FF);
                 std::string key_str;
-                look_key->Serialize(key_str);
+
+                if (req.Key() == nullptr)
+                {
+                    assert(req.KeyImage() != nullptr &&
+                           !req.KeyImage()->empty());
+                    key_str = *req.KeyImage();
+                }
+                else
+                {
+                    req.Key()->Serialize(key_str);
+                }
+
                 forward_req->set_key(std::move(key_str));
             }
         }
@@ -1363,10 +1421,9 @@ public:
         assert(cce);
         ccp = it.GetPage();
 
-        if (obj_version < cce->CommitTs())
+        if (commit_ts <= cce->CommitTs())
         {
             // Discard message since cce has a newer version.
-            assert(commit_ts <= cce->CommitTs());
             req.SetFinish();
             return true;
         }
@@ -1410,7 +1467,6 @@ public:
                 }
             }
             else
-
             {
                 // Emplace the cmds as buffered cmds and try to commit them.
                 cce->GetOrCreateKeyLock(shard_, this, ccp);
@@ -1443,8 +1499,6 @@ public:
                     // Recycles the lock if this and prior commands have been
                     // applied and there is no pending command.
                     bool lock_recycled = cce->RecycleKeyLock(*shard_);
-                    assert(lock_recycled);
-                    (void) lock_recycled;
                 }
             }
         }
@@ -1459,12 +1513,10 @@ public:
                                 cce,
                                 this,
                                 cc_ng_id_,
-                                req.PrimaryLeaderTerm(),
+                                req.StandbyNodeTerm(),
                                 &req,
                                 -1,
                                 true,
-                                req.ForwardMessageGroup(),
-                                req.InitialSequenceId(),
                                 req.KeyShardCode());
             cce->GetOrCreateKeyLock(shard_, this, ccp)
                 .AcquireReadIntent(FetchRecordCc::GetFetchRecordTxNumber(
@@ -1625,7 +1677,7 @@ public:
                 // Acquire a read intent on this cce with the
                 // special txn to avoid cce being kicked out before
                 // fetch record
-                // returnsFetchRecordCc::GetFetchRecordTxNumber(Sharder::Instance().NodeId())
+                //
                 cce->GetOrCreateKeyLock(shard_, this, ccp)
                     .AcquireReadIntent(FetchRecordCc::GetFetchRecordTxNumber(
                         Sharder::Instance().NodeId()));
@@ -1753,14 +1805,15 @@ public:
             static_cast<CcEntry<KeyT, ValueT> *>(entry);
         LruPage *ccp = cce->GetCcPage();
         // Release the
-        // FetchRecordCc::GetFetchRecordTxNumber(Sharder::Instance().NodeId())ried
-        // by fetch record.
+        // FetchRecordCc::GetFetchRecordTxNumber(Sharder::Instance().NodeId())
+        // ried by fetch record.
         ReleaseCceLock(
             cce->GetKeyLock(),
             cce,
             FetchRecordCc::GetFetchRecordTxNumber(Sharder::Instance().NodeId()),
             cc_ng_id_,
             LockType::ReadIntent);
+
         if (status == RecordStatus::Unknown)
         {
             // fetch record fails.

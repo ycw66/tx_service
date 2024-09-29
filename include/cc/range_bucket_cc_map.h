@@ -70,6 +70,10 @@ public:
         {
             ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
         }
+        else
+        {
+            ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
+        }
 
         if (ng_term < 0)
         {

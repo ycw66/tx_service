@@ -39,12 +39,14 @@ void LruEntry::SetCkptTs(uint64_t ts)
 
 bool LruEntry::IsPersistent() const
 {
-    if (Sharder::Instance().PrimaryNodeTerm() > 0)
+    if (Sharder::Instance().StandbyNodeTerm() >= 0 &&
+        Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
-        // If this is a follower, all cce is treated as persisted since
-        // primary node will write them to kv.
+        // If this is a follower with shared kv, all cce is treated as persisted
+        // since primary node will write them to kv.
         return true;
     }
+
 #ifndef ON_KEY_OBJECT
     return CommitTs() <= ckpt_ts_;
 #else
@@ -129,6 +131,7 @@ bool LruEntry::RecycleKeyLock(CcShard &ccs)
         cc_lock_and_extra_ = nullptr;
         return true;
     }
+
     return false;
 }
 
