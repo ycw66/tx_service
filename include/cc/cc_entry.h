@@ -1080,7 +1080,11 @@ public:
         assert(commit_ts > CkptTs());
 #endif
 
+#ifndef ON_KEY_OBJECT
         if (from_ts < commit_ts && commit_ts <= to_ts)
+#else
+        if (from_ts < commit_ts)
+#endif
         {
             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
             ref.CloneOrCopyKey(TxKey(&key));
