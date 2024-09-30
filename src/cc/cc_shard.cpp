@@ -1030,9 +1030,7 @@ void CcShard::FetchCatalog(const TableName &table_name,
         assert(!(txservice_skip_kv && (Sharder::Instance().GetPrimaryNodeId() ==
                                        Sharder::Instance().NodeId())));
         // All standby nodes should fetch catalog from primay node.
-        bool fetch_from_primary =
-            Sharder::Instance().CandidateStandbyNodeTerm() > 0 ||
-            Sharder::Instance().StandbyNodeTerm() > 0;
+        bool fetch_from_primary = IsStandbyTx(cc_ng_term);
         std::unique_ptr<FetchCatalogCc> fetch_catalog_cc =
             std::make_unique<FetchCatalogCc>(
                 table_name, *this, cc_ng_id, cc_ng_term, fetch_from_primary);
@@ -1052,6 +1050,7 @@ void CcShard::FetchCatalog(const TableName &table_name,
                     // Renqueue the requester to retry.
                     Enqueue(core_id_, requester);
                 }
+                RemoveFetchRequest(table_name);
                 return;
             }
             FetchCatalogClosure *closure = new FetchCatalogClosure(fetch_req);
@@ -1346,9 +1345,9 @@ void CcShard::FetchRecord(const TableName &table_name,
                           int64_t cc_ng_term,
                           CcRequestBase *requester,
                           int32_t range_id,
-                          bool fetch_from_primary,
                           uint32_t key_shard_code)
 {
+    bool fetch_from_primary = IsStandbyTx(cc_ng_term);
     auto tab_it = fetch_record_reqs_.try_emplace(cce,
                                                  &table_name,
                                                  tbl_schema,
