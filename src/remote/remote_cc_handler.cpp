@@ -709,7 +709,7 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     fi_req->set_fault_name(fault_name);
     fi_req->set_fault_paras(fault_paras);
 
-    stream_sender_.SendMessageToNg(node_id, send_msg, &hres);
+    stream_sender_.SendMessageToNode(node_id, send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::AnalyzeTableAll(
