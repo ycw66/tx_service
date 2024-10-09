@@ -1345,9 +1345,9 @@ void CcShard::FetchRecord(const TableName &table_name,
                           int64_t cc_ng_term,
                           CcRequestBase *requester,
                           int32_t range_id,
+                          bool fetch_from_primary,
                           uint32_t key_shard_code)
 {
-    bool fetch_from_primary = IsStandbyTx(cc_ng_term);
     auto tab_it = fetch_record_reqs_.try_emplace(cce,
                                                  &table_name,
                                                  tbl_schema,

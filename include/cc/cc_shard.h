@@ -680,6 +680,7 @@ public:
                      int64_t cc_ng_term,
                      CcRequestBase *requester,
                      int32_t range_id = -1,
+                     bool fetch_from_primary = false,
                      uint32_t key_shard_code = 0);
 
     void RemoveFetchRecordRequest(LruEntry *cce);

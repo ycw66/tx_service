@@ -1516,6 +1516,7 @@ public:
                                 req.StandbyNodeTerm(),
                                 &req,
                                 -1,
+                                true,
                                 req.KeyShardCode());
             cce->GetOrCreateKeyLock(shard_, this, ccp)
                 .AcquireReadIntent(FetchRecordCc::GetFetchRecordTxNumber(

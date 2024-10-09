@@ -112,7 +112,9 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
 void TransactionExecution::Reset()
 {
 #ifdef ON_KEY_OBJECT
-    if (FLAGS_cmd_read_catalog)
+    // Skip releasing catalogs read if the tx is not started.
+    if (FLAGS_cmd_read_catalog && init_txn_.hd_result_.IsFinished() &&
+        !init_txn_.hd_result_.IsError())
     {
         ReleaseCatalogsRead();
     }
