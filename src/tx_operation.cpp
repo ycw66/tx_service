@@ -816,8 +816,8 @@ void LockWriteBucketsOp::Advance(TransactionExecution *txm,
     {
         write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
                                               (hash & 0x3FF));
+        txm->rw_set_.IncreaseFowardWriteCnt(1);
     }
-    txm->rw_set_.IncreaseFowardWriteCnt(1);
     ++write_key_it_;
 
     if (write_key_it_ == write_key_end_)
