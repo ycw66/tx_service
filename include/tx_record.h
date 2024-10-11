@@ -108,6 +108,7 @@ struct TxRecord
 
     virtual void SetTTL(uint64_t ttl)
     {
+        assert(false);
         return;
     }
 

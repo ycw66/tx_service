@@ -69,17 +69,29 @@ public:
     }
     virtual std::unique_ptr<TxRecord> CreateObject(
         const std::string *image) const = 0;
-    virtual std::unique_ptr<TxRecord> CreateTTLObject(
-        const std::string *image) const
-    {
-        assert(false);
-        return nullptr;
-    }
+
+    // Get command for retiring command (e.g. DelCommand) for expired TTL
+    // bound object
     virtual std::unique_ptr<TxCommand> RetireExpiredTTLObjectCommand() const
     {
         assert(false);
         return nullptr;
     }
+
+    // This command for restoring ttl object from wal
+    virtual std::unique_ptr<TxCommand> RecoverTTLObjectCommand()
+    {
+        assert(false);
+        return nullptr;
+    }
+
+    // Will this command change the object ttl, currently used for purpose if
+    // the object ttl will be reseted or not
+    virtual bool WillSetTTL() const
+    {
+        return false;
+    }
+
     virtual std::unique_ptr<TxCommandResult> CreateCommandResult() const = 0;
     virtual bool ProceedOnNonExistentObject() const = 0;
     virtual bool ProceedOnExistentObject() const = 0;

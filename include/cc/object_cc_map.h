@@ -447,35 +447,52 @@ public:
             cce->SetCkptTs(1);
         }
 
-        // check if the payload is expired
-        TxObject *obj = static_cast<TxObject *>(cce->payload_.get());
-        if (obj != nullptr && obj->HasTTL())
+        // Process ttl expire
+        // Get ttl from dirty payload at first, then from payload
+        obj_result.ttl_expired_ = false;
+        uint64_t ttl = UINT64_MAX;
+        if (cce->GetKeyLock() != nullptr &&
+            cce->DirtyPayloadStatus() == RecordStatus::Normal)
         {
-            // If ttl is expired
-            if (obj->GetTTL() < shard_->Now())
+            std::unique_ptr<ValueT> dirty_payload = cce->DirtyPayload();
+            TxObject *obj = static_cast<TxObject *>(dirty_payload.get());
+            if (obj != nullptr && obj->HasTTL())
             {
-                // return deleted
-                if (req.IsReadOnly())
-                {
-                    obj_result.rec_status_ = RecordStatus::Deleted;
-                    obj_result.commit_ts_ = obj->GetTTL();
-                    hd_res->SetFinished();
-                    // If the object is expired, it should decrease 1 for object
-                    // count
-                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
-
-                    return true;
-                }
-                // mark deleted on cce if not read only
-                else
-                {
-                    cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
-                    cce->SetDirtyPayload(nullptr);
-                    cce->SetPendingCmd(nullptr);
-                    obj_result.ttl_expired_ = true;
-                    obj_result.ttl_ = obj->GetTTL();
-                }
+                ttl = obj->GetTTL();
             }
+            cce->SetDirtyPayload(std::move(dirty_payload));
+        }
+        else
+        {
+            TxObject *obj = static_cast<TxObject *>(cce->payload_.get());
+            if (obj != nullptr && obj->HasTTL())
+            {
+                ttl = obj->GetTTL();
+            }
+        }
+
+        // if ttl is expired
+        if (ttl < shard_->Now())
+        {
+            if (req.IsReadOnly())
+            {
+                // early return if ttl expired when cmd is read only
+                obj_result.rec_status_ = RecordStatus::Deleted;
+                obj_result.commit_ts_ = ttl;
+                hd_res->SetFinished();
+                return true;
+            }
+            else
+            {
+                obj_result.ttl_expired_ = true;
+                obj_result.ttl_ = ttl;
+            }
+        }
+        // if ttl exist, not expired, cmd will not overwrite object values and
+        // the cmd will reset ttl
+        else if (ttl < UINT64_MAX && cmd->WillSetTTL() && !cmd->IsOverwrite())
+        {
+            obj_result.ttl_reset_ = true;
         }
 
         if (req.Isolation() > IsolationLevel::ReadCommitted ||
@@ -497,10 +514,11 @@ public:
                     pending_cmd =
                         std::get<std::unique_ptr<TxCommand>>(var_cmd).get();
                 }
+
                 std::unique_ptr<ValueT> dirty_payload = cce->DirtyPayload();
                 // Since pending_cmd_ exists, the payload must also exist.
-                // Otherwise, the dirty payload should have already been created
-                // by the last command.
+                // Otherwise, the dirty payload should have already been
+                // created by the last command.
                 assert(pending_cmd != nullptr);
                 assert(cce->PayloadStatus() == RecordStatus::Normal &&
                        cce->payload_ != nullptr);
@@ -610,11 +628,13 @@ public:
         // writelock yet.
         if (acquired_lock != LockType::WriteLock)
         {
-            bool procceed =
+            bool need_write_lock =
                 (!object_not_exist && cmd->ProceedOnExistentObject()) ||
-                (object_not_exist && cmd->ProceedOnNonExistentObject());
+                (object_not_exist && cmd->ProceedOnNonExistentObject()) ||
+                (obj_result.ttl_expired_ || obj_result.ttl_reset_);
 
-            if (procceed)
+            // acquire write lock if need futher process
+            if (need_write_lock)
             {
                 // Upgrade to write lock
                 std::tie(acquired_lock, err_code) =
@@ -717,11 +737,25 @@ public:
                 forward_req->set_key(std::move(key_str));
             }
         }
+
+        // if cce is already expired
+        if (obj_result.ttl_expired_)
+        {
+            cce->SetDirtyPayload(nullptr);
+            cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
+            cce->SetPendingCmd(nullptr);
+            object_not_exist = true;
+        }
+        else if (obj_result.ttl_reset_)
+        {
+            // cmd will be processed as usual, but a recover obj cmd log will be
+            // written
+        }
+
         RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
         if (object_not_exist)
         {
             assert(cmd->ProceedOnNonExistentObject());
-
             // Create an empty temporary object to process the commands, the
             // dirty payload will be uploaded to payload in PostWriteCc if
             // the txn commits.
@@ -733,8 +767,8 @@ public:
             cce->SetPendingCmd(nullptr);
             if (forward_req)
             {
-                // command will be added below if dirty payload status is not
-                // deleted.
+                // command will be added below if dirty payload status is
+                // not deleted.
                 forward_req->set_object_version(cce->CommitTs());
             }
         }
@@ -760,6 +794,12 @@ public:
                 CommitCommandOnDirtyPayload(
                     dirty_payload, dirty_payload_status, *cmd);
             }
+            // if cmd.ExecuteOn() telling ttl reset is not going to happen
+            else if (obj_result.ttl_reset_ == true)
+            {
+                obj_result.ttl_reset_ = false;
+            }
+
             cce->SetDirtyPayload(std::move(dirty_payload));
             cce->SetDirtyPayloadStatus(dirty_payload_status);
         }
@@ -818,6 +858,12 @@ public:
                     // temporary object if the txn commits.
                     cce->SetDirtyPayloadStatus(RecordStatus::Uncreated);
                 }
+            }
+
+            // if cmd.ExecuteOn() telling ttl reset is not going to happen
+            if (!object_modified && obj_result.ttl_reset_ == true)
+            {
+                obj_result.ttl_reset_ = false;
             }
         }
 

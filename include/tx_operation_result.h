@@ -527,6 +527,7 @@ struct ObjectCommandResult
         cmd_result_ = nullptr;
         ttl_expired_ = false;
         ttl_ = UINT64_MAX;
+        ttl_reset_ = false;
     }
 
     // cce commit_ts, for validation?
@@ -554,6 +555,8 @@ struct ObjectCommandResult
     bool ttl_expired_{false};
     // TTL if expired
     uint64_t ttl_{UINT64_MAX};
+    // TTL reset
+    bool ttl_reset_{false};
 };
 
 struct UploadBatchResult

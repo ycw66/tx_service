@@ -6017,11 +6017,12 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         uint64_t commit_ts = cmd_result.commit_ts_;
         uint64_t last_vali_ts = cmd_result.last_vali_ts_;
         bool ttl_expired = cmd_result.ttl_expired_;
+        bool ttl_reset = cmd_result.ttl_reset_;
 
-        if (obj_cmd_op.auto_commit_ && txservice_skip_wal)
-        {
-            assert(lock_acquired == LockType::NoLock);
-        }
+        // if (obj_cmd_op.auto_commit_ && txservice_skip_wal)
+        //{
+        // assert(lock_acquired == LockType::NoLock);
+        //}
 
         assert(obj_status != RecordStatus::Unknown);
         bool version_changed = false;
@@ -6045,6 +6046,24 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
 #endif
                 );
             }
+            if (ttl_reset)
+            {
+                // write a recover obj cmd to log
+                auto recover_command =
+                    obj_cmd_.command_->RecoverTTLObjectCommand();
+                rw_set_.AddObjectCommand(*table_name,
+                                         cce_addr,
+                                         commit_ts,
+                                         last_vali_ts,
+                                         obj_cmd_.key_,
+                                         recover_command.get()
+#ifndef RANGE_PARTITION_ENABLED
+                                             ,
+                                         obj_cmd_op.forward_key_shard_
+#endif
+                );
+            }
+
             // The command modifies the object. Put it into the command set
             // for writing log and post-processing. If the command fails, only
             // to release the write lock.
