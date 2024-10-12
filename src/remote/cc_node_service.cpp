@@ -287,7 +287,8 @@ void CcNodeService::ClusterRemoveNode(
     brpc::ClosureGuard done_guard(done);
     using namespace txservice;
 
-    if (Sharder::Instance().LeaderTerm(local_shards_.NodeId()) <= 0)
+    if (Sharder::Instance().LeaderTerm(Sharder::Instance().NativeNodeGroup()) <=
+        0)
     {
         // Node is not preferred leader of node group.
         response->set_result(
@@ -725,7 +726,8 @@ void CcNodeService::GetClusterNodes(
     brpc::ClosureGuard done_guard(done);
     // First make sure we're the preferred leader of ng since we'll need to
     // put read lock on cluster config cc map when reading cluster config.
-    if (Sharder::Instance().LeaderTerm(Sharder::Instance().NodeId()) < 0)
+    if (Sharder::Instance().LeaderTerm(Sharder::Instance().NativeNodeGroup()) <
+        0)
     {
         response->set_error(true);
         return;

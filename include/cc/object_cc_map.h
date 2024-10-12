@@ -1362,7 +1362,7 @@ public:
         }
 
         // Discard cmds that applies on an older version
-        if (commit_ts > 0 && commit_ts <= obj_version)
+        if (commit_ts > 0 && cce->CommitTs() <= obj_version)
         {
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());

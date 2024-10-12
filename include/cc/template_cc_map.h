@@ -380,13 +380,19 @@ public:
                             shard_->Enqueue(&req);
                             return false;
                         }
-                    }
 
-                    // Set the status as deleted with ts == 1 since we know fore
-                    // sure this key never existed.
-                    cce_ptr->SetCommitTsPayloadStatus(1U,
-                                                      RecordStatus::Deleted);
-                    cce_ptr->SetCkptTs(1U);
+                        // Set the status as deleted with ts == 1 since we know
+                        // fore sure this key never existed.
+                        // Since the key is added to key cache, cce status
+                        // cannot stay as Unknown otherwise this key will not be
+                        // eviected from key cache if the cce is kicked out of
+                        // memory as Unknwon status. To keep the key cache and
+                        // status consistent, set the cce status as deleted to
+                        // indicate does not exist.
+                        cce_ptr->SetCommitTsPayloadStatus(
+                            1U, RecordStatus::Deleted);
+                        cce_ptr->SetCkptTs(1U);
+                    }
                 }
 
                 hd_res->SetFinished();

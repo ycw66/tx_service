@@ -388,6 +388,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
             ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
             cc_req->Reset(
                 cc_ng_id,
+                cc_ng_term,
                 cluster_config_ccm_name_sv,
                 TableType::ClusterConfig,
                 std::string_view(scale_op_blob.data(), scale_op_blob.length()),
@@ -411,6 +412,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
             cc_req = replay_cc_pool_.NextRequest();
             cc_req->Reset(
                 cc_ng_id,
+                cc_ng_term,
                 range_bucket_ccm_name_sv,
                 TableType::RangeBucket,
                 std::string_view(scale_op_blob.data(), scale_op_blob.length()),
@@ -439,6 +441,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
 
             ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
             cc_req->Reset(cc_ng_id,
+                          cc_ng_term,
                           catalog_ccm_name_sv,
                           TableType::Catalog,
                           std::string_view(schema_op_blob.data(),
@@ -496,6 +499,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
             ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
             cc_req->Reset(
                 cc_ng_id,
+                cc_ng_term,
                 table_name_view,
                 TableType::RangePartition,
                 std::string_view(split_range_op_blob.data() + blob_offset,
@@ -523,8 +527,13 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
         // parse and process log records
         const std::string &log_records = msg.binary_log_records();
         ParseDataLogCc *cc_req = parse_datalog_cc_pool_.NextRequest();
-        cc_req->Reset(
-            log_records, cc_ng_id, mux, status, on_fly_cnt, recovery_error);
+        cc_req->Reset(log_records,
+                      cc_ng_id,
+                      cc_ng_term,
+                      mux,
+                      status,
+                      on_fly_cnt,
+                      recovery_error);
         on_fly_cnt.fetch_add(1, std::memory_order_release);
         local_shards_.EnqueueCcRequest(next_core, cc_req);
         next_core = (next_core + 1) % local_shards_.Count();

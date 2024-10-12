@@ -3713,6 +3713,7 @@ public:
 
     void Reset(
         uint32_t ng_id,
+        int64_t ng_term,
         std::string_view table_name_view,
         TableType table_type,
         std::string_view blob,
@@ -3729,7 +3730,14 @@ public:
         table_name_str_ = table_name_view;
         table_name_holder_ = TableName(table_name_str_, table_type);
         TemplatedCcRequest<ReplayLogCc, Void>::Reset(
-            &table_name_holder_, &result_, ng_id, txn, -1);
+            &table_name_holder_,
+            &result_,
+            ng_id,
+            txn,
+            -1,
+            CcProtocol::OCC,
+            IsolationLevel::ReadCommitted,
+            ng_term);
         log_blob_str_ = blob;
         commit_ts_ = commit_ts;
         result_.Reset();
@@ -3754,12 +3762,12 @@ public:
     {
         int64_t cc_ng_candid_term =
             Sharder::Instance().CandidateLeaderTerm(node_group_id_);
-        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-        if (cc_ng_candid_term < 0 && cc_ng_term < 0)
+        if (cc_ng_candid_term < 0 || ng_term_ != cc_ng_candid_term)
         {
             SetFinish();
             return true;
         }
+        assert(Sharder::Instance().LeaderTerm(node_group_id_) < 0);
         if (ccm_ == nullptr)
         {
             assert(table_name_ != nullptr);
@@ -3776,10 +3784,7 @@ public:
                     if (catalog_entry == nullptr)
                     {
                         ccs.FetchCatalog(
-                            base_table_name,
-                            node_group_id_,
-                            std::max(cc_ng_candid_term, cc_ng_term),
-                            this);
+                            base_table_name, node_group_id_, ng_term_, this);
                         return false;
                     }
 
@@ -3816,20 +3821,14 @@ public:
                         // After fetching is finished, this cc request is
                         // re-enqueued for re-execution.
                         ccs.FetchTableRanges(
-                            *table_name_,
-                            this,
-                            node_group_id_,
-                            std::max(cc_ng_candid_term, cc_ng_term));
+                            *table_name_, this, node_group_id_, ng_term_);
                         return false;
                     }
                 }
                 else
                 {
-                    const CatalogEntry *catalog_entry =
-                        ccs.InitCcm(*table_name_,
-                                    node_group_id_,
-                                    std::max(cc_ng_candid_term, cc_ng_term),
-                                    this);
+                    const CatalogEntry *catalog_entry = ccs.InitCcm(
+                        *table_name_, node_group_id_, ng_term_, this);
                     if (catalog_entry != nullptr)
                     {
                         // If FetchCatalogCc failure due to storage fault,
@@ -4013,6 +4012,7 @@ public:
 
     void Reset(const std::string &log_records,
                uint32_t cc_ng_id,
+               int64_t cc_ng_term,
                bthread::Mutex &mux,
                std::atomic<fault::RecoveryService::WaitingStatus> &status,
                std::atomic<uint64_t> &on_fly_cnt,
@@ -4020,6 +4020,8 @@ public:
     {
         log_records_ = log_records;
         cc_ng_id_ = cc_ng_id;
+        cc_ng_term_ = cc_ng_term;
+        assert(cc_ng_term_ >= 0);
         mux_ = &mux;
         status_ = &status;
         on_fly_cnt_ = &on_fly_cnt;
@@ -4103,8 +4105,10 @@ public:
                                  : (dest_core + 1) % ccs.core_cnt_;
                 ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
                 replay_cc_list.push_back(cc_req);
+                assert(cc_ng_term_ >= 0);
                 cc_req->Reset(
                     cc_ng_id_,
+                    cc_ng_term_,
                     table_name_view,
                     table_type,
                     std::string_view(blob.data() + blob_offset, kv_len),
@@ -4140,6 +4144,7 @@ public:
 private:
     std::string log_records_;
     uint32_t cc_ng_id_;
+    int64_t cc_ng_term_{-1};
     bthread::Mutex *mux_;
     std::atomic<fault::RecoveryService::WaitingStatus> *status_;
     std::atomic<uint64_t> *on_fly_cnt_;
