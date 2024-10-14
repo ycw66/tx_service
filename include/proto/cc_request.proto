@@ -289,6 +289,18 @@ message StandbyStartFollowingResponse
     uint32 subscribe_id = 3;
 }
 
+message UpdateStandbyCkptTsRequest
+{
+    uint32 node_group_id = 1;
+    int64 ng_term  =2;
+    uint64 primary_succ_ckpt_ts = 3;
+}
+
+message UpdateStandbyCkptTsResponse
+{
+    bool error = 1;
+}
+
 message UpdateStandbyConsistentTsRequest
 {
     uint32 node_group_id = 1;
@@ -404,6 +416,7 @@ service CcRpcService {
     rpc FetchCatalog(FetchPayloadRequest) returns (FetchPayloadResponse);
     rpc StandbyStartFollowing(StandbyStartFollowingRequest) returns (StandbyStartFollowingResponse);
     rpc UpdateStandbyConsistentTs(UpdateStandbyConsistentTsRequest) returns (UpdateStandbyConsistentTsResponse);
+    rpc UpdateStandbyCkptTs(UpdateStandbyCkptTsRequest) returns (UpdateStandbyCkptTsResponse);
     rpc RequestResendStandbyMessage(RequestResendStandbyMessageRequest) returns (RequestResendStandbyMessageResponse);
     rpc RequestStorageSnapshotSync(StorageSnapshotSyncRequest) returns (StorageSnapshotSyncResponse);
     rpc OnSnapshotSynced(OnSnapshotSyncedRequest) returns (OnSnapshotSyncedResponse);

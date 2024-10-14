@@ -7,6 +7,7 @@
 #include <mutex>
 
 #include "cc_handler_result.h"
+#include "cc_req_misc.h"
 #include "sharder.h"
 #include "type.h"
 
@@ -77,105 +78,9 @@ public:
     {
     }
 
-    void SetFinish()
-    {
-        std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
-        status_->unfinished_tasks_--;
-        // The default value of `truncate_log_ts_` is `0`.
-        if (status_->truncate_log_ts_ == 0)
-        {
-            status_->truncate_log_ts_ = data_sync_ts_;
-        }
-        else
-        {
-            // Update minimum checkpoint timestamp. We use this timestamp to
-            // truncate log at the end.
-            status_->truncate_log_ts_ =
-                std::min(status_->truncate_log_ts_, data_sync_ts_);
-        }
+    void SetFinish();
 
-        if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
-        {
-            if (status_->need_truncate_log_)
-            {
-                if (status_->err_code_ == CcErrorCode::NO_ERROR)
-                {
-                    // Truncate redo log
-                    LOG(INFO) << "Checkpoint of node group #" << node_group_id_
-                              << " succeeded with timestamp: "
-                              << status_->truncate_log_ts_;
-                    if (status_->truncate_log_ts_ != UINT64_MAX)
-                    {
-                        Sharder::Instance().UpdateNodeGroupCkptTs(
-                            node_group_id_, status_->truncate_log_ts_);
-                    }
-
-                    if (!txservice_skip_wal &&
-                        status_->truncate_log_ts_ != UINT64_MAX)
-                    {
-#ifndef RANGE_PARTITION_ENABLED
-                        if (!is_standby_node_ckpt_)
-#endif
-                        {
-                            Sharder::Instance()
-                                .GetLogAgent()
-                                ->UpdateCheckpointTs(node_group_id_,
-                                                     node_group_term_,
-                                                     status_->truncate_log_ts_);
-                        }
-                    }
-                }
-                else
-                {
-                    LOG(INFO) << "Checkpoint of node group #" << node_group_id_
-                              << " finished with timestamp: " << data_sync_ts_
-                              << " with result code: "
-                              << static_cast<uint32_t>(status_->err_code_);
-                }
-            }
-
-            if (task_res_)
-            {
-                if (status_->err_code_ == CcErrorCode::NO_ERROR)
-                {
-                    task_res_->SetFinished();
-                }
-                else
-                {
-                    task_res_->SetError(status_->err_code_);
-                }
-            }
-            status_->cv_.notify_all();
-        }
-    }
-
-    void SetError(CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR)
-    {
-        std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
-        status_->unfinished_tasks_--;
-        status_->err_code_ = err_code;
-        // The default value of `truncate_log_ts_` is `0`.
-        if (status_->truncate_log_ts_ == 0)
-        {
-            status_->truncate_log_ts_ = data_sync_ts_;
-        }
-        else
-        {
-            // Update minimum checkpoint timestamp. We use this timestamp to
-            // truncate log at the end.
-            status_->truncate_log_ts_ =
-                std::min(status_->truncate_log_ts_, data_sync_ts_);
-        }
-
-        if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
-        {
-            if (task_res_)
-            {
-                task_res_->SetError(status_->err_code_);
-            }
-            status_->cv_.notify_all();
-        }
-    }
+    void SetError(CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR);
 
     void SetErrorCode(CcErrorCode err_code)
     {

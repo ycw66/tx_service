@@ -1156,7 +1156,7 @@ void Sharder::UpdateClusterConfig(
                         Sharder::Instance()
                             .GetLocalCcShards()
                             ->GetTxService()
-                            ->ckpt_.GetNewCheckpointTs(node_id_, true, false);
+                            ->ckpt_.GetNewCheckpointTs(node_id_, true);
                     log_agent_->UpdateCheckpointTs(
                         node_id_, last_term, last_ckpt_ts);
                 }

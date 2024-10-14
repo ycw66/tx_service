@@ -1422,6 +1422,25 @@ void CcNodeService::StandbyStartFollowing(
     response->set_subscribe_id(subscribe_id);
     response->set_error(false);
 }
+
+void CcNodeService::UpdateStandbyCkptTs(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::UpdateStandbyCkptTsRequest *request,
+    ::txservice::remote::UpdateStandbyCkptTsResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    if (Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
+    {
+        Sharder::Instance().UpdateNodeGroupCkptTs(
+            request->node_group_id(), request->primary_succ_ckpt_ts());
+    }
+
+    // response does not matter
+    response->set_error(false);
+}
+
 void CcNodeService::UpdateStandbyConsistentTs(
     ::google::protobuf::RpcController *controller,
     const ::txservice::remote::UpdateStandbyConsistentTsRequest *request,
@@ -1429,11 +1448,6 @@ void CcNodeService::UpdateStandbyConsistentTs(
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
-    if (Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
-    {
-        Sharder::Instance().UpdateNodeGroupCkptTs(request->node_group_id(),
-                                                  request->consistent_ts());
-    }
 
     WaitableCc update_consistent_ts_cc;
     for (int32_t seq_grp = 0; seq_grp < request->seq_ids_size(); seq_grp++)

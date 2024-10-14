@@ -1554,6 +1554,9 @@ public:
     const BucketInfo *GetRangeOwnerNoLocking(const int32_t range_id,
                                              const NodeGroupId ng_id) const;
 
+    std::vector<std::pair<uint16_t, NodeGroupId>> GetAllBucketOwners(
+        NodeGroupId node_group_id);
+
     const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
         *GetAllBucketInfos(const NodeGroupId ng_id) const;
 

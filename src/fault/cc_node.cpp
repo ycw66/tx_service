@@ -18,6 +18,7 @@
 #include "sharder.h"
 #include "tx_service.h"
 #include "tx_service_common.h"
+#include "util.h"
 
 namespace txservice::fault
 {
@@ -276,12 +277,36 @@ bool CcNode::OnLeaderStart(int64_t term,
     // Invalidate terms smaller than the new term on this ng.
     Sharder::Instance().SetInvalidLeaderTerm(ng_id_, term - 1);
 
-    int64_t prev_subsribe_term = Sharder::Instance().PrimaryNodeTerm();
-    if (prev_subsribe_term > 0)
+    int64_t prev_standby_term = Sharder::Instance().StandbyNodeTerm();
+    int64_t prev_candidate_standby_term =
+        Sharder::Instance().CandidateStandbyNodeTerm();
+    int64_t prev_subsribe_term = PrimaryTermFromStandbyTerm(prev_standby_term);
+
+    if (prev_standby_term > 0)
     {
+        // Standby pins the node group when processing DDL to avoid leaving
+        // inconsistent state caused by term change during DDL. Wait until all
+        // pins are cleared on this ng before clearing the standby term.
+        {
+            std::unique_lock lk(pinning_threads_mux_);
+            pinning_threads_cv_.wait(lk,
+                                     [this] { return pinning_threads_ == 0; });
+        }
+
         // no longer subscribed to previous term
         Sharder::Instance().SetStandbyNodeTerm(-1);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+    }
+    else if (prev_candidate_standby_term > 0)
+    {
+        // no longer subscribed to previous term
+        // Sharder::Instance().SetStandbyNodeTerm(-1);
+        assert(prev_standby_term < 0);
+        Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+
+        // transfer leader to next node
+        retry = false;
+        return false;
     }
 
     if (!txservice_skip_kv && !local_cc_shards_.store_hd_->IsSharedStorage())
@@ -350,7 +375,7 @@ bool CcNode::OnLeaderStart(int64_t term,
 
         if (!cache_survivied)
         {
-            // if cache does not survive to the next term, clear ccm.
+            //  if cache does not survive to the next term, clear ccm.
             uint16_t core_cnt = local_cc_shards_.Count();
             ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
             for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
@@ -361,10 +386,10 @@ bool CcNode::OnLeaderStart(int64_t term,
             replay_start_ts = 0;
         }
         else if (!txservice_skip_kv &&
-                 !local_cc_shards_.store_hd_->IsSharedStorage())
+                 local_cc_shards_.store_hd_->IsSharedStorage())
         {
-            // Update ckpt ts of cache. This is only needed since for
-            // none-shared kv standby does its own ckpt.
+            // Update ckpt ts of cache. since for non-shared kv, each standby
+            // does its own ckpt and already has ckpt ts set.
             uint16_t core_cnt = local_cc_shards_.Count();
             cache_survivied = true;
             EscalateStandbyCcmCc escalate_cc(core_cnt, last_ckpt_ts_);
@@ -589,6 +614,13 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         }
         else
         {
+            // Wait for data unpin then clear all node_group data
+            {
+                std::unique_lock lk(pinning_threads_mux_);
+                pinning_threads_cv_.wait(
+                    lk, [this] { return pinning_threads_ == 0; });
+            }
+
             // clean old term ccm cache since this node was following on an
             // older term
             Sharder::Instance().SetStandbyNodeTerm(-1);
@@ -606,12 +638,6 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
 
     if (need_clear_ccm)
     {
-        // Wait for data unpin then clear all node_group data
-        {
-            std::unique_lock lk(pinning_threads_mux_);
-            pinning_threads_cv_.wait(lk,
-                                     [this] { return pinning_threads_ == 0; });
-        }
         uint16_t core_cnt = local_cc_shards_.Count();
         ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
         for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)

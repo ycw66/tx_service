@@ -139,6 +139,12 @@ public:
         ::txservice::remote::StandbyStartFollowingResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void UpdateStandbyCkptTs(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::UpdateStandbyCkptTsRequest *request,
+        ::txservice::remote::UpdateStandbyCkptTsResponse *response,
+        ::google::protobuf::Closure *done) override;
+
     void UpdateStandbyConsistentTs(
         ::google::protobuf::RpcController *controller,
         const ::txservice::remote::UpdateStandbyConsistentTsRequest *request,

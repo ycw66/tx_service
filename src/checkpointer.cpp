@@ -8,6 +8,7 @@
 #include "cc_request.h"
 #include "range_slice.h"
 #include "sharder.h"
+#include "standby.h"
 #include "statistics.h"
 #include "tx_start_ts_collector.h"
 
@@ -57,7 +58,7 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
 }
 
 std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
-    uint32_t node_group_id, bool is_last_ckpt, bool is_standby_node)
+    uint32_t node_group_id, bool is_last_ckpt)
 {
     size_t core_cnt = local_shards_.Count();
     CkptTsCc ckpt_req(core_cnt, node_group_id);
@@ -78,10 +79,7 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
     local_shards_.TableRangeHeapUsageReport();
 #endif
 
-    if (!is_standby_node)
-    {
-        ckpt_req.UpdateStandbyConsistentTs();
-    }
+    ckpt_req.UpdateStandbyConsistentTs();
 
     uint64_t ckpt_ts = UINT64_MAX;
     ckpt_ts = ckpt_req.GetCkptTs();
@@ -201,7 +199,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         }
 
         auto [ckpt_ts, mem_usage] =
-            GetNewCheckpointTs(node_group, is_last_ckpt, is_standby_node);
+            GetNewCheckpointTs(node_group, is_last_ckpt);
         uint64_t last_ckpt_ts =
             Sharder::Instance().GetNodeGroupCkptTs(node_group);
 
@@ -327,6 +325,9 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             {
                 assert(standby_node_term < 0 && leader_term >= 0);
                 NotifyLogOfCkptTs(node_group, leader_term, last_succ_ckpt_ts);
+
+                BrocastPrimaryCkptTs(
+                    node_group, leader_term, last_succ_ckpt_ts);
             }
         }
 
@@ -354,7 +355,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 
                 // Note: `status->truncate_log_ts_ may larger than `ckpt_ts`. So
                 // we use `status->truncate_log_ts_` to truncate log.
-                if (status->truncate_log_ts_ > last_ckpt_ts)
+                if (status->truncate_log_ts_ != UINT64_MAX &&
+                    status->truncate_log_ts_ > last_ckpt_ts)
                 {
                     assert(status->truncate_log_ts_ >= ckpt_ts);
                     Sharder::Instance().UpdateNodeGroupCkptTs(
@@ -364,6 +366,9 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                     {
                         assert(standby_node_term < 0 && leader_term >= 0);
                         NotifyLogOfCkptTs(
+                            node_group, leader_term, status->truncate_log_ts_);
+
+                        BrocastPrimaryCkptTs(
                             node_group, leader_term, status->truncate_log_ts_);
                     }
                 }

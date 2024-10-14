@@ -5,6 +5,7 @@
 #include "glog/logging.h"
 #include "proto/cc_request.pb.h"
 #include "tx_id.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -101,5 +102,9 @@ struct StandbySequenceGroup
     std::queue<std::pair<uint64_t, uint64_t>> pending_standby_consistent_ts_;
     bool subscribed_{false};
 };
+
+void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
+                          int64_t node_group_term,
+                          uint64_t primary_ckpt_ts);
 
 };  // namespace txservice

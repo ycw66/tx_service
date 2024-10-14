@@ -23,10 +23,16 @@
 #include "store/data_store_handler.h"
 #include "tx_service.h"
 #include "tx_start_ts_collector.h"
+#include "type.h"
 #include "util.h"
+
+#ifdef ON_KEY_OBJECT
+DECLARE_bool(cmd_read_catalog);
+#endif
 
 namespace txservice
 {
+
 CcShard::CcShard(uint16_t core_id,
                  uint32_t core_cnt,
                  uint32_t node_memory_limit_mb,
@@ -774,6 +780,16 @@ void CcShard::ClearTx(TxNumber txn)
                 {
                     lru_ptr->GetKeyGapLockAndExtraData()->ClearTx();
                 }
+
+#ifdef ON_KEY_OBJECT
+                if (FLAGS_cmd_read_catalog &&
+                    lk_info.table_type_ == TableType::Catalog)
+                {
+                    // Do not recycle the lock on Catalog since it's frequently
+                    // accessed.
+                    continue;
+                }
+#endif
 
                 lru_ptr->RecycleKeyLock(*this);
             }

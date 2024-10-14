@@ -1648,6 +1648,27 @@ BucketInfo *LocalCcShards::GetRangeOwnerInternal(const int32_t range_id,
                                  ng_id);
 }
 
+std::vector<std::pair<uint16_t, NodeGroupId>> LocalCcShards::GetAllBucketOwners(
+    NodeGroupId node_group_id)
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    auto ng_bucket_it = bucket_infos_.find(node_group_id);
+    if (ng_bucket_it == bucket_infos_.end())
+    {
+        return {};
+    }
+
+    std::vector<std::pair<uint16_t, NodeGroupId>> bucket_owners;
+    auto &ng_buckets = ng_bucket_it->second;
+
+    for (const auto &pair : ng_buckets)
+    {
+        bucket_owners.emplace_back(pair.first, pair.second->BucketOwner());
+    }
+
+    return bucket_owners;
+}
+
 const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
     *LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
 {
