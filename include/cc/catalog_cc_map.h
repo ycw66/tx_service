@@ -1807,7 +1807,7 @@ public:
                                NonBlockingLock *>{CcErrorCode::NO_ERROR,
                                                   lock_it->second}
                    : std::pair<CcErrorCode, NonBlockingLock *>{
-                         CcErrorCode::READ_CATALOG_FAIL, nullptr};
+                         CcErrorCode::READ_CATALOG_CONFLICT, nullptr};
     }
 
 private:

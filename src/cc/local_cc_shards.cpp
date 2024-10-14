@@ -900,18 +900,6 @@ void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id, int64_t term)
             }
         }
     }
-    else
-    {
-        for (const auto &[table, image] : prebuilt_tables_)
-        {
-            // FetchCatalog from data store
-            for (auto &shard : cc_shards_)
-            {
-                // TODO(lzx): here should wait table schema loaded.
-                shard->FetchCatalog(table, ng_id, term, nullptr);
-            }
-        }
-    }
 }
 
 void LocalCcShards::PublishMessage(const std::string &chan,

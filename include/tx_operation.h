@@ -1075,6 +1075,7 @@ struct ObjectCommandOp : TransactionOperation
     CcHandlerResult<ReadKeyResult> *lock_bucket_result_;
     uint32_t forward_key_shard_{UINT32_MAX};
 #endif
+    bool catalog_read_success_{};
 };
 
 struct MultiObjectCommandOp : TransactionOperation
@@ -1119,6 +1120,7 @@ struct MultiObjectCommandOp : TransactionOperation
     // [{key shard code, forward key shard code}, ...]
     std::vector<std::pair<uint32_t, uint32_t>> vct_key_shard_code_;
 #endif
+    bool catalog_read_success_{};
 };
 
 // Only acquire key write lock on forward NodeGroup (dirty owner of bucket)

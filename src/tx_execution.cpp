@@ -76,6 +76,9 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       obj_cmd_(this, &lock_bucket_result_),
       multi_obj_cmd_(this, &lock_bucket_result_),
 #endif
+      read_catalog_op_(),
+      catalog_tx_key_(&read_catalog_key_),
+      read_catalog_result_(this),
 #ifdef RANGE_PARTITION_ENABLED
       lock_write_ranges_(&lock_range_result_),
 #else
@@ -404,6 +407,9 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
 
     case CcErrorCode::READ_CATALOG_FAIL:
         return TxErrorCode::READ_CATALOG_FAIL;
+
+    case CcErrorCode::READ_CATALOG_CONFLICT:
+        return TxErrorCode::READ_CATALOG_CONFLICT;
 
     case CcErrorCode::UNDEFINED_ERR:
     default:
@@ -5823,6 +5829,75 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     uint32_t key_shard_code = 0;
     if (!obj_cmd_op.is_running_)
     {
+#ifdef ON_KEY_OBJECT
+        if (FLAGS_cmd_read_catalog && !obj_cmd_op.catalog_read_success_)
+        {
+            // Check and lock the catalog of the table
+            std::string_view table_name_sv =
+                obj_cmd_op.table_name_->StringView();
+            int db_idx = table_name_sv.back() - '0';
+            if (table_name_sv[table_name_sv.size() - 2] != '_')
+            {
+                db_idx = (table_name_sv[table_name_sv.size() - 2] - '0') * 10 +
+                         db_idx;
+            }
+
+            assert(db_idx >= 0 && db_idx < 16);
+            if (!locked_db_[db_idx])
+            {
+                LocalCcHandler *local_hd =
+                    dynamic_cast<LocalCcHandler *>(cc_handler_);
+
+                uint32_t ng_id = TxCcNodeId();
+                int64_t ng_term = TxTerm();
+
+                auto [err_code, lock_struct] = local_hd->ReadCatalog(
+                    *obj_cmd_op.table_name_, ng_id, ng_term, TxNumber());
+                if (err_code == CcErrorCode::NO_ERROR)
+                {
+                    assert(lock_struct != nullptr);
+                    locked_db_[db_idx] = lock_struct;
+                    obj_cmd_op.catalog_read_success_ = true;
+                }
+                else if (err_code == CcErrorCode::READ_CATALOG_FAIL)
+                {
+                    obj_cmd_op.is_running_ = false;
+                    // Read and lock the catalog through read_catalog_op_.
+                    read_catalog_result_.Reset();
+                    read_catalog_result_.Value().Reset();
+                    read_catalog_key_ = CatalogKey(*obj_cmd_op.table_name_);
+                    read_catalog_record_ = CatalogRecord{};
+
+                    read_catalog_op_.Reset(TableName(catalog_ccm_name_sv.data(),
+                                                     catalog_ccm_name_sv.size(),
+                                                     TableType::Catalog),
+                                           &catalog_tx_key_,
+                                           &read_catalog_record_,
+                                           &read_catalog_result_);
+
+                    // Control flow jumps to read_catalog_op_, do not execute
+                    // further after `Process(read_catalog_op_)` returns.
+                    PushOperation(&read_catalog_op_);
+                    Process(read_catalog_op_);
+                    return;
+                }
+                else
+                {
+                    DLOG(WARNING) << "Command read catalog fails, return error";
+
+                    obj_cmd_op.hd_result_.SetError(
+                        CcErrorCode::READ_CATALOG_CONFLICT);
+                    PostProcess(obj_cmd_op);
+                    return;
+                }
+            }
+            else
+            {
+                obj_cmd_op.catalog_read_success_ = true;
+            }
+        }
+#endif
+
 #ifdef RANGE_PARTITION_ENABLED
         if (lock_range_result_.IsFinished())
         {
@@ -5931,46 +6006,6 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     }
 
     obj_cmd_op.is_running_ = true;
-
-#ifdef ON_KEY_OBJECT
-    if (FLAGS_cmd_read_catalog)
-    {
-        // Check and lock the catalog of the table
-        std::string_view table_name_sv = obj_cmd_op.table_name_->StringView();
-        int db_idx = table_name_sv.back() - '0';
-        if (table_name_sv[table_name_sv.size() - 2] != '_')
-        {
-            db_idx =
-                (table_name_sv[table_name_sv.size() - 2] - '0') * 10 + db_idx;
-        }
-
-        assert(db_idx >= 0 && db_idx < 16);
-        if (!locked_db_[db_idx])
-        {
-            LocalCcHandler *local_hd =
-                dynamic_cast<LocalCcHandler *>(cc_handler_);
-
-            uint32_t ng_id = TxCcNodeId();
-            int64_t ng_term = TxTerm();
-
-            auto [err_code, lock_struct] = local_hd->ReadCatalog(
-                *obj_cmd_op.table_name_, ng_id, ng_term, TxNumber());
-            if (err_code == CcErrorCode::NO_ERROR)
-            {
-                assert(lock_struct != nullptr);
-                locked_db_[db_idx] = lock_struct;
-            }
-            else
-            {
-                DLOG(WARNING) << "Command read catalog fails, return error";
-
-                obj_cmd_op.hd_result_.SetError(CcErrorCode::READ_CATALOG_FAIL);
-                PostProcess(obj_cmd_op);
-                return;
-            }
-        }
-    }
-#endif
 
     uint64_t current_ts =
         dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
@@ -6186,6 +6221,81 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
     MultiObjectCommandTxRequest *req = obj_cmd_op.tx_req_;
     const std::vector<TxKey> *vct_key = req->VctKey();
     const std::vector<TxCommand *> *vct_cmd = req->VctCommand();
+
+    if (!obj_cmd_op.is_running_)
+    {
+#ifdef ON_KEY_OBJECT
+        if (FLAGS_cmd_read_catalog && !obj_cmd_op.catalog_read_success_)
+        {
+            // Check and lock the catalog of the table
+            std::string_view table_name_sv = req->table_name_->StringView();
+            int db_idx = table_name_sv.back() - '0';
+            if (table_name_sv[table_name_sv.size() - 2] != '_')
+            {
+                db_idx = (table_name_sv[table_name_sv.size() - 2] - '0') * 10 +
+                         db_idx;
+            }
+
+            assert(db_idx >= 0 && db_idx < 16);
+            if (!locked_db_[db_idx])
+            {
+                LocalCcHandler *local_hd =
+                    dynamic_cast<LocalCcHandler *>(cc_handler_);
+
+                uint32_t ng_id = TxCcNodeId();
+                int64_t ng_term = TxTerm();
+
+                auto [err_code, lock_struct] = local_hd->ReadCatalog(
+                    *req->table_name_, ng_id, ng_term, TxNumber());
+                if (err_code == CcErrorCode::NO_ERROR)
+                {
+                    assert(lock_struct != nullptr);
+                    locked_db_[db_idx] = lock_struct;
+                    obj_cmd_op.catalog_read_success_ = true;
+                }
+                else if (err_code == CcErrorCode::READ_CATALOG_FAIL)
+                {
+                    obj_cmd_op.is_running_ = false;
+                    // Read and lock the catalog through read_catalog_op_.
+                    read_catalog_result_.Reset();
+                    read_catalog_result_.Value().Reset();
+                    read_catalog_key_ = CatalogKey(*req->table_name_);
+                    read_catalog_record_ = CatalogRecord{};
+
+                    read_catalog_op_.Reset(TableName(catalog_ccm_name_sv.data(),
+                                                     catalog_ccm_name_sv.size(),
+                                                     TableType::Catalog),
+                                           &catalog_tx_key_,
+                                           &read_catalog_record_,
+                                           &read_catalog_result_);
+
+                    // Control flow jumps to read_catalog_op_, do not execute
+                    // further after `Process(read_catalog_op_)` returns.
+                    PushOperation(&read_catalog_op_);
+                    Process(read_catalog_op_);
+                    return;
+                }
+                else
+                {
+                    assert(err_code == CcErrorCode::READ_CATALOG_CONFLICT);
+                    DLOG(WARNING) << "MultiObjectCommand read catalog "
+                                     "conflicts, return error";
+
+                    obj_cmd_op.atm_err_code_.store(
+                        CcErrorCode::READ_CATALOG_CONFLICT,
+                        std::memory_order_relaxed);
+                    PostProcess(obj_cmd_op);
+                    return;
+                }
+            }
+            else
+            {
+                obj_cmd_op.catalog_read_success_ = true;
+            }
+        }
+#endif
+    }
+
 #ifdef RANGE_PARTITION_ENABLED
     while (obj_cmd_op.range_lock_cur_ < vct_key->size())
     {
@@ -6275,50 +6385,6 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
             PushOperation(&lock_bucket_op_);
             Process(lock_bucket_op_);
             return;
-        }
-    }
-#endif
-
-#ifdef ON_KEY_OBJECT
-    if (FLAGS_cmd_read_catalog)
-    {
-        // Check and lock the catalog of the table
-        std::string_view table_name_sv = req->table_name_->StringView();
-        int db_idx = table_name_sv.back() - '0';
-        if (table_name_sv[table_name_sv.size() - 2] != '_')
-        {
-            db_idx =
-                (table_name_sv[table_name_sv.size() - 2] - '0') * 10 + db_idx;
-        }
-
-        assert(db_idx >= 0 && db_idx < 16);
-
-        if (!locked_db_[db_idx])
-        {
-            LocalCcHandler *local_hd =
-                dynamic_cast<LocalCcHandler *>(cc_handler_);
-
-            uint32_t ng_id = TxCcNodeId();
-            int64_t ng_term = TxTerm();
-
-            auto [err_code, lock_struct] = local_hd->ReadCatalog(
-                *req->table_name_, ng_id, ng_term, TxNumber());
-            if (err_code == CcErrorCode::NO_ERROR)
-            {
-                assert(lock_struct != nullptr);
-                locked_db_[db_idx] = lock_struct;
-            }
-            else
-            {
-                assert(err_code == CcErrorCode::READ_CATALOG_FAIL);
-                DLOG(WARNING)
-                    << "MultiObjectCommand read catalog fails, return error";
-
-                obj_cmd_op.atm_err_code_.store(CcErrorCode::READ_CATALOG_FAIL,
-                                               std::memory_order_relaxed);
-                PostProcess(obj_cmd_op);
-                return;
-            }
         }
     }
 #endif

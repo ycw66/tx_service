@@ -612,6 +612,14 @@ private:
     // TODO: accommodate for MonographDB
     std::array<NonBlockingLock *, 16> locked_db_{nullptr};
 
+    // TODO(zkl): allocate these fields on heap since they are rarely used.
+    ReadLocalOperation read_catalog_op_;
+    CatalogKey read_catalog_key_;
+    // not used, only need to load the catalog and add read lock
+    CatalogRecord read_catalog_record_;
+    TxKey catalog_tx_key_;
+    CcHandlerResult<ReadKeyResult> read_catalog_result_;
+
     ObjectCommandOp obj_cmd_;
     MultiObjectCommandOp multi_obj_cmd_;
 

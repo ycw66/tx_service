@@ -32,6 +32,10 @@
 #include "type.h"
 #include "util.h"
 
+#ifdef ON_KEY_OBJECT
+DECLARE_bool(cmd_read_catalog);
+#endif
+
 namespace txservice
 {
 class AbortReason
@@ -6049,12 +6053,35 @@ void ObjectCommandOp::Reset(const TableName *table_name,
     lock_bucket_result_->Reset();
     forward_key_shard_ = UINT32_MAX;
 #endif
+    catalog_read_success_ = false;
 }
 
 void ObjectCommandOp::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
+#ifdef ON_KEY_OBJECT
+        if (FLAGS_cmd_read_catalog && !catalog_read_success_)
+        {
+            // Just returned from read_catalog_op_, check read_catalog_result_.
+            const CcHandlerResult<ReadKeyResult> &read_catalog_result =
+                txm->read_catalog_result_;
+            assert(read_catalog_result.IsFinished());
+            if (read_catalog_result.IsError())
+            {
+                // There is an error when read the catalog. The read operation
+                // is set to be errored.
+                hd_result_.SetError(read_catalog_result.ErrorCode());
+
+                txm->PostProcess(*this);
+                return;
+            }
+
+            txm->Process(*this);
+            return;
+        }
+#endif
+
 #ifdef RANGE_PARTITION_ENABLED
         // Just returned from LockReadRangeOp, check lock_range_result_.
         assert(lock_range_result_->IsFinished());
@@ -6088,10 +6115,6 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             // There is an error when getting the input key's bucket. The
             // read operation is set to be errored.
             hd_result_.SetError(lock_bucket_result_->ErrorCode());
-
-            bool force_error = hd_result_.ForceError();
-            (void) force_error;
-            assert(force_error);
 
             txm->PostProcess(*this);
             return;
@@ -6312,12 +6335,36 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
     lock_bucket_result_->Reset();
     lock_bucket_result_->Value().Reset();
 #endif
+    catalog_read_success_ = false;
 }
 
 void MultiObjectCommandOp::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
+#ifdef ON_KEY_OBJECT
+        if (FLAGS_cmd_read_catalog && !catalog_read_success_)
+        {
+            // Just returned from read_catalog_op_, check read_catalog_result_.
+            const CcHandlerResult<ReadKeyResult> &read_catalog_result =
+                txm->read_catalog_result_;
+            assert(read_catalog_result.IsFinished());
+            if (read_catalog_result.IsError())
+            {
+                // There is an error when reading the catalog. This operation is
+                // set to be errored.
+                atm_err_code_.store(CcErrorCode::READ_CATALOG_FAIL,
+                                    std::memory_order_relaxed);
+
+                txm->PostProcess(*this);
+                return;
+            }
+
+            txm->Process(*this);
+            return;
+        }
+#endif
+
 #ifdef RANGE_PARTITION_ENABLED
         assert(lock_range_result_->IsFinished());
         const std::vector<TxKey> *vct_key = tx_req_->VctKey();
