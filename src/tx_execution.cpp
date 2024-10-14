@@ -1523,6 +1523,7 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
                 req->SetError(TxErrorCode::TX_INIT_FAIL);
             }
         }
+
         return;
     }
 
@@ -1543,6 +1544,7 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
 #else
     uint64_resp_->Finish(tx_number);
 #endif
+    uint64_resp_ = nullptr;
 }
 
 /**
@@ -1648,6 +1650,7 @@ void TransactionExecution::Process(ReadOperation &read)
                         assert(state_stack_.empty());
                         rtp_resp_->Finish(std::pair<RecordStatus, uint64_t>(
                             RecordStatus::Deleted, 0));
+                        rtp_resp_ = nullptr;
                     }
                     else
                     {
@@ -1656,6 +1659,7 @@ void TransactionExecution::Process(ReadOperation &read)
                         assert(state_stack_.empty());
                         rtp_resp_->Finish(std::pair<RecordStatus, uint64_t>(
                             RecordStatus::Normal, 0));
+                        rtp_resp_ = nullptr;
                     }
                     return;
                 }
@@ -1890,6 +1894,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         DLOG(ERROR) << "ReadOperation failed for cc error:"
                     << read_.hd_result_.ErrorMsg() << "; txn: " << TxNumber();
         rtp_resp_->FinishError(ConvertCcError(read_.hd_result_.ErrorCode()));
+        rtp_resp_ = nullptr;
     }
     else
     {
@@ -1949,7 +1954,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                         << " ,table: " << table_name->String();
                     rtp_resp_->FinishError(
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
-
+                    rtp_resp_ = nullptr;
                     return;
                 }
             }
@@ -1998,6 +2003,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
         rtp_resp_->Finish(std::pair<RecordStatus, uint64_t>(
             read_res.rec_status_, read_res.ts_));
+        rtp_resp_ = nullptr;
     }
 }
 
@@ -2163,6 +2169,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
         uint64_resp_->FinishError(
             ConvertCcError(scan_open.hd_result_.ErrorCode()));
+        uint64_resp_ = nullptr;
 
         if (open_result.scanner_ != nullptr)
         {
@@ -2233,6 +2240,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     if (uint64_resp_ != nullptr)
     {
         uint64_resp_->Finish(open_result.scan_alias_);
+        uint64_resp_ = nullptr;
     }
 }
 
@@ -2256,6 +2264,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         if (scan_it == scans_.end())
         {
             bool_resp_->FinishError(TxErrorCode::NG_TERM_CHANGED);
+            bool_resp_ = nullptr;
             state_stack_.pop_back();
             return;
         }
@@ -2522,6 +2531,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                     << scan_next.hd_result_.ErrorMsg();
         bool_resp_->FinishError(
             ConvertCcError(scan_next.hd_result_.ErrorCode()));
+        bool_resp_ = nullptr;
         return;
     }
 #ifdef RANGE_PARTITION_ENABLED
@@ -2535,6 +2545,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                     << scan_next.tx_req_->table_name_.StringView();
         bool_resp_->FinishError(
             ConvertCcError(scan_next.slice_hd_result_.ErrorCode()));
+        bool_resp_ = nullptr;
         return;
     }
 #endif
@@ -2661,6 +2672,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         DrainScanner(&scanner, table_name);
                         bool_resp_->FinishError(
                             TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                        bool_resp_ = nullptr;
                         return;
                     }
                 }
@@ -2888,6 +2900,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         DrainScanner(&scanner, table_name);
                         bool_resp_->FinishError(
                             TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                        bool_resp_ = nullptr;
                         return;
                     }
                 }
@@ -3033,6 +3046,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 #else
     bool_resp_->Finish(false);
 #endif
+    bool_resp_ = nullptr;
 }
 
 void TransactionExecution::ScanClose(
@@ -3166,9 +3180,11 @@ void TransactionExecution::Upsert(const TableName &table_name,
         TxErrorCode::NO_ERROR)
     {
         void_resp_->FinishError(err_code);
+        void_resp_ = nullptr;
         return;
     }
     void_resp_->Finish(void_);
+    void_resp_ = nullptr;
 }
 
 void TransactionExecution::Commit()
@@ -3176,6 +3192,8 @@ void TransactionExecution::Commit()
     if (tx_term_ < 0)
     {
         bool_resp_->Finish(false);
+        bool_resp_ = nullptr;
+
         // transaction can be recycled and put into free list.
         tx_status_.store(TxnStatus::Finished, std::memory_order_release);
         Reset();
@@ -3242,6 +3260,7 @@ void TransactionExecution::Abort()
         if (bool_resp_ != nullptr)
         {
             bool_resp_->Finish(false);
+            bool_resp_ = nullptr;
         }
 
         // transaction can be recycled and put into free list.
@@ -4558,6 +4577,8 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         {
             bool_resp_->Finish(false);
         }
+
+        bool_resp_ = nullptr;
     }
 #ifdef ON_KEY_OBJECT
     else if (rec_resp_ != nullptr)
@@ -4910,6 +4931,7 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
             {
                 bool_resp_->Finish(false);
             }
+            bool_resp_ = nullptr;
         }
 #ifdef ON_KEY_OBJECT
         else if (rec_resp_ != nullptr)
@@ -5270,6 +5292,8 @@ void TransactionExecution::PostProcess(ReloadCacheOperation &reload_cache_op)
     {
         void_resp_->Finish(void_);
     }
+
+    void_resp_ = nullptr;
 }
 
 void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)
@@ -5313,6 +5337,7 @@ void TransactionExecution::PostProcess(FaultInjectOp &fault_inject_op_)
     assert(state_stack_.empty());
 
     bool_resp_->Finish(fault_inject_op_.succeed_);
+    bool_resp_ = nullptr;
 }
 
 void TransactionExecution::ProcessTxRequest(
@@ -5381,6 +5406,7 @@ void TransactionExecution::PostProcess(CleanCcEntryForTestOp &clean_entry_op)
     assert(state_stack_.empty());
 
     bool_resp_->Finish(clean_entry_op.succeed_);
+    bool_resp_ = nullptr;
 }
 
 void TransactionExecution::Process(AnalyzeTableAllOp &analyze_table_all_op)
@@ -5435,11 +5461,13 @@ void TransactionExecution::PostProcess(AnalyzeTableAllOp &analyze_table_all_op)
                    << analyze_table_all_op.hd_result_.ErrorMsg();
         void_resp_->FinishError(
             ConvertCcError(analyze_table_all_op.hd_result_.ErrorCode()));
+        void_resp_ = nullptr;
     }
     else
     {
         DLOG(INFO) << "txm notifies analyze tx request ";
         void_resp_->Finish(void_);
+        void_resp_ = nullptr;
     }
 }
 
@@ -5501,11 +5529,13 @@ void TransactionExecution::PostProcess(BroadcastStatisticsOp &broadcast_stat_op)
                    << broadcast_stat_op.hd_result_.ErrorMsg();
         void_resp_->FinishError(
             ConvertCcError(broadcast_stat_op.hd_result_.ErrorCode()));
+        void_resp_ = nullptr;
     }
     else
     {
         DLOG(INFO) << "txm notifies broadcast tx request ";
         void_resp_->Finish(void_);
+        void_resp_ = nullptr;
     }
 }
 
@@ -6916,6 +6946,7 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
                        "Error code: "
                     << (int) lock_range_result_.ErrorCode();
         void_resp_->FinishError(ConvertCcError(lock_range_result_.ErrorCode()));
+        void_resp_ = nullptr;
         return;
     }
 #endif
@@ -6982,10 +7013,12 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
     if (err == CcErrorCode::NO_ERROR)
     {
         void_resp_->Finish(void_);
+        void_resp_ = nullptr;
     }
     else
     {
         void_resp_->FinishError(ConvertCcError(err));
+        void_resp_ = nullptr;
     }
 }
 
