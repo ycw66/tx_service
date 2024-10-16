@@ -1755,8 +1755,6 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
         }
     }
 
-    std::unordered_map<NodeGroupId, uint16_t> ng_buckets;
-    // std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     // Insert bucket ids into the map.
     auto it = rand_num_to_ng.begin();
     for (uint16_t bucket_id = 0; bucket_id < total_range_buckets; bucket_id++)
@@ -1772,8 +1770,6 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
                                 : it->second;
         ng_bucket_infos.try_emplace(
             bucket_id, std::make_unique<BucketInfo>(ng_id, version));
-        auto res_pair = ng_buckets.try_emplace(ng_id, 0);
-        res_pair.first->second++;
     }
 }
 

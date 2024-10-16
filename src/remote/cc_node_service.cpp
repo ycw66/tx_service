@@ -25,6 +25,7 @@
 namespace txservice
 {
 thread_local CcRequestPool<ResendStandbyMessageCc> resend_standby_msg_pool_;
+thread_local CcRequestPool<ReadCc> read_pool;
 
 namespace remote
 {
@@ -1214,7 +1215,7 @@ void CcNodeService::FetchPayload(
         return;
     }
 
-    ReadCc read_cc;
+    ReadCc *read_cc = read_pool.NextRequest();
     bthread::Mutex mux;
     bthread::ConditionVariable cv;
     bool finished = false;
@@ -1224,14 +1225,14 @@ void CcNodeService::FetchPayload(
     {
         std::unique_lock<bthread::Mutex> lk(mux);
         finished = true;
-        cv.notify_all();
+        cv.notify_one();
     };
 
     TableName table_name(
         request->table_name_str(),
         ToLocalType::ConvertCcTableType(request->table_type()));
     // The first 32bits of standby term is the primary node ng term.
-    read_cc.Reset(
+    read_cc->Reset(
         &table_name,
         &request->key_str(),
         request->key_shard_code(),
@@ -1249,10 +1250,10 @@ void CcNodeService::FetchPayload(
         true);
 
     // Send read cc to get the payload
-    local_shards_.EnqueueCcRequest(request->key_shard_code(), &read_cc);
+    local_shards_.EnqueueCcRequest(request->key_shard_code(), read_cc);
     {
         std::unique_lock<bthread::Mutex> lk(mux);
-        while (!res.IsFinished())
+        while (!finished)
         {
             cv.wait(lk);
         }
@@ -1298,7 +1299,7 @@ void CcNodeService::FetchCatalog(
         return;
     }
 
-    ReadCc read_cc;
+    ReadCc *read_cc = read_pool.NextRequest();
     bthread::Mutex mux;
     bthread::ConditionVariable cv;
     bool finished = false;
@@ -1307,7 +1308,7 @@ void CcNodeService::FetchCatalog(
     {
         std::unique_lock<bthread::Mutex> lk(mux);
         finished = true;
-        cv.notify_all();
+        cv.notify_one();
     };
     TableName table_name(
         request->table_name_str(),
@@ -1319,7 +1320,7 @@ void CcNodeService::FetchCatalog(
     TxKey tx_key(&catalog_key);
     CatalogRecord catalog_rec;
     // The first 32bits of standby term is the primary node ng term.
-    read_cc.Reset(
+    read_cc->Reset(
         &table_name,
         &tx_key,
         request->key_shard_code(),
@@ -1338,7 +1339,7 @@ void CcNodeService::FetchCatalog(
         false);
 
     // Send read cc to get the payload
-    local_shards_.EnqueueCcRequest(request->key_shard_code(), &read_cc);
+    local_shards_.EnqueueCcRequest(request->key_shard_code(), read_cc);
     {
         std::unique_lock<bthread::Mutex> lk(mux);
         while (!res.IsFinished())

@@ -837,7 +837,7 @@ public:
         if (cntl_.Failed())
         {
             // RPC failed.
-            LOG(ERROR) << "Failed for Fetch Payload RPC request of ng#"
+            LOG(ERROR) << "Failed for FetchCatalog RPC request of ng#"
                        << request_.node_group_id()
                        << ", with Error code: " << cntl_.ErrorCode()
                        << ". Error Msg: " << cntl_.ErrorText();
@@ -848,7 +848,7 @@ public:
 
                 self_guard.release();
                 // Retry if timeout.
-                DLOG(INFO) << "Retry after EOVERCROWDED fetch record "
+                DLOG(INFO) << "Retry after EOVERCROWDED FetchCatalog "
                               "service of ng#"
                            << request_.node_group_id();
                 cntl_.Reset();
@@ -856,22 +856,22 @@ public:
                 remote::CcRpcService_Stub stub(channel_.get());
                 cntl_.set_timeout_ms(5000);
                 cntl_.set_write_to_socket_in_background(true);
-                stub.FetchPayload(&cntl_, &request_, &response_, this);
+                stub.FetchCatalog(&cntl_, &request_, &response_, this);
                 return;
             }
             if (cntl_.ErrorCode() == brpc::ERPCTIMEDOUT)
             {
                 self_guard.release();
                 // Retry if timeout.
-                DLOG(INFO) << "Fetch payload request timed out. Retry fetch "
-                              "payload service of ng#"
+                DLOG(INFO) << "Fetch catalog request timed out. Retry "
+                              "FetchCatalog service of ng#"
                            << request_.node_group_id();
                 cntl_.Reset();
                 response_.Clear();
                 remote::CcRpcService_Stub stub(channel_.get());
                 cntl_.set_timeout_ms(5000);
                 cntl_.set_write_to_socket_in_background(true);
-                stub.FetchPayload(&cntl_, &request_, &response_, this);
+                stub.FetchCatalog(&cntl_, &request_, &response_, this);
                 return;
             }
             Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
@@ -901,17 +901,16 @@ public:
             {
                 self_guard.release();
                 // Retry until primary node term has changed.
-                DLOG(INFO) << "Fetch payload failed with "
+                DLOG(INFO) << "Fetch catalog failed with "
                            << CcErrorMessage(err_code)
-                           << ". Retry fetch "
-                              "payload service of ng#"
+                           << ". Retry FetchCatalog service of ng#"
                            << request_.node_group_id();
                 cntl_.Reset();
                 response_.Clear();
                 remote::CcRpcService_Stub stub(channel_.get());
                 cntl_.set_timeout_ms(5000);
                 cntl_.set_write_to_socket_in_background(true);
-                stub.FetchPayload(&cntl_, &request_, &response_, this);
+                stub.FetchCatalog(&cntl_, &request_, &response_, this);
                 return;
             }
             else

@@ -3760,14 +3760,18 @@ public:
     // should never access this object after Execute returns
     bool Execute(CcShard &ccs) override
     {
-        int64_t cc_ng_candid_term =
+        int64_t cur_term =
             Sharder::Instance().CandidateLeaderTerm(node_group_id_);
-        if (cc_ng_candid_term < 0 || ng_term_ != cc_ng_candid_term)
+        if (cur_term < 0)
+        {
+            cur_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        }
+        if (cur_term < 0 || ng_term_ != cur_term)
         {
             SetFinish();
             return true;
         }
-        assert(Sharder::Instance().LeaderTerm(node_group_id_) < 0);
+
         if (ccm_ == nullptr)
         {
             assert(table_name_ != nullptr);
