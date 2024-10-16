@@ -1342,7 +1342,7 @@ void CcNodeService::FetchCatalog(
     local_shards_.EnqueueCcRequest(request->key_shard_code(), read_cc);
     {
         std::unique_lock<bthread::Mutex> lk(mux);
-        while (!res.IsFinished())
+        while (!finished)
         {
             cv.wait(lk);
         }
