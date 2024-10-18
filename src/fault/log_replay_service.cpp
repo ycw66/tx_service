@@ -690,14 +690,15 @@ void RecoveryService::WaitAndClearRequests(brpc::StreamId stream_id,
                                            WaitingStatus waiting_status)
 {
     size_t on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
-    if (on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll ||
-        on_fly_cnt > 10000 && waiting_status == WaitingStatus::WaitForMany)
+    if ((on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll) ||
+        (on_fly_cnt > 10000 && waiting_status == WaitingStatus::WaitForMany))
     {
         status.store(waiting_status, std::memory_order_relaxed);
         on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
-        while (on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll ||
-               on_fly_cnt > 10000 &&
-                   waiting_status == WaitingStatus::WaitForMany)
+        while (
+            (on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll) ||
+            (on_fly_cnt > 10000 &&
+             waiting_status == WaitingStatus::WaitForMany))
         {
             bthread_usleep(100);
             on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);

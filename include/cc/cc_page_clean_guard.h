@@ -268,7 +268,7 @@ public:
     {
     }
 
-    bool CleanSuccess() const
+    bool CleanSuccess() const override
     {
         // If we're just doing regular page clean, clean_succecss is always
         // true.

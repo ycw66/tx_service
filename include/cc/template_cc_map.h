@@ -4275,7 +4275,7 @@ public:
             }
 
             auto scan_batch_func =
-                [this, &scan_tuple_func](
+                [&scan_tuple_func](
                     CcPage<KeyT, ValueT> *ccp,
                     size_t start_idx,
                     size_t end_idx) -> std::pair<ScanReturnType, CcErrorCode>
@@ -4652,7 +4652,7 @@ public:
             }
 
             auto scan_batch_func =
-                [this, &scan_tuple_func](
+                [&scan_tuple_func](
                     CcPage<KeyT, ValueT> *ccp,
                     ssize_t start_idx,
                     ssize_t end_idx) -> std::pair<ScanReturnType, CcErrorCode>

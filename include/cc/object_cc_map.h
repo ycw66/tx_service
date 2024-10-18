@@ -76,13 +76,13 @@ public:
     using CcMap::table_schema_;
     using TemplateCcMap<KeyT, ValueT>::Find;
     using TemplateCcMap<KeyT, ValueT>::FindEmplace;
-    using TemplateCcMap<KeyT, ValueT>::Iterator;
+    using typename TemplateCcMap<KeyT, ValueT>::Iterator;
     using TemplateCcMap<KeyT, ValueT>::KeySchema;
     using TemplateCcMap<KeyT, ValueT>::RecordSchema;
     using TemplateCcMap<KeyT, ValueT>::Type;
     using TemplateCcMap<KeyT, ValueT>::CleanEntry;
 
-    bool Execute(ApplyCc &req)
+    bool Execute(ApplyCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -992,7 +992,7 @@ public:
         return true;
     }
 
-    bool Execute(PostWriteCc &req)
+    bool Execute(PostWriteCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -1339,7 +1339,7 @@ public:
         return req.SetFinish();
     }
 
-    bool Execute(UploadTxCommandsCc &req)
+    bool Execute(UploadTxCommandsCc &req) override
     {
         TxNumber txn = req.Txn();
         uint64_t obj_version = req.ObjectVersion();
@@ -1428,7 +1428,7 @@ public:
         return true;
     }
 
-    bool Execute(KeyObjectStandbyForwardCc &req)
+    bool Execute(KeyObjectStandbyForwardCc &req) override
     {
         uint64_t schema_version = req.SchemaVersion();
         if (schema_version < schema_ts_)
@@ -1591,7 +1591,7 @@ public:
         return true;
     }
 
-    bool Execute(ReplayLogCc &req)
+    bool Execute(ReplayLogCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,

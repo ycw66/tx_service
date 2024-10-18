@@ -1364,21 +1364,21 @@ public:
 
     void UpdateCcEntry(const SliceDataItem &data_item, bool enable_mvcc)
     {
-        const ValueT *record =
-            static_cast<const ValueT *>(data_item.record_.get());
-
 #ifdef RANGE_PARTITION_ENABLED
         // Initialize the data store size if it is unspecified
         // before
         if (data_store_size_ == INT32_MAX)
         {
-            data_store_size_ = data_item.is_deleted_
-                                   ? 0
-                                   : data_item.key_.Size() + record->Size();
+            data_store_size_ =
+                data_item.is_deleted_
+                    ? 0
+                    : data_item.key_.Size() + data_item.record_->Size();
         }
 #endif
 
 #ifndef ON_KEY_OBJECT
+        const ValueT *record =
+            static_cast<const ValueT *>(data_item.record_.get());
         // If the in-memory version is from a upload request (i.e.
         // generated sk record from pk), the data store version
         // might be newer. Only overwrite if in memory version is

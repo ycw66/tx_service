@@ -232,7 +232,7 @@ struct TableName
     bool operator<(const TableName &rhs) const
     {
         return type_ < rhs.type_ ||
-               type_ == rhs.type_ && this->StringView() < rhs.StringView();
+               (type_ == rhs.type_ && this->StringView() < rhs.StringView());
     }
 
     std::string_view StringView() const

@@ -4153,7 +4153,6 @@ private:
     std::atomic<fault::RecoveryService::WaitingStatus> *status_;
     std::atomic<uint64_t> *on_fly_cnt_;
     bool *recovery_error_;
-    uint16_t next_core_ = 0;
 };
 
 struct BroadcastStatisticsCc
