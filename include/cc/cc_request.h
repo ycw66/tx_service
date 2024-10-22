@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "catalog_key_record.h"
 #include "cc/cc_map.h"
 #include "cc/cc_shard.h"
 #include "cc/ccm_scanner.h"
@@ -4739,6 +4740,11 @@ public:
         {
             resume_key_.emplace_back(TxKey());
         }
+
+        if (clean_type == CleanType::CleanCcm)
+        {
+            ddl_err_code_ = {false, CcErrorCode::NO_ERROR};
+        }
     }
 
     KickoutCcEntryCc(const KickoutCcEntryCc &rhs) = delete;
@@ -4773,6 +4779,11 @@ public:
         start_key_str_ = nullptr;
         end_key_str_ = nullptr;
         resume_key_.resize(core_cnt);
+
+        if (clean_type == CleanType::CleanCcm)
+        {
+            ddl_err_code_ = {false, CcErrorCode::NO_ERROR};
+        }
     }
 
     void Reset(const TableName &table_name,
@@ -4803,11 +4814,16 @@ public:
         range_version_ = range_version;
         resume_key_.clear();
         resume_key_.resize(core_cnt);
+        if (clean_type == CleanType::CleanCcm)
+        {
+            ddl_err_code_ = {false, CcErrorCode::NO_ERROR};
+        }
     }
 
     bool Execute(CcShard &ccs) override
     {
         int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+
         if (ng_term < 0)
         {
             return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
@@ -4815,15 +4831,75 @@ public:
 
         if (clean_type_ == CleanType::CleanCcm)
         {
-            if (!CleanCcMap(ccs))
-            {
-                // Current ccmap has more page
-                // Yield
-                ccs.Enqueue(ccs.LocalCoreId(), this);
-                return false;
-            }
+            // only the first core can safely access `ddl_err_code`
+            // the value of `ddl_err_code_.first` will be updated to true before
+            // calling `UpsertTable` function.
+            bool is_ddl_phase =
+                ccs.core_id_ == 0 && ddl_err_code_.first == true;
 
-            return SetFinish();
+            if (!is_ddl_phase)
+            {
+                if (!CleanCcMap(ccs))
+                {
+                    // Current ccmap has more page
+                    // Yield
+                    ccs.Enqueue(ccs.LocalCoreId(), this);
+                    return false;
+                }
+
+                if (ccs.core_id_ == 0 && !txservice_skip_kv &&
+                    !Sharder::Instance()
+                         .GetDataStoreHandler()
+                         ->IsSharedStorage())
+                {
+                    const CatalogEntry *catalog_entry =
+                        ccs.GetCatalog(*table_name_, node_group_id_);
+                    if (catalog_entry == nullptr)
+                    {
+                        //  Fetch catalog
+                        ccs.FetchCatalog(
+                            *table_name_, node_group_id_, ng_term, this);
+                        return false;
+                    }
+
+                    if (catalog_entry->schema_ != nullptr)
+                    {
+                        assert(ccs.core_id_ == 0);
+                        // Enter ddl phase, update the value of
+                        // `ddl_err_code.first` to true
+                        ddl_err_code_ = {true, CcErrorCode::NO_ERROR};
+                        Sharder::Instance().GetDataStoreHandler()->UpsertTable(
+                            catalog_entry->schema_.get(),
+                            OperationType::TruncateTable,
+                            clean_ts_,
+                            node_group_id_,
+                            ng_term,
+                            nullptr,
+                            nullptr,
+                            this,
+                            &ccs,
+                            &ddl_err_code_.second);
+                        return false;
+                    }
+                }
+
+                return SetFinish();
+            }
+            else
+            {
+                assert(ccs.core_id_ == 0);
+                if (ddl_err_code_.first)
+                {
+                    if (ddl_err_code_.second != CcErrorCode::NO_ERROR)
+                    {
+                        return SetError(ddl_err_code_.second);
+                    }
+                    else
+                    {
+                        return SetFinish();
+                    }
+                }
+            }
         }
 
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -5047,6 +5123,9 @@ private:
     std::vector<TxKey> resume_key_;
     std::atomic_uint16_t unfinished_cnt_{0};
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
+
+    // Only first core can access `ddl_err_code_`
+    std::pair<bool, CcErrorCode> ddl_err_code_;
 };
 
 struct ReleaseDataSyncScanHeapCc : public CcRequestBase
@@ -5969,9 +6048,10 @@ public:
             std::string_view(fwd_req_->table_name().data()), table_type);
         uint32_t ng_id = fwd_req_->key_shard_code() >> 10;
 
-        // tx number here does not matter since we won't acquire any lock.
+        uint64_t txn = fwd_req_->tx_number();
+
         TemplatedCcRequest<KeyObjectStandbyForwardCc, Void>::Reset(
-            &remote_table_name_, hres, ng_id, 0, 0);
+            &remote_table_name_, hres, ng_id, txn, 0);
         cmds_vec_.clear();
         cmds_vec_.reserve(fwd_req_->cmd_list_size());
         for (int idx = 0; idx < fwd_req_->cmd_list_size(); ++idx)
@@ -6003,9 +6083,10 @@ public:
             std::string_view(fwd_req_->table_name().data()), table_type);
         uint32_t ng_id = fwd_req_->key_shard_code() >> 10;
 
-        // tx number here does not matter since we won't acquire any lock.
+        uint64_t txn = fwd_req_->tx_number();
+
         TemplatedCcRequest<KeyObjectStandbyForwardCc, Void>::Reset(
-            &remote_table_name_, nullptr, ng_id, 0, 0);
+            &remote_table_name_, nullptr, ng_id, txn, 0);
         cmds_vec_.clear();
         cmds_vec_.reserve(fwd_req_->cmd_list_size());
         for (int idx = 0; idx < fwd_req_->cmd_list_size(); ++idx)

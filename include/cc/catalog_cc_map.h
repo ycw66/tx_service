@@ -462,13 +462,21 @@ public:
                 }
                 else
                 {
+                    assert(req.PayloadStr() != nullptr);
                     // When the request comes from a remote tx, allocates a
                     // schema record, which acts as a container referencing the
                     // current and dirty schema pair.
-                    std::unique_ptr<CatalogRecord> empty_rec =
+                    std::unique_ptr<CatalogRecord> decoded_rec =
                         std::make_unique<CatalogRecord>();
-                    schema_rec = empty_rec.get();
-                    req.SetDecodedPayload(std::move(empty_rec));
+                    if (req.OpType() != OperationType::DropTable)
+                    {
+                        size_t offset = 0;
+                        decoded_rec->Deserialize(req.PayloadStr()->data(),
+                                                 offset);
+                    }
+
+                    schema_rec = decoded_rec.get();
+                    req.SetDecodedPayload(std::move(decoded_rec));
                 }
 
                 if (req.OpType() == OperationType::CreateTable)
@@ -589,6 +597,7 @@ public:
                         shard_->GetNextStandbyForwardEntry();
                     auto *forward_req = &forward_entry->Request();
                     forward_req->set_primary_leader_term(ng_term);
+                    forward_req->set_tx_number(req.Txn());
                     forward_req->set_table_name(table_name_.String());
                     forward_req->set_table_type(
                         remote::ToRemoteType::ConvertTableType(
@@ -1541,6 +1550,23 @@ public:
             cce = it->second;
             ccp = it.GetPage();
         }
+
+        if (commit_ts <= cce->CommitTs())
+        {
+            // discard outdate request
+
+            if (shard_->core_id_ + 1 == shard_->core_cnt_)
+            {
+                req.SetFinish();
+                return true;
+            }
+            else
+            {
+                MoveRequest(&req, shard_->core_id_ + 1);
+                return false;
+            }
+        }
+
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
@@ -1767,6 +1793,7 @@ public:
         int64_t ng_term,
         TxNumber tx_number)
     {
+        bool read_success = false;
         auto lock_it = table_locks_.find(table_name.StringView());
         if (lock_it == table_locks_.end())
         {
@@ -1793,21 +1820,28 @@ public:
             assert(catalog_entry != nullptr && catalog_entry->Version() > 0);
             assert(catalog_entry->schema_ != nullptr);
 
-            // upload catalog record
-            catalog_cce->payload_ = std::make_unique<CatalogRecord>();
-            catalog_cce->payload_->Set(catalog_entry->schema_,
-                                       catalog_entry->dirty_schema_,
-                                       catalog_entry->Version());
-            catalog_cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
-                                                  RecordStatus::Normal);
-
             NonBlockingLock *lock =
                 &catalog_cce->GetOrCreateKeyLock(shard_, this, catalog_ccp);
             auto res = table_locks_.try_emplace(table_name.StringView(), lock);
             lock_it = res.first;
+            read_success = lock_it->second->AcquireReadLockFast(tx_number);
+            if (read_success &&
+                catalog_cce->PayloadStatus() == RecordStatus::Unknown)
+            {
+                // upload catalog record
+                catalog_cce->payload_ = std::make_unique<CatalogRecord>();
+                catalog_cce->payload_->Set(catalog_entry->schema_,
+                                           catalog_entry->dirty_schema_,
+                                           catalog_entry->Version());
+                catalog_cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
+                                                      RecordStatus::Normal);
+            }
+        }
+        else
+        {
+            read_success = lock_it->second->AcquireReadLockFast(tx_number);
         }
 
-        bool read_success = lock_it->second->AcquireReadLockFast(tx_number);
         return read_success
                    ? std::pair<CcErrorCode,
                                NonBlockingLock *>{CcErrorCode::NO_ERROR,

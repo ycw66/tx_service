@@ -717,10 +717,11 @@ public:
                 cce->SetForwardEntry(forward_entry);
                 forward_req = &forward_entry->Request();
                 forward_req->set_primary_leader_term(ng_term);
+                forward_req->set_tx_number(req.Txn());
                 forward_req->set_table_name(table_name_.String());
                 forward_req->set_table_type(
                     remote::ToRemoteType::ConvertTableType(table_name_.Type()));
-                forward_req->set_key_shard_code(req.key_shard_code_ & 0x3FF);
+                forward_req->set_key_shard_code(req.key_shard_code_);
                 std::string key_str;
 
                 if (req.Key() == nullptr)
@@ -1847,6 +1848,13 @@ public:
                   RecordStatus status,
                   std::string &rec_str) override
     {
+        if (commit_ts > 1 && commit_ts < schema_ts_)
+        {
+            DLOG(INFO) << "BackFill: discard, commit_ts: " << commit_ts
+                       << ", schema_ts: " << schema_ts_;
+            return true;
+        }
+
         CcEntry<KeyT, ValueT> *cce =
             static_cast<CcEntry<KeyT, ValueT> *>(entry);
         LruPage *ccp = cce->GetCcPage();

@@ -27,6 +27,7 @@
 #include "tx_key.h"
 #include "tx_request.h"
 #include "tx_service.h"
+#include "tx_service_common.h"
 #include "tx_trace.h"
 #include "tx_worker_pool.h"
 #include "type.h"
@@ -2756,19 +2757,47 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             if (op_type_ == OperationType::DropTable ||
                 op_type_ == OperationType::TruncateTable)
             {
-                op_ = &upsert_kv_table_op_;
-                // Read table schema from local cc shard. This is because we
-                // could be recovering from commit stage, in which case we
-                // have skipped post_all_intent_op_ and the schema in
-                // catalog_rec_ would be empty.
-                LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-                auto catalog_entry =
-                    shards->GetCatalog(table_key_.Name(), txm->TxCcNodeId());
-                upsert_kv_table_op_.table_schema_ =
-                    catalog_entry->schema_.get();
-                upsert_kv_table_op_.alter_table_info_ = nullptr;
-                txm->PushOperation(&upsert_kv_table_op_);
-                txm->Process(upsert_kv_table_op_);
+                // `clean_ccm_op` will notify each node group leader performs
+                // `UpsertTable` and `KickoutData` independently for rocksdb.
+                if (op_type_ == OperationType::TruncateTable &&
+                    !txservice_skip_kv &&
+                    !Sharder::Instance()
+                         .GetDataStoreHandler()
+                         ->IsSharedStorage())
+                {
+                    assert(clean_ccm_op_.table_names_.empty());
+                    clean_ccm_op_.table_names_.emplace_back(
+                        table_key_.Name().StringView().data(),
+                        table_key_.Name().StringView().size(),
+                        table_key_.Name().Type());
+                    clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
+                    clean_ccm_op_.commit_ts_ = txm->CommitTs();
+
+                    LOG(INFO) << "UpsertTableOp: Clean all ccmap on all node "
+                                 "groups, txn: "
+                              << txm->TxNumber();
+
+                    op_ = &clean_ccm_op_;
+                    txm->PushOperation(&clean_ccm_op_);
+                    txm->Process(clean_ccm_op_);
+                }
+                else
+                {
+                    op_ = &upsert_kv_table_op_;
+                    // Read table schema from local cc shard. This is because we
+                    // could be recovering from commit stage, in which case we
+                    // have skipped post_all_intent_op_ and the schema in
+                    // catalog_rec_ would be empty.
+                    LocalCcShards *shards =
+                        Sharder::Instance().GetLocalCcShards();
+                    auto catalog_entry = shards->GetCatalog(table_key_.Name(),
+                                                            txm->TxCcNodeId());
+                    upsert_kv_table_op_.table_schema_ =
+                        catalog_entry->schema_.get();
+                    upsert_kv_table_op_.alter_table_info_ = nullptr;
+                    txm->PushOperation(&upsert_kv_table_op_);
+                    txm->Process(upsert_kv_table_op_);
+                }
             }
             else
             {
