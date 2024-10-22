@@ -1192,6 +1192,7 @@ public:
                 shard_->CreateOrUpdatePkCcMap(
                     table_name, old_schema, req.NodeGroupId());
 
+#ifdef RANGE_PARTITION_ENABLED
                 // Pk range table ccmap
                 const TableName base_range_name{table_name.StringView(),
                                                 TableType::RangePartition};
@@ -1199,6 +1200,7 @@ public:
                                                  old_schema,
                                                  req.NodeGroupId(),
                                                  catalog_entry->Version());
+#endif
 
                 // Old sk table ccmap using old schema.
                 std::vector<TableName> old_index_names =
@@ -1207,6 +1209,7 @@ public:
                 {
                     shard_->CreateOrUpdateSkCcMap(
                         old_index_name, old_schema, req.NodeGroupId());
+#ifdef RANGE_PARTITION_ENABLED
                     // old sk range table ccmap
                     const TableName old_index_range_name{
                         old_index_name.StringView(), TableType::RangePartition};
@@ -1214,6 +1217,7 @@ public:
                                                      old_schema,
                                                      req.NodeGroupId(),
                                                      catalog_entry->Version());
+#endif
                 }
 
                 // New sk table ccmap using new schema
@@ -1228,6 +1232,7 @@ public:
                         shard_->CreateOrUpdateSkCcMap(
                             new_index_name, new_schema, req.NodeGroupId());
 
+#ifdef RANGE_PARTITION_ENABLED
                         // New sk range cc maps should use the dirty schema
                         const TableName new_index_range_name{
                             new_index_name.StringView(),
@@ -1237,6 +1242,7 @@ public:
                             new_schema,
                             req.NodeGroupId(),
                             catalog_entry->DirtyVersion());
+#endif
                     }
                 }
             }
