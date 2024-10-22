@@ -48,6 +48,7 @@ void SkGenerator::Reset(const TxKey *start_key,
     scan_batch_size_ = LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE;
     task_result_ = CcErrorCode::NO_ERROR;
     scanned_items_count_ = 0;
+    table_schema_ = nullptr;
 }
 
 void SkGenerator::Reset(const std::string &start_key_str,
@@ -88,6 +89,7 @@ void SkGenerator::Reset(const std::string &start_key_str,
     scan_batch_size_ = LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE;
     task_result_ = CcErrorCode::NO_ERROR;
     scanned_items_count_ = 0;
+    table_schema_ = nullptr;
 }
 
 void SkGenerator::ProcessTask()
@@ -116,12 +118,14 @@ void SkGenerator::ProcessTask()
         task_result_ = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
         return;
     }
+    // Unpin the node group data immediately.
+    Sharder::Instance().UnpinNodeGroupData(node_group_id_);
+
     // guard to unpin node group on finish.
     std::shared_ptr<void> defer_unpin(
         nullptr,
         [this](void *)
         {
-            Sharder::Instance().UnpinNodeGroupData(node_group_id_);
             upload_index_ctx_.TerminateWorkers();
 
             auto result = task_status_->TaskStatus();
@@ -273,9 +277,10 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
     auto catalog_entry =
         cc_shards->GetCatalog(*base_table_name_, node_group_id_);
-    TableSchema *table_schema =
-        const_cast<TableSchema *>(catalog_entry->dirty_schema_.get());
-    assert(table_schema != nullptr && new_indexes_name_->size() > 0);
+    // In this case, we can get the dirty schema safely, because the this node
+    // group has hold the catalog write intent lock already.
+    table_schema_ = catalog_entry->dirty_schema_;
+    assert(table_schema_.get() != nullptr && new_indexes_name_->size() > 0);
     size_t core_cnt = cc_shards->Count();
 
     DataSyncScanCc scan_req(*base_table_name_,
@@ -396,7 +401,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
             if (vec_idx >= sk_encoder_vec_.size())
             {
                 sk_encoder_vec_.emplace_back(
-                    std::move(table_schema->CreateSkEncoder(*tbl_name_it)));
+                    std::move(table_schema_->CreateSkEncoder(*tbl_name_it)));
             }
             sk_encoder = sk_encoder_vec_[vec_idx].get();
 

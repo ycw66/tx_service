@@ -199,6 +199,7 @@ private:
     size_t scan_batch_size_{LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE};
     CcErrorCode task_result_{CcErrorCode::NO_ERROR};
     size_t scanned_items_count_{0};
+    std::shared_ptr<TableSchema> table_schema_{nullptr};
 };
 
 }  // namespace txservice
