@@ -746,6 +746,29 @@ public:
             cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
             cce->SetPendingCmd(nullptr);
             object_not_exist = true;
+            // Object not exist due to ttl expired,
+            // for command on exist object, return early
+            if (cmd->ProceedOnExistentObject() &&
+                !cmd->ProceedOnNonExistentObject())
+            {
+                // Early return logic for read-write command.
+                if (req.apply_and_commit_)
+                {
+                    cce->payload_ = nullptr;
+                    const uint64_t commit_ts = std::max(
+                        {cce->CommitTs() + 1, req.TxTs(), shard_->Now()});
+                    cce->SetCommitTsPayloadStatus(commit_ts,
+                                                  RecordStatus::Deleted);
+                    // Release and try to recycle the lock.
+                    ReleaseCceLock(
+                        cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+                    obj_result.lock_acquired_ = LockType::NoLock;
+                }
+                obj_result.rec_status_ = RecordStatus::Deleted;
+                obj_result.commit_ts_ = cce->CommitTs();
+                hd_res->SetFinished();
+                return true;
+            }
         }
         else if (obj_result.ttl_reset_)
         {

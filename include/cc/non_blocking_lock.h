@@ -408,7 +408,8 @@ public:
                         : std::get<std::unique_ptr<TxCommand>>(pending_cmd_) ==
                               nullptr) &&
                    dirty_payload_ == nullptr &&
-                   dirty_payload_status_ == RecordStatus::NonExistent);
+                   (dirty_payload_status_ == RecordStatus::NonExistent ||
+                    dirty_payload_status_ == RecordStatus::Deleted));
             return queue_block_cmds_.Size() == 0 && !HasBufferedCommandList();
         }
         else
