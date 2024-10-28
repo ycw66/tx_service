@@ -6517,7 +6517,6 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
     }
     else
     {
-        bool readonly = true;
         std::vector<RecordStatus> vct_rec;
 
         {
@@ -6595,8 +6594,6 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
                         version_changed = true;
                     }
-
-                    readonly = false;
                 }
                 else if (cmd_res.lock_acquired_ != LockType::NoLock &&
                          !rw_set_.FindObjectCommand(*req->table_name_,
@@ -6628,7 +6625,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
         bool cmd_success = req->Command()->IsPassed();
         // NOTICE: sub commands never be committed in ApplyCc
-        if (!req->auto_commit_ || readonly)
+        if (!req->auto_commit_)
         {
             // Not autocommit, or autocommit and this is a read only command.
             // Notify the ObjectCommandTxRequest sender once the command
