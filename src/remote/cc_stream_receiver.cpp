@@ -49,7 +49,6 @@ thread_local CcRequestPool<RemoteUploadTxCommandsCc> upload_cmds_pool_;
 thread_local CcRequestPool<RemoteDbSizeCc> dbsize_pool_;
 thread_local CcRequestPool<KeyObjectStandbyForwardCc>
     key_obj_standby_forward_pool_;
-thread_local CcRequestPool<ResendStandbyMessageCc> resend_standby_msg_pool_;
 thread_local CcRequestPool<ParseCcMsgCc> parse_standby_forward_pool_;
 
 CcStreamReceiver::CcStreamReceiver(

@@ -24,7 +24,6 @@
 
 namespace txservice
 {
-thread_local CcRequestPool<ResendStandbyMessageCc> resend_standby_msg_pool_;
 thread_local CcRequestPool<ReadCc> read_pool;
 
 namespace remote
@@ -1487,24 +1486,6 @@ void CcNodeService::UpdateStandbyConsistentTs(
 
     // response does not matter
     response->set_error(false);
-}
-
-void CcNodeService::RequestResendStandbyMessage(
-    ::google::protobuf::RpcController *controller,
-    const ::txservice::remote::RequestResendStandbyMessageRequest *request,
-    ::txservice::remote::RequestResendStandbyMessageResponse *response,
-    ::google::protobuf::Closure *done)
-{
-    // done->Run() will be called by ResendStandbyMessage when it is finished.
-    ResendStandbyMessageCc *cc = resend_standby_msg_pool_.NextRequest();
-    cc->Reset(request->node_group_id(),
-              request->standby_node_term(),
-              request->seq_id(),
-              request->src_node_id(),
-              response,
-              done);
-    assert(request->seq_grp() < local_shards_.Count());
-    local_shards_.EnqueueCcRequest(request->seq_grp(), cc);
 }
 
 void CcNodeService::RequestStorageSnapshotSync(

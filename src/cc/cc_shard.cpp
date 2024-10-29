@@ -22,6 +22,7 @@
 #include "sharder.h"  // Sharder
 #include "store/data_store_handler.h"
 #include "tx_service.h"
+#include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
 #include "util.h"
@@ -32,7 +33,6 @@ DECLARE_bool(cmd_read_catalog);
 
 namespace txservice
 {
-
 CcShard::CcShard(uint16_t core_id,
                  uint32_t core_cnt,
                  uint32_t node_memory_limit_mb,
@@ -157,6 +157,7 @@ CcShard::CcShard(uint16_t core_id,
 
     // init defrag heap cc
     defrag_heap_cc_ = std::make_unique<DefragShardHeapCc>(16);
+    retry_fwd_msg_cc_ = std::make_unique<RetryFailedStandbyMsgCc>();
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
@@ -2088,7 +2089,6 @@ StandbyForwardEntry *CcShard::GetNextStandbyForwardEntry()
 
         // Only overwrite standby entry if it is already older than the
         // oldest buffered msg.
-
         ++next_foward_idx_;
         if (next_foward_idx_ >= standby_fwd_vec_.size())
         {
@@ -2135,23 +2135,101 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
         stream_sender_ = Sharder::Instance().GetCcStreamSender();
     }
 
-    CODE_FAULT_INJECTOR("discard_forward_standby_message", {
-        if (seq_id % 2 == 0)
-        {
-            LOG(INFO) << "FaultInject  discard_forward_standby_message, seq_id:"
-                      << seq_id;
-            entry->Free();
-            return;
-        }
-    });
-
-    for (uint32_t node_id : subscribed_standby_nodes_)
+    for (auto &[node_id, last_sent_seq_id] : subscribed_standby_nodes_)
     {
-        stream_sender_->SendMessageToNode(
-            node_id, entry->Message(), nullptr, false, false);
+        if (last_sent_seq_id == seq_id - 1)
+        {
+            CODE_FAULT_INJECTOR("discard_forward_standby_message", {
+                if (seq_id % 2 == 0)
+                {
+                    LOG(INFO) << "FaultInject  "
+                                 "discard_forward_standby_message, seq_id:"
+                              << seq_id;
+                    last_sent_seq_id++;
+                    continue;
+                }
+            });
+            CODE_FAULT_INJECTOR("forward_standby_message_eagain", {
+                if (seq_id % 2 == 0)
+                {
+                    LOG(INFO) << "FaultInject  "
+                                 "forward_standby_message_eagain, seq_id:"
+                              << seq_id;
+                    if (!retry_fwd_msg_cc_->InUse())
+                    {
+                        retry_fwd_msg_cc_->Use();
+                        Enqueue(retry_fwd_msg_cc_.get());
+                    }
+                    continue;
+                }
+            });
+
+            bool succ = stream_sender_->SendMessageToNode(
+                node_id, entry->Message(), nullptr, false, false);
+            if (succ)
+            {
+                last_sent_seq_id++;
+            }
+            else if (!retry_fwd_msg_cc_->InUse())
+            {
+                retry_fwd_msg_cc_->Use();
+                Enqueue(retry_fwd_msg_cc_.get());
+            }
+        }
     }
 
     entry->Free();
+}
+
+bool CcShard::ResendFailedForwardMessages()
+{
+    bool all_msgs_sent = true;
+    for (auto &[node_id, seq_id] : subscribed_standby_nodes_)
+    {
+        if (seq_id == next_forward_sequence_id_ - 1)
+        {
+            // No failed message
+            continue;
+        }
+
+        // Retry sending all buffered msgs.
+        while (seq_id < next_forward_sequence_id_ - 1)
+        {
+            // seq id is the last sent msg, start sending from seq id + 1
+            size_t pending_buf_idx = (seq_id + 1) % txservice_max_standby_lag;
+            if (standby_fwded_msg_buffer_[pending_buf_idx] &&
+                standby_fwded_msg_buffer_[pending_buf_idx]->IsFree() &&
+                standby_fwded_msg_buffer_[pending_buf_idx]->SequenceId() ==
+                    seq_id + 1)
+            {
+                bool succ = stream_sender_->SendMessageToNode(
+                    node_id,
+                    standby_fwded_msg_buffer_[pending_buf_idx]->Message(),
+                    nullptr,
+                    false,
+                    false);
+                if (!succ)
+                {
+                    all_msgs_sent = false;
+                    break;
+                }
+                else
+                {
+                    seq_id++;
+                }
+            }
+            else
+            {
+                // this message is already lost and this standby needs to
+                // resubscribe to the primary node again. Send it the latest msg
+                // so that it knows it has already fallen behind.
+                assert(next_forward_sequence_id_ - seq_id >=
+                       txservice_max_standby_lag);
+                seq_id = next_forward_sequence_id_ - 2;
+            }
+        }
+    }
+    return all_msgs_sent;
 }
 
 bool CcShard::UpdateLastReceivedStandbySequenceId(
@@ -2179,6 +2257,27 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
 
     assert(seq_grp_info.last_consistent_standby_sequence_id_ <=
            seq_grp_info.next_expecting_standby_sequence_id_ - 1);
+    if (seq_id - seq_grp_info.last_consistent_standby_sequence_id_ >
+        txservice_max_standby_lag)
+    {
+        // standby has fallen behind too much. Resubscribe to primary node.
+        LOG(WARNING) << "Sequence group " << sequence_grp_id
+                     << " has fallen behind primary too much. Trying to "
+                        "resubscribe.";
+        int64_t cur_prim_term = Sharder::Instance().PrimaryNodeTerm();
+        if (cur_prim_term > 0)
+        {
+            NodeGroupId native_ng = Sharder::Instance().NativeNodeGroup();
+            Sharder::Instance().OnStartFollowing(
+                native_ng,
+                cur_prim_term,
+                Sharder::Instance().LeaderNodeId(native_ng),
+                true);
+        }
+        // remove this seq grp from subscribed seq grps
+        seq_grp_info.Unsubscribe();
+        return false;
+    }
 
     if (seq_grp_info.next_expecting_standby_sequence_id_ > seq_id)
     {
@@ -2234,68 +2333,6 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
         seq_grp_info.next_expecting_standby_sequence_id_ = seq_id + 1;
     }
 
-    if (seq_grp_info.next_expecting_standby_sequence_id_ -
-            seq_grp_info.last_consistent_standby_sequence_id_ >
-        txservice_max_standby_lag)
-    {
-        // standby has fallen behind too much. Resubscribe to primary node.
-        LOG(WARNING)
-            << "Sequence group " << sequence_grp_id
-            << " has fallen behind primary too much. Trying to resubscribe.";
-        int64_t cur_prim_term = Sharder::Instance().PrimaryNodeTerm();
-        if (cur_prim_term > 0)
-        {
-            NodeGroupId native_ng = Sharder::Instance().NativeNodeGroup();
-            Sharder::Instance().OnStartFollowing(
-                native_ng,
-                cur_prim_term,
-                Sharder::Instance().LeaderNodeId(native_ng),
-                true);
-        }
-        // remove this seq grp from subscribed seq grps
-        seq_grp_info.Unsubscribe();
-        return false;
-    }
-
-    if (seq_grp_info.next_expecting_standby_sequence_id_ -
-            seq_grp_info.last_consistent_standby_sequence_id_ >
-        1000)
-    {
-        // The msg is put into cc request queue which is a concurrent queue, so
-        // it might be processed in random order. But if a message has not been
-        // received after 100 msgs, it is likely that the message is missed by
-        // network. Request primary node to resend the msg.
-        auto it = seq_grp_info.missing_standby_seqeunce_ids_.lower_bound(
-            seq_grp_info.last_requested_resend_sequence_id_);
-
-        if (it != seq_grp_info.missing_standby_seqeunce_ids_.end())
-        {
-            if (*it == seq_grp_info.last_requested_resend_sequence_id_)
-            {
-                it++;
-            }
-
-            uint32_t primary_node_id = Sharder::Instance().GetPrimaryNodeId();
-            while (it != seq_grp_info.missing_standby_seqeunce_ids_.end() &&
-                   seq_grp_info.next_expecting_standby_sequence_id_ - *it >
-                       1000)
-            {
-                if (!RequestMissingStandbyMessage(sequence_grp_id,
-                                                  *it,
-                                                  standby_node_term,
-                                                  primary_node_id))
-                {
-                    // If the request fails due to broken channel, yield for
-                    // now.
-                    break;
-                }
-
-                seq_grp_info.last_requested_resend_sequence_id_ = *it;
-                it++;
-            }
-        }
-    }
-
     while (!seq_grp_info.pending_standby_consistent_ts_.empty())
     {
         // Try to bump up last matched ckpt ts.
@@ -2328,45 +2365,9 @@ void CcShard::ResetStandbySequence()
     standby_sequence_grps_.clear();
 }
 
-bool CcShard::RequestMissingStandbyMessage(uint32_t seq_grp,
-                                           uint64_t seq_id,
-                                           int64_t standby_node_term,
-                                           uint32_t node_id)
-{
-    std::shared_ptr<brpc::Channel> channel =
-        Sharder::Instance().GetCcNodeServiceChannel(node_id);
-    if (channel == nullptr)
-    {
-        // Fail to establish the channel to the primary node.
-
-        return false;
-    }
-
-    remote::CcRpcService_Stub stub(channel.get());
-    RequestStandbyMessageClosure *closure = new RequestStandbyMessageClosure;
-    closure->SetChannel(node_id, channel);
-    auto req = closure->ResendRequest();
-    req->set_standby_node_term(standby_node_term);
-    req->set_seq_grp(seq_grp);
-    req->set_seq_id(seq_id);
-    req->set_src_node_id(Sharder::Instance().NodeId());
-    req->set_node_group_id(Sharder::Instance().NativeNodeGroup());
-    closure->Controller()->set_timeout_ms(500);
-    closure->Controller()->set_write_to_socket_in_background(true);
-    stub.RequestResendStandbyMessage(
-        closure->Controller(), req, closure->ResendResponse(), closure);
-    return true;
-}
-
 bool CcShard::GetStandbyMessage(uint64_t seq_id,
                                 remote::KeyObjectStandbyForwardRequest *req)
 {
-    CODE_FAULT_INJECTOR("disable_resend_standby_message", {
-        LOG(INFO) << "FaultInject  disable_resend_standby_message, seq_id:"
-                  << seq_id;
-        return false;
-    });
-
     // We can quickly locate the msg entry from seq id
     size_t idx = seq_id % txservice_max_standby_lag;
     StandbyForwardEntry *entry = standby_fwded_msg_buffer_[idx];
@@ -2422,55 +2423,29 @@ void CcShard::UpdateStandbyConsistentTs(uint32_t seq_grp,
     }
     else
     {
+        if (seq_id - seq_grp_info.last_consistent_standby_sequence_id_ >
+            txservice_max_standby_lag)
+        {
+            // standby has fallen behind too much. Resubscribe to primary node.
+            LOG(WARNING) << "Sequence group " << seq_grp
+                         << " has fallen behind primary too much. Trying to "
+                            "resubscribe.";
+            int64_t cur_prim_term = Sharder::Instance().PrimaryNodeTerm();
+            if (cur_prim_term > 0)
+            {
+                NodeGroupId native_ng = Sharder::Instance().NativeNodeGroup();
+                Sharder::Instance().OnStartFollowing(
+                    native_ng,
+                    cur_prim_term,
+                    Sharder::Instance().LeaderNodeId(native_ng),
+                    true);
+            }
+            // remove this seq grp from subscribed seq grps
+            seq_grp_info.Unsubscribe();
+            return;
+        }
         seq_grp_info.pending_standby_consistent_ts_.emplace(seq_id,
                                                             consistent_ts);
-
-        // primary node is already starting checkpoint with this ckpt ts.
-        // Request for missing messages before the given seq id if we
-        // haven't done so.
-        if (seq_grp_info.last_requested_resend_sequence_id_ < seq_id)
-        {
-            if (seq_grp_info.next_expecting_standby_sequence_id_ <= seq_id)
-            {
-                for (uint64_t missing_seq_id =
-                         seq_grp_info.next_expecting_standby_sequence_id_;
-                     missing_seq_id <= seq_id;
-                     ++missing_seq_id)
-                {
-                    seq_grp_info.missing_standby_seqeunce_ids_.insert(
-                        missing_seq_id);
-                }
-
-                seq_grp_info.next_expecting_standby_sequence_id_ = seq_id + 1;
-            }
-
-            auto it = seq_grp_info.missing_standby_seqeunce_ids_.lower_bound(
-                seq_grp_info.last_requested_resend_sequence_id_);
-            if (it != seq_grp_info.missing_standby_seqeunce_ids_.end())
-            {
-                if (*it == seq_grp_info.last_requested_resend_sequence_id_)
-                {
-                    it++;
-                }
-                uint32_t primary_node = Sharder::Instance().GetPrimaryNodeId();
-
-                while (seq_grp_info.last_requested_resend_sequence_id_ <
-                           seq_grp_info.next_expecting_standby_sequence_id_ &&
-                       it != seq_grp_info.missing_standby_seqeunce_ids_.end())
-                {
-                    if (!RequestMissingStandbyMessage(
-                            seq_grp, *it, standby_node_term, primary_node))
-                    {
-                        // If the request fails due to broken channel, yield for
-                        // now.
-                        break;
-                    }
-
-                    seq_grp_info.last_requested_resend_sequence_id_ = *it;
-                    it++;
-                }
-            }
-        }
     }
 }
 

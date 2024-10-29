@@ -70,7 +70,6 @@ struct StandbySequenceGroup
     {
         next_expecting_standby_sequence_id_ = initial_seq_id;
         last_consistent_standby_sequence_id_ = initial_seq_id - 1;
-        last_requested_resend_sequence_id_ = 0;
         missing_standby_seqeunce_ids_.clear();
         while (!pending_standby_consistent_ts_.empty())
         {
@@ -91,9 +90,6 @@ struct StandbySequenceGroup
     // the largest sequence number that we've received all msgs before this
     // sequence number.
     uint64_t last_consistent_standby_sequence_id_{0};
-    // the largest missing sequence number that we've requested primary to
-    // resend
-    uint64_t last_requested_resend_sequence_id_{0};
     // Set of missing sequence msgs
     std::set<uint64_t> missing_standby_seqeunce_ids_;
     // The largest ts that is consistent in this seq group.

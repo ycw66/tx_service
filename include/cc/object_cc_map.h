@@ -275,26 +275,6 @@ public:
                 return false;
             }
 
-            CODE_FAULT_INJECTOR("disable_fetch_record_from_kv", {
-                if (is_standby_tx)
-                {
-                    LOG(INFO) << "FaultInject  "
-                                 "disable_fetch_record_from_kv";
-                    if (cce->PayloadStatus() == RecordStatus::Unknown &&
-                        (!cce->GetKeyLock() || cce->DirtyPayloadStatus() ==
-                                                   RecordStatus::NonExistent))
-                    {
-                        if (cmd->IsReadOnly())
-                        {
-                            assert(acquired_lock == LockType::NoLock);
-                            obj_result.rec_status_ = RecordStatus::Deleted;
-                            hd_res->SetFinished();
-                            return true;
-                        }
-                    }
-                }
-            });
-
             // Check if this cce does not exists in ccmap at all.
             // We need to double check that there is no dirty payload
             // status on the cce since a previous cmd might ignores
@@ -319,6 +299,22 @@ public:
                     // does not exist.
                     if (!cmd->IgnoreKvValue())
                     {
+                        CODE_FAULT_INJECTOR("disable_fetch_record_from_kv", {
+                            if (is_standby_tx)
+                            {
+                                LOG(INFO) << "FaultInject  "
+                                             "disable_fetch_record_from_kv";
+
+                                if (cmd->IsReadOnly())
+                                {
+                                    assert(acquired_lock == LockType::NoLock);
+                                    obj_result.rec_status_ =
+                                        RecordStatus::Deleted;
+                                    hd_res->SetFinished();
+                                    return true;
+                                }
+                            }
+                        });
                         // Fetch record from storage
                         shard_->FetchRecord(table_name_,
                                             table_schema_,
@@ -1497,8 +1493,16 @@ public:
             req.SetFinish();
             return true;
         }
-        else if (cce->PayloadStatus() != RecordStatus::Unknown || has_overwrite)
+        else if (cce->PayloadStatus() != RecordStatus::Unknown ||
+                 obj_version == 1 || has_overwrite)
         {
+            if (obj_version == 1 && !has_overwrite)
+            {
+                // ver == 1 means this key does not exist on primary node.
+                assert(cce->PayloadStatus() == RecordStatus::Unknown ||
+                       cce->CommitTs() == 1);
+                cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
+            }
             bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
             if ((obj_version == cce->CommitTs() || has_overwrite) &&
                 !cce->HasBufferedCommandList())

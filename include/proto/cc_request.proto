@@ -418,7 +418,6 @@ service CcRpcService {
     rpc StandbyStartFollowing(StandbyStartFollowingRequest) returns (StandbyStartFollowingResponse);
     rpc UpdateStandbyConsistentTs(UpdateStandbyConsistentTsRequest) returns (UpdateStandbyConsistentTsResponse);
     rpc UpdateStandbyCkptTs(UpdateStandbyCkptTsRequest) returns (UpdateStandbyCkptTsResponse);
-    rpc RequestResendStandbyMessage(RequestResendStandbyMessageRequest) returns (RequestResendStandbyMessageResponse);
     rpc RequestStorageSnapshotSync(StorageSnapshotSyncRequest) returns (StorageSnapshotSyncResponse);
     rpc OnSnapshotSynced(OnSnapshotSyncedRequest) returns (OnSnapshotSyncedResponse);
     rpc FetchNodeInfo(FetchNodeInfoRequest) returns (FetchNodeInfoResponse);
@@ -1111,14 +1110,6 @@ message DBSizeResponse {
     int32 dbsize_term = 2;
 }
 
-message RequestStandbyForwardMessageRequest {
-    uint32 src_node_id = 1;
-    uint32 node_group_id = 2;
-    uint32 seq_grp = 3;
-    uint64 seq_id = 4;
-    int64 ng_term = 5;
-}
-
 message CcMessage {
     enum MessageType {
         AcquireRequest = 0;
@@ -1165,7 +1156,6 @@ message CcMessage {
         DBSizeRequest = 54;
         DBSizeResponse = 55;
         KeyObjectStandbyForwardRequest = 56;
-        RequestStandbyForwardMessageRequest = 57;
     }
 
     MessageType type = 1;
@@ -1219,6 +1209,5 @@ message CcMessage {
         DBSizeRequest dbsize_req = 62;
         DBSizeResponse db_size_resp = 63;
         KeyObjectStandbyForwardRequest key_obj_standby_forward_req=64;
-        RequestStandbyForwardMessageRequest req_standby_msg_req=65;
     }
 }

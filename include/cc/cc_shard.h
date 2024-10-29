@@ -58,8 +58,7 @@ class LocalCcShards;
 struct StatisticsEntry;
 struct CheckDeadLockResult;
 struct DefragShardHeapCc;
-/// struct StandbyForwardEntry;
-// struct StandbySequenceGroup;
+struct RetryFailedStandbyMsgCc;
 
 namespace remote
 {
@@ -852,17 +851,9 @@ public:
         uint64_t start_seq_id = next_forward_sequence_id_;
         LOG(INFO) << "start forwarding to node " << node_id << " from seq "
                   << start_seq_id << ", seq grp " << core_id_;
-        for (auto it = subscribed_standby_nodes_.begin();
-             it != subscribed_standby_nodes_.end();
-             it++)
-        {
-            if (*it == node_id)
-            {
-                return start_seq_id;
-            }
-        }
 
-        subscribed_standby_nodes_.push_back(node_id);
+        auto ins_res = subscribed_standby_nodes_.try_emplace(node_id);
+        ins_res.first->second = start_seq_id - 1;
         return start_seq_id;
     }
     uint64_t NextStandbyMessageSequence() const
@@ -870,9 +861,18 @@ public:
         return next_forward_sequence_id_;
     }
 
-    const std::vector<uint32_t> &GetSubscribedStandbys() const
+    // Try to send previous failed message to standby nodes.
+    bool ResendFailedForwardMessages();
+
+    std::vector<uint32_t> GetSubscribedStandbys()
     {
-        return subscribed_standby_nodes_;
+        std::vector<uint32_t> node_ids;
+        node_ids.reserve(subscribed_standby_nodes_.size());
+        for (auto [node_id, seq_id] : subscribed_standby_nodes_)
+        {
+            node_ids.push_back(node_id);
+        }
+        return node_ids;
     }
     bool GetStandbyMessage(uint64_t seq_id,
                            remote::KeyObjectStandbyForwardRequest *req);
@@ -883,11 +883,6 @@ public:
         const remote::KeyObjectStandbyForwardRequest &msg,
         int64_t standby_node_term);
     void SubsribeToPrimaryNode(uint32_t seq_grp, uint64_t seq_id);
-
-    bool RequestMissingStandbyMessage(uint32_t seq_grp,
-                                      uint64_t seq_id,
-                                      int64_t ng_term,
-                                      uint32_t node_id);
 
     void UpdateStandbyConsistentTs(uint32_t seq_grp,
                                    uint64_t seq_id,
@@ -976,7 +971,8 @@ private:
     std::vector<StandbyForwardEntry *> standby_fwded_msg_buffer_;
     uint32_t next_foward_idx_{0};
     uint64_t next_forward_sequence_id_{1};
-    std::vector<uint32_t> subscribed_standby_nodes_;
+    std::unordered_map<uint32_t, uint64_t> subscribed_standby_nodes_;
+    std::unique_ptr<RetryFailedStandbyMsgCc> retry_fwd_msg_cc_;
 
     // Standby forward msg related members used on follower node
     CcRequestPool<KeyObjectStandbyForwardCc> key_obj_standby_msg_cc_pool_;

@@ -364,7 +364,8 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
     }
     else
     {
-        DLOG(INFO) << "replay not finished: ";
+        DLOG(INFO) << "replay not finished, current ver: " << cur_ver
+                   << ", msg expect ver: " << txn_cmd_list.front().obj_version_;
     }
 }
 

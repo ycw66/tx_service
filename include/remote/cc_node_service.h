@@ -151,12 +151,6 @@ public:
         ::txservice::remote::UpdateStandbyConsistentTsResponse *response,
         ::google::protobuf::Closure *done) override;
 
-    void RequestResendStandbyMessage(
-        ::google::protobuf::RpcController *controller,
-        const ::txservice::remote::RequestResendStandbyMessageRequest *request,
-        ::txservice::remote::RequestResendStandbyMessageResponse *response,
-        ::google::protobuf::Closure *done) override;
-
     void RequestStorageSnapshotSync(
         ::google::protobuf::RpcController *controller,
         const ::txservice::remote::StorageSnapshotSyncRequest *request,

@@ -3621,47 +3621,26 @@ private:
                                     txservice::CheckTxStatusCc *r);
 };
 
-struct ResendStandbyMessageCc : public CcRequestBase
+struct RetryFailedStandbyMsgCc : CcRequestBase
 {
+public:
+    RetryFailedStandbyMsgCc()
+    {
+    }
+
     bool Execute(CcShard &ccs) override
     {
-        brpc::ClosureGuard done_guard(done_);
-
-        int64_t primary_node_leader_term =
-            PrimaryTermFromStandbyTerm(standby_node_term_);
-        if (!Sharder::Instance().CheckLeaderTerm(ng_id_,
-                                                 primary_node_leader_term))
+        if (ccs.ResendFailedForwardMessages())
         {
-            response_->set_error(true);
             return true;
         }
-
-        response_->set_error(
-            !ccs.GetStandbyMessage(seq_id_, response_->mutable_msg()));
-        return true;
+        else
+        {
+            // Retry in the next run one round
+            ccs.Enqueue(this);
+        }
+        return false;
     }
-
-    void Reset(uint32_t ng_id,
-               int64_t standby_node_term,
-               uint64_t seq_id,
-               uint32_t req_node_id,
-               remote::RequestResendStandbyMessageResponse *response,
-               ::google::protobuf::Closure *done)
-    {
-        standby_node_term_ = standby_node_term;
-        seq_id_ = seq_id;
-        ng_id_ = ng_id;
-        req_node_id_ = req_node_id;
-        response_ = response;
-        done_ = done;
-    }
-
-    int64_t standby_node_term_;
-    uint64_t seq_id_;
-    uint32_t ng_id_;
-    uint32_t req_node_id_;
-    remote::RequestResendStandbyMessageResponse *response_;
-    ::google::protobuf::Closure *done_;
 };
 
 struct ClearTxCc : public CcRequestBase
@@ -6038,41 +6017,6 @@ public:
         assert(ccs.core_id_ == ccm->shard_->core_id_);
         return ccm->Execute(*this);
     }
-    void Reset(const remote::KeyObjectStandbyForwardRequest &fwd_req,
-               CcHandlerResult<Void> *hres)
-    {
-        fwd_req_ = &fwd_req;
-        TableType table_type =
-            remote::ToLocalType::ConvertCcTableType(fwd_req_->table_type());
-        remote_table_name_ = TableName(
-            std::string_view(fwd_req_->table_name().data()), table_type);
-        uint32_t ng_id = fwd_req_->key_shard_code() >> 10;
-
-        uint64_t txn = fwd_req_->tx_number();
-
-        TemplatedCcRequest<KeyObjectStandbyForwardCc, Void>::Reset(
-            &remote_table_name_, hres, ng_id, txn, 0);
-        cmds_vec_.clear();
-        cmds_vec_.reserve(fwd_req_->cmd_list_size());
-        for (int idx = 0; idx < fwd_req_->cmd_list_size(); ++idx)
-        {
-            cmds_vec_.emplace_back(fwd_req_->cmd_list(idx).data());
-        }
-
-        key_str_ = &fwd_req_->key();
-        object_version_ = fwd_req_->object_version();
-        commit_ts_ = fwd_req_->commit_ts();
-        schema_version_ = fwd_req_->schema_version();
-        has_overwrite_ = fwd_req_->has_overwrite();
-        key_shard_code_ = fwd_req_->key_shard_code();
-        forward_msg_grp_ = fwd_req_->forward_seq_grp();
-        primary_leader_term_ = fwd_req_->primary_leader_term();
-        seq_grp_initial_id_ = UINT64_MAX;
-        updated_local_seq_id_ = false;
-        ddl_phase_ = DDLPhase::AcquirePhase;
-        ddl_kv_op_err_code_ = CcErrorCode::NO_ERROR;
-        cce_ptr_ = nullptr;
-    }
 
     void Reset(std::unique_ptr<remote::CcMessage> msg)
     {
@@ -6123,10 +6067,6 @@ public:
         if (input_msg_)
         {
             hd_->RecycleCcMsg(std::move(input_msg_));
-        }
-        else
-        {
-            res_->SetFinished();
         }
     }
 
