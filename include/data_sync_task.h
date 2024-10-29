@@ -47,6 +47,9 @@ public:
                  uint32_t ng_id,
                  int64_t ng_term,
                  uint64_t data_sync_ts,
+#ifndef RANGE_PARTITION_ENABLED
+                 uint64_t flush_data_mem_quote,
+#endif
                  std::shared_ptr<DataSyncStatus> status,
                  bool is_dirty,
                  bool need_adjust_ts,
@@ -66,6 +69,7 @@ public:
           data_sync_ts_(data_sync_ts)
 #ifndef RANGE_PARTITION_ENABLED
           ,
+          flush_data_mem_quote_(flush_data_mem_quote),
           filter_lambda_(filter_lambda),
           forward_cache_(forward_cache),
           is_standby_node_ckpt_(is_standby_node_ckpt)
@@ -98,6 +102,76 @@ public:
         sync_ts_adjustable_ = false;
     }
 
+#ifdef ON_KEY_OBJECT
+    // Function to allocate memory quote
+    uint64_t AllocateFlushDataMemQuote(uint64_t quote)
+    {
+        std::unique_lock<bthread::Mutex> lk(mem_mutex_);
+
+        // Lambda to check if there's enough available memory
+        auto has_enough_memory = [this, quote]()
+        {
+            // if quote is avaliable
+            if ((flush_data_mem_usage_ + quote) <= flush_data_mem_quote_)
+            {
+                return true;
+            }
+            // Or a single object quote is bigger than
+            // overall quote which means the object is also bigger than scan
+            // heap limit, we have to allow it to be flushed, otherwise it will
+            // block ckpt
+            if (quote > flush_data_mem_quote_)
+            {
+                LOG(WARNING)
+                    << "Flush object is too large (size: " << quote
+                    << ") which excceds the flush data mem quote (size: "
+                    << flush_data_mem_quote_ << ")";
+                return true;
+            }
+
+            return false;
+        };
+
+        // Wait until enough memory is available
+        while (!has_enough_memory())
+        {
+            DLOG(INFO) << "Flush data memory quote is full "
+                       << flush_data_mem_usage_ << " ,request quote: " << quote
+                       << " total quote: " << flush_data_mem_quote_
+                       << " ,flight task cnt: " << flight_task_cnt_;
+            mem_cv_.wait(lk);
+        }
+
+        // Allocate the memory quote
+        uint64_t old_usage = flush_data_mem_usage_;
+        flush_data_mem_usage_ += quote;
+        return old_usage;
+    }
+
+    // return the quote to flush data memory usage pool and notify waiting data
+    // sync thread
+    uint64_t DeallocateFlushMemQuote(uint64_t quote)
+    {
+        std::lock_guard<bthread::Mutex> lock(mem_mutex_);
+
+        assert(quote <= flush_data_mem_usage_);
+
+        // Deallocate the memory quote
+        uint64_t old_usage = flush_data_mem_usage_;
+        flush_data_mem_usage_ -= quote;
+
+        // Notify all waiting threads that memory has been freed
+        mem_cv_.notify_one();
+
+        return old_usage;
+    }
+
+    uint64_t FlushMemQuote()
+    {
+        return flush_data_mem_quote_;
+    }
+#endif
+
     const TableName table_name_;
     int32_t range_id_;
     uint64_t range_version_;
@@ -117,6 +191,16 @@ public:
 
     bthread::Mutex flight_task_mux_;
     bthread::ConditionVariable flight_task_cv_;
+
+    // Accumulated pending flush data memory usage for back pressure the
+    // DataSyncScan
+    // Synchronization primitives
+    bthread::Mutex mem_mutex_;
+    bthread::ConditionVariable mem_cv_;
+    // Memory usage tracking
+    uint64_t flush_data_mem_usage_{0};
+    uint64_t flush_data_mem_quote_{0};
+
     // Flush data task cnt + 1 (Data sync task)
     int64_t flight_task_cnt_{0};
     CkptErrorCode ckpt_err_{CkptErrorCode::NO_ERROR};

@@ -3129,7 +3129,7 @@ public:
 #endif
                    ,
                    uint64_t schema_version = 0)
-        : force_flush_(false),
+        : scan_heap_is_full_(false),
           table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
@@ -3178,6 +3178,7 @@ public:
             pause_pos_.emplace_back(nullptr, false);
 #endif
             accumulated_scan_cnt_.emplace_back(0);
+            accumulated_mem_usage_.emplace_back(0);
         }
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -3286,18 +3287,25 @@ public:
 #endif
             {
                 archive_vec_.at(i).clear();
+                archive_vec_.at(i).reserve(scan_batch_size_);
                 mv_base_idx_vec_.at(i).clear();
+                mv_base_idx_vec_.at(i).reserve(scan_batch_size_);
             }
+
             accumulated_scan_cnt_.at(i) = 0;
+            accumulated_mem_usage_.at(i) = 0;
         }
+
 #ifdef ON_KEY_OBJECT
-        if (force_flush_)
+        if (scan_heap_is_full_)
         {
+            // vec has been cleared during ReleaseDataSyncScanHeapCc,
+            // resize to prepared size
             data_sync_vec_[0].resize(scan_batch_size_);
         }
 #endif
         err_ = CcErrorCode::NO_ERROR;
-        force_flush_ = false;
+        scan_heap_is_full_ = false;
     }
 
     void SetError(CcErrorCode err)
@@ -3409,9 +3417,8 @@ public:
     }
 
     std::vector<size_t> accumulated_scan_cnt_;
-    // force DataSync task flush out this batch of scaned data whatever other
-    // criteria exists, e.g. scan mem is full
-    bool force_flush_{false};
+    std::vector<uint64_t> accumulated_mem_usage_;
+    bool scan_heap_is_full_{false};
 
     size_t scan_count_{0};
 
@@ -5178,27 +5185,35 @@ public:
             return false;
         }
 #else
-        if (data_sync_vec_ != nullptr && data_sync_vec_->size() != 0)
+        if (data_sync_vec_ != nullptr)
         {
             // to avoid large jitter when releasing big memory chunck,
             // we release memory incremently in batch
             size_t vec_size = data_sync_vec_->size();
-            if (vec_size != 0)
+            if (vec_size > 0)
             {
                 CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
                 mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
-                if (vec_size > VEC_ERASE_BATCH_SIZE)
+                size_t cnt = 0;
+                while (cnt < VEC_ERASE_BATCH_SIZE && data_sync_vec_->size() > 0)
                 {
-                    data_sync_vec_->resize(vec_size - VEC_ERASE_BATCH_SIZE);
+                    FlushRecord rec = std::move(data_sync_vec_->back());
+                    data_sync_vec_->pop_back();
+                    cnt++;
                 }
-                else
+                int64_t allocated, committed;
+                if (data_sync_vec_->size() == 0 &&
+                    scan_heap->Full(&allocated, &committed))
                 {
-                    data_sync_vec_->resize(0);
+                    LOG(ERROR)
+                        << "Shared scan heap is still full after release "
+                        << vec_size << " allocated: " << allocated
+                        << " committed: " << committed
+                        << " heap size: " << scan_heap->memory_limit_;
                 }
-                data_sync_vec_->shrink_to_fit();
                 mi_heap_set_default(prev_heap);
 
-                if (data_sync_vec_->size() != 0)
+                if (data_sync_vec_->size() > 0)
                 {
                     ccs.Enqueue(this);
                     return false;
@@ -5206,24 +5221,34 @@ public:
             }
         }
 
-        if (archive_vec_ != nullptr && archive_vec_->size() != 0)
+        if (archive_vec_ != nullptr)
         {
             size_t vec_size = archive_vec_->size();
-            if (vec_size != 0)
+            if (vec_size > 0)
             {
                 CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
                 mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
-                if (vec_size > VEC_ERASE_BATCH_SIZE)
+                size_t cnt = 0;
+                while (cnt < VEC_ERASE_BATCH_SIZE && archive_vec_->size() > 0)
                 {
-                    archive_vec_->resize(vec_size - VEC_ERASE_BATCH_SIZE);
+                    FlushRecord rec = std::move(archive_vec_->back());
+                    archive_vec_->pop_back();
+                    cnt++;
                 }
-                else
+
+                int64_t allocated, committed;
+                if (archive_vec_->size() == 0 &&
+                    scan_heap->Full(&allocated, &committed))
                 {
-                    archive_vec_->resize(0);
+                    LOG(ERROR)
+                        << "Shared scan heap is still full after release "
+                        << vec_size << " allocated: " << allocated
+                        << " committed: " << committed
+                        << " heap size: " << scan_heap->memory_limit_;
                 }
                 mi_heap_set_default(prev_heap);
 
-                if (archive_vec_->size() != 0)
+                if (archive_vec_->size() > 0)
                 {
                     ccs.Enqueue(this);
                     return false;

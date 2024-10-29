@@ -173,8 +173,12 @@ public:
 
         if (!shard_data_sync_scan_heap_)
         {
+            // 10% of the shard heap is reserved for ckpt
+            // The distribution of ckpt memory
+            // 25% for data sync scan cc
+            // 75% for flush data task
             shard_data_sync_scan_heap_ =
-                std::make_unique<CcShardHeap>(this, memory_limit_ * 0.1);
+                std::make_unique<CcShardHeap>(this, memory_limit_ * 0.1 * 0.25);
         }
     }
 

@@ -1778,6 +1778,9 @@ private:
     const NodeGroupId ng_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
+    // The memory quote of data sync work
+    uint64_t data_sync_worker_memory_usage_quote_{0};
+
     // The background thread that periodically advances the timers of the local
     // shards to the current wall clock.
     std::thread timer_thd_;
@@ -2143,6 +2146,9 @@ private:
                       std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
                       std::unique_ptr<std::vector<FlushRecord>> archive_vec,
                       std::unique_ptr<std::vector<TxKey>> mv_base_vec,
+#ifdef ON_KEY_OBJECT
+                      uint64_t vec_mem_usage,
+#endif
                       TransactionExecution *data_sync_txm,
                       bool during_range_split,
                       size_t scan_task_worker_idx)
@@ -2155,6 +2161,9 @@ private:
               data_sync_vec_(std::move(data_sync_vec)),
               archive_vec_(std::move(archive_vec)),
               mv_base_vec_(std::move(mv_base_vec)),
+#ifdef ON_KEY_OBJECT
+              vec_mem_usage_(vec_mem_usage),
+#endif
               vec_owner_(true),
               during_range_split(during_range_split),
               scan_task_worker_idx_(scan_task_worker_idx),
@@ -2197,6 +2206,9 @@ private:
         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
         std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
+#ifdef ON_KEY_OBJECT
+        uint64_t vec_mem_usage_{0};
+#endif
         std::vector<FlushRecord> *data_sync_vec_ptr_{nullptr};
         std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
         std::vector<TxKey> *mv_base_vec_ptr_{nullptr};

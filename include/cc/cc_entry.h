@@ -299,6 +299,27 @@ public:
             return Key().Size() + PayloadSize();
         }
     }
+
+    uint64_t MemUsage()
+    {
+        uint64_t mem_usage = 0;
+        if (key_type_ == FlushKeyType::TxKey)
+        {
+            mem_usage += tx_key_.MemUsage();
+        }
+        else
+        {
+            mem_usage += sizeof(key_idx_);
+        }
+
+#ifdef ON_KEY_OBJECT
+        mem_usage += payload_.MemUsage();
+#else
+        mem_usage += sizeof(std::shared_ptr<TxRecord>);
+#endif
+
+        return mem_usage;
+    }
 };
 
 struct LruEntry
@@ -1022,7 +1043,8 @@ public:
                          bool mvcc_enabled,
                          size_t &ckpt_vec_size,
                          bool export_persisted_record_to_ckpt_vec,
-                         bool skip_archived_key) const
+                         bool skip_archived_key,
+                         uint64_t &mem_usage) const
     {
         // `export_store_record_if_need` - True means If no larger version needs
         // to be flushed(commit_ts > ckpt_ts && commit_ts <= to_ts), we need to
@@ -1068,6 +1090,7 @@ public:
                     ref.SetPayload(payload_);
                 }
 
+                mem_usage += ref.MemUsage();
                 // the size of record is not change.
                 ref.delta_size_ = 0;
                 exported_count++;
@@ -1103,6 +1126,7 @@ public:
 
             ref.payload_status_ = rec_status;
             ref.commit_ts_ = commit_ts;
+            mem_usage += ref.MemUsage();
 
 #ifdef RANGE_PARTITION_ENABLED
             if (data_store_size_ != INT32_MAX)
@@ -1176,6 +1200,7 @@ public:
                             }
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
+                            mem_usage += ref.MemUsage();
                             exported_count++;
                         }
                         else
@@ -1218,6 +1243,7 @@ public:
                                 // the size of record is not change.
                                 ref.delta_size_ = 0;
 
+                                mem_usage += ref.MemUsage();
                                 exported_count++;
                             }
                         }
@@ -1250,6 +1276,7 @@ public:
                             }
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
+                            mem_usage += ref.MemUsage();
                             if (data_store_size_ == INT32_MAX)
                             {
                                 // Mark the delta as unknwon
@@ -1290,6 +1317,7 @@ public:
                                     ref.SetPayload(payload_);  // sk
                                 }
                             }
+                            mem_usage += ref.MemUsage();
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
                         }
@@ -1340,6 +1368,7 @@ public:
                             // the size of record is not change.
                             ref.delta_size_ = 0;
 
+                            mem_usage += ref.MemUsage();
                             exported_count++;
                         }
                     }
@@ -1356,6 +1385,7 @@ public:
             // if an older version exists, need to copy record from "base table"
             // into "mvcc_archives table".
             mv_base_vec.push_back(ckpt_idx);
+            mem_usage += sizeof(ckpt_idx);
         }
 #endif
 

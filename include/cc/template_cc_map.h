@@ -5057,7 +5057,8 @@ public:
         bool mvcc_enabled,
         size_t &ckpt_vec_size,
         bool export_base_table_record_if_need,
-        bool skip_archived_key) const
+        bool skip_archived_key,
+        uint64_t &mem_usage) const
     {
         // This override heap thread call is not necessary, since the thread is
         // alreay be overrided before cc_request execution
@@ -5086,7 +5087,8 @@ public:
                                    mvcc_enabled,
                                    ckpt_vec_size,
                                    export_base_table_record_if_need,
-                                   skip_archived_key);
+                                   skip_archived_key,
+                                   mem_usage);
             export_size.second = false;
         }
 
@@ -5471,6 +5473,7 @@ public:
 
                     if (need_export)
                     {
+                        uint64_t mem_usage = 0;
                         auto export_result = ExportForCkpt(
                             cce,
                             *key,
@@ -5484,8 +5487,11 @@ public:
                             shard_->EnableMvcc(),
                             req.accumulated_scan_cnt_[shard_->core_id_],
                             false,
-                            false);
+                            false,
+                            mem_usage);
 
+                        req.accumulated_mem_usage_[shard_->core_id_] +=
+                            mem_usage;
                         if (export_result.second)
                         {
                             is_scan_mem_full = true;
@@ -5507,6 +5513,7 @@ public:
                     cce->data_store_size_ = 0;
                 }
 
+                uint64_t mem_usage = 0;
                 auto export_result =
                     ExportForCkpt(cce,
                                   *key,
@@ -5520,7 +5527,9 @@ public:
                                   shard_->EnableMvcc(),
                                   req.accumulated_scan_cnt_[shard_->core_id_],
                                   true,
-                                  req.skip_archived_key_);
+                                  req.skip_archived_key_,
+                                  mem_usage);
+                req.accumulated_mem_usage_[shard_->core_id_] += mem_usage;
                 if (export_result.second)
                 {
                     is_scan_mem_full = true;
@@ -5680,7 +5689,7 @@ public:
                 {
                     // scan memory is full and there are
                     // data for flush
-                    req.force_flush_ = true;
+                    req.scan_heap_is_full_ = true;
                     req.SetFinish(shard_->core_id_);
                     return false;
                 }
@@ -5892,6 +5901,7 @@ public:
             if (req.filter_lambda_(key->Hash()) &&
                 (cce->NeedCkpt() || req.include_persisted_data_))
             {
+                uint64_t mem_usage = 0;
                 auto export_result =
                     ExportForCkpt(cce,
                                   *key,
@@ -5905,7 +5915,9 @@ public:
                                   shard_->EnableMvcc(),
                                   req.accumulated_scan_cnt_[vec_idx],
                                   req.include_persisted_data_,
-                                  false);
+                                  false,
+                                  mem_usage);
+                req.accumulated_mem_usage_[vec_idx] += mem_usage;
 
                 if (export_result.second)
                 {
@@ -5969,6 +5981,7 @@ public:
                 }
                 else if (cce->NeedCkpt())
                 {
+                    uint64_t mem_usage = 0;
                     auto export_result =
                         ExportForCkpt(cce,
                                       *key,
@@ -5982,8 +5995,9 @@ public:
                                       shard_->EnableMvcc(),
                                       req.accumulated_scan_cnt_[vec_idx],
                                       false,
-                                      false);
-
+                                      false,
+                                      mem_usage);
+                    req.accumulated_mem_usage_[vec_idx] += mem_usage;
                     if (export_result.second)
                     {
                         is_scan_mem_full = true;
@@ -6035,7 +6049,7 @@ public:
             {
                 //  scan memory is full and there are
                 //  data for flush
-                req.force_flush_ = true;
+                req.scan_heap_is_full_ = true;
                 req.SetFinish(vec_idx);
                 return false;
             }
@@ -6855,6 +6869,7 @@ public:
                 if (req.WithFlush())
                 {
                     std::vector<FlushRecord> tmp_ckpt_vec(1);
+                    uint64_t mem_usage = 0;
                     size_t tmp_ckpt_vec_size = 0;
 
                     std::vector<FlushRecord> tmp_akv_vec;
@@ -6873,7 +6888,8 @@ public:
                                   shard_->EnableMvcc(),
                                   tmp_ckpt_vec_size,
                                   false,
-                                  false);
+                                  false,
+                                  mem_usage);
 
                     assert(tmp_ckpt_vec_size <= 1);
                     size_t offset = 0;

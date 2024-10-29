@@ -6470,7 +6470,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
         if (!mcmd->IsExpired() &&
             atm_block_cnt_.load(std::memory_order_relaxed) > 0)
         {
-            LOG(INFO) << "Not Expired";
+            DLOG(INFO) << "Not Expired";
             return;
         }
 
@@ -6481,7 +6481,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 txm->PostProcess(*this);
             }
 
-            LOG(INFO) << "ForwardResult";
+            DLOG(INFO) << "ForwardResult";
             return;
         }
 
