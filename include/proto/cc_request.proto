@@ -472,10 +472,11 @@ message StopNodeResponse
 message TransferRequest {
   uint32 ng_id = 1;
   uint32 node_id = 2;
+  int64 term = 3;
 }
 
 message TransferResponse {
-  bool error = 1;
+  int32 error_code = 1;
 }
 
 message GetLeaderRequest
