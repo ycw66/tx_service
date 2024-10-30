@@ -350,6 +350,7 @@ bool CcNode::OnLeaderStart(int64_t term,
                     uint64_t shard_ts = ccs.MinLastStandbyConsistentTs();
                     std::unique_lock<bthread::Mutex> lk(mux);
                     last_consistent_ts = std::min(last_consistent_ts, shard_ts);
+                    return true;
                 },
                 local_cc_shards_.Count());
             // Get the last consistent ts of the in memory cache and replay
@@ -568,6 +569,28 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
     }
 
     is_processing_.store(false, std::memory_order_release);
+
+    if (succ)
+    {
+        uint16_t core_cnt = local_cc_shards_.Count();
+
+        WaitableCc dequeue_wl_cc(
+            [term = req->standby_node_term()](CcShard &ccs)
+            {
+                if (Sharder::Instance().StandbyNodeTerm() == term)
+                {
+                    return ccs.DequeueWaitListAfterStandbyCatchUp();
+                }
+
+                return true;
+            },
+            core_cnt);
+        for (uint32_t core_id = 0; core_id < core_cnt; core_id++)
+        {
+            local_cc_shards_.EnqueueCcRequest(core_id, &dequeue_wl_cc);
+        }
+        dequeue_wl_cc.Wait();
+    }
     return succ;
 }
 
@@ -757,6 +780,8 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
                     ccs.SubsribeToPrimaryNode(grp_id, init_seq_ids.at(grp_id));
                 }
             }
+
+            return true;
         },
         core_cnt);
     for (uint32_t core_id = 0; core_id < core_cnt; core_id++)
@@ -764,6 +789,23 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         local_cc_shards_.EnqueueCcRequest(core_id, &sub_cc);
     }
     sub_cc.Wait();
+
+    // Ask primary to resend msg from the given seq id since some of the
+    // messages sent before starting seq id is set on standby node might have
+    // been dropped.
+    remote::ResetStandbySequenceIdRequest reset_req;
+    remote::ResetStandbySequenceIdResponse reset_resp;
+    reset_req.set_ng_id(ng_id_);
+    reset_req.set_ng_term(primary_term);
+    reset_req.set_node_id(node_id_);
+    reset_req.mutable_seq_id()->CopyFrom(start_follow_resp.start_sequence_id());
+    for (auto i = 0; i < reset_req.seq_id_size(); i++)
+    {
+        reset_req.add_seq_grp(i);
+    }
+
+    cntl.Reset();
+    stub.ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
 
     // Initialize bucket info.
 

@@ -869,6 +869,8 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
                     pins_.fetch_sub(1, std::memory_order_release);
                     break;
                 }
+
+                return true;
             };
 
             cc_shard->DispatchTask(ctrl.NextExecutor(), std::move(task));

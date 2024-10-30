@@ -169,6 +169,20 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
             // to tx processor.
             ParseCcMsgCc *cc = parse_standby_forward_pool_.NextRequest();
             cc->Reset(messages, size, this);
+            uint16_t first_core = next_core_;
+            // Do not send this task to overloaded core.
+            while (local_shards_.GetCcShard(next_core_)->QueueSize() > 1000)
+            {
+                next_core_++;
+                if (next_core_ == local_shards_.Count())
+                {
+                    next_core_ = 0;
+                }
+                if (first_core == next_core_)
+                {
+                    break;
+                }
+            }
             local_shards_.EnqueueCcRequest(next_core_++, cc);
             if (next_core_ == local_shards_.Count())
             {

@@ -1404,6 +1404,8 @@ void CcNodeService::StandbyStartFollowing(
                     std::unique_lock<bthread::Mutex> lk(mux);
                     start_seq = ccs.AddSubscribedStandby(node_id);
                 }
+
+                return true;
             });
         local_shards_.EnqueueCcRequest(core_id, &add_sub_cc);
         add_sub_cc.Wait();
@@ -1463,7 +1465,7 @@ void CcNodeService::UpdateStandbyConsistentTs(
                     Sharder::Instance().StandbyNodeTerm();
                 if (standby_node_term < 0)
                 {
-                    return;
+                    return true;
                 }
                 int64_t current_primary_term =
                     PrimaryTermFromStandbyTerm(standby_node_term);
@@ -1477,6 +1479,8 @@ void CcNodeService::UpdateStandbyConsistentTs(
                     LOG(INFO) << "primary node term mismatch " << primary_term
                               << " , " << current_primary_term;
                 }
+
+                return true;
             }
 
         );
@@ -1585,6 +1589,40 @@ void CcNodeService::FetchNodeInfo(
 
     response->set_role(NodeRole::VoterNode);
     response->set_status(NodeStatus::Loading);
+}
+
+void CcNodeService::ResetStandbySequenceId(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::ResetStandbySequenceIdRequest *request,
+    ::txservice::remote::ResetStandbySequenceIdResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    uint32_t ng_id = request->ng_id();
+    uint32_t node_id = request->node_id();
+    int64_t ng_term = request->ng_term();
+    std::unordered_map<uint32_t, uint64_t> seq_ids;
+    for (auto i = 0; i < request->seq_grp_size(); i++)
+    {
+        seq_ids.emplace(request->seq_grp(i), request->seq_id(i));
+    }
+    WaitableCc reset_seq_cc(
+        [ng_id, ng_term, node_id, &seq_ids](CcShard &ccs)
+        {
+            if (Sharder::Instance().CheckLeaderTerm(ng_id, ng_term))
+            {
+                ccs.ResetStandbySequence(node_id, seq_ids.at(ccs.core_id_));
+            }
+            return true;
+        },
+        seq_ids.size());
+
+    for (auto [seq_grp, _] : seq_ids)
+    {
+        local_shards_.EnqueueCcRequest(seq_grp, &reset_seq_cc);
+    }
+    reset_seq_cc.Wait();
+    response->set_error(false);
 }
 
 }  // namespace remote

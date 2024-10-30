@@ -168,6 +168,12 @@ public:
                        ::txservice::remote::FetchNodeInfoResponse *response,
                        ::google::protobuf::Closure *done) override;
 
+    void ResetStandbySequenceId(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::ResetStandbySequenceIdRequest *request,
+        ::txservice::remote::ResetStandbySequenceIdResponse *response,
+        ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

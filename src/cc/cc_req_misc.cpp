@@ -862,6 +862,20 @@ void FetchRecordCc::SetFinish(int err)
     ccs_.Enqueue(this);
 }
 
+bool RunOnTxProcessorCc::Execute(CcShard &ccs)
+{
+    if (task_)
+    {
+        bool done = task_(ccs);
+        if (!done)
+        {
+            ccs.Enqueue(this);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 {
     int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group_);

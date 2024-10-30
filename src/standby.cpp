@@ -37,7 +37,10 @@ void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
     WaitableCc get_subscribe_node_ids_cc;
     get_subscribe_node_ids_cc.Reset(
         [&subscribe_node_ids](CcShard &ccs)
-        { subscribe_node_ids = ccs.GetSubscribedStandbys(); });
+        {
+            subscribe_node_ids = ccs.GetSubscribedStandbys();
+            return true;
+        });
 
     Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(
         0, &get_subscribe_node_ids_cc);

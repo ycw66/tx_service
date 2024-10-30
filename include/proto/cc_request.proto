@@ -390,6 +390,18 @@ message FetchNodeInfoResponse{
     NodeStatus status = 4;
 }
 
+message ResetStandbySequenceIdRequest{
+    uint32 node_id = 1;
+    repeated uint32 seq_grp = 2;
+    repeated uint64 seq_id = 3;
+    uint32 ng_id = 4;
+    int64 ng_term = 5;
+}
+
+message ResetStandbySequenceIdResponse{
+    bool error = 1;
+}
+
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -421,6 +433,7 @@ service CcRpcService {
     rpc RequestStorageSnapshotSync(StorageSnapshotSyncRequest) returns (StorageSnapshotSyncResponse);
     rpc OnSnapshotSynced(OnSnapshotSyncedRequest) returns (OnSnapshotSyncedResponse);
     rpc FetchNodeInfo(FetchNodeInfoRequest) returns (FetchNodeInfoResponse);
+    rpc ResetStandbySequenceId(ResetStandbySequenceIdRequest) returns (ResetStandbySequenceIdResponse);
 }
 
 message NodeConfigBuf

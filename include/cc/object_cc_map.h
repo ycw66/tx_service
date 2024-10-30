@@ -1494,7 +1494,7 @@ public:
             return true;
         }
         else if (cce->PayloadStatus() != RecordStatus::Unknown ||
-                 obj_version == 1 || has_overwrite)
+                 has_overwrite || obj_version == 1)
         {
             if (obj_version == 1 && !has_overwrite)
             {
@@ -1578,23 +1578,29 @@ public:
         }
         else
         {
-            assert(cce->PayloadStatus() == RecordStatus::Unknown);
-            // There is no cached version of this record, ask primary node for
-            // the payload.
-            shard_->FetchRecord(table_name_,
-                                table_schema_,
-                                TxKey(look_key),
-                                cce,
-                                this,
-                                cc_ng_id_,
-                                req.StandbyNodeTerm(),
-                                &req,
-                                -1,
-                                true,
-                                req.KeyShardCode());
-            cce->GetOrCreateKeyLock(shard_, this, ccp)
-                .AcquireReadIntent(FetchRecordCc::GetFetchRecordTxNumber(
-                    Sharder::Instance().NodeId()));
+            if (Sharder::Instance().StandbyNodeTerm() > 0)
+            {
+                // TODO(liunyl): to avoid rpc overflow on primary, fetching
+                // record form kv for now. Fix this by fetching record by cc req
+                // from primary. There is no cached version of this record, ask
+                // primary node for the payload.
+                shard_->FetchRecord(table_name_,
+                                    table_schema_,
+                                    TxKey(look_key),
+                                    cce,
+                                    this,
+                                    cc_ng_id_,
+                                    req.StandbyNodeTerm(),
+                                    &req);
+                cce->GetOrCreateKeyLock(shard_, this, ccp)
+                    .AcquireReadIntent(FetchRecordCc::GetFetchRecordTxNumber(
+                        Sharder::Instance().NodeId()));
+            }
+            else
+            {
+                // Cannot fetch from kv yet, wait for snapshot is synced.
+                shard_->EnqueueWaitListForStandbyCatchUp(&req);
+            }
             return false;
         }
 

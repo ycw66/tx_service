@@ -340,7 +340,7 @@ public:
      * @param task A cpu-bound task.
      */
     void DispatchTask(uint16_t cc_shard_idx,
-                      std::function<void(CcShard &)> task);
+                      std::function<bool(CcShard &)> task);
 
     /**
      * @brief Get the number of ccentries in this ccshard
@@ -882,6 +882,8 @@ public:
                            remote::KeyObjectStandbyForwardRequest *req);
     void ResetStandbySequence();
 
+    void ResetStandbySequence(uint32_t node_id, uint64_t seq_id);
+
     // called on follower node
     bool UpdateLastReceivedStandbySequenceId(
         const remote::KeyObjectStandbyForwardRequest &msg,
@@ -898,6 +900,25 @@ public:
     void EnqueueWaitListIfSchemaMismatch(CcRequestBase *req);
 
     void DequeueWaitListAfterSchemaUpdated();
+
+    void EnqueueWaitListForStandbyCatchUp(CcRequestBase *req)
+    {
+        waiting_list_for_standby_catch_up_.push(req);
+    }
+
+    bool DequeueWaitListAfterStandbyCatchUp()
+    {
+        size_t dequeued_cnt = 0;
+        while (!waiting_list_for_standby_catch_up_.empty() &&
+               dequeued_cnt < 10000)
+        {
+            Enqueue(waiting_list_for_standby_catch_up_.front());
+            waiting_list_for_standby_catch_up_.pop();
+            dequeued_cnt++;
+        }
+
+        return waiting_list_for_standby_catch_up_.empty();
+    }
 
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
@@ -983,6 +1004,7 @@ private:
     absl::flat_hash_map<uint32_t, StandbySequenceGroup> standby_sequence_grps_;
     // requests to execute after schema being modified
     std::vector<CcRequestBase *> waiting_list_for_schema_;
+    std::queue<CcRequestBase *> waiting_list_for_standby_catch_up_;
 
     // Reserved head and tail for the double-linked list of cc entries, which
     // simplifies handling of empty and one-element lists.

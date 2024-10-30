@@ -959,7 +959,7 @@ void CcShard::SetWaitingCkpt(bool is_waiting)
 }
 
 void CcShard::DispatchTask(uint16_t cc_shard_idx,
-                           std::function<void(CcShard &)> task)
+                           std::function<bool(CcShard &)> task)
 {
     RunOnTxProcessorCc *cc_req = run_on_tx_processor_cc_pool_.NextRequest();
     cc_req->Reset(std::move(task));
@@ -2263,7 +2263,9 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
         // standby has fallen behind too much. Resubscribe to primary node.
         LOG(WARNING) << "Sequence group " << sequence_grp_id
                      << " has fallen behind primary too much. Trying to "
-                        "resubscribe.";
+                        "resubscribe. Last consistent seq id is "
+                     << seq_grp_info.last_consistent_standby_sequence_id_
+                     << ", latest seq id is " << seq_id;
         int64_t cur_prim_term = Sharder::Instance().PrimaryNodeTerm();
         if (cur_prim_term > 0)
         {
@@ -2363,6 +2365,27 @@ void CcShard::ResetStandbySequence()
     }
     subscribed_standby_nodes_.clear();
     standby_sequence_grps_.clear();
+    while (!waiting_list_for_standby_catch_up_.empty())
+    {
+        waiting_list_for_standby_catch_up_.front()->AbortCcRequest(
+            CcErrorCode::NG_TERM_CHANGED);
+        waiting_list_for_standby_catch_up_.pop();
+    }
+}
+
+void CcShard::ResetStandbySequence(uint32_t node_id, uint64_t seq_id)
+{
+    if (subscribed_standby_nodes_.find(node_id) !=
+            subscribed_standby_nodes_.end() &&
+        subscribed_standby_nodes_.at(node_id) > seq_id - 1)
+    {
+        subscribed_standby_nodes_.at(node_id) = seq_id - 1;
+        if (!retry_fwd_msg_cc_->InUse())
+        {
+            retry_fwd_msg_cc_->Use();
+            Enqueue(retry_fwd_msg_cc_.get());
+        }
+    }
 }
 
 bool CcShard::GetStandbyMessage(uint64_t seq_id,

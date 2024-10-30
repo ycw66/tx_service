@@ -770,33 +770,26 @@ public:
 struct RunOnTxProcessorCc : public CcRequestBase
 {
 public:
-    explicit RunOnTxProcessorCc(std::function<void(CcShard &ccs)> task = {})
+    explicit RunOnTxProcessorCc(std::function<bool(CcShard &ccs)> task = {})
         : task_(std::move(task))
     {
     }
 
-    void Reset(std::function<void(CcShard &ccs)> task)
+    void Reset(std::function<bool(CcShard &ccs)> task)
     {
         task_ = std::move(task);
     }
 
-    bool Execute(CcShard &ccs) override
-    {
-        if (task_)
-        {
-            task_(ccs);
-        }
-        return true;
-    }
+    bool Execute(CcShard &ccs) override;
 
 private:
-    std::function<void(CcShard &ccs)> task_;
+    std::function<bool(CcShard &ccs)> task_;
 };
 
 struct WaitableCc : public RunOnTxProcessorCc
 {
 public:
-    explicit WaitableCc(std::function<void(CcShard &ccs)> task = {},
+    explicit WaitableCc(std::function<bool(CcShard &ccs)> task = {},
                         uint32_t core_cnt = 1)
         : RunOnTxProcessorCc(std::move(task)),
           unfinished_cnt_(core_cnt),
@@ -804,7 +797,7 @@ public:
     {
     }
 
-    void Reset(std::function<void(CcShard &ccs)> task = {},
+    void Reset(std::function<bool(CcShard &ccs)> task = {},
                uint16_t core_cnt = 1)
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
@@ -854,12 +847,14 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        RunOnTxProcessorCc::Execute(ccs);
-        error_code_ = CcErrorCode::NO_ERROR;
-        if (--unfinished_cnt_ == 0)
+        if (RunOnTxProcessorCc::Execute(ccs))
         {
-            cv_.notify_one();
+            std::unique_lock<bthread::Mutex> lk(mux_);
+            error_code_ = CcErrorCode::NO_ERROR;
+            if (--unfinished_cnt_ == 0)
+            {
+                cv_.notify_one();
+            }
         }
         return false;
     }

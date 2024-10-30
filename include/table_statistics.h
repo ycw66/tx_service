@@ -875,6 +875,7 @@ public:
         {
             ccmap_sample_pool->To(broadcast_sample_pool);
             *updated_since_sync = ccmap_sample_pool->ResetGetUpdatedSinceSync();
+            return true;
         };
         RunOnBindingCcShard(std::move(task));
 
@@ -888,7 +889,10 @@ public:
             sample_pool_map;
 
         Task task = [this, &sample_pool_map](CcShard &ccs)
-        { To(sample_pool_map); };
+        {
+            To(sample_pool_map);
+            return true;
+        };
         RunOnBindingCcShard(std::move(task));
 
         *updated_since_sync = const_cast<TableStatistics<KeyT> *>(this)
@@ -1325,7 +1329,7 @@ private:
     }
 
 private:
-    using Task = std::function<void(CcShard &ccs)>;
+    using Task = std::function<bool(CcShard &ccs)>;
 
     // Deliver task to tx_processor to avoid lock contention.
     void RunOnBindingCcShard(Task task) const
