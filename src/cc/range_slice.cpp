@@ -725,6 +725,122 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     return true;
 }
 
+bool StoreRange::SampleSubRangeKeys(StoreSlice *slice,
+                                    const TableName &table_name,
+                                    NodeGroupId ng_id,
+                                    int64_t ng_term,
+                                    uint64_t data_sync_ts,
+                                    size_t key_cnt,
+                                    size_t first_idx,
+                                    std::vector<TxKey> &new_range_keys)
+{
+    TxKey start_key = slice->StartTxKey();
+    TxKey end_key = slice->EndTxKey();
+
+    SampleSubRangeKeysCc sample_keys_cc(table_name,
+                                        ng_id,
+                                        ng_term,
+                                        data_sync_ts,
+                                        &start_key,
+                                        &end_key,
+                                        key_cnt);
+
+    // Send the request to one shard randomly.
+    uint64_t core_rand = butil::fast_rand();
+    local_cc_shards_.EnqueueToCcShard(core_rand % local_cc_shards_.Count(),
+                                      &sample_keys_cc);
+    DLOG(INFO) << "Send the sample range keys request to shard#"
+               << core_rand % local_cc_shards_.Count();
+
+    sample_keys_cc.Wait();
+    CcErrorCode res = sample_keys_cc.ErrorCode();
+    if (res != CcErrorCode::NO_ERROR)
+    {
+        LOG(ERROR) << "SampleSlice failed on table: " << table_name.StringView()
+                   << " with error code: " << static_cast<uint32_t>(res);
+        return false;
+    }
+    else
+    {
+        // Get sub-range keys.
+        std::vector<TxKey> &target_keys = sample_keys_cc.TargetTxKeys();
+        assert(target_keys.size() == key_cnt);
+        for (size_t i = 0; i < target_keys.size(); ++i)
+        {
+            new_range_keys[first_idx + i] = target_keys[i].Clone();
+        }
+    }
+
+    return true;
+}
+
+void StoreRange::UpdateSliceSpec(StoreSlice *slice,
+                                 const std::vector<TxKey> &new_range_keys,
+                                 size_t first_idx,
+                                 size_t subslice_cnt)
+{
+    uint64_t sub_slice_size = slice->Size() / subslice_cnt;
+    uint64_t sub_post_ckpt_size = slice->PostCkptSize() / subslice_cnt;
+    std::vector<SliceChangeInfo> split_keys;
+    split_keys.reserve(subslice_cnt);
+
+    // The first sub-slice's start key re-uses the old slice's start key.
+    split_keys.emplace_back(
+        slice->StartTxKey(), sub_slice_size, sub_post_ckpt_size);
+    for (size_t i = 0; i < subslice_cnt - 1; ++i)
+    {
+        split_keys.emplace_back(new_range_keys[first_idx + i].GetShallowCopy(),
+                                sub_slice_size,
+                                sub_post_ckpt_size);
+    }
+
+    // Split this StoreSlice in memory.
+    std::unique_lock<std::shared_mutex> range_lk(mux_);
+    std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
+
+    assert(!slice->to_alter_);
+    slice->to_alter_ = true;
+
+    // Unlocks the slice before checking the slice's pin count. If some
+    // tx's are pinning the slice, the calling thread, i.e., the
+    // checkpointer, is put into sleep on the condition variable.
+    slice_lk.unlock();
+    wait_cv_.wait(range_lk,
+                  [slice_ptr = slice] { return slice_ptr->ChangeAllowed(); });
+
+    slice_lk.lock();
+
+    std::unique_lock<std::mutex> heap_lk(
+        local_cc_shards_.table_ranges_heap_mux_);
+    bool is_override_thd = mi_is_override_thread();
+    mi_threadid_t prev_thd =
+        mi_override_thread(local_cc_shards_.GetTableRangesHeapThreadId());
+    mi_heap_t *prev_heap =
+        mi_heap_set_default(local_cc_shards_.GetTableRangesHeap());
+
+    UpdateSlice(slice, split_keys);
+
+    bool range_slice_mem_full = local_cc_shards_.TableRangesMemoryFull();
+    mi_heap_set_default(prev_heap);
+    if (is_override_thd)
+    {
+        mi_override_thread(prev_thd);
+    }
+    else
+    {
+        mi_restore_default_thread_id();
+    }
+    heap_lk.unlock();
+
+    slice->to_alter_ = false;
+    if (range_slice_mem_full)
+    {
+        range_lk.unlock();
+        slice_lk.unlock();
+        local_cc_shards_.KickoutRangeSlices();
+    }
+}
+
 bool StoreRange::UpdateRangeSlicesInStore(const TableName &table_name,
                                           uint64_t ckpt_ts,
                                           uint64_t range_version,

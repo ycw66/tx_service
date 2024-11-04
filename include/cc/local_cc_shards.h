@@ -1898,6 +1898,21 @@ private:
         {
         }
 
+        RangeSplitTask(std::shared_ptr<DataSyncTask> data_sync_task,
+                       std::shared_ptr<const TableSchema> schema,
+                       std::vector<TxKey> &&split_keys,
+                       TableRangeEntry *range_entry,
+                       TransactionExecution *data_sync_txm,
+                       std::shared_ptr<void> defer_unpin)
+            : schema_(schema),
+              split_keys_(std::move(split_keys)),
+              range_entry_(range_entry),
+              data_sync_task_(data_sync_task),
+              data_sync_txm_(data_sync_txm),
+              defer_unpin_(defer_unpin_)
+        {
+        }
+
         std::shared_ptr<const TableSchema> schema_;
         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
@@ -2069,6 +2084,18 @@ private:
         uint64_t data_sync_ts,
         StoreRange *store_range,
         std::vector<TxKey> &splitting_info);
+
+    /**
+     * @brief Decide the range update plan based on the @@slices_delta_size
+     * parameter.
+     */
+    bool CalculateRangeUpdate(const TableName &table_name,
+                              NodeGroupId node_group_id,
+                              int64_t node_group_term,
+                              uint64_t data_sync_ts,
+                              StoreRange *store_range,
+                              const std::map<TxKey, int64_t> &slices_delta_size,
+                              std::vector<TxKey> &splitting_info);
     /**
      * @brief Worker thread that split the target range and flush the data into
      * data store in their new partitions. This is called during checkpoint on a

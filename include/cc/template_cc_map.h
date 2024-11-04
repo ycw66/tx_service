@@ -8107,6 +8107,113 @@ public:
         return true;
     }
 
+    bool Execute(SampleSubRangeKeysCc &req) override
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
+        const KeyT *const req_start_key = req.StartTxKey()->GetKey<KeyT>();
+        const KeyT *const req_end_key = req.EndTxKey()->GetKey<KeyT>();
+
+        TxKey &pause_pos = req.PausePos();
+        const KeyT *slice_start_key = pause_pos.KeyPtr() != nullptr
+                                          ? pause_pos.GetKey<KeyT>()
+                                          : req_start_key;
+        const KeyT *slice_end_key = req_end_key;
+
+        Iterator it;
+        Iterator end_it;
+        it = LowerBound(*slice_start_key);
+        if (it == Begin())
+        {
+            ++it;
+        }
+
+        if (slice_end_key == KeyT::PositiveInfinity())
+        {
+            end_it = End();
+        }
+        else
+        {
+            std::pair<Iterator, ScanType> end_pair =
+                ForwardScanStart(*slice_end_key, true);
+            end_it = end_pair.first;
+            if (end_pair.second == ScanType::ScanGap)
+            {
+                ++end_it;
+            }
+        }
+
+        using KeySamplePool = SampleSubRangeKeysCc::SamplePool<
+            SampleSubRangeKeysCc::SamplePoolSize,
+            KeyT,
+            typename TemplateCcMapSamplePool<KeyT>::CopyKey>;
+
+        KeySamplePool *const key_sample_pool = [&req]
+        {
+            if (req.SamplePoolPtr() == nullptr)
+            {
+                req.SetSamplePool(std::move(std::make_unique<KeySamplePool>()));
+            }
+            return static_cast<KeySamplePool *>(req.SamplePoolPtr());
+        }();
+
+        for (size_t scan_cnt = 0;
+             scan_cnt < SampleSubRangeKeysCc::ScanBatchSize && it != end_it;
+             ++scan_cnt)
+        {
+            const KeyT *key = it->first;
+            const CcEntry<KeyT, ValueT> *cce = it->second;
+            assert(key);
+
+            // sample keys
+            if (cce->CommitTs() <= req.DataSyncTs() &&
+                cce->PayloadStatus() == RecordStatus::Normal)
+            {
+                key_sample_pool->Insert(*key);
+            }
+
+            ++it;
+        }
+
+        if (it == end_it)
+        {
+            // Get the target keys
+            const std::vector<KeyT> &sample_keys =
+                key_sample_pool->SampleKeys();
+            assert(sample_keys.size() == SampleSubRangeKeysCc::SamplePoolSize);
+            std::vector<TxKey> &target_txkeys = req.TargetTxKeys();
+            size_t target_cnt = target_txkeys.size();
+            size_t step_size = sample_keys.size() / (target_cnt + 1);
+            for (size_t i = 0; i < target_cnt; ++i)
+            {
+                size_t idx = step_size * (i + 1);
+                target_txkeys[i] = TxKey(&sample_keys[idx]);
+            }
+
+            // Finish
+            req.SetFinish();
+        }
+        else
+        {
+            // Set the paused position and put the request into ccqueue again.
+            pause_pos = it->first->CloneTxKey();
+            shard_->Enqueue(&req);
+        }
+
+        return false;
+    }
+
     bool Execute(ApplyCc &req) override
     {
         return true;

@@ -2988,6 +2988,46 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         scan_delta_size_cc.Reset();
     }
 
+    std::vector<TxKey> split_keys;
+    bool ret = CalculateRangeUpdate(table_name,
+                                    ng_id,
+                                    ng_term,
+                                    data_sync_task->data_sync_ts_,
+                                    store_range,
+                                    slices_delta_size,
+                                    split_keys);
+    if (!ret)
+    {
+        LOG(ERROR) << "Calculate subranges key failed on table "
+                   << table_name.StringView();
+
+        data_sync_task->SetError();
+        // Handle the pending tasks for the same range
+        PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+
+        range_entry->UnPinStoreRange();
+        txservice::AbortTx(data_sync_txm);
+        return;
+    }
+
+    if (!split_keys.empty())
+    {
+        std::lock_guard<std::mutex> range_split_worker_lk(
+            range_split_worker_ctx_.mux_);
+
+        auto range_split_task =
+            std::make_unique<RangeSplitTask>(data_sync_task,
+                                             table_schema,
+                                             std::move(split_keys),
+                                             range_entry,
+                                             data_sync_txm,
+                                             defer_unpin);
+
+        pending_range_split_task_.push_back(std::move(range_split_task));
+        range_split_worker_ctx_.cv_.notify_one();
+        return;
+    }
+
     // 3. Scan records.
     // The data sync worker thread is the owner of those vectors.
     std::vector<std::vector<FlushRecord>> data_sync_vecs;
@@ -4144,6 +4184,37 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
         }
     }
 
+    return true;
+}
+
+bool LocalCcShards::CalculateRangeUpdate(
+    const TableName &table_name,
+    NodeGroupId node_group_id,
+    int64_t node_group_term,
+    uint64_t data_sync_ts,
+    StoreRange *store_range,
+    const std::map<TxKey, int64_t> &slices_delta_size,
+    std::vector<TxKey> &splitting_info)
+{
+    for (auto it = slices_delta_size.cbegin(); it != slices_delta_size.cend();
+         ++it)
+    {
+        StoreSlice *curr_slice = store_range->FindSlice(it->first);
+        int64_t sum = curr_slice->Size() + it->second;
+        uint64_t slice_size = sum > 0 ? sum : 0;
+        curr_slice->SetPostCkptSize(slice_size);
+    }
+
+    size_t store_range_post_ckpt_size = store_range->PostCkptSize();
+    if (store_range_post_ckpt_size > StoreRange::range_max_size)
+    {
+        return store_range->CalculateRangeSplitKeys(table_name,
+                                                    node_group_id,
+                                                    node_group_term,
+                                                    data_sync_ts,
+                                                    store_range_post_ckpt_size,
+                                                    splitting_info);
+    }
     return true;
 }
 

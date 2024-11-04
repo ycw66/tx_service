@@ -614,6 +614,18 @@ public:
                          const std::vector<FlushRecord> &flush_vec,
                          size_t start_idx,
                          size_t end_idx);
+    bool SampleSubRangeKeys(StoreSlice *slice,
+                            const TableName &table_name,
+                            NodeGroupId ng_id,
+                            int64_t ng_term,
+                            uint64_t data_sync_ts,
+                            size_t key_cnt,
+                            size_t first_idx,
+                            std::vector<TxKey> &new_range_keys);
+    void UpdateSliceSpec(StoreSlice *slice,
+                         const std::vector<TxKey> &new_range_keys,
+                         size_t first_idx,
+                         size_t subslice_cnt);
 
     /**
      * This function is NOT THREAD SAFE. Only checkpointer should be calling
@@ -626,6 +638,14 @@ public:
         int64_t ng_term,
         uint64_t flush_ts,
         size_t post_ckpt_size) = 0;
+
+    virtual bool CalculateRangeSplitKeys(
+        const TableName &table_name,
+        NodeGroupId ng_id,
+        int64_t ng_term,
+        uint64_t data_sync_ts,
+        size_t post_ckpt_size,
+        std::vector<TxKey> &new_range_keys) = 0;
 
     // Update slice size after data flush. If flush is successful,
     // update slice size to precalculated post ckpt size. Otherwise,
@@ -1443,6 +1463,113 @@ public:
             subrange_slice_idx = slice_idx;
         }
         return new_range_keys;
+    }
+
+    bool CalculateRangeSplitKeys(const TableName &table_name,
+                                 NodeGroupId ng_id,
+                                 int64_t ng_term,
+                                 uint64_t data_sync_ts,
+                                 size_t post_ckpt_size,
+                                 std::vector<TxKey> &new_range_keys) override
+    {
+        uint32_t slice_idx = 0;
+        uint32_t subrange_slice_idx = 0;
+        uint32_t subrange_key_cnt = 0;
+        size_t subrange_cnt =
+            std::ceil(post_ckpt_size / (StoreRange::range_max_size *
+                                        StoreRange::new_range_load_factor));
+        size_t avg_subrange_size = post_ckpt_size / subrange_cnt;
+
+        new_range_keys.resize(subrange_cnt);
+
+        while (slice_idx < slices_.size())
+        {
+            size_t curr_subrange_size = 0;
+            bool sample_keys = false;
+            StoreSlice *curr_slice = nullptr;
+            for (; curr_subrange_size < avg_subrange_size &&
+                   slice_idx < slices_.size();
+                 ++slice_idx)
+            {
+                StoreSlice *curr_slice = slices_[slice_idx].get();
+                if (curr_slice->PostCkptSize() != UINT64_MAX)
+                {
+                    if (curr_slice->PostCkptSize() > avg_subrange_size)
+                    {
+                        // The current slice need to split into multiple
+                        // sub-ranges, then to sample subrange keys from the
+                        // current slice.
+                        sample_keys = true;
+                        break;
+                    }
+
+                    curr_subrange_size += curr_slice->PostCkptSize();
+                }
+                else
+                {
+                    curr_subrange_size += curr_slice->Size();
+                }
+            }
+
+            if (sample_keys)
+            {
+                // The post ckpt size of the current slice is large than average
+                // sub-range size, so need to split into several subrange.
+                // The start key of the first sub-range is the start key of the
+                // current slice, and start keys of the remaining sub-ranges are
+                // obtained by sampling.
+                size_t subranges_cnt =
+                    std::ceil(curr_slice->PostCkptSize() / avg_subrange_size);
+                if (subrange_slice_idx != 0)
+                {
+                    // Skip the first subrange.
+                    const KeyT *slice_start =
+                        slices_[subrange_slice_idx]->StartKey();
+                    assert(slice_start->Type() == KeyType::Normal);
+                    new_range_keys.at(subrange_key_cnt) =
+                        TxKey(std::make_unique<KeyT>(*slice_start));
+                    ++subrange_key_cnt;
+                }
+
+                if (!SampleSubRangeKeys(curr_slice,
+                                        table_name,
+                                        ng_id,
+                                        ng_term,
+                                        data_sync_ts,
+                                        (subranges_cnt - 1),
+                                        subrange_key_cnt,
+                                        new_range_keys))
+                {
+                    return false;
+                }
+
+                // Update the current slice into multiple slices. To avoid more
+                // than one subrange task access one slice simultaneously during
+                // handling the FlushRecords.
+                // NOTE: The new slice spec is not the final status, the new
+                // subslices boundary is equal to the boundary of the subrange
+                // which the new subslice belong to.
+                UpdateSliceSpec(
+                    curr_slice, new_range_keys, subrange_key_cnt, subrange_cnt);
+
+                subrange_key_cnt += (subrange_cnt - 1);
+            }
+            // Skip the first subrange since it will reuse the current range
+            // entry.
+            else if (subrange_slice_idx != 0)
+            {
+                const KeyT *slice_start =
+                    slices_[subrange_slice_idx]->StartKey();
+                assert(slice_start->Type() == KeyType::Normal);
+                new_range_keys.at(subrange_key_cnt) =
+                    TxKey(std::make_unique<KeyT>(*slice_start));
+                ++subrange_key_cnt;
+            }
+
+            subrange_slice_idx = slice_idx;
+        }
+
+        return true;
     }
 
     void DeleteKey(const KeyT &key, uint16_t core_id, StoreSlice *slice)

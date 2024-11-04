@@ -7648,4 +7648,180 @@ public:
 private:
     size_t free_count_{0};
 };
+
+struct SampleSubRangeKeysCc : public CcRequestBase
+{
+public:
+    static constexpr size_t ScanBatchSize = 128;
+    static constexpr size_t SamplePoolSize = 1024;
+
+    struct SamplePoolBase
+    {
+        virtual ~SamplePoolBase() = default;
+    };
+
+    template <uint32_t CapacityN, typename KeyT, typename CopyKey>
+    struct SamplePool : public SamplePoolBase
+    {
+    public:
+        void Insert(const KeyT &key)
+        {
+            random_pairing_.Insert(key, ++counter_);
+        }
+
+        const std::vector<KeyT> &SampleKeys() const
+        {
+            return random_pairing_.SampleKeys();
+        }
+
+    public:
+        RandomPairing<CapacityN, KeyT, CopyKey> random_pairing_;
+        size_t counter_{0};
+    };
+
+public:
+    SampleSubRangeKeysCc(const TableName &table_name,
+                         NodeGroupId ng_id,
+                         int64_t ng_term,
+                         uint64_t data_sync_ts,
+                         const TxKey *start_key,
+                         const TxKey *end_key,
+                         size_t subrange_key_cnt)
+        : table_name_(table_name),
+          node_group_id_(ng_id),
+          node_group_term_(ng_term),
+          data_sync_ts_(data_sync_ts),
+          start_key_(start_key),
+          end_key_(end_key)
+    {
+        subrange_keys_.resize(subrange_key_cnt);
+    }
+
+    ~SampleSubRangeKeysCc() = default;
+
+    SampleSubRangeKeysCc(const SampleSubRangeKeysCc &rhs) = delete;
+    SampleSubRangeKeysCc &operator=(const SampleSubRangeKeysCc &rhs) = delete;
+
+    bool ValidTermCheck()
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        assert(node_group_term_ > 0);
+
+        if (cc_ng_term < 0 || cc_ng_term != node_group_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
+
+        CcMap *ccm = ccs.GetCcm(table_name_, node_group_id_);
+        if (ccm == nullptr)
+        {
+            assert(!table_name_.IsMeta());
+            const CatalogEntry *catalog_entry = ccs.InitCcm(
+                table_name_, node_group_id_, node_group_term_, this);
+            // Catalog entry should always exists and schema should not be null,
+            // since this cc request should be executed when table is locked by
+            // data sync txm.
+            assert(catalog_entry && catalog_entry->schema_);
+            ccm = ccs.GetCcm(table_name_, node_group_id_);
+        }
+        assert(ccm != nullptr);
+        ccm->Execute(*this);
+        // return false since SampleSubRangeKeysCc is not re-used and does not
+        // need to call CcRequestBase::Free
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this]() { return finished_; });
+    }
+
+    void SetFinish()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        finished_ = true;
+        cv_.notify_one();
+    }
+
+    void SetError(CcErrorCode err)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        err_code_ = err;
+        finished_ = true;
+        cv_.notify_one();
+    }
+
+    CcErrorCode ErrorCode()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        return err_code_;
+    }
+
+    uint64_t DataSyncTs() const
+    {
+        return data_sync_ts_;
+    }
+
+    const TxKey *StartTxKey() const
+    {
+        return start_key_;
+    }
+
+    const TxKey *EndTxKey() const
+    {
+        return end_key_;
+    }
+
+    TxKey &PausePos()
+    {
+        return paused_pos_;
+    }
+
+    SamplePoolBase *SamplePoolPtr() const
+    {
+        return sample_pool_.get();
+    }
+
+    void SetSamplePool(std::unique_ptr<SamplePoolBase> &&sample_pool)
+    {
+        sample_pool_ = std::move(sample_pool);
+    }
+
+    std::vector<TxKey> &TargetTxKeys()
+    {
+        return subrange_keys_;
+    }
+
+private:
+    const TableName &table_name_;
+    NodeGroupId node_group_id_;
+    int64_t node_group_term_;
+    uint64_t data_sync_ts_;
+    const TxKey *start_key_;
+    const TxKey *end_key_;
+    std::vector<TxKey> subrange_keys_;
+    TxKey paused_pos_;
+
+    std::unique_ptr<SamplePoolBase> sample_pool_{nullptr};
+
+    std::mutex mux_;
+    std::condition_variable cv_;
+    bool finished_{false};
+    CcErrorCode err_code_{CcErrorCode::NO_ERROR};
+};
+
 }  // namespace txservice
