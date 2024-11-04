@@ -647,6 +647,8 @@ public:
 
     virtual size_t PostCkptSize() = 0;
 
+    virtual size_t SlicesCount() const = 0;
+
     uint32_t Pins()
     {
         return pins_.load(std::memory_order_acquire);
@@ -961,6 +963,12 @@ public:
         }
 
         return slice_vec;
+    }
+
+    size_t SlicesCount() const override
+    {
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        return slices_.size();
     }
 
     const std::vector<std::unique_ptr<TemplateStoreSlice<KeyT>>> &TypedSlices()

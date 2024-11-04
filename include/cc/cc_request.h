@@ -3186,6 +3186,10 @@ public:
 struct DataSyncScanCc : public CcRequestBase
 {
 public:
+#ifdef RANGE_PARTITION_ENABLED
+    enum DataSyncScanType{ScanFlushRecords = 0, ScanSliceDeltaSize};
+#endif
+
     // how many pages to scan one time
 #ifdef ON_KEY_OBJECT
     // Yield more often on redis since any run one round
@@ -3215,7 +3219,9 @@ public:
                    bool include_persisted_data,
 #ifdef RANGE_PARTITION_ENABLED
                    bool export_base_table_rec_if_need = false,
-                   bool skip_archived_key = false
+                   bool export_base_table_rec_only = false,
+                   StoreRange *store_range = nullptr,
+                   DataSyncScanType scan_type = ScanFlushRecords
 #else
                    bool only_one_core,
                    std::function<bool(size_t hash_code)> filter
@@ -3241,7 +3247,9 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
           ,
           export_base_table_rec_if_need_(export_base_table_rec_if_need),
-          skip_archived_key_(skip_archived_key)
+          export_base_table_rec_only_(export_base_table_rec_only),
+          store_range_(store_range),
+          scan_type_(scan_type)
 #else
           ,
           only_scan_one_core_(only_one_core),
@@ -3254,18 +3262,26 @@ public:
         assert(scan_batch_size_ > DataSyncScanBatchSize);
         for (size_t i = 0; i < core_cnt; i++)
         {
-            data_sync_vec_.emplace_back();
-            data_sync_vec_.back().resize(scan_batch_size);
 #ifdef RANGE_PARTITION_ENABLED
-            if (!skip_archived_key_)
-#endif
+            if (scan_type_ == ScanFlushRecords)
             {
-                archive_vec_.emplace_back();
-                archive_vec_.back().reserve(scan_batch_size);
-                mv_base_idx_vec_.emplace_back();
-                mv_base_idx_vec_.back().reserve(scan_batch_size);
-            }
+                if (!export_base_table_rec_only_)
+#endif
+                {
+                    archive_vec_.emplace_back();
+                    archive_vec_.back().reserve(scan_batch_size);
+                    mv_base_idx_vec_.emplace_back();
+                    mv_base_idx_vec_.back().reserve(scan_batch_size);
+                }
+                data_sync_vec_.emplace_back();
+                data_sync_vec_.back().resize(scan_batch_size);
 #ifdef RANGE_PARTITION_ENABLED
+            }
+            else
+            {
+                slice_delta_size_.emplace_back();
+                slice_delta_size_.back().reserve(scan_batch_size_);
+            }
             pause_pos_.emplace_back(TxKey(), false);
 #else
             pause_pos_.emplace_back(nullptr, false);
@@ -3275,7 +3291,7 @@ public:
         }
 
 #ifdef RANGE_PARTITION_ENABLED
-        if (export_base_table_rec_if_need)
+        if (export_base_table_rec_if_need || scan_type_ == ScanSliceDeltaSize)
         {
             slice_ids_.resize(core_cnt_);
         }
@@ -3376,15 +3392,27 @@ public:
         for (size_t i = 0; i < core_cnt_; i++)
         {
 #ifdef RANGE_PARTITION_ENABLED
-            if (!skip_archived_key_)
-#endif
+            if (scan_type_ == ScanFlushRecords)
             {
-                archive_vec_.at(i).clear();
-                archive_vec_.at(i).reserve(scan_batch_size_);
-                mv_base_idx_vec_.at(i).clear();
-                mv_base_idx_vec_.at(i).reserve(scan_batch_size_);
+                if (!export_base_table_rec_only_)
+#endif
+                {
+                    archive_vec_.at(i).clear();
+                    archive_vec_.at(i).reserve(scan_batch_size_);
+                    mv_base_idx_vec_.at(i).clear();
+                    mv_base_idx_vec_.at(i).reserve(scan_batch_size_);
+                }
+#ifdef RANGE_PARTITION_ENABLED
             }
-
+            else
+            {
+                // Reset the size of each pair
+                for (size_t j = 0; j < accumulated_scan_cnt_[i]; ++j)
+                {
+                    slice_delta_size_[i][j].second = 0;
+                }
+            }
+#endif
             accumulated_scan_cnt_.at(i) = 0;
             accumulated_mem_usage_.at(i) = 0;
         }
@@ -3509,6 +3537,26 @@ public:
         err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
     }
 
+#ifdef RANGE_PARTITION_ENABLED
+    DataSyncScanType ScanType() const
+    {
+        return scan_type_;
+    }
+
+    std::vector<std::pair<TxKey, int64_t>> &SliceDeltaSize(uint16_t core_id)
+    {
+        return slice_delta_size_[core_id];
+    }
+
+    StoreRange *StoreRangePtr() const
+    {
+        return store_range_;
+    }
+#endif
+
+    // For ScanFlushRecords, this indicates the count of keys that have been
+    // exported. For ScanDeltaSize, it is the count of slices that have been
+    // scanned.
     std::vector<size_t> accumulated_scan_cnt_;
     std::vector<uint64_t> accumulated_mem_usage_;
     bool scan_heap_is_full_{false};
@@ -3567,8 +3615,13 @@ private:
     std::vector<RangeSliceId> slice_ids_;
 
     // This is used for scan during add index txm.
-    bool skip_archived_key_{false};
+    bool export_base_table_rec_only_{false};
 
+    StoreRange *store_range_{nullptr};
+    DataSyncScanType scan_type_{ScanFlushRecords};
+    // The delta size of the slices. First is the TxKey of the slice, second is
+    // the delta size. The TxKey is not the owner of the key.
+    std::vector<std::vector<std::pair<TxKey, int64_t>>> slice_delta_size_;
 #else
     bool only_scan_one_core_{false};
     std::function<bool(size_t hash_code)> filter_lambda_;

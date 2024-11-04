@@ -5145,7 +5145,7 @@ public:
         bool mvcc_enabled,
         size_t &ckpt_vec_size,
         bool export_base_table_record_if_need,
-        bool skip_archived_key,
+        bool export_base_table_record_only,
         uint64_t &mem_usage) const
     {
         // This override heap thread call is not necessary, since the thread is
@@ -5174,7 +5174,7 @@ public:
                                    mvcc_enabled,
                                    ckpt_vec_size,
                                    export_base_table_record_if_need,
-                                   skip_archived_key,
+                                   export_base_table_record_only,
                                    mem_usage);
             export_size.second = false;
         }
@@ -5221,6 +5221,7 @@ public:
 
         Iterator it;
         Iterator end_it;
+        Iterator req_end_it;
         if (req.IsDrained(shard_->core_id_))
         {
             // scan is already finished on this core
@@ -5234,6 +5235,7 @@ public:
         if (req.export_base_table_rec_if_need_ &&
             nullptr == req.slice_ids_[shard_->core_id_].Slice())
         {
+            assert(req.ScanType() == DataSyncScanCc::ScanFlushRecords);
             const KeyT *slice_start_key = nullptr;
             if (pause_key_and_is_drained.first.KeyPtr() != nullptr)
             {
@@ -5380,9 +5382,21 @@ public:
                 it = LowerBound(*pause_key);
             }
 
+            if (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize)
+            {
+                std::pair<Iterator, ScanType> req_end_pair =
+                    ForwardScanStart(*req_end_key, true);
+                req_end_it = req_end_pair.first;
+                if (req_end_pair.second == ScanType::ScanGap)
+                {
+                    ++req_end_it;
+                }
+            }
             const KeyT *search_end_key = req_end_key;
 
-            if (req.export_base_table_rec_if_need_)
+            if (req.export_base_table_rec_if_need_ ||
+                (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize &&
+                 req.slice_ids_[shard_->core_id_].Slice()))
             {
                 const TemplateStoreSlice<KeyT> *slice =
                     static_cast<const TemplateStoreSlice<KeyT> *>(
@@ -5436,7 +5450,8 @@ public:
         }
 
         uint64_t recycle_ts = 1U;
-        if (shard_->EnableMvcc() && !req.skip_archived_key_)
+        if (req.ScanType() == DataSyncScanCc::ScanFlushRecords &&
+            shard_->EnableMvcc() && !req.export_base_table_rec_only_)
         {
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
@@ -5453,6 +5468,14 @@ public:
         //
         // indicate if export cce failed due to oom
         bool is_scan_mem_full = false;
+        int64_t *curr_slice_delta_size = nullptr;
+        if (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize &&
+            req.slice_ids_[shard_->core_id_].Slice())
+        {
+            curr_slice_delta_size =
+                &(req.SliceDeltaSize(shard_->core_id_).back().second);
+        }
+
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_.at(shard_->core_id_) <
@@ -5478,11 +5501,40 @@ public:
                     {
                         it = Iterator(ccp->next_page_, 0, &neg_inf_);
                     }
+
+                    if (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize &&
+                        it == end_it_next_page_it)
+                    {
+                        // Reach the current slice end, reset the end iter.
+                        ++(req.accumulated_scan_cnt_[shard_->core_id_]);
+                        req.slice_ids_[shard_->core_id_].Reset();
+                        curr_slice_delta_size = nullptr;
+
+                        // update the end it.
+                        end_it = req_end_it;
+                        end_it_next_page_it = end_it;
+                        if (end_it_next_page_it != End())
+                        {
+                            CcPage<KeyT, ValueT> *ccp =
+                                end_it_next_page_it.GetPage();
+                            assert(ccp != nullptr);
+                            if (ccp->next_page_ == PagePosInf())
+                            {
+                                end_it_next_page_it = End();
+                            }
+                            else
+                            {
+                                end_it_next_page_it =
+                                    Iterator(ccp->next_page_, 0, &neg_inf_);
+                            }
+                        }
+                    }
                     continue;
                 }
             }
 
-            if (shard_->EnableMvcc() && !req.skip_archived_key_)
+            if (req.ScanType() == DataSyncScanCc::ScanFlushRecords &&
+                shard_->EnableMvcc() && !req.export_base_table_rec_only_)
             {
                 cce->KickOutArchiveRecords(recycle_ts);
             }
@@ -5567,31 +5619,95 @@ public:
 
                     if (need_export)
                     {
-                        uint64_t mem_usage = 0;
-                        auto export_result = ExportForCkpt(
-                            cce,
-                            *key,
-                            req.DataSyncVec(shard_->core_id_),
-                            req.ArchiveVec(shard_->core_id_),
-                            req.MoveBaseIdxVec(shard_->core_id_),
-                            req.previous_scan_ts_,
-                            req.data_sync_ts_,
-                            recycle_ts,
-                            shard_->EnableMvcc(),
-                            req.accumulated_scan_cnt_[shard_->core_id_],
-                            false,
-                            false,
-                            mem_usage);
-
-                        req.accumulated_mem_usage_[shard_->core_id_] +=
-                            mem_usage;
-                        if (export_result.second)
+                        if (req.ScanType() ==
+                            DataSyncScanCc::ScanSliceDeltaSize)
                         {
-                            is_scan_mem_full = true;
-                            DLOG(INFO) << "scan heap is full, core_id: "
-                                       << shard_->core_id_
-                                       << " ,scan count: " << req.scan_count_;
-                            break;
+                            if (req.slice_ids_[shard_->core_id_].Slice() ==
+                                nullptr)
+                            {
+                                // The new slice, to get the slice end iterator.
+                                StoreRange *store_range = req.StoreRangePtr();
+                                TemplateStoreSlice<KeyT> *typed_store_slice =
+                                    static_cast<TemplateStoreSlice<KeyT> *>(
+                                        store_range->FindSlice(TxKey(key)));
+
+                                const KeyT *slice_end_key =
+                                    typed_store_slice->EndKey();
+                                std::pair<Iterator, ScanType> end_pair =
+                                    ForwardScanStart(*slice_end_key, true);
+                                end_it = end_pair.first;
+                                if (end_pair.second == ScanType::ScanGap)
+                                {
+                                    ++end_it;
+                                }
+
+                                end_it_next_page_it = end_it;
+                                if (end_it_next_page_it != End())
+                                {
+                                    CcPage<KeyT, ValueT> *ccp =
+                                        end_it_next_page_it.GetPage();
+                                    assert(ccp != nullptr);
+                                    if (ccp->next_page_ == PagePosInf())
+                                    {
+                                        end_it_next_page_it = End();
+                                    }
+                                    else
+                                    {
+                                        end_it_next_page_it = Iterator(
+                                            ccp->next_page_, 0, &neg_inf_);
+                                    }
+                                }
+
+                                req.slice_ids_[shard_->core_id_] = RangeSliceId(
+                                    store_range, typed_store_slice);
+
+                                auto &slice_delta_size =
+                                    req.SliceDeltaSize(shard_->core_id_);
+                                auto &cur_slice = slice_delta_size.emplace_back(
+                                    typed_store_slice->StartTxKey(), 0);
+                                curr_slice_delta_size = &cur_slice.second;
+                            }
+
+                            // Export the delta size of this cce
+                            assert(cce->data_store_size_ != INT32_MAX &&
+                                   curr_slice_delta_size);
+                            *curr_slice_delta_size +=
+                                (cce->PayloadStatus() != RecordStatus::Deleted
+                                     ? (key->Size() + cce->PayloadSize() -
+                                        cce->data_store_size_)
+                                     : (-cce->data_store_size_));
+                        }
+                        else
+                        {
+                            uint64_t mem_usage = 0;
+                            auto export_result = ExportForCkpt(
+                                cce,
+                                *key,
+                                req.DataSyncVec(shard_->core_id_),
+                                req.ArchiveVec(shard_->core_id_),
+                                req.MoveBaseIdxVec(shard_->core_id_),
+                                req.previous_scan_ts_,
+                                req.data_sync_ts_,
+                                recycle_ts,
+                                Type(),
+                                shard_->EnableMvcc(),
+                                req.accumulated_scan_cnt_[shard_->core_id_],
+                                false,
+                                false,
+                                mem_usage);
+
+                            req.accumulated_mem_usage_[shard_->core_id_] +=
+                                mem_usage;
+
+                            if (export_result.second)
+                            {
+                                is_scan_mem_full = true;
+                                DLOG(INFO)
+                                    << "scan heap is full, core_id: "
+                                    << shard_->core_id_
+                                    << " ,scan count: " << req.scan_count_;
+                                break;
+                            }
                         }
                     }
                 }
@@ -5619,7 +5735,7 @@ public:
                                   shard_->EnableMvcc(),
                                   req.accumulated_scan_cnt_[shard_->core_id_],
                                   true,
-                                  req.skip_archived_key_,
+                                  req.export_base_table_rec_only_,
                                   mem_usage);
                 req.accumulated_mem_usage_[shard_->core_id_] += mem_usage;
                 if (export_result.second)
@@ -5634,6 +5750,36 @@ public:
 
             // Forward iterator
             it++;
+
+            if (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize)
+            {
+                if (it == end_it)
+                {
+                    // Reach the current slice end.
+                    ++(req.accumulated_scan_cnt_[shard_->core_id_]);
+                    req.slice_ids_[shard_->core_id_].Reset();
+                    curr_slice_delta_size = nullptr;
+
+                    // Reset the end iterator.
+                    end_it = req_end_it;
+                    end_it_next_page_it = end_it;
+                    if (end_it_next_page_it != End())
+                    {
+                        CcPage<KeyT, ValueT> *ccp =
+                            end_it_next_page_it.GetPage();
+                        assert(ccp != nullptr);
+                        if (ccp->next_page_ == PagePosInf())
+                        {
+                            end_it_next_page_it = End();
+                        }
+                        else
+                        {
+                            end_it_next_page_it =
+                                Iterator(ccp->next_page_, 0, &neg_inf_);
+                        }
+                    }
+                }
+            }
 
             if (req.export_base_table_rec_if_need_)
             {

@@ -2891,6 +2891,103 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         data_sync_task->SetErrorCode(CcErrorCode::GET_RANGE_ID_ERR);
     }
 
+    StoreRange *store_range = range_entry->PinStoreRange();
+    if (!store_range)
+    {
+        WaitableCc cc;
+        // Since node group is pinned, range entry will not be dropped by
+        // ClearNodeGroupCc. This is the only thread that will update table
+        // ranges for this table, so we don't need meta data shared lock here.
+        range_entry->FetchRangeSlices(
+            range_tbl_name, &cc, ng_id, ng_term, cc_shards_[0].get());
+        cc.Wait();
+        while (cc.IsError())
+        {
+            // Failed to fetch range slice. If error is caused by data store
+            // unreachable, retry.
+            if (cc.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                cc.Reset();
+                range_entry->FetchRangeSlices(
+                    range_tbl_name, &cc, ng_id, ng_term, cc_shards_[0].get());
+                cc.Wait();
+            }
+            else if (cc.ErrorCode() == CcErrorCode::NG_TERM_CHANGED)
+            {
+                data_sync_task->SetError();
+                PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+                // Term is invalid, we are no longer leader. Abort data sync.
+                txservice::AbortTx(data_sync_txm);
+                return;
+            }
+            else
+            {
+                assert(false);
+            }
+        }
+        store_range = range_entry->PinStoreRange();
+        assert(store_range != nullptr);
+    }
+
+    TxKey start_tx_key = range_entry->GetRangeInfo()->StartTxKey();
+    TxKey end_tx_key = range_entry->GetRangeInfo()->EndTxKey();
+    // Scan the delta slice size
+    std::map<TxKey, int64_t> slices_delta_size;
+    DataSyncScanCc scan_delta_size_cc(table_name,
+                                      0,
+                                      last_sync_ts,
+                                      data_sync_task->data_sync_ts_,
+                                      ng_id,
+                                      ng_term,
+                                      cc_shards_.size(),
+                                      store_range->SlicesCount(),
+                                      data_sync_txm->TxNumber(),
+                                      &start_tx_key,
+                                      &end_tx_key,
+                                      false,
+                                      false,
+                                      false,
+                                      store_range,
+                                      DataSyncScanCc::ScanSliceDeltaSize,
+                                      table_schema->Version());
+
+    for (size_t i = 0; i < cc_shards_.size(); i++)
+    {
+        EnqueueToCcShard(i, &scan_delta_size_cc);
+    }
+    scan_delta_size_cc.Wait();
+
+    if (scan_delta_size_cc.IsError())
+    {
+        LOG(ERROR) << "DataSync scan delta slice size failed on table "
+                   << table_name.StringView() << " with error code: "
+                   << static_cast<uint32_t>(scan_delta_size_cc.ErrorCode());
+
+        txservice::AbortTx(data_sync_txm);
+        std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
+        data_sync_task_queue_.emplace_front(data_sync_task);
+        data_sync_worker_ctx_.cv_.notify_one();
+        return;
+    }
+    else
+    {
+        for (size_t i = 0; i < cc_shards_.size(); ++i)
+        {
+            // The data is drained
+            assert(scan_delta_size_cc.IsDrained(i));
+
+            auto &delta_size = scan_delta_size_cc.SliceDeltaSize(i);
+            for (size_t j = 0; j < scan_delta_size_cc.accumulated_scan_cnt_[i];
+                 ++j)
+            {
+                slices_delta_size[std::move(delta_size[j].first)] +=
+                    delta_size[j].second;
+            }
+        }
+        scan_delta_size_cc.Reset();
+    }
+
     // 3. Scan records.
     // The data sync worker thread is the owner of those vectors.
     std::vector<std::vector<FlushRecord>> data_sync_vecs;
@@ -2909,9 +3006,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
 
-    TxKey start_tx_key = range_entry->GetRangeInfo()->StartTxKey();
-    TxKey end_tx_key = range_entry->GetRangeInfo()->EndTxKey();
-
     DataSyncScanCc scan_cc(table_name,
                            0,
                            last_sync_ts,
@@ -2926,6 +3020,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                            false,
                            false,
                            false,
+                           store_range,
+                           DataSyncScanCc::ScanFlushRecords,
                            table_schema->Version());
 
     while (!scan_data_drained)

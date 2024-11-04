@@ -1037,8 +1037,8 @@ public:
      * @param export_persisted_record_to_ckpt_vec - True means If no larger
      * version exists, we need to export the data which commit_ts same as
      * ckpt_ts to ckpt_vec. Note: This flag only used for RangePartition.
-     * @param skip_archived_key - True means there is no need to scan the
-     * archive data. This is used for scan during add index txm.
+     * @param export_base_table_record_only - True means only need to export the
+     * base data. This is used for scan during add index txm.
      * @return the number of exported version records.
      */
 
@@ -1052,7 +1052,7 @@ public:
                          bool mvcc_enabled,
                          size_t &ckpt_vec_size,
                          bool export_persisted_record_to_ckpt_vec,
-                         bool skip_archived_key,
+                         bool export_base_table_record_only,
                          uint64_t &mem_usage) const
     {
         // `export_store_record_if_need` - True means If no larger version needs
@@ -1160,7 +1160,7 @@ public:
             exported_count++;
         }
 
-        if (!mvcc_enabled || skip_archived_key)
+        if (!mvcc_enabled || export_base_table_record_only)
         {
             return exported_count;
         }
