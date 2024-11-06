@@ -12,7 +12,8 @@ template <typename T>
 class CcRequestPool
 {
 public:
-    CcRequestPool() : head_(0)
+    explicit CcRequestPool(size_t max_size = UINT64_MAX)
+        : head_(0), max_size_(max_size)
     {
         pool_.reserve(8);
         for (size_t idx = 0; idx < 8; ++idx)
@@ -42,6 +43,11 @@ public:
 
         if (count == pool_.size())
         {
+            if (count == max_size_)
+            {
+                return nullptr;
+            }
+
             size_t old_size = pool_.size();
             pool_.resize((size_t) (old_size * 1.5));
             for (size_t idx = old_size; idx < pool_.size(); ++idx)
@@ -63,8 +69,24 @@ public:
         }
     }
 
+    bool IsAllFree()
+    {
+        for (size_t i = 0; i < pool_.size(); i++)
+        {
+            CcRequestBase *req_ptr =
+                static_cast<CcRequestBase *>(pool_[i].get());
+            if (req_ptr->InUse())
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
 private:
     std::vector<std::unique_ptr<T>> pool_;
     size_t head_;
+    size_t max_size_;
 };
 }  // namespace txservice

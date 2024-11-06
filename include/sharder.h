@@ -324,6 +324,23 @@ public:
     }
 
     /**
+     * @brief Set the Tx cache restored from KV flag
+     * @param is_restored If the restoring proccess finished
+     */
+    void SetTxCacheRestored(bool is_restored)
+    {
+        node_tx_cache_restored_.store(is_restored, std::memory_order_release);
+    }
+
+    /**
+     * @brief Get the Tx cache restored from KV flag for standby node
+     */
+    bool IsTxCacheRestored()
+    {
+        return node_tx_cache_restored_.load(std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Updates the leader cache of all cc node groups.
      *
      */
@@ -416,6 +433,11 @@ public:
                                      uint32_t log_group_id,
                                      int64_t cc_ng_term);
 
+    /**
+     * @brief Updadates the specific cc node's status, when CcMap restored from
+     * KV
+     */
+    void FinishRestoreTxCache(uint32_t cc_ng_id, int64_t cc_ng_term);
     /**
      * @brief Wait for all the tx_service nodes to finish the log recovery
      * process and setup the cc_stream_sender.
@@ -690,6 +712,9 @@ private:
     // The term that standby is subsribed to. Only used on standby node.
     std::atomic<int64_t> candidate_standby_node_term_cache_;
     std::atomic<int64_t> standby_node_term_cache_;
+
+    // the flag of if this node tx cache has been restored from KV
+    std::atomic<bool> node_tx_cache_restored_;
 
     std::atomic<uint32_t> subscribe_counter_{0};
 

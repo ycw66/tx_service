@@ -948,4 +948,165 @@ bool WaitNoNakedBucketRefCc::Execute(CcShard &ccs)
     return false;
 }
 
+RestoreCcMapCc::RestoreCcMapCc()
+    : table_name_(nullptr),
+      cc_ng_id_(0),
+      cc_ng_term_(0),
+      core_cnt_(0),
+      finished_cnt_(0),
+      slice_data_(),
+      decoded_slice_data_(),
+      next_idxs_(),
+      cancel_data_loading_on_error_(nullptr),
+      data_item_decoded_(),
+      error_code_(CcErrorCode::NO_ERROR),
+      total_cnt_(0)
+{
+}
+
+void RestoreCcMapCc::Reset(const TableName *table_name,
+                           uint32_t cc_group_id,
+                           int64_t cc_group_term,
+                           const uint16_t core_cnt,
+                           std::atomic<bool> *cancel_data_loading_on_error)
+{
+    table_name_ = table_name;
+    cc_ng_id_ = cc_group_id;
+    cc_ng_term_ = cc_group_term;
+    core_cnt_ = core_cnt;
+    cancel_data_loading_on_error_ = cancel_data_loading_on_error;
+    error_code_ = CcErrorCode::NO_ERROR;
+    finished_cnt_ = 0;
+    slice_data_.clear();
+    slice_data_.resize(core_cnt_);
+    decoded_slice_data_.clear();
+    decoded_slice_data_.resize(core_cnt_);
+    next_idxs_.clear();
+    next_idxs_.resize(core_cnt_);
+    data_item_decoded_.clear();
+    data_item_decoded_.resize(core_cnt_);
+    std::fill(data_item_decoded_.begin(), data_item_decoded_.end(), 0);
+    next_idxs_.clear();
+    next_idxs_.resize(core_cnt_);
+    std::fill(next_idxs_.begin(), next_idxs_.end(), 0);
+    total_cnt_ = 0;
+}
+
+bool RestoreCcMapCc::Execute(CcShard &ccs)
+{
+    int64_t cc_ng_candid_term =
+        Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+    int64_t standby_candid_term =
+        Sharder::Instance().CandidateStandbyNodeTerm();
+    int64_t standby_term = Sharder::Instance().StandbyNodeTerm();
+
+    // what ever this is a primary or standby node, either term matched is ok
+    if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_ &&
+        std::max(standby_candid_term, standby_term) != cc_ng_term_)
+    {
+        SetFinished(CcErrorCode::NG_TERM_CHANGED);
+        return false;
+    }
+
+    if (cancel_data_loading_on_error_->load(std::memory_order_acquire))
+    {
+        SetFinished(CcErrorCode::FORCE_FAIL);
+        return false;
+    }
+
+    CcMap *ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
+
+    if (ccm == nullptr)
+    {
+        const CatalogEntry *catalog_entry =
+            ccs.InitCcm(*table_name_, cc_ng_id_, cc_ng_term_, this);
+
+        if (catalog_entry != nullptr)
+        {
+            // Successfully load table catalog from data store.
+            assert(catalog_entry->Version() > 0);
+
+            // For a filling range slice request, there must be a prior
+            // request reading and locking the table's schema, to prevent
+            // others from dropping the table. Hence, the table's schema
+            // must be avaliable.
+            assert(catalog_entry->schema_ != nullptr);
+            ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
+            assert(ccm != nullptr);
+        }
+        else
+        {
+            // The table's schema is not available yet. Cannot initialize the cc
+            // map. The request will be re-executed after the schema is fetched
+            // from the data store.
+            return false;
+        }
+    }
+
+    ccm->Execute(*this);
+
+    return false;
+}
+
+void RestoreCcMapCc::SetFinished(CcErrorCode error_code)
+{
+    std::unique_lock<bthread::Mutex> lk(req_mux_);
+
+    if (error_code != CcErrorCode::NO_ERROR &&
+        error_code_ == CcErrorCode::NO_ERROR)
+    {
+        error_code_ = error_code;
+
+        if (!cancel_data_loading_on_error_->load(std::memory_order_acquire))
+        {
+            bool expected = false;
+            cancel_data_loading_on_error_->compare_exchange_strong(expected,
+                                                                   true);
+        }
+        DLOG(INFO) << "RestoreCcMapCc " << this
+                   << " error: " << static_cast<int>(error_code_);
+    }
+
+    if (++finished_cnt_ == core_cnt_)
+    {
+        Free();
+    }
+}
+
+std::deque<SliceDataItem> &RestoreCcMapCc::DecodedSliceData(uint16_t core_id)
+{
+    assert(core_id < decoded_slice_data_.size());
+    return decoded_slice_data_[core_id];
+}
+
+std::deque<RawSliceDataItem> &RestoreCcMapCc::SliceData(uint16_t core_id)
+{
+    assert(core_id < slice_data_.size());
+    return slice_data_[core_id];
+}
+
+void RestoreCcMapCc::AddDataItem(uint16_t core_id,
+                                 std::string &&key_str,
+                                 std::string &&rec_str,
+                                 uint64_t version_ts,
+                                 bool is_deleted)
+{
+    assert(core_id < slice_data_.size());
+    slice_data_[core_id].emplace_back(
+        std::move(key_str), std::move(rec_str), version_ts, is_deleted);
+}
+
+void RestoreCcMapCc::DecodedDataItem(
+    uint16_t core_id,
+    TxKey &&key,
+    std::unique_ptr<txservice::TxRecord> &&record,
+    uint64_t version_ts,
+    bool is_deleted)
+{
+    assert(core_id < decoded_slice_data_.size());
+    decoded_slice_data_[core_id].emplace_back(
+        std::move(key), std::move(record), version_ts, is_deleted);
+}
+
 }  // namespace txservice

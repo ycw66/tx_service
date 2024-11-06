@@ -591,4 +591,5 @@ struct UploadBatchResult
     std::atomic<int64_t> term_{-1};
     NodeGroupId node_group_id_{0};
 };
+
 }  // namespace txservice

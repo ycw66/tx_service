@@ -10,6 +10,8 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -292,6 +294,7 @@ private:
 struct FillStoreSliceCc;
 
 struct LoadRangeSliceRequest
+
 {
 public:
     LoadRangeSliceRequest() = delete;
@@ -981,6 +984,84 @@ private:
     bthread::Mutex mutex_;
     bthread::ConditionVariable cv_;
     bool finish_{false};
+};
+
+/**
+ * Restore CcMap with data from KV
+ */
+struct RestoreCcMapCc : public CcRequestBase
+{
+public:
+    RestoreCcMapCc();
+
+    void Reset(const TableName *table_name,
+               uint32_t cc_group_id,
+               int64_t cc_group_term,
+               const uint16_t core_cnt,
+               std::atomic<bool> *cancel_data_loading_on_error);
+
+    bool Execute(CcShard &ccs) override;
+
+    std::deque<SliceDataItem> &DecodedSliceData(uint16_t core_id);
+    std::deque<RawSliceDataItem> &SliceData(uint16_t core_id);
+
+    void AddDataItem(uint16_t core_id,
+                     std::string &&key_str,
+                     std::string &&rec_str,
+                     uint64_t version_ts,
+                     bool is_deleted);
+
+    void DecodedDataItem(uint16_t core_id,
+                         TxKey &&key,
+                         std::unique_ptr<txservice::TxRecord> &&record,
+                         uint64_t version_ts,
+                         bool is_deleted);
+
+    void SetFinished(CcErrorCode error_code = CcErrorCode::NO_ERROR);
+
+    size_t NextIndex(size_t core_idx) const
+    {
+        size_t next_idx = next_idxs_[core_idx];
+        if (data_item_decoded_[core_idx] == 0)
+        {
+            assert(next_idx <= slice_data_[core_idx].size());
+        }
+        else
+        {
+            assert(next_idx <= decoded_slice_data_[core_idx].size());
+        }
+        return next_idx;
+    }
+
+    void SetNextIndex(size_t core_idx, size_t index)
+    {
+        if (data_item_decoded_[core_idx] == 0)
+        {
+            assert(index <= slice_data_[core_idx].size());
+        }
+        else
+        {
+            assert(index <= decoded_slice_data_[core_idx].size());
+        }
+
+        next_idxs_[core_idx] = index;
+    }
+
+    const TableName *table_name_;
+    NodeGroupId cc_ng_id_;
+    int64_t cc_ng_term_;
+    uint16_t core_cnt_{0};
+    uint16_t finished_cnt_{0};
+
+    std::vector<std::deque<RawSliceDataItem>> slice_data_;
+    std::vector<std::deque<SliceDataItem>> decoded_slice_data_;
+    std::vector<size_t> next_idxs_;
+    std::atomic<bool> *cancel_data_loading_on_error_;
+
+    std::vector<size_t> data_item_decoded_{};
+    CcErrorCode error_code_{CcErrorCode::NO_ERROR};
+    size_t total_cnt_{0};
+    bthread::Mutex req_mux_{};
 };
 
 }  // namespace txservice

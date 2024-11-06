@@ -15,6 +15,9 @@ inline bool txservice_skip_wal = false;
 inline bool txservice_skip_kv = false;
 // max latency of each sequence group between primary and standby nodes.
 inline uint64_t txservice_max_standby_lag = 100000;
+// If checkpointed data can be evicted from memory if memory is full. If this is
+// off, all data will be cached in memory.
+inline bool txservice_enable_cache_replacement = true;
 
 enum struct TxShardStatus
 {

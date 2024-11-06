@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -384,6 +385,12 @@ public:
 
     virtual void OnShutdown()
     {
+    }
+
+    // Restore Tx service cc maps from KV store using pre built tables
+    virtual void RestoreTxCache(NodeGroupId cc_ng_id, int64_t cc_ng_term)
+    {
+        assert(false);
     }
 
 protected:

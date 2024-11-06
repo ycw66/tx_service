@@ -1377,8 +1377,17 @@ void CcShard::FetchRecord(const TableName &table_name,
                                                  range_id,
                                                  fetch_from_primary);
     FetchRecordCc *fetch_req = &(tab_it.first->second);
-
     fetch_req->AddRequester(requester);
+
+    CODE_FAULT_INJECTOR("disable_fetch_record", {
+        LOG(INFO) << "FaultInject disable_fetch_record hitted, mark record as "
+                     "deleted";
+        fetch_req->rec_status_ = RecordStatus::Deleted;
+        fetch_req->rec_ts_ = 1;
+        fetch_req->SetFinish(static_cast<int>(CcErrorCode::NO_ERROR));
+        return;
+    });
+
     if (fetch_req->RequesterCount() == 1)
     {
         fetch_req->start_ts =

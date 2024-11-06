@@ -56,6 +56,7 @@ struct UploadBatchSlicesCc;
 struct UpdateKeyCacheCc;
 struct KeyObjectStandbyForwardCc;
 struct EscalateStandbyCcmCc;
+struct RestoreCcMapCc;
 
 enum struct ScanType : uint8_t
 {
@@ -164,6 +165,7 @@ public:
     virtual bool Execute(UpdateKeyCacheCc &req) = 0;
     virtual bool Execute(KeyObjectStandbyForwardCc &req) = 0;
     virtual bool Execute(EscalateStandbyCcmCc &req) = 0;
+    virtual bool Execute(RestoreCcMapCc &req) = 0;
 
     virtual size_t size() const = 0;
     virtual size_t NormalObjectSize()

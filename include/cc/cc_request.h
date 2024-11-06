@@ -7215,6 +7215,7 @@ protected:
     std::vector<uint32_t> vct_ng_id_;
     const TableName *table_name_;
 };
+
 struct EscalateStandbyCcmCc : CcRequestBase
 {
     EscalateStandbyCcmCc() = delete;
@@ -7268,5 +7269,4 @@ private:
     bthread::ConditionVariable req_cv_{};
     uint16_t unfinished_cnt_{0};
 };
-
 }  // namespace txservice

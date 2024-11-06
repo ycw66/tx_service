@@ -1392,7 +1392,7 @@ public:
         return exported_count;
     }
 
-    void UpdateCcEntry(const SliceDataItem &data_item, bool enable_mvcc)
+    void UpdateCcEntry(SliceDataItem &data_item, bool enable_mvcc)
     {
 #ifdef RANGE_PARTITION_ENABLED
         // Initialize the data store size if it is unspecified
@@ -1447,6 +1447,29 @@ public:
             // Commit ts greater than 1 means that the key is
             // already cached in memory.
             return;
+        }
+#else
+        // If the in-memory version is from a upload request (i.e.
+        // generated sk record from pk), the data store version
+        // might be newer. Only overwrite if in memory version is
+        // newer.
+        const uint64_t cce_version = CommitTs();
+        if (cce_version < data_item.version_ts_)
+        {
+            if (data_item.is_deleted_)
+            {
+                payload_ = nullptr;
+            }
+            else
+            {
+                // TxRecord::Uptr rec_clone = record->Clone();
+                // payload_.reset(static_cast<ValueT *>(rec_clone.release()));
+                payload_.reset(
+                    static_cast<ValueT *>(data_item.record_.release()));
+            }
+            RecordStatus status = data_item.is_deleted_ ? RecordStatus::Deleted
+                                                        : RecordStatus::Normal;
+            SetCommitTsPayloadStatus(data_item.version_ts_, status);
         }
 #endif
         SetCkptTs(data_item.version_ts_);

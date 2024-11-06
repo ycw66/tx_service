@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -263,8 +264,9 @@ public:
             {
                 // The apply request needs a new cc entry but the cc map has
                 // reached the maximal capacity.
-                // If skip_kv, return error directly.
-                if (txservice_skip_kv)
+                // If skip_kv or cache replacement (every entry should be in
+                // mem) is disabled, return error directly.
+                if (txservice_skip_kv || !txservice_enable_cache_replacement)
                 {
                     hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
                     return true;
@@ -315,34 +317,54 @@ public:
                                 }
                             }
                         });
-                        // Fetch record from storage
-                        shard_->FetchRecord(table_name_,
-                                            table_schema_,
-                                            TxKey(look_key),
-                                            cce,
-                                            this,
-                                            cc_ng_id_,
-                                            ng_term,
-                                            &req);
 
-                        req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
-                        // Acquire a read intent on this cce with the
-                        // special txn to avoid cce being kicked out before
-                        // fetch record returns.
-                        cce->GetOrCreateKeyLock(shard_, this, ccp)
-                            .AcquireReadIntent(
-                                FetchRecordCc::GetFetchRecordTxNumber(
-                                    cc_ng_id_));
-
-                        if (metrics::enable_cache_hit_rate)
+                        bool fetch_record = true;
+                        if (!txservice_enable_cache_replacement)
                         {
-                            auto meter = shard_->GetMeter();
-                            meter->Collect(
-                                metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
-                                1,
-                                "miss");
+                            if (Sharder::Instance().IsTxCacheRestored())
+                            {
+                                fetch_record = false;
+                            }
                         }
-                        return false;
+
+                        if (fetch_record)
+                        {
+                            // Fetch record from storage
+                            shard_->FetchRecord(table_name_,
+                                                table_schema_,
+                                                TxKey(look_key),
+                                                cce,
+                                                this,
+                                                cc_ng_id_,
+                                                ng_term,
+                                                &req);
+
+                            req.block_type_ =
+                                ApplyCc::ApplyBlockType::BlockOnFetch;
+                            // Acquire a read intent on this cce with the
+                            // special txn to avoid cce being kicked out before
+                            // fetch record returns.
+                            cce->GetOrCreateKeyLock(shard_, this, ccp)
+                                .AcquireReadIntent(
+                                    FetchRecordCc::GetFetchRecordTxNumber(
+                                        cc_ng_id_));
+
+                            if (metrics::enable_cache_hit_rate)
+                            {
+                                auto meter = shard_->GetMeter();
+                                meter->Collect(
+                                    metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
+                                    1,
+                                    "miss");
+                            }
+                            return false;
+                        }
+                        else
+                        {
+                            // treat as record deleted
+                            std::string rec_str = "";
+                            BackFill(cce, 1, RecordStatus::Deleted, rec_str);
+                        }
                     }
                     else
                     {
@@ -1578,39 +1600,49 @@ public:
         }
         else
         {
-            if (Sharder::Instance().StandbyNodeTerm() > 0)
+            // On this standby node, there is no cached version of this record,
+            // or cache replacement is disabled and the KV snaphot from primary
+            // is still being loaded into memory
+            if (txservice_enable_cache_replacement ||
+                !Sharder::Instance().IsTxCacheRestored())
             {
-                // TODO(liunyl): to avoid rpc overflow on primary, fetching
-                // record form kv for now. Fix this by fetching record by cc req
-                // from primary. There is no cached version of this record, ask
-                // primary node for the payload.
-                shard_->FetchRecord(table_name_,
-                                    table_schema_,
-                                    TxKey(look_key),
-                                    cce,
-                                    this,
-                                    cc_ng_id_,
-                                    req.StandbyNodeTerm(),
-                                    &req);
-                cce->GetOrCreateKeyLock(shard_, this, ccp)
-                    .AcquireReadIntent(FetchRecordCc::GetFetchRecordTxNumber(
-                        Sharder::Instance().NodeId()));
+                if (Sharder::Instance().StandbyNodeTerm() > 0)
+                {
+                    // TODO(liunyl): to avoid rpc overflow on primary, fetching
+                    // record form kv for now. Fix this by fetching record by cc
+                    // req from primary. There is no cached version of this
+                    // record, ask primary node for the payload.
+                    shard_->FetchRecord(table_name_,
+                                        table_schema_,
+                                        TxKey(look_key),
+                                        cce,
+                                        this,
+                                        cc_ng_id_,
+                                        req.StandbyNodeTerm(),
+                                        &req);
+                    cce->GetOrCreateKeyLock(shard_, this, ccp)
+                        .AcquireReadIntent(
+                            FetchRecordCc::GetFetchRecordTxNumber(
+                                Sharder::Instance().NodeId()));
+                }
+                else
+                {
+                    // Cannot fetch from kv yet, wait for snapshot is synced.
+                    shard_->EnqueueWaitListForStandbyCatchUp(&req);
+                }
+                return false;
             }
             else
             {
-                // Cannot fetch from kv yet, wait for snapshot is synced.
-                shard_->EnqueueWaitListForStandbyCatchUp(&req);
+                // if cache replacement disabled and kv data has been loaded
+                // into TX cache, then we known this UNKNOWN record is non-exist
+                cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
             }
-            return false;
         }
 
         // Must update dirty_commit_ts. Otherwise, this entry may be
         // skipped by checkpointer.
         commit_ts = cce->CommitTs();
-        if (commit_ts > last_dirty_commit_ts_)
-        {
-            last_dirty_commit_ts_ = commit_ts;
-        }
         if (commit_ts > last_dirty_commit_ts_)
         {
             last_dirty_commit_ts_ = commit_ts;
@@ -1623,6 +1655,91 @@ public:
 
         req.SetFinish();
         return true;
+    }
+
+    bool Execute(RestoreCcMapCc &req) override
+    {
+        uint16_t core_id = shard_->core_id_;
+        if (req.data_item_decoded_[core_id] == 0)
+        {
+            size_t index = req.NextIndex(core_id);
+            auto &slice_data = req.SliceData(core_id);
+            for (size_t i = 0; i < FillStoreSliceCc::MaxScanBatchSize &&
+                               index < slice_data.size();
+                 i++)
+            {
+                RawSliceDataItem &data_item = slice_data[index];
+                std::string key_str = std::move(data_item.key_str_);
+                std::string val_str = std::move(data_item.rec_str_);
+                std::unique_ptr<KeyT> key = std::make_unique<KeyT>();
+                key->KVDeserialize(key_str.data(), key_str.size());
+                // tx_key is owner now
+                TxKey tx_key(std::move(key));
+                ValueT val;
+                size_t offset = 0;
+                std::unique_ptr<TxRecord> rec =
+                    val.DeserializeObject(val_str.data(), offset);
+                req.DecodedDataItem(core_id,
+                                    std::move(tx_key),
+                                    std::move(rec),
+                                    data_item.version_ts_,
+                                    data_item.is_deleted_);
+                index++;
+            }
+
+            if (index < slice_data.size())
+            {
+                req.SetNextIndex(core_id, index);
+            }
+            else
+            {
+                req.data_item_decoded_[core_id] = 1;
+                req.SetNextIndex(core_id, 0);
+            }
+
+            shard_->Enqueue(core_id, &req);
+        }
+        else
+        {
+            std::deque<SliceDataItem> &slice_vec =
+                req.DecodedSliceData(core_id);
+
+            size_t index = req.NextIndex(shard_->core_id_);
+            size_t last_index = std::min(
+                index + FillStoreSliceCc::MaxScanBatchSize, slice_vec.size());
+            bool success =
+                this->BatchFillSlice(slice_vec, true, index, last_index);
+            req.total_cnt_ += last_index - index;
+
+            if (!success)
+            {
+                if (!req.cancel_data_loading_on_error_->load(
+                        std::memory_order_relaxed))
+                {
+                    int64_t alloc, commit;
+                    CcShardHeap *shard_heap = shard_->GetShardHeap();
+                    shard_heap->Full(&alloc, &commit);
+                    LOG(ERROR) << "Restore Tx cache failed due to out of "
+                                  "memory, core: "
+                               << core_id << " allocated: " << alloc
+                               << " ,committed: " << commit;
+                }
+                req.SetFinished(CcErrorCode::OUT_OF_MEMORY);
+                return true;
+            }
+
+            index = last_index;
+            if (index == slice_vec.size())
+            {
+                req.SetFinished();
+            }
+            else
+            {
+                req.SetNextIndex(shard_->core_id_, index);
+                shard_->Enqueue(core_id, &req);
+            }
+        }
+        return false;
     }
 
     bool Execute(ReplayLogCc &req) override

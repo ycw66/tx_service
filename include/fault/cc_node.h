@@ -43,6 +43,8 @@ public:
                               uint32_t latest_committed_txn_no,
                               uint64_t last_ckpt_ts);
 
+    void FinishRestoreTxCache(uint32_t cc_ng_id, int64_t cc_ng_term);
+
     /**
      * Pin data of this node group if this ccnode is group leader.
      * Must be called in pair with UnpinData().
@@ -80,6 +82,7 @@ public:
 private:
     void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);
     void SubscribePrimaryNode(uint32_t node_id, int64_t term, bool resubscribe);
+    void CheckAndBecomeReady(bool is_primary);
 
     //  CcNode belongs to node group: ng_id_.
     const uint32_t ng_id_;
@@ -102,8 +105,9 @@ private:
     // recovered_log_groups_ records the log groups which have finished the
     // recovery.
     std::unordered_set<uint32_t> recovered_log_groups_;
-    // recovery_mux_ is used to protect recovered_log_groups_, since it will be
-    // updated by replay thread and raft service thread concurrently.
+    // recovery_mux_ is used to protect recovered_log_groups_,
+    // since it will be updated by replay thread and raft service thread
+    // concurrently.
     std::mutex recovery_mux_;
 
     uint32_t log_group_cnt_;

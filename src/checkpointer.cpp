@@ -3,6 +3,8 @@
 #include <brpc/controller.h>
 
 #include <cstdint>
+#include <cstdio>
+#include <string>
 
 #include "catalog_key_record.h"
 #include "cc_request.h"

@@ -14,6 +14,9 @@
 #include "cc_node_service.h"
 #include "cc_req_misc.h"
 #include "cc_request.pb.h"
+#ifdef KV_DATA_STORE_TYPE
+#include "kv_store.h"
+#endif
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "tx_service.h"
@@ -70,6 +73,8 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
     int64_t candidate_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
     if (candidate_term < 0 || candidate_term > ng_term)
     {
+        LOG(ERROR) << "Term changed since log replay start, old term: "
+                   << ng_term << " ,candidate term: " << candidate_term;
         return;
     }
 
@@ -106,6 +111,37 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
 
         Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
     }
+}
+
+void CcNode::FinishRestoreTxCache(uint32_t cc_ng_id, int64_t cc_ng_term)
+{
+    std::lock_guard<std::mutex> lk(recovery_mux_);
+
+    if (cc_ng_id != ng_id_)
+    {
+        return;
+    }
+
+    // what ever this is a primary or standby node, either term matched is ok
+    int64_t primary_candidate_term =
+        Sharder::Instance().CandidateLeaderTerm(ng_id_);
+    int64_t primary_term = Sharder::Instance().LeaderTerm(cc_ng_id);
+    int64_t standby_term = Sharder::Instance().StandbyNodeTerm();
+    // RestoreTxCache must happen after standby node received the rocksdb
+    // snapshot from primary node
+    assert(Sharder::Instance().CandidateStandbyNodeTerm() == -1);
+    if (std::max(primary_candidate_term, primary_term) != cc_ng_term &&
+        standby_term != cc_ng_term)
+    {
+        LOG(ERROR) << "Term changed since RestoreTxCache start, old term: "
+                   << cc_ng_term << " ,current primary candidate term: "
+                   << primary_candidate_term
+                   << " ,current primary term: " << primary_term
+                   << " ,current standby term: " << standby_term;
+        return;
+    }
+
+    Sharder::Instance().SetTxCacheRestored(true);
 }
 
 int64_t CcNode::PinData()
@@ -332,11 +368,10 @@ bool CcNode::OnLeaderStart(int64_t term,
     LOG(INFO) << "CC node " << node_id_ << " becomes the leader of ng#"
               << ng_id_ << ". Term: " << term;
 
+    bool cache_survivied = false;
     if (ng_id_ == Sharder::Instance().NativeNodeGroup() &&
         prev_subsribe_term > 0)
     {
-        bool cache_survivied = false;
-
         if (!txservice_skip_wal)
         {
             // If node was a follower, we can keep
@@ -447,12 +482,21 @@ bool CcNode::OnLeaderStart(int64_t term,
 
     local_cc_shards_.InitPrebuiltTables(ng_id_, term);
 
+    // when kv is enabled, and cache replacement is disabled, then load all
+    // datas from kv
+    if (!txservice_skip_kv && !txservice_enable_cache_replacement &&
+        !cache_survivied)
+    {
+        Sharder::Instance().SetTxCacheRestored(false);
+        local_cc_shards_.store_hd_->RestoreTxCache(ng_id_, term);
+    }
+
     if (txservice_skip_wal)
     {
         {
             // replay thread and leader election thread may update
-            // candidate_leader_term_, leader_term_ and
-            // recovered_log_groups_ concurrently.
+            // candidate_leader_term_, leader_term_ and recovered_log_groups_
+            // concurrently.
             std::lock_guard<std::mutex> lk(recovery_mux_);
             Sharder::Instance().SetLeaderTerm(ng_id_, term);
             LOG(INFO) << "Skipped log replay for cc node group #" << ng_id_
@@ -564,8 +608,15 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
     bool succ = local_cc_shards_.store_hd_->OnSnapshotReceived(req);
     if (succ)
     {
-        Sharder::Instance().SetStandbyNodeTerm(req->standby_node_term());
+        int64_t standby_term = req->standby_node_term();
+        Sharder::Instance().SetStandbyNodeTerm(standby_term);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+        // when kv is enabled, and cache replacement is disabled, then load all
+        // datas from kv
+        if (!txservice_skip_kv && !txservice_enable_cache_replacement)
+        {
+            local_cc_shards_.store_hd_->RestoreTxCache(ng_id_, standby_term);
+        }
     }
 
     is_processing_.store(false, std::memory_order_release);
@@ -668,6 +719,13 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
             local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
         }
         clear_ccm_req.Wait();
+    }
+
+    if (!txservice_skip_kv && !txservice_enable_cache_replacement)
+    {
+        // mark tx cache restored as false, we will restore after
+        // KV snapshot received from parimary
+        Sharder::Instance().SetTxCacheRestored(false);
     }
     //  term is already updated. Release processing latch to allow other rpc
     //  to proceed.
@@ -899,5 +957,4 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         }
     }
 }
-
 }  // namespace txservice::fault

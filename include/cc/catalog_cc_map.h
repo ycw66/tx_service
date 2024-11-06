@@ -920,7 +920,8 @@ public:
 
         const CatalogKey *table_key =
             static_cast<const CatalogKey *>(req.Key());
-        Iterator it = FindEmplace(*table_key);
+        bool emplace = false;
+        Iterator it = FindEmplace(*table_key, emplace, true, false);
         CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {

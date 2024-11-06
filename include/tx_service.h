@@ -1001,6 +1001,7 @@ public:
         bool enable_mvcc = true,
         bool skip_wal = false,
         bool skip_kv = false,  // only used in mono_redis
+        bool enable_cache_replacement = true,
         metrics::MetricsRegistry *metrics_registry = nullptr,
         metrics::CommonLabels common_labels = {},
         std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr,
@@ -1058,6 +1059,19 @@ public:
 
         txservice_skip_wal = skip_wal;
         txservice_skip_kv = skip_kv;
+        txservice_enable_cache_replacement = enable_cache_replacement;
+
+        if (conf.find("enable_key_cache") != conf.end())
+        {
+            if (enable_mvcc && conf.at("enable_key_cache"))
+            {
+                LOG(WARNING) << "Txservice key cache is disabled due to "
+                                "incompatibility with MVCC.";
+            }
+            // Key cache is only available in non-mvcc mode.
+            txservice_enable_key_cache =
+                conf.at("enable_key_cache") && !enable_mvcc;
+        }
     }
 
     int Start(uint32_t node_id,
@@ -1075,6 +1089,24 @@ public:
               const std::string &local_path,
               bool enable_brpc_builtin_services = true)
     {
+        if (txservice_skip_kv)
+        {
+            if (txservice_enable_cache_replacement)
+            {
+                LOG(ERROR) << "When enable_cache_replacement is true, skip_kv "
+                              "must be false";
+                return -1;
+            }
+        }
+        else if (!txservice_enable_cache_replacement)
+        {
+            if (local_cc_shards_.store_hd_->IsSharedStorage())
+            {
+                LOG(ERROR) << "Share storage is not supported when cache "
+                              "replacement is disabled";
+                return -1;
+            }
+        }
         uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
         if (Sharder::Instance().Init(node_id,
                                      ng_id,

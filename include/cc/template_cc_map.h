@@ -5941,8 +5941,10 @@ public:
                         continue;
                     }
 
-                    // If the data is owned by this ng, fetch the record,
-                    // otherwise only skip this record for now and don't
+                    // The fetch record may failed when the
+                    // cce is touch at 1st place, so the record status can be
+                    // Unknown. If the data is owned by this ng, fetch the
+                    // record, otherwise only skip this record for now and don't
                     // truncate redo log.
                     if (cce->PayloadStatus() == RecordStatus::Unknown)
                     {
@@ -7777,6 +7779,12 @@ public:
         return true;
     }
 
+    bool Execute(RestoreCcMapCc &req) override
+    {
+        assert(false);
+        return true;
+    }
+
     size_t size() const override
     {
         return size_;
@@ -8881,13 +8889,22 @@ protected:
         CcShardHeap *shard_heap = shard_->GetShardHeap();
         if (shard_heap != nullptr && shard_heap->Full())
         {
-            // The shard has reached the maximal capacity. Tries to
-            // clean cc entries that have been checkpointed but are not
-            // being accessed by active tx's.
-            shard_->Clean();
-
-            if (shard_heap->Full() && !table_name_.IsMeta() && !force_emplace)
+            if (txservice_enable_cache_replacement)
             {
+                // The shard has reached the maximal capacity. Tries to
+                // clean cc entries that have been checkpointed but are not
+                // being accessed by active tx's.
+                shard_->Clean();
+
+                if (shard_heap->Full() && !table_name_.IsMeta() &&
+                    !force_emplace)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                // when cache replacement is disable, we don't kickout cce
                 return false;
             }
         }
@@ -9150,21 +9167,29 @@ protected:
         CcShardHeap *shard_heap = shard_->GetShardHeap();
         if (shard_heap != nullptr && shard_heap->Full())
         {
-            // The shard has reached the maximal capacity. Tries to
-            // clean cc entries that have been checkpointed but are not
-            // being accessed by active tx's.
-            shard_->Clean();
-
-            if (shard_heap->Full() && !table_name_.IsMeta() && !force_emplace)
+            if (txservice_enable_cache_replacement)
             {
-                if (read_only_req)
+                // The shard has reached the maximal capacity. Tries to
+                // clean cc entries that have been checkpointed but are not
+                // being accessed by active tx's.
+                shard_->Clean();
+
+                if (shard_heap->Full() && !table_name_.IsMeta() &&
+                    !force_emplace)
                 {
-                    fail_if_not_found = true;
+                    if (read_only_req)
+                    {
+                        fail_if_not_found = true;
+                    }
+                    else
+                    {
+                        return End();
+                    }
                 }
-                else
-                {
-                    return End();
-                }
+            }
+            else if (!force_emplace && !read_only_req)
+            {
+                return End();
             }
         }
 
