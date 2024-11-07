@@ -5080,7 +5080,7 @@ public:
     {
         assert(clean_type_ == CleanType::CleanCcm);
 
-        return ccs.CleanCcmPages(*table_name_, node_group_id_, clean_ts_);
+        return ccs.CleanCcmPages(*table_name_, node_group_id_, clean_ts_, true);
     }
 
     CleanType GetCleanType() const
@@ -5927,11 +5927,6 @@ public:
 
     bool ValidTermCheck() override
     {
-        if (Sharder::Instance().NativeNodeGroup() != node_group_id_)
-        {
-            return false;
-        }
-
         int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
         if (standby_node_term < 0)
         {
@@ -5975,8 +5970,7 @@ public:
 
         if (!updated_local_seq_id_)
         {
-            if (!ccs.UpdateLastReceivedStandbySequenceId(*fwd_req_,
-                                                         StandbyNodeTerm()))
+            if (!ccs.UpdateLastReceivedStandbySequenceId(*fwd_req_))
             {
                 // No need to process msg
                 SetFinish();
@@ -6046,6 +6040,22 @@ public:
     void Reset(std::unique_ptr<remote::CcMessage> msg)
     {
         fwd_req_ = &msg->key_obj_standby_forward_req();
+        forward_msg_grp_ = fwd_req_->forward_seq_grp();
+        primary_leader_term_ = fwd_req_->primary_leader_term();
+        seq_grp_initial_id_ = UINT64_MAX;
+        updated_local_seq_id_ = false;
+        cce_ptr_ = nullptr;
+        input_msg_ = std::move(msg);
+        if (hd_ == nullptr)
+        {
+            hd_ = Sharder::Instance().GetCcStreamSender();
+        }
+        if (fwd_req_->out_of_sync())
+        {
+            // No need to set other fields
+            ng_term_ = -1;
+            return;
+        }
         TableType table_type =
             remote::ToLocalType::ConvertCcTableType(fwd_req_->table_type());
         remote_table_name_ = TableName(
@@ -6068,18 +6078,8 @@ public:
         schema_version_ = fwd_req_->schema_version();
         has_overwrite_ = fwd_req_->has_overwrite();
         key_shard_code_ = fwd_req_->key_shard_code();
-        forward_msg_grp_ = fwd_req_->forward_seq_grp();
-        primary_leader_term_ = fwd_req_->primary_leader_term();
-        seq_grp_initial_id_ = UINT64_MAX;
-        updated_local_seq_id_ = false;
         ddl_phase_ = DDLPhase::AcquirePhase;
         ddl_kv_op_err_code_ = CcErrorCode::NO_ERROR;
-        cce_ptr_ = nullptr;
-        input_msg_ = std::move(msg);
-        if (hd_ == nullptr)
-        {
-            hd_ = Sharder::Instance().GetCcStreamSender();
-        }
     }
 
     void SetFinish()

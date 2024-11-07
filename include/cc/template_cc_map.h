@@ -5952,7 +5952,7 @@ public:
                             Sharder::Instance().MapKeyHashToBucketId(key_hash);
                         if (shard_->GetBucketOwner(bucket_id, cc_ng_id_) ==
                                 cc_ng_id_ &&
-                            ng_term > 0)
+                            current_term > 0)
                         {
                             TxKey tx_key(key);
                             shard_->FetchRecord(table_name_,
@@ -5973,7 +5973,9 @@ public:
                     {
                         BufferedTxnCmdList &buffered_cmd_list =
                             cce->BufferedCommandList();
+                        int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                         buffered_cmd_list.Clear();
+                        shard_->UpdateBufferedCommandCnt(-buffered_cmd_cnt_old);
                         cce->RecycleKeyLock(*shard_);
                     }
                     else
@@ -7741,6 +7743,16 @@ public:
                 // to overwrite potential newer version in kv.
                 RecordStatus status = cce->PayloadStatus();
                 cce->SetCommitTsPayloadStatus(now_ts, status);
+#ifdef ON_KEY_OBJECT
+                if (cce->HasBufferedCommandList())
+                {
+                    BufferedTxnCmdList &buffered_cmds =
+                        cce->BufferedCommandList();
+                    int64_t buffered_cmd_cnt_old = buffered_cmds.Size();
+                    buffered_cmds.Clear();
+                    shard_->UpdateBufferedCommandCnt(0 - buffered_cmd_cnt_old);
+                }
+#endif
             }
             else
             {

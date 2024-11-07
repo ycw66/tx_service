@@ -35,6 +35,7 @@ struct StandbyForwardEntry
         assert(!in_use_);
         in_use_ = true;
         msg.clear_key_obj_standby_forward_req();
+        msg.mutable_key_obj_standby_forward_req()->set_out_of_sync(false);
         sequence_id_ = UINT64_MAX;
     }
 
@@ -69,6 +70,7 @@ struct StandbySequenceGroup
     void Subscribe(uint64_t initial_seq_id)
     {
         next_expecting_standby_sequence_id_ = initial_seq_id;
+        initial_sequnce_id_ = initial_seq_id;
         last_consistent_standby_sequence_id_ = initial_seq_id - 1;
         missing_standby_seqeunce_ids_.clear();
         while (!pending_standby_consistent_ts_.empty())
@@ -85,6 +87,7 @@ struct StandbySequenceGroup
         subscribed_ = false;
     }
 
+    uint64_t initial_sequnce_id_{0};
     // the largest sequencec received + 1
     uint64_t next_expecting_standby_sequence_id_{0};
     // the largest sequence number that we've received all msgs before this

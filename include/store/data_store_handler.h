@@ -361,6 +361,7 @@ public:
     virtual void OnSnapshotSyncRequested(
         const txservice::remote::StorageSnapshotSyncRequest *req)
     {
+        assert(false);
     }
 
     virtual bool OnSnapshotReceived(

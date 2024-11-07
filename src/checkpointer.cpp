@@ -117,7 +117,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         // request snapshot from primary if standby is not synced on every
         // checkpoint attempt. This request can be called multiple times and
         // will be deduped on the primary node based on requested term.
-        assert(!store_hd_->IsSharedStorage());
+
         std::shared_ptr<brpc::Channel> channel =
             Sharder::Instance().GetCcNodeServiceChannel(
                 Sharder::Instance().LeaderNodeId(

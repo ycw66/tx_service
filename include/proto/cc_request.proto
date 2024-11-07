@@ -328,21 +328,7 @@ message KeyObjectStandbyForwardRequest {
     int64 primary_leader_term = 13;
     uint64 schema_version = 14;
     uint64 tx_number = 15;
-}
-
-message RequestResendStandbyMessageRequest 
-{
-    uint32 src_node_id = 1;
-    uint32 node_group_id = 2;
-    uint32 seq_grp = 3;
-    uint64 seq_id = 4;
-    int64 standby_node_term = 5;
-}
-
-message RequestResendStandbyMessageResponse 
-{
-    bool error = 1;
-    KeyObjectStandbyForwardRequest msg = 2;
+    bool out_of_sync = 16;
 }
 
 message StorageSnapshotSyncRequest {

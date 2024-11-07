@@ -841,6 +841,8 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         {
             for (CcRequestBase *req : requesters_)
             {
+                // TODO(liunyl): key object forward req can only be aborted if
+                // term changes. retry if data store op failed.
                 if (req)
                 {
                     req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);

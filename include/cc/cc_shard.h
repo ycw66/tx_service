@@ -722,10 +722,13 @@ public:
      * @param table_name
      * @param ng_id
      * @param schema_ts
+     * @param truncate_table: if the clean operation is part of truncate table.
+     * If true, ccm will be set to fully cached after cleared.
      */
     bool CleanCcmPages(const TableName &table_name,
                        NodeGroupId ng_id,
-                       uint64_t clean_ts);
+                       uint64_t clean_ts,
+                       bool truncate_table = false);
 
     void UpdateCcmSchema(const TableName &table_name,
                          NodeGroupId node_group_id,
@@ -850,15 +853,13 @@ public:
     // Called on primary node
     StandbyForwardEntry *GetNextStandbyForwardEntry();
     void ForwardStandbyMessage(StandbyForwardEntry *entry);
-    uint64_t AddSubscribedStandby(uint32_t node_id)
+    void AddSubscribedStandby(uint32_t node_id, uint64_t start_seq_id)
     {
-        uint64_t start_seq_id = next_forward_sequence_id_;
         LOG(INFO) << "start forwarding to node " << node_id << " from seq "
                   << start_seq_id << ", seq grp " << core_id_;
 
         auto ins_res = subscribed_standby_nodes_.try_emplace(node_id);
         ins_res.first->second = start_seq_id - 1;
-        return start_seq_id;
     }
     uint64_t NextStandbyMessageSequence() const
     {
@@ -867,6 +868,11 @@ public:
 
     // Try to send previous failed message to standby nodes.
     bool ResendFailedForwardMessages();
+
+    uint64_t GetNextForwardSequnceId() const
+    {
+        return next_forward_sequence_id_;
+    }
 
     std::vector<uint32_t> GetSubscribedStandbys()
     {
@@ -878,16 +884,11 @@ public:
         }
         return node_ids;
     }
-    bool GetStandbyMessage(uint64_t seq_id,
-                           remote::KeyObjectStandbyForwardRequest *req);
     void ResetStandbySequence();
-
-    void ResetStandbySequence(uint32_t node_id, uint64_t seq_id);
 
     // called on follower node
     bool UpdateLastReceivedStandbySequenceId(
-        const remote::KeyObjectStandbyForwardRequest &msg,
-        int64_t standby_node_term);
+        const remote::KeyObjectStandbyForwardRequest &msg);
     void SubsribeToPrimaryNode(uint32_t seq_grp, uint64_t seq_id);
 
     void UpdateStandbyConsistentTs(uint32_t seq_grp,
@@ -901,24 +902,9 @@ public:
 
     void DequeueWaitListAfterSchemaUpdated();
 
-    void EnqueueWaitListForStandbyCatchUp(CcRequestBase *req)
-    {
-        waiting_list_for_standby_catch_up_.push(req);
-    }
+    void UpdateBufferedCommandCnt(int64_t delta);
 
-    bool DequeueWaitListAfterStandbyCatchUp()
-    {
-        size_t dequeued_cnt = 0;
-        while (!waiting_list_for_standby_catch_up_.empty() &&
-               dequeued_cnt < 10000)
-        {
-            Enqueue(waiting_list_for_standby_catch_up_.front());
-            waiting_list_for_standby_catch_up_.pop();
-            dequeued_cnt++;
-        }
-
-        return waiting_list_for_standby_catch_up_.empty();
-    }
+    void CheckLagAndResubscribe() const;
 
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
@@ -1004,7 +990,11 @@ private:
     absl::flat_hash_map<uint32_t, StandbySequenceGroup> standby_sequence_grps_;
     // requests to execute after schema being modified
     std::vector<CcRequestBase *> waiting_list_for_schema_;
-    std::queue<CcRequestBase *> waiting_list_for_standby_catch_up_;
+
+    // The total number of commands buffered on this shard. If standby node has
+    // too many commands buffered, it probably has fallen behind. Resubscribe
+    // to the master node to get the full and latest snapshot.
+    int64_t buffered_cmd_cnt_{0};
 
     // Reserved head and tail for the double-linked list of cc entries, which
     // simplifies handling of empty and one-element lists.

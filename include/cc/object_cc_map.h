@@ -101,7 +101,6 @@ public:
         CcHandlerResult<ObjectCommandResult> *hd_res = req.Result();
         ObjectCommandResult &obj_result = hd_res->Value();
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
-        // TODO(lzx): replace "cmd_success" with TxCommand::IsPassed()
         bool &object_modified = obj_result.object_modified_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
         CcPage<KeyT, ValueT> *ccp = nullptr;
@@ -146,9 +145,6 @@ public:
                 return true;
             }
         }
-
-        // TODO(zkl): Read and PinRangeSlice, load from kv; wait for replay to
-        //  finish
 
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
@@ -289,7 +285,9 @@ public:
                 // if ccm contains all the ccentries, then unknown status means
                 // that we can skip accessing kv store and return deleted status
                 // directly.
-                if (ccm_has_full_entries_ || txservice_skip_kv)
+                if (ccm_has_full_entries_ || txservice_skip_kv ||
+                    (!txservice_enable_cache_replacement &&
+                     Sharder::Instance().IsTxCacheRestored()))
                 {
                     cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
                     cce->SetCkptTs(1U);
@@ -317,54 +315,34 @@ public:
                                 }
                             }
                         });
+                        // Fetch record from storage
+                        shard_->FetchRecord(table_name_,
+                                            table_schema_,
+                                            TxKey(look_key),
+                                            cce,
+                                            this,
+                                            cc_ng_id_,
+                                            ng_term,
+                                            &req);
 
-                        bool fetch_record = true;
-                        if (!txservice_enable_cache_replacement)
+                        req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
+                        // Acquire a read intent on this cce with the
+                        // special txn to avoid cce being kicked out before
+                        // fetch record returns.
+                        cce->GetOrCreateKeyLock(shard_, this, ccp)
+                            .AcquireReadIntent(
+                                FetchRecordCc::GetFetchRecordTxNumber(
+                                    cc_ng_id_));
+
+                        if (metrics::enable_cache_hit_rate)
                         {
-                            if (Sharder::Instance().IsTxCacheRestored())
-                            {
-                                fetch_record = false;
-                            }
+                            auto meter = shard_->GetMeter();
+                            meter->Collect(
+                                metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
+                                1,
+                                "miss");
                         }
-
-                        if (fetch_record)
-                        {
-                            // Fetch record from storage
-                            shard_->FetchRecord(table_name_,
-                                                table_schema_,
-                                                TxKey(look_key),
-                                                cce,
-                                                this,
-                                                cc_ng_id_,
-                                                ng_term,
-                                                &req);
-
-                            req.block_type_ =
-                                ApplyCc::ApplyBlockType::BlockOnFetch;
-                            // Acquire a read intent on this cce with the
-                            // special txn to avoid cce being kicked out before
-                            // fetch record returns.
-                            cce->GetOrCreateKeyLock(shard_, this, ccp)
-                                .AcquireReadIntent(
-                                    FetchRecordCc::GetFetchRecordTxNumber(
-                                        cc_ng_id_));
-
-                            if (metrics::enable_cache_hit_rate)
-                            {
-                                auto meter = shard_->GetMeter();
-                                meter->Collect(
-                                    metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
-                                    1,
-                                    "miss");
-                            }
-                            return false;
-                        }
-                        else
-                        {
-                            // treat as record deleted
-                            std::string rec_str = "";
-                            BackFill(cce, 1, RecordStatus::Deleted, rec_str);
-                        }
+                        return false;
                     }
                     else
                     {
@@ -391,7 +369,9 @@ public:
             {
                 BufferedTxnCmdList &buffered_cmd_list =
                     cce->BufferedCommandList();
+                int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                 buffered_cmd_list.Clear();
+                shard_->UpdateBufferedCommandCnt(-buffered_cmd_cnt_old);
                 cce->RecycleKeyLock(*shard_);
             }
 
@@ -1320,6 +1300,7 @@ public:
             {
                 BufferedTxnCmdList &buffered_cmd_list =
                     cce->BufferedCommandList();
+                int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                 // Clear cmds with smaller version than uploaded version.
                 for (auto it = buffered_cmd_list.txn_cmd_list_.begin();
                      it != buffered_cmd_list.txn_cmd_list_.end();)
@@ -1334,6 +1315,9 @@ public:
                 buffered_cmd_list.cur_version_ = commit_ts;
                 TryCommitBufferedCommands(
                     cce->payload_, buffered_cmd_list, commit_ts);
+                int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
+                shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
+                                                 buffered_cmd_cnt_old);
             }
 
             if (cce->payload_)
@@ -1429,11 +1413,15 @@ public:
 
             if (txn_cmd.obj_version_ >= commit_version)
             {
+                int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                 EmplaceAndCommitBufferedTxnCommand(cce->payload_,
                                                    buffered_cmd_list,
                                                    txn_cmd,
                                                    commit_version,
                                                    payload_status);
+                int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
+                shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
+                                                 buffered_cmd_cnt_old);
                 cce->SetCommitTsPayloadStatus(commit_version, payload_status);
             }
 
@@ -1515,15 +1503,40 @@ public:
             req.SetFinish();
             return true;
         }
-        else if (cce->PayloadStatus() != RecordStatus::Unknown ||
-                 has_overwrite || obj_version == 1)
+        else
         {
-            if (obj_version == 1 && !has_overwrite)
+            if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
-                // ver == 1 means this key does not exist on primary node.
-                assert(cce->PayloadStatus() == RecordStatus::Unknown ||
-                       cce->CommitTs() == 1);
-                cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
+                if (!has_overwrite && obj_version != 1 &&
+                    !ccm_has_full_entries_ &&
+                    (txservice_enable_cache_replacement ||
+                     !Sharder::Instance().IsTxCacheRestored()))
+                {
+                    if (Sharder::Instance().StandbyNodeTerm() > 0)
+                    {
+                        // Cannot find a cached version in memory. Fetch
+                        // it from kv store if kv is synced with primary.
+                        shard_->FetchRecord(table_name_,
+                                            table_schema_,
+                                            TxKey(look_key),
+                                            cce,
+                                            this,
+                                            cc_ng_id_,
+                                            req.StandbyNodeTerm(),
+                                            nullptr);
+                        cce->GetOrCreateKeyLock(shard_, this, ccp)
+                            .AcquireReadIntent(
+                                FetchRecordCc::GetFetchRecordTxNumber(
+                                    Sharder::Instance().NodeId()));
+                    }
+                }
+                else
+                {
+                    // ver == 1 means this key does not exist on primary node.
+                    assert(cce->PayloadStatus() == RecordStatus::Unknown ||
+                           cce->CommitTs() == 1);
+                    cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
+                }
             }
             bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
             if ((obj_version == cce->CommitTs() || has_overwrite) &&
@@ -1584,11 +1597,20 @@ public:
                 // Emplace txn_cmd and try to commit all pending commands.
                 uint64_t commit_version = cce->CommitTs();
                 RecordStatus payload_status = cce->PayloadStatus();
+
+                int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                 EmplaceAndCommitBufferedTxnCommand(cce->payload_,
                                                    buffered_cmd_list,
                                                    txn_cmd,
                                                    commit_version,
                                                    payload_status);
+                int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
+                shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
+                                                 buffered_cmd_cnt_old);
+                // Resubscribe to the leader if standby node has fallen behind
+                // too much.
+                shard_->CheckLagAndResubscribe();
+
                 cce->SetCommitTsPayloadStatus(commit_version, payload_status);
                 if (buffered_cmd_list.IsNull())
                 {
@@ -1596,47 +1618,6 @@ public:
                     // applied and there is no pending command.
                     bool lock_recycled = cce->RecycleKeyLock(*shard_);
                 }
-            }
-        }
-        else
-        {
-            // On this standby node, there is no cached version of this record,
-            // or cache replacement is disabled and the KV snaphot from primary
-            // is still being loaded into memory
-            if (txservice_enable_cache_replacement ||
-                !Sharder::Instance().IsTxCacheRestored())
-            {
-                if (Sharder::Instance().StandbyNodeTerm() > 0)
-                {
-                    // TODO(liunyl): to avoid rpc overflow on primary, fetching
-                    // record form kv for now. Fix this by fetching record by cc
-                    // req from primary. There is no cached version of this
-                    // record, ask primary node for the payload.
-                    shard_->FetchRecord(table_name_,
-                                        table_schema_,
-                                        TxKey(look_key),
-                                        cce,
-                                        this,
-                                        cc_ng_id_,
-                                        req.StandbyNodeTerm(),
-                                        &req);
-                    cce->GetOrCreateKeyLock(shard_, this, ccp)
-                        .AcquireReadIntent(
-                            FetchRecordCc::GetFetchRecordTxNumber(
-                                Sharder::Instance().NodeId()));
-                }
-                else
-                {
-                    // Cannot fetch from kv yet, wait for snapshot is synced.
-                    shard_->EnqueueWaitListForStandbyCatchUp(&req);
-                }
-                return false;
-            }
-            else
-            {
-                // if cache replacement disabled and kv data has been loaded
-                // into TX cache, then we known this UNKNOWN record is non-exist
-                cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
             }
         }
 
@@ -1913,11 +1894,15 @@ public:
 
             if (txn_cmd.obj_version_ >= current_version)
             {
+                int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                 EmplaceAndCommitBufferedTxnCommand(cce->payload_,
                                                    buffered_cmd_list,
                                                    txn_cmd,
                                                    current_version,
                                                    payload_status);
+                int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
+                shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
+                                                 buffered_cmd_cnt_old);
                 cce->SetCommitTsPayloadStatus(current_version, payload_status);
             }
             else
@@ -2054,6 +2039,7 @@ public:
             {
                 BufferedTxnCmdList &buffered_cmd_list =
                     cce->BufferedCommandList();
+                int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                 // Clear cmds with smaller version than kv version.
                 for (auto it = buffered_cmd_list.txn_cmd_list_.begin();
                      it != buffered_cmd_list.txn_cmd_list_.end();)
@@ -2070,6 +2056,9 @@ public:
                 uint64_t commit_version = commit_ts;
                 TryCommitBufferedCommands(
                     cce->payload_, buffered_cmd_list, commit_version);
+                int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
+                shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
+                                                 buffered_cmd_cnt_old);
                 RecordStatus commit_status = cce->payload_ == nullptr
                                                  ? RecordStatus::Deleted
                                                  : RecordStatus::Normal;
@@ -2111,8 +2100,9 @@ public:
                     {
                         assert(false);
                     }
-
+                    int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                     buffered_cmd_list.Clear();
+                    shard_->UpdateBufferedCommandCnt(-buffered_cmd_cnt_old);
                     cce->RecycleKeyLock(*shard_);
                 }
             }

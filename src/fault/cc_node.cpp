@@ -1,5 +1,3 @@
-#include "fault/cc_node.h"
-
 #include <brpc/controller.h>
 #include <brpc/errno.pb.h>
 #include <bthread/bthread.h>
@@ -17,6 +15,7 @@
 #ifdef KV_DATA_STORE_TYPE
 #include "kv_store.h"
 #endif
+#include "fault/cc_node.h"
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "tx_service.h"
@@ -621,27 +620,6 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
 
     is_processing_.store(false, std::memory_order_release);
 
-    if (succ)
-    {
-        uint16_t core_cnt = local_cc_shards_.Count();
-
-        WaitableCc dequeue_wl_cc(
-            [term = req->standby_node_term()](CcShard &ccs)
-            {
-                if (Sharder::Instance().StandbyNodeTerm() == term)
-                {
-                    return ccs.DequeueWaitListAfterStandbyCatchUp();
-                }
-
-                return true;
-            },
-            core_cnt);
-        for (uint32_t core_id = 0; core_id < core_cnt; core_id++)
-        {
-            local_cc_shards_.EnqueueCcRequest(core_id, &dequeue_wl_cc);
-        }
-        dequeue_wl_cc.Wait();
-    }
     return succ;
 }
 
@@ -847,24 +825,6 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         local_cc_shards_.EnqueueCcRequest(core_id, &sub_cc);
     }
     sub_cc.Wait();
-
-    // Ask primary to resend msg from the given seq id since some of the
-    // messages sent before starting seq id is set on standby node might have
-    // been dropped.
-    remote::ResetStandbySequenceIdRequest reset_req;
-    remote::ResetStandbySequenceIdResponse reset_resp;
-    reset_req.set_ng_id(ng_id_);
-    reset_req.set_ng_term(primary_term);
-    reset_req.set_node_id(node_id_);
-    reset_req.mutable_seq_id()->CopyFrom(start_follow_resp.start_sequence_id());
-    for (auto i = 0; i < reset_req.seq_id_size(); i++)
-    {
-        reset_req.add_seq_grp(i);
-    }
-
-    cntl.Reset();
-    stub.ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
-
     // Initialize bucket info.
 
     // TODO(lzx): fetch ng_configs from LeaderNode if storage is not shared
@@ -905,7 +865,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         }
     }
 
-    if (!txservice_skip_kv && !store_hd->IsSharedStorage())
+    if (!txservice_skip_kv)
     {
         // If we need to sync kv snapshot, remain in candidate standby until
         // snapshot is received.
@@ -915,13 +875,31 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     {
         Sharder::Instance().SetStandbyNodeTerm(standby_term);
     }
+
+    // Ask primary to resend msg from the given seq id since some of the
+    // messages sent before starting seq id is set on standby node might have
+    // been dropped.
+    remote::ResetStandbySequenceIdRequest reset_req;
+    remote::ResetStandbySequenceIdResponse reset_resp;
+    reset_req.set_ng_id(ng_id_);
+    reset_req.set_ng_term(primary_term);
+    reset_req.set_node_id(node_id_);
+    reset_req.mutable_seq_id()->CopyFrom(start_follow_resp.start_sequence_id());
+    for (auto i = 0; i < reset_req.seq_id_size(); i++)
+    {
+        reset_req.add_seq_grp(i);
+    }
+
+    cntl.Reset();
+    stub.ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
+
     LOG(INFO) << "subscribed to primary node at term " << primary_term;
 
     is_processing_.store(false, std::memory_order_release);
 
     // If the data store is not shared between standby and primary, ask primary
     // to send a snapshot of previous data
-    if (!txservice_skip_kv && !store_hd->IsSharedStorage())
+    if (!txservice_skip_kv)
     {
         remote::StorageSnapshotSyncRequest snapshot_req;
         remote::StorageSnapshotSyncResponse snapshot_resp;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <deque>
 #include <memory>
 #include <string>
 #include <utility>
@@ -263,7 +264,7 @@ struct BufferedTxnCmdList
     // commit_ts of the last applied transaction, commands must be
     // applied in transactions' commit order
     uint64_t cur_version_{1};
-    std::vector<TxnCmd> txn_cmd_list_;
+    std::deque<TxnCmd> txn_cmd_list_;
 
     bool IsNull() const
     {
@@ -276,12 +277,17 @@ struct BufferedTxnCmdList
         txn_cmd_list_.shrink_to_fit();
     }
 
+    size_t Size() const
+    {
+        return txn_cmd_list_.size();
+    }
+
     void EmplaceTxnCmd(TxnCmd &txn_cmd)
     {
         auto cmp = [](const TxnCmd &lhs, const TxnCmd &rhs) -> bool
         { return lhs.obj_version_ < rhs.obj_version_; };
 
-        std::vector<TxnCmd> &txn_cmd_list = txn_cmd_list_;
+        std::deque<TxnCmd> &txn_cmd_list = txn_cmd_list_;
 
         auto lb_it = std::lower_bound(
             txn_cmd_list.begin(), txn_cmd_list.end(), txn_cmd, cmp);
@@ -321,7 +327,7 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
                                BufferedTxnCmdList &buffered_cmd_list,
                                uint64_t &cur_ver)
 {
-    std::vector<TxnCmd> &txn_cmd_list = buffered_cmd_list.txn_cmd_list_;
+    std::deque<TxnCmd> &txn_cmd_list = buffered_cmd_list.txn_cmd_list_;
     // iterate the list and apply the commands in version order
     for (auto it = txn_cmd_list.begin(); it != txn_cmd_list.end();)
     {

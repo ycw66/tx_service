@@ -1402,7 +1402,7 @@ void CcNodeService::StandbyStartFollowing(
                 else
                 {
                     std::unique_lock<bthread::Mutex> lk(mux);
-                    start_seq = ccs.AddSubscribedStandby(node_id);
+                    start_seq = ccs.GetNextForwardSequnceId();
                 }
 
                 return true;
@@ -1500,9 +1500,9 @@ void CcNodeService::RequestStorageSnapshotSync(
 {
     brpc::ClosureGuard done_guard(done);
     auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
-    if (!store_hd || store_hd->IsSharedStorage())
+    if (!store_hd)
     {
-        // kv store not enabled or does not need to sync
+        // kv store not enabled
         response->set_error(true);
         return;
     }
@@ -1523,6 +1523,12 @@ void CcNodeService::RequestStorageSnapshotSync(
         return;
     });
 
+    // If kvstore is enabled, we must flush data in-memory to kvstore firstly.
+    // For non-shared kvstore, also we create and send the snapshot to standby
+    // nodes.
+    // Then, notify standby nodes that data committed before subscribe timepoint
+    // has been flushed to kvstore. (standby nodes begin fetch record from
+    // kvstore on cache miss).
     store_hd->OnSnapshotSyncRequested(request);
     response->set_error(false);
 }
@@ -1535,7 +1541,7 @@ void CcNodeService::OnSnapshotSynced(
 {
     brpc::ClosureGuard done_guard(done);
     auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
-    if (!store_hd || store_hd->IsSharedStorage())
+    if (!store_hd)
     {
         // kv store not enabled or does not need to sync
         response->set_error(true);
@@ -1611,7 +1617,7 @@ void CcNodeService::ResetStandbySequenceId(
         {
             if (Sharder::Instance().CheckLeaderTerm(ng_id, ng_term))
             {
-                ccs.ResetStandbySequence(node_id, seq_ids.at(ccs.core_id_));
+                ccs.AddSubscribedStandby(node_id, seq_ids.at(ccs.core_id_));
             }
             return true;
         },
