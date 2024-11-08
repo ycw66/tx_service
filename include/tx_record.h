@@ -362,11 +362,12 @@ struct BlobTxRecord : public TxRecord
 {
     BlobTxRecord() = default;
 
-    BlobTxRecord(const BlobTxRecord &rhs) : value_(rhs.value_)
+    BlobTxRecord(const BlobTxRecord &rhs) : value_(rhs.value_), ttl_(rhs.ttl_)
     {
     }
 
-    BlobTxRecord(BlobTxRecord &&rhs) : value_(std::move(rhs.value_))
+    BlobTxRecord(BlobTxRecord &&rhs)
+        : value_(std::move(rhs.value_)), ttl_(rhs.ttl_)
     {
     }
 
@@ -377,6 +378,7 @@ struct BlobTxRecord : public TxRecord
             return *this;
         }
         value_ = rhs.value_;
+        ttl_ = rhs.ttl_;
         return *this;
     }
 
@@ -388,6 +390,7 @@ struct BlobTxRecord : public TxRecord
         }
 
         value_ = std::move(rhs.value_);
+        ttl_ = rhs.ttl_;
 
         return *this;
     }
@@ -457,6 +460,7 @@ struct BlobTxRecord : public TxRecord
     }
 
     std::string value_;
+    // For leveraging the TTL feature support by Cassandra and Dynamo
     uint64_t ttl_{UINT64_MAX};
 };
 
