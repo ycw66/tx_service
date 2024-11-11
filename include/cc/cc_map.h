@@ -58,6 +58,7 @@ struct EscalateStandbyCcmCc;
 struct RestoreCcMapCc;
 struct InvalidateTableCacheCc;
 struct SampleSubRangeKeysCc;
+struct ScanSliceDeltaSizeCc;
 
 enum struct ScanType : uint8_t
 {
@@ -177,6 +178,7 @@ public:
     virtual bool Execute(RestoreCcMapCc &req) = 0;
     virtual bool Execute(InvalidateTableCacheCc &req) = 0;
     virtual bool Execute(SampleSubRangeKeysCc &req) = 0;
+    virtual bool Execute(ScanSliceDeltaSizeCc &req) = 0;
 
     virtual size_t size() const = 0;
     virtual size_t NormalObjectSize()

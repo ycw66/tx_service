@@ -5221,7 +5221,6 @@ public:
 
         Iterator it;
         Iterator end_it;
-        Iterator req_end_it;
         if (req.IsDrained(shard_->core_id_))
         {
             // scan is already finished on this core
@@ -5235,7 +5234,6 @@ public:
         if (req.export_base_table_rec_if_need_ &&
             nullptr == req.slice_ids_[shard_->core_id_].Slice())
         {
-            assert(req.ScanType() == DataSyncScanCc::ScanFlushRecords);
             const KeyT *slice_start_key = nullptr;
             if (pause_key_and_is_drained.first.KeyPtr() != nullptr)
             {
@@ -5382,21 +5380,9 @@ public:
                 it = LowerBound(*pause_key);
             }
 
-            if (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize)
-            {
-                std::pair<Iterator, ScanType> req_end_pair =
-                    ForwardScanStart(*req_end_key, true);
-                req_end_it = req_end_pair.first;
-                if (req_end_pair.second == ScanType::ScanGap)
-                {
-                    ++req_end_it;
-                }
-            }
             const KeyT *search_end_key = req_end_key;
 
-            if (req.export_base_table_rec_if_need_ ||
-                (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize &&
-                 req.slice_ids_[shard_->core_id_].Slice()))
+            if (req.export_base_table_rec_if_need_)
             {
                 const TemplateStoreSlice<KeyT> *slice =
                     static_cast<const TemplateStoreSlice<KeyT> *>(
@@ -5450,8 +5436,7 @@ public:
         }
 
         uint64_t recycle_ts = 1U;
-        if (req.ScanType() == DataSyncScanCc::ScanFlushRecords &&
-            shard_->EnableMvcc() && !req.export_base_table_rec_only_)
+        if (shard_->EnableMvcc() && !req.export_base_table_rec_only_)
         {
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
@@ -5468,13 +5453,6 @@ public:
         //
         // indicate if export cce failed due to oom
         bool is_scan_mem_full = false;
-        int64_t *curr_slice_delta_size = nullptr;
-        if (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize &&
-            req.slice_ids_[shard_->core_id_].Slice())
-        {
-            curr_slice_delta_size =
-                &(req.SliceDeltaSize(shard_->core_id_).back().second);
-        }
 
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
@@ -5501,40 +5479,11 @@ public:
                     {
                         it = Iterator(ccp->next_page_, 0, &neg_inf_);
                     }
-
-                    if (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize &&
-                        it == end_it_next_page_it)
-                    {
-                        // Reach the current slice end, reset the end iter.
-                        ++(req.accumulated_scan_cnt_[shard_->core_id_]);
-                        req.slice_ids_[shard_->core_id_].Reset();
-                        curr_slice_delta_size = nullptr;
-
-                        // update the end it.
-                        end_it = req_end_it;
-                        end_it_next_page_it = end_it;
-                        if (end_it_next_page_it != End())
-                        {
-                            CcPage<KeyT, ValueT> *ccp =
-                                end_it_next_page_it.GetPage();
-                            assert(ccp != nullptr);
-                            if (ccp->next_page_ == PagePosInf())
-                            {
-                                end_it_next_page_it = End();
-                            }
-                            else
-                            {
-                                end_it_next_page_it =
-                                    Iterator(ccp->next_page_, 0, &neg_inf_);
-                            }
-                        }
-                    }
                     continue;
                 }
             }
 
-            if (req.ScanType() == DataSyncScanCc::ScanFlushRecords &&
-                shard_->EnableMvcc() && !req.export_base_table_rec_only_)
+            if (shard_->EnableMvcc() && !req.export_base_table_rec_only_)
             {
                 cce->KickOutArchiveRecords(recycle_ts);
             }
@@ -5619,95 +5568,33 @@ public:
 
                     if (need_export)
                     {
-                        if (req.ScanType() ==
-                            DataSyncScanCc::ScanSliceDeltaSize)
+                        uint64_t mem_usage = 0;
+                        auto export_result = ExportForCkpt(
+                            cce,
+                            *key,
+                            req.DataSyncVec(shard_->core_id_),
+                            req.ArchiveVec(shard_->core_id_),
+                            req.MoveBaseIdxVec(shard_->core_id_),
+                            req.previous_scan_ts_,
+                            req.data_sync_ts_,
+                            recycle_ts,
+                            Type(),
+                            shard_->EnableMvcc(),
+                            req.accumulated_scan_cnt_[shard_->core_id_],
+                            false,
+                            false,
+                            mem_usage);
+
+                        req.accumulated_mem_usage_[shard_->core_id_] +=
+                            mem_usage;
+
+                        if (export_result.second)
                         {
-                            if (req.slice_ids_[shard_->core_id_].Slice() ==
-                                nullptr)
-                            {
-                                // The new slice, to get the slice end iterator.
-                                StoreRange *store_range = req.StoreRangePtr();
-                                TemplateStoreSlice<KeyT> *typed_store_slice =
-                                    static_cast<TemplateStoreSlice<KeyT> *>(
-                                        store_range->FindSlice(TxKey(key)));
-
-                                const KeyT *slice_end_key =
-                                    typed_store_slice->EndKey();
-                                std::pair<Iterator, ScanType> end_pair =
-                                    ForwardScanStart(*slice_end_key, true);
-                                end_it = end_pair.first;
-                                if (end_pair.second == ScanType::ScanGap)
-                                {
-                                    ++end_it;
-                                }
-
-                                end_it_next_page_it = end_it;
-                                if (end_it_next_page_it != End())
-                                {
-                                    CcPage<KeyT, ValueT> *ccp =
-                                        end_it_next_page_it.GetPage();
-                                    assert(ccp != nullptr);
-                                    if (ccp->next_page_ == PagePosInf())
-                                    {
-                                        end_it_next_page_it = End();
-                                    }
-                                    else
-                                    {
-                                        end_it_next_page_it = Iterator(
-                                            ccp->next_page_, 0, &neg_inf_);
-                                    }
-                                }
-
-                                req.slice_ids_[shard_->core_id_] = RangeSliceId(
-                                    store_range, typed_store_slice);
-
-                                auto &slice_delta_size =
-                                    req.SliceDeltaSize(shard_->core_id_);
-                                auto &cur_slice = slice_delta_size.emplace_back(
-                                    typed_store_slice->StartTxKey(), 0);
-                                curr_slice_delta_size = &cur_slice.second;
-                            }
-
-                            // Export the delta size of this cce
-                            assert(cce->data_store_size_ != INT32_MAX &&
-                                   curr_slice_delta_size);
-                            *curr_slice_delta_size +=
-                                (cce->PayloadStatus() != RecordStatus::Deleted
-                                     ? (key->Size() + cce->PayloadSize() -
-                                        cce->data_store_size_)
-                                     : (-cce->data_store_size_));
-                        }
-                        else
-                        {
-                            uint64_t mem_usage = 0;
-                            auto export_result = ExportForCkpt(
-                                cce,
-                                *key,
-                                req.DataSyncVec(shard_->core_id_),
-                                req.ArchiveVec(shard_->core_id_),
-                                req.MoveBaseIdxVec(shard_->core_id_),
-                                req.previous_scan_ts_,
-                                req.data_sync_ts_,
-                                recycle_ts,
-                                Type(),
-                                shard_->EnableMvcc(),
-                                req.accumulated_scan_cnt_[shard_->core_id_],
-                                false,
-                                false,
-                                mem_usage);
-
-                            req.accumulated_mem_usage_[shard_->core_id_] +=
-                                mem_usage;
-
-                            if (export_result.second)
-                            {
-                                is_scan_mem_full = true;
-                                DLOG(INFO)
-                                    << "scan heap is full, core_id: "
-                                    << shard_->core_id_
-                                    << " ,scan count: " << req.scan_count_;
-                                break;
-                            }
+                            is_scan_mem_full = true;
+                            DLOG(INFO) << "scan heap is full, core_id: "
+                                       << shard_->core_id_
+                                       << " ,scan count: " << req.scan_count_;
+                            break;
                         }
                     }
                 }
@@ -5750,36 +5637,6 @@ public:
 
             // Forward iterator
             it++;
-
-            if (req.ScanType() == DataSyncScanCc::ScanSliceDeltaSize)
-            {
-                if (it == end_it)
-                {
-                    // Reach the current slice end.
-                    ++(req.accumulated_scan_cnt_[shard_->core_id_]);
-                    req.slice_ids_[shard_->core_id_].Reset();
-                    curr_slice_delta_size = nullptr;
-
-                    // Reset the end iterator.
-                    end_it = req_end_it;
-                    end_it_next_page_it = end_it;
-                    if (end_it_next_page_it != End())
-                    {
-                        CcPage<KeyT, ValueT> *ccp =
-                            end_it_next_page_it.GetPage();
-                        assert(ccp != nullptr);
-                        if (ccp->next_page_ == PagePosInf())
-                        {
-                            end_it_next_page_it = End();
-                        }
-                        else
-                        {
-                            end_it_next_page_it =
-                                Iterator(ccp->next_page_, 0, &neg_inf_);
-                        }
-                    }
-                }
-            }
 
             if (req.export_base_table_rec_if_need_)
             {
@@ -8105,6 +7962,283 @@ public:
     bool Execute(InvalidateTableCacheCc &req) override
     {
         return true;
+    }
+
+    bool Execute(ScanSliceDeltaSizeCc &req) override
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
+        const KeyT *const req_start_key = req.StartTxKey().GetKey<KeyT>();
+        const KeyT *const req_end_key = req.EndTxKey().GetKey<KeyT>();
+
+        auto &paused_position = req.PausedPos(shard_->core_id_);
+
+        auto deduce_iterator = [this](const KeyT &search_key) -> Iterator
+        {
+            Iterator it;
+            std::pair<Iterator, ScanType> search_pair =
+                ForwardScanStart(search_key, true);
+            it = search_pair.first;
+            if (search_pair.second == ScanType::ScanGap)
+            {
+                ++it;
+            }
+            return it;
+        };
+
+        auto next_page_it = [this](Iterator &end_it) -> Iterator
+        {
+            Iterator it = end_it;
+            if (it != End())
+            {
+                CcPage<KeyT, ValueT> *ccp = it.GetPage();
+                assert(ccp != nullptr);
+                if (ccp->next_page_ == PagePosInf())
+                {
+                    it = End();
+                }
+                else
+                {
+                    it = Iterator(ccp->next_page_, 0, &neg_inf_);
+                }
+            }
+            return it;
+        };
+
+        Iterator key_it;
+        Iterator req_end_it;
+
+        // The key iterator.
+        const KeyT *search_start_key =
+            paused_position.first.KeyPtr() == nullptr
+                ? req_start_key
+                : paused_position.first.GetKey<KeyT>();
+        key_it = deduce_iterator(*search_start_key);
+
+        // The request end iterator
+        req_end_it = deduce_iterator(*req_end_key);
+
+        // Since we might skip the page that end_it is on if it's not updated
+        // since last ckpt, it might skip end_it. If the last page is skipped it
+        // will be set as the first entry on the next page. Also check if
+        // (key_it == end_next_page_it).
+        Iterator req_end_next_page_it = next_page_it(req_end_it);
+
+        // The current slice end iterator
+        Iterator slice_end_it = req_end_it;
+        Iterator slice_end_next_page_it = req_end_next_page_it;
+
+        int64_t *curr_slice_delta_size = nullptr;
+        if (paused_position.second)
+        {
+            // The current slice has not completed in the last round.
+            // Fix the slice end iterator.
+            const KeyT *slice_end_key =
+                paused_position.second->EndTxKey().GetKey<KeyT>();
+            slice_end_it = deduce_iterator(*slice_end_key);
+
+            slice_end_next_page_it = next_page_it(slice_end_it);
+
+            curr_slice_delta_size =
+                &(req.SliceDeltaSize(shard_->core_id_).back().second);
+        }
+
+        // ScanSliceDeltaSizeCc is running on TxProcessor thread. To avoid
+        // blocking other transaction for a long time, we only process
+        // ScanBatchSize number of keys in each round.
+        for (size_t scan_cnt = 0;
+             scan_cnt < ScanSliceDeltaSizeCc::ScanBatchSize &&
+             key_it != req_end_it && key_it != req_end_next_page_it;
+             ++scan_cnt)
+        {
+            const KeyT *key = key_it->first;
+            CcEntry<KeyT, ValueT> *cce = key_it->second;
+            CcPage<KeyT, ValueT> *ccp = key_it.GetPage();
+            assert(ccp);
+
+            if (ccp->last_dirty_commit_ts_ <= req.LastDataSyncTs())
+            {
+                assert(!cce->NeedCkpt());
+                // Skip the pages that have no updates since last data sync.
+                if (ccp->next_page_ == PagePosInf())
+                {
+                    key_it = End();
+                }
+                else
+                {
+                    key_it = Iterator(ccp->next_page_, 0, &neg_inf_);
+                }
+
+                // Check the slice iterator.
+                if (key_it == slice_end_it || key_it == slice_end_next_page_it)
+                {
+                    // Reach the end of current slice.
+                    paused_position.second = nullptr;
+                    curr_slice_delta_size = nullptr;
+
+                    // Reset the slice end iterator
+                    slice_end_it = req_end_it;
+                    slice_end_next_page_it = next_page_it(slice_end_it);
+                }
+                continue;
+            }
+
+            const uint64_t commit_ts = cce->CommitTs();
+            // The commit_ts <= 1 means the key is non-existed or a new inserted
+            // key that the tx has not finished post-processing.
+            if (cce->NeedCkpt() && commit_ts > 1 && commit_ts <= req.ScanTs())
+            {
+                bool need_export = true;
+                if (cce->data_store_size_ == INT32_MAX)
+                {
+                    // Load data store size by pinning the slice. Data store
+                    // size is required to decide slice & range update plan.
+                    RangeSliceOpStatus pin_status;
+                    RangeSliceId slice_id = shard_->local_shards_.PinRangeSlice(
+                        table_name_,
+                        req.NodeGroupId(),
+                        req.NodeGroupTerm(),
+                        KeySchema(),
+                        RecordSchema(),
+                        schema_ts_,
+                        table_schema_->GetKVCatalogInfo(),
+                        *key,
+                        true,
+                        &req,
+                        shard_,
+                        pin_status,
+                        true,
+                        UINT8_MAX);
+                    switch (pin_status)
+                    {
+                    case RangeSliceOpStatus::Successful:
+                    {
+                        if (cce->data_store_size_ == INT32_MAX)
+                        {
+                            // If data store size is still unavailable after the
+                            // slice is loaded from data store, that means this
+                            // entry does not exist in data store.
+                            cce->data_store_size_ = 0;
+                        }
+                        slice_id.Unpin();
+                        break;
+                    }
+                    case RangeSliceOpStatus::Retry:
+                    {
+                        paused_position.first = key->CloneTxKey();
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
+                    }
+                    case RangeSliceOpStatus::BlockedOnLoad:
+                    {
+                        paused_position.first = key->CloneTxKey();
+                        return false;
+                    }
+                    case RangeSliceOpStatus::NotOwner:
+                    {
+                        assert("Dead branch");
+                        // The recovered cc entry does not belong to this ng
+                        // anymore. This will happen if ng failover after a
+                        // range split just finished but before checkpointer
+                        // is able to truncate the log. In this case the log
+                        // records of the data that now falls on another ng
+                        // will still be replayed on the old ng on recover.
+                        // Skip the cc entry and remove it at the end.
+                        need_export = false;
+                        break;
+                    }
+                    default:
+                    {
+                        // Checkpointing needs to load a slice only if one or
+                        // more changed records are to be flushed. Range catalog
+                        // must have been loaded when initial changes were made.
+                        // So, pinning slice in checkpointing never returns
+                        // BlockedOnCatalog. Moreover, since the force_load flag
+                        // is set, pinning slice in checkpointing never returns
+                        // Delay.
+                        req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                        return false;
+                    }
+                    }
+                }
+
+                if (need_export)
+                {
+                    assert(commit_ts > cce->CkptTs());
+                    if (paused_position.second == nullptr)
+                    {
+                        // Step into a new slice.
+                        TemplateStoreRange<KeyT> *store_range =
+                            static_cast<TemplateStoreRange<KeyT> *>(
+                                req.StoreRangePtr());
+                        TemplateStoreSlice<KeyT> *slice =
+                            store_range->FindSlice(*key);
+
+                        paused_position.second = slice;
+
+                        const KeyT *slice_end_key = slice->EndKey();
+                        slice_end_it = deduce_iterator(*slice_end_key);
+
+                        slice_end_next_page_it = next_page_it(slice_end_it);
+
+                        auto &slice_delta_size =
+                            req.SliceDeltaSize(shard_->core_id_);
+                        slice_delta_size.emplace_back(slice->StartTxKey(), 0);
+                        curr_slice_delta_size = &slice_delta_size.back().second;
+                    }
+
+                    // Export the delta size of this cce.
+                    assert(cce->data_store_size_ != INT32_MAX &&
+                           curr_slice_delta_size);
+                    *curr_slice_delta_size +=
+                        (cce->PayloadStatus() != RecordStatus::Deleted
+                             ? (key->Size() + cce->PayloadSize() -
+                                cce->data_store_size_)
+                             : (-cce->data_store_size_));
+                }
+            }
+
+            // Forward key iterator
+            ++key_it;
+
+            if (key_it == slice_end_it)
+            {
+                // Reach the current slice end.
+                paused_position.second = nullptr;
+                curr_slice_delta_size = nullptr;
+
+                // Update the end it.
+                slice_end_it = req_end_it;
+                slice_end_next_page_it = next_page_it(slice_end_it);
+            }
+        }
+
+        if (key_it == req_end_it || key_it == req_end_next_page_it)
+        {
+            // Reach the end of this request.
+            paused_position = {TxKey(), nullptr};
+            req.SetFinish();
+        }
+        else
+        {
+            paused_position.first = key_it->first->CloneTxKey();
+            shard_->Enqueue(&req);
+        }
+
+        // Access ScanSliceDeltaSizeCc member variable is unsafe after
+        // SetFinished().
+        return false;
     }
 
     bool Execute(SampleSubRangeKeysCc &req) override

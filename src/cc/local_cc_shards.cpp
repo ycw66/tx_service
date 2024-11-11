@@ -2934,23 +2934,16 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     TxKey end_tx_key = range_entry->GetRangeInfo()->EndTxKey();
     // Scan the delta slice size
     std::map<TxKey, int64_t> slices_delta_size;
-    DataSyncScanCc scan_delta_size_cc(table_name,
-                                      0,
-                                      last_sync_ts,
-                                      data_sync_task->data_sync_ts_,
-                                      ng_id,
-                                      ng_term,
-                                      cc_shards_.size(),
-                                      store_range->SlicesCount(),
-                                      data_sync_txm->TxNumber(),
-                                      &start_tx_key,
-                                      &end_tx_key,
-                                      false,
-                                      false,
-                                      false,
-                                      store_range,
-                                      DataSyncScanCc::ScanSliceDeltaSize,
-                                      table_schema->Version());
+    ScanSliceDeltaSizeCc scan_delta_size_cc(table_name,
+                                            last_sync_ts,
+                                            data_sync_task->data_sync_ts_,
+                                            ng_id,
+                                            ng_term,
+                                            cc_shards_.size(),
+                                            data_sync_txm->TxNumber(),
+                                            start_tx_key,
+                                            end_tx_key,
+                                            store_range);
 
     for (size_t i = 0; i < cc_shards_.size(); i++)
     {
@@ -2960,7 +2953,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
     if (scan_delta_size_cc.IsError())
     {
-        LOG(ERROR) << "DataSync scan delta slice size failed on table "
+        LOG(ERROR) << "DataSync scan slice delta size failed on table "
                    << table_name.StringView() << " with error code: "
                    << static_cast<uint32_t>(scan_delta_size_cc.ErrorCode());
 
@@ -2974,18 +2967,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     {
         for (size_t i = 0; i < cc_shards_.size(); ++i)
         {
-            // The data is drained
-            assert(scan_delta_size_cc.IsDrained(i));
-
             auto &delta_size = scan_delta_size_cc.SliceDeltaSize(i);
-            for (size_t j = 0; j < scan_delta_size_cc.accumulated_scan_cnt_[i];
-                 ++j)
+            for (size_t j = 0; j < delta_size.size(); ++j)
             {
                 slices_delta_size[std::move(delta_size[j].first)] +=
                     delta_size[j].second;
             }
         }
-        scan_delta_size_cc.Reset();
     }
 
     std::vector<TxKey> split_keys;
@@ -3060,8 +3048,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                            false,
                            false,
                            false,
-                           store_range,
-                           DataSyncScanCc::ScanFlushRecords,
                            table_schema->Version());
 
     while (!scan_data_drained)

@@ -3186,10 +3186,6 @@ public:
 struct DataSyncScanCc : public CcRequestBase
 {
 public:
-#ifdef RANGE_PARTITION_ENABLED
-    enum DataSyncScanType{ScanFlushRecords = 0, ScanSliceDeltaSize};
-#endif
-
     // how many pages to scan one time
 #ifdef ON_KEY_OBJECT
     // Yield more often on redis since any run one round
@@ -3219,9 +3215,7 @@ public:
                    bool include_persisted_data,
 #ifdef RANGE_PARTITION_ENABLED
                    bool export_base_table_rec_if_need = false,
-                   bool export_base_table_rec_only = false,
-                   StoreRange *store_range = nullptr,
-                   DataSyncScanType scan_type = ScanFlushRecords
+                   bool export_base_table_rec_only = false
 #else
                    bool only_one_core,
                    std::function<bool(size_t hash_code)> filter
@@ -3247,9 +3241,7 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
           ,
           export_base_table_rec_if_need_(export_base_table_rec_if_need),
-          export_base_table_rec_only_(export_base_table_rec_only),
-          store_range_(store_range),
-          scan_type_(scan_type)
+          export_base_table_rec_only_(export_base_table_rec_only)
 #else
           ,
           only_scan_one_core_(only_one_core),
@@ -3262,26 +3254,19 @@ public:
         assert(scan_batch_size_ > DataSyncScanBatchSize);
         for (size_t i = 0; i < core_cnt; i++)
         {
+            data_sync_vec_.emplace_back();
+            data_sync_vec_.back().resize(scan_batch_size);
 #ifdef RANGE_PARTITION_ENABLED
-            if (scan_type_ == ScanFlushRecords)
-            {
-                if (!export_base_table_rec_only_)
+            if (!export_base_table_rec_only_)
 #endif
-                {
-                    archive_vec_.emplace_back();
-                    archive_vec_.back().reserve(scan_batch_size);
-                    mv_base_idx_vec_.emplace_back();
-                    mv_base_idx_vec_.back().reserve(scan_batch_size);
-                }
-                data_sync_vec_.emplace_back();
-                data_sync_vec_.back().resize(scan_batch_size);
-#ifdef RANGE_PARTITION_ENABLED
-            }
-            else
             {
-                slice_delta_size_.emplace_back();
-                slice_delta_size_.back().reserve(scan_batch_size_);
+                archive_vec_.emplace_back();
+                archive_vec_.back().reserve(scan_batch_size);
+                mv_base_idx_vec_.emplace_back();
+                mv_base_idx_vec_.back().reserve(scan_batch_size);
             }
+
+#ifdef RANGE_PARTITION_ENABLED
             pause_pos_.emplace_back(TxKey(), false);
 #else
             pause_pos_.emplace_back(nullptr, false);
@@ -3291,7 +3276,7 @@ public:
         }
 
 #ifdef RANGE_PARTITION_ENABLED
-        if (export_base_table_rec_if_need || scan_type_ == ScanSliceDeltaSize)
+        if (export_base_table_rec_if_need)
         {
             slice_ids_.resize(core_cnt_);
         }
@@ -3392,27 +3377,15 @@ public:
         for (size_t i = 0; i < core_cnt_; i++)
         {
 #ifdef RANGE_PARTITION_ENABLED
-            if (scan_type_ == ScanFlushRecords)
-            {
-                if (!export_base_table_rec_only_)
+            if (!export_base_table_rec_only_)
 #endif
-                {
-                    archive_vec_.at(i).clear();
-                    archive_vec_.at(i).reserve(scan_batch_size_);
-                    mv_base_idx_vec_.at(i).clear();
-                    mv_base_idx_vec_.at(i).reserve(scan_batch_size_);
-                }
-#ifdef RANGE_PARTITION_ENABLED
-            }
-            else
             {
-                // Reset the size of each pair
-                for (size_t j = 0; j < accumulated_scan_cnt_[i]; ++j)
-                {
-                    slice_delta_size_[i][j].second = 0;
-                }
+                archive_vec_.at(i).clear();
+                archive_vec_.at(i).reserve(scan_batch_size_);
+                mv_base_idx_vec_.at(i).clear();
+                mv_base_idx_vec_.at(i).reserve(scan_batch_size_);
             }
-#endif
+
             accumulated_scan_cnt_.at(i) = 0;
             accumulated_mem_usage_.at(i) = 0;
         }
@@ -3537,23 +3510,6 @@ public:
         err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
     }
 
-#ifdef RANGE_PARTITION_ENABLED
-    DataSyncScanType ScanType() const
-    {
-        return scan_type_;
-    }
-
-    std::vector<std::pair<TxKey, int64_t>> &SliceDeltaSize(uint16_t core_id)
-    {
-        return slice_delta_size_[core_id];
-    }
-
-    StoreRange *StoreRangePtr() const
-    {
-        return store_range_;
-    }
-#endif
-
     // For ScanFlushRecords, this indicates the count of keys that have been
     // exported. For ScanDeltaSize, it is the count of slices that have been
     // scanned.
@@ -3616,12 +3572,6 @@ private:
 
     // This is used for scan during add index txm.
     bool export_base_table_rec_only_{false};
-
-    StoreRange *store_range_{nullptr};
-    DataSyncScanType scan_type_{ScanFlushRecords};
-    // The delta size of the slices. First is the TxKey of the slice, second is
-    // the delta size. The TxKey is not the owner of the key.
-    std::vector<std::vector<std::pair<TxKey, int64_t>>> slice_delta_size_;
 #else
     bool only_scan_one_core_{false};
     std::function<bool(size_t hash_code)> filter_lambda_;
@@ -7647,6 +7597,195 @@ public:
 
 private:
     size_t free_count_{0};
+};
+
+struct ScanSliceDeltaSizeCc : public CcRequestBase
+{
+    static constexpr size_t ScanBatchSize = 128;
+
+    ScanSliceDeltaSizeCc(const TableName &table_name,
+                         uint64_t last_datasync_ts,
+                         uint64_t scan_ts,
+                         uint64_t ng_id,
+                         int64_t ng_term,
+                         uint64_t core_cnt,
+                         uint64_t txn,
+                         const TxKey &target_start_key,
+                         const TxKey &target_end_key,
+                         StoreRange *store_range)
+        : table_name_(table_name),
+          node_group_id_(ng_id),
+          node_group_term_(ng_term),
+          last_datasync_ts_(last_datasync_ts),
+          scan_ts_(scan_ts),
+          start_key_(target_start_key),
+          end_key_(target_end_key),
+          store_range_(store_range),
+          unfinished_cnt_(core_cnt)
+    {
+        assert(store_range_);
+        tx_number_ = txn;
+        pause_pos_.resize(core_cnt);
+        for (size_t i = 0; i < core_cnt; ++i)
+        {
+            slice_delta_size_.emplace_back();
+            slice_delta_size_.back().reserve(store_range_->SlicesCount());
+        }
+    }
+
+    bool ValidTermCheck()
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        assert(node_group_term_ > 0);
+
+        return (cc_ng_term < 0 || cc_ng_term != node_group_term_) ? false
+                                                                  : true;
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
+
+        CcMap *ccm = ccs.GetCcm(table_name_, node_group_id_);
+        if (ccm == nullptr)
+        {
+            assert(!table_name_.IsMeta());
+            const CatalogEntry *catalog_entry = ccs.InitCcm(
+                table_name_, node_group_id_, node_group_term_, this);
+            // Catalog entry should always exists and schema should not be null,
+            // since this cc request should be executed when table is locked by
+            // data sync txm.
+            assert(catalog_entry && catalog_entry->schema_);
+            ccm = ccs.GetCcm(table_name_, node_group_id_);
+        }
+        assert(ccm != nullptr);
+        ccm->Execute(*this);
+
+        // return false since ScanSliceDeltaSizeCc is not re-used and does not
+        // need to call CcRequestBase::Free
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
+    }
+
+    void SetFinish()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (--unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
+    }
+
+    void SetError(CcErrorCode err)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        err_ = err;
+        if (--unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
+    }
+
+    bool IsError()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return err_ != CcErrorCode::NO_ERROR;
+    }
+
+    CcErrorCode ErrorCode()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return err_;
+    }
+
+    uint32_t NodeGroupId()
+    {
+        return node_group_id_;
+    }
+
+    int64_t NodeGroupTerm() const
+    {
+        return node_group_term_;
+    }
+
+    uint64_t LastDataSyncTs() const
+    {
+        return last_datasync_ts_;
+    }
+
+    uint64_t ScanTs() const
+    {
+        return scan_ts_;
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        SetError(err_code);
+    }
+
+    const TxKey &StartTxKey() const
+    {
+        return start_key_;
+    }
+
+    const TxKey &EndTxKey() const
+    {
+        return end_key_;
+    }
+
+    StoreRange *StoreRangePtr() const
+    {
+        return store_range_;
+    }
+
+    std::pair<TxKey, StoreSlice *> &PausedPos(size_t core_id)
+    {
+        return pause_pos_[core_id];
+    }
+
+    std::vector<std::pair<TxKey, int64_t>> &SliceDeltaSize(size_t core_id)
+    {
+        return slice_delta_size_[core_id];
+    }
+
+private:
+    const TableName &table_name_;
+    uint32_t node_group_id_;
+    int64_t node_group_term_;
+    // It is used as a hint to decide if a page has dirty data since last round
+    // of checkpoint. It is guaranteed that all entries committed before this ts
+    // are synced into data store.
+    uint64_t last_datasync_ts_;
+    // Target ts. Collect all data changes committed before this ts into data
+    // sync vec.
+    uint64_t scan_ts_;
+    // Start/end key of target range.
+    const TxKey &start_key_;
+    const TxKey &end_key_;
+    StoreRange *store_range_{nullptr};
+    // Position that we left off during last round of scan.
+    // pause_pos_.first is the key that we stopped at (has not been scanned
+    // though), .second is the slice that we stopped in (has not been scanned
+    // completed yet).
+    std::vector<std::pair<TxKey, StoreSlice *>> pause_pos_;
+    // The delta size of the slices. First is the TxKey of the slice, second is
+    // the delta size. The TxKey is not the owner of the key.
+    std::vector<std::vector<std::pair<TxKey, int64_t>>> slice_delta_size_;
+
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
+    uint32_t unfinished_cnt_;
+    std::mutex mux_;
+    std::condition_variable cv_;
 };
 
 struct SampleSubRangeKeysCc : public CcRequestBase
