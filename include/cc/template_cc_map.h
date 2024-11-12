@@ -2233,8 +2233,17 @@ public:
         // dispatched to all cores.
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
         int64_t tx_term = req.TxTerm();
+        bool is_standby_tx = IsStandbyTx(tx_term);
+        int64_t ng_term;
+        if (is_standby_tx)
+        {
+            ng_term = Sharder::Instance().StandbyNodeTerm();
+        }
+        else
+        {
+            ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        }
         // fault inject
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_ScanOpenBatchCc", {
             LOG(INFO) << "FaultInject  "
@@ -2599,8 +2608,17 @@ public:
         TX_TRACE_DUMP(&req);
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
         int64_t tx_term = req.TxTerm();
+        bool is_standby_tx = IsStandbyTx(tx_term);
+        int64_t ng_term;
+        if (is_standby_tx)
+        {
+            ng_term = Sharder::Instance().StandbyNodeTerm();
+        }
+        else
+        {
+            ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        }
         if (ng_term < 0)
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);

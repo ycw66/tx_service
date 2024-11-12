@@ -1524,6 +1524,40 @@ public:
         scan_pattern_ = scan_pattern;
 #endif
     }
+    bool ValidTermCheck() override
+    {
+        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
+        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
+        {
+            return false;
+        }
+
+        bool is_standby_tx = IsStandbyTx(TxTerm());
+        int64_t cc_ng_term = -1;
+        if (is_standby_tx)
+        {
+            assert(node_group_id_ == Sharder::Instance().NativeNodeGroup());
+            cc_ng_term = Sharder::Instance().StandbyNodeTerm();
+        }
+        else
+        {
+            cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        }
+
+        if (ng_term_ < 0)
+        {
+            ng_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != ng_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
 
     bool IsForWrite() const
     {
@@ -1636,7 +1670,17 @@ public:
         {
             return false;
         }
-        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        bool is_standby_tx = IsStandbyTx(TxTerm());
+        int64_t cc_ng_term = -1;
+        if (is_standby_tx)
+        {
+            assert(node_group_id_ == Sharder::Instance().NativeNodeGroup());
+            cc_ng_term = Sharder::Instance().StandbyNodeTerm();
+        }
+        else
+        {
+            cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        }
         if (cce_addr_->Term() != cc_ng_term)
         {
             return false;

@@ -832,6 +832,19 @@ void txservice::LocalCcHandler::ScanOpen(
     CcShard &local_shard = *cc_shards_.cc_shards_[thd_id_];
     uint32_t shard_code = tx_number >> 32L;
     uint32_t cc_ng_id = shard_code >> 10;
+    bool is_standby_tx = IsStandbyTx(tx_term);
+
+    if (is_standby_tx)
+    {
+        // Standby node does not communicate with other node groups so
+        // scan on standby node only works if there's only 1 node group.
+        // Standby node does not support scan for write.
+        if (Sharder::Instance().NodeGroupCount() > 1 || is_for_write)
+        {
+            hd_res.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
+            return;
+        }
+    }
 
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
     if (table_name.Type() == TableType::Secondary ||
@@ -939,27 +952,43 @@ void txservice::LocalCcHandler::ScanOpen(
 
     // A scan sends requests to local cores and remote cc nodes.
     uint32_t dependent_cnt = 0;
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    if (is_standby_tx)
     {
-        uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
-        if (node_id == cc_shards_.node_id_)
+        dependent_cnt = core_cnt;
+    }
+    else
+    {
+        for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
         {
-            dependent_cnt += core_cnt;
-        }
-        else
-        {
-            // remote
-            dependent_cnt++;
+            uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
+            if (node_id == cc_shards_.node_id_)
+            {
+                dependent_cnt += core_cnt;
+            }
+            else
+            {
+                // remote
+                dependent_cnt++;
+            }
         }
     }
+
     hd_res.SetRefCnt(dependent_cnt);
 
     for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
     {
         uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
-        if (node_id == cc_shards_.node_id_)
+        if (node_id == cc_shards_.node_id_ || is_standby_tx)
         {
-            int local_term = Sharder::Instance().LeaderTerm(ng_id);
+            int64_t local_term = -1;
+            if (is_standby_tx)
+            {
+                local_term = Sharder::Instance().StandbyNodeTerm();
+            }
+            else
+            {
+                local_term = Sharder::Instance().LeaderTerm(ng_id);
+            }
             if (local_term < 0)
             {
                 // The local node is not the leader of the corresponding
@@ -1215,12 +1244,13 @@ void txservice::LocalCcHandler::ScanNextBatch(
     ScanCache *blocked_cache = scanner.Cache(shard_code);
     uint32_t node_group_id = shard_code >> 10;
     hd_res.Value().node_group_id_ = node_group_id;
+    bool is_standby_tx = IsStandbyTx(tx_term);
 #ifdef EXT_TX_PROC_ENABLED
     hd_res.SetToBlock();
 #endif
 
-    uint32_t node_id = Sharder::Instance().LeaderNodeId(node_group_id);
-    if (node_id == cc_shards_.node_id_)
+    if (is_standby_tx ||
+        Sharder::Instance().LeaderNodeId(node_group_id) == cc_shards_.node_id_)
     {
         hd_res.Value().is_local_ = true;
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
