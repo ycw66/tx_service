@@ -823,7 +823,7 @@ struct RemoteDbSizeCc : public DbSizeCc
 {
 public:
     RemoteDbSizeCc();
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg, size_t core_cnt);
     bool Execute(CcShard &ccs) override;
 
 private:
@@ -831,7 +831,7 @@ private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
     std::function<void()> post_lambda_;
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    std::vector<TableName> redis_table_names_;
 };
 }  // namespace remote
 }  // namespace txservice

@@ -1895,11 +1895,13 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         RemoteDbSizeCc *dbsize = dbsize_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), dbsize);
-        dbsize->Reset(std::move(msg));
-        int32_t cnt = dbsize->GetLocalShardCnt();
-        for (int32_t i = 0; i < cnt; i++)
+        dbsize->Reset(std::move(msg),
+                      Sharder::Instance().GetLocalCcShardsCount());
+        for (size_t core_idx = 0;
+             core_idx < Sharder::Instance().GetLocalCcShardsCount();
+             ++core_idx)
         {
-            local_shards_.EnqueueCcRequest(i, dbsize);
+            local_shards_.EnqueueCcRequest(core_idx, dbsize);
         }
 
         break;
@@ -1908,7 +1910,14 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         const DBSizeResponse &resp = msg->db_size_resp();
         DbSizeCc *dbcc = reinterpret_cast<DbSizeCc *>(msg->handler_addr());
-        dbcc->AddRemoteObjSize(resp.dbsize_term(), resp.node_obj_size());
+
+        std::vector<int64_t> total_obj_sizes;
+        for (int idx = 0; idx < resp.node_obj_size_size(); ++idx)
+        {
+            total_obj_sizes.push_back(resp.node_obj_size(idx));
+        }
+
+        dbcc->AddRemoteObjSize(resp.dbsize_term(), total_obj_sizes);
         msg_pool_.enqueue(std::move(msg));
         break;
     }

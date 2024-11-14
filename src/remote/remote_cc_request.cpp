@@ -1,5 +1,6 @@
 #include "remote/remote_cc_request.h"
 
+#include <atomic>
 #include <string_view>
 
 #include "cc/cc_handler_result.h"
@@ -1999,22 +2000,29 @@ txservice::remote::RemoteDbSizeCc::RemoteDbSizeCc()
 
     post_lambda_ = [this]()
     {
-        assert(local_shard_cnt_ == 0);
+        assert(total_ref_cnt_ == 0);
         output_msg_.set_handler_addr(input_msg_->handler_addr());
 
         const DBSizeRequest &req = input_msg_->dbsize_req();
         DBSizeResponse *resp = output_msg_.mutable_db_size_resp();
-        resp->set_node_obj_size(total_obj_size_);
+        for (size_t idx = 0; idx < total_obj_sizes_.size(); ++idx)
+        {
+            resp->add_node_obj_size(
+                total_obj_sizes_[idx]->load(std::memory_order_relaxed));
+        }
+
         resp->set_dbsize_term(req.dbsize_term());
 
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 
         hd_->RecycleCcMsg(std::move(input_msg_));
+
+        Clear();
     };
 }
 
 void txservice::remote::RemoteDbSizeCc::Reset(
-    std::unique_ptr<CcMessage> input_msg)
+    std::unique_ptr<CcMessage> input_msg, size_t core_cnt)
 {
     Clear();
     assert(input_msg->has_dbsize_req());
@@ -2023,16 +2031,22 @@ void txservice::remote::RemoteDbSizeCc::Reset(
     output_msg_.clear_handler_addr();
     output_msg_.clear_db_size_resp();
 
+    assert(table_names_ == nullptr);
+    const DBSizeRequest &cmds_req = input_msg->dbsize_req();
+    for (int idx = 0; idx < cmds_req.table_name_str_size(); ++idx)
     {
-        const DBSizeRequest &cmds_req = input_msg->dbsize_req();
-        std::string_view table_name_sv{cmds_req.table_name_str()};
-        remote_table_name_ =
-            TableName(table_name_sv,
-                      ToLocalType::ConvertCcTableType(cmds_req.table_type()));
-        table_name_ = &remote_table_name_;
-        AddLocalNodeGroupId(cmds_req.node_group_id());
-        local_shard_cnt_ = Sharder::Instance().GetLocalCcShardsCount();
+        std::string_view table_name_sv{cmds_req.table_name_str(idx)};
+        redis_table_names_.emplace_back(
+            table_name_sv,
+            ToLocalType::ConvertCcTableType(cmds_req.table_type(idx)));
     }
+
+    DbSizeCc::Reset(&redis_table_names_, core_cnt, 0);
+    assert(table_names_ == &redis_table_names_);
+    assert(total_ref_cnt_.load(std::memory_order_relaxed) == core_cnt);
+    assert(remote_ref_cnt_.load(std::memory_order_relaxed) == 0);
+
+    AddLocalNodeGroupId(cmds_req.node_group_id());
 
     input_msg_ = std::move(input_msg);
 
@@ -2045,16 +2059,23 @@ void txservice::remote::RemoteDbSizeCc::Reset(
 bool txservice::remote::RemoteDbSizeCc::Execute(CcShard &ccs)
 {
     assert(vct_ng_id_.size() == 1);
-    CcMap *map = ccs.GetCcm(*table_name_, vct_ng_id_[0]);
-    if (map != nullptr)
+    for (size_t idx = 0; idx < table_names_->size(); ++idx)
     {
-        total_obj_size_.fetch_add(map->NormalObjectSize(),
-                                  std::memory_order_relaxed);
+        CcMap *map = ccs.GetCcm(table_names_->at(idx), vct_ng_id_[0]);
+        if (map != nullptr)
+        {
+            total_obj_sizes_[idx]->fetch_add(map->NormalObjectSize(),
+                                             std::memory_order_relaxed);
+        }
     }
 
-    int32_t cnt = local_shard_cnt_.fetch_sub(1, std::memory_order_relaxed);
+    assert(remote_ref_cnt_.load(std::memory_order_relaxed) == 0);
+    int32_t cnt = total_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
     if (cnt == 1)
     {
+        table_names_ = nullptr;
+        redis_table_names_.clear();
+        redis_table_names_.shrink_to_fit();
         post_lambda_();
         return true;
     }

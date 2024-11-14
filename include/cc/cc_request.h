@@ -7156,13 +7156,20 @@ public:
     {
     }
 
-    void Reset(const TableName *table_name)
+    void Reset(std::vector<TableName> *table_names,
+               size_t local_ref_cnt,
+               size_t remote_ref_cnt)
     {
         Clear();
-        table_name_ = table_name;
-        remote_shard_cnt_ = Sharder::Instance().NodeGroupCount() - 1;
-        local_shard_cnt_ = Sharder::Instance().GetLocalCcShardsCount();
-        total_obj_size_ = 0;
+        table_names_ = table_names;
+
+        total_ref_cnt_ = local_ref_cnt + remote_ref_cnt;
+        remote_ref_cnt_ = remote_ref_cnt;
+        for (size_t idx = 0; idx < table_names_->size(); ++idx)
+        {
+            total_obj_sizes_.push_back(
+                std::make_unique<std::atomic<int64_t>>(0));
+        }
     }
 
     bool Execute(CcShard &ccs) override
@@ -7171,17 +7178,19 @@ public:
 
         for (uint32_t ng_id : vct_ng_id_)
         {
-            CcMap *map = ccs.GetCcm(*table_name_, ng_id);
-            if (map != nullptr)
+            for (size_t idx = 0; idx < table_names_->size(); ++idx)
             {
-                total_obj_size_.fetch_add(map->NormalObjectSize(),
-                                          std::memory_order_relaxed);
+                CcMap *map = ccs.GetCcm(table_names_->at(idx), ng_id);
+                if (map != nullptr)
+                {
+                    total_obj_sizes_[idx]->fetch_add(map->NormalObjectSize(),
+                                                     std::memory_order_relaxed);
+                }
             }
         }
 
-        local_shard_cnt_.fetch_sub(1, std::memory_order_relaxed);
-        if (local_shard_cnt_.load(std::memory_order_relaxed) == 0 &&
-            remote_shard_cnt_.load(std::memory_order_relaxed) == 0)
+        size_t ref_cnt = total_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        if (ref_cnt == 1)
         {
             std::unique_lock lk(mux_);
             cv_.notify_one();
@@ -7190,40 +7199,52 @@ public:
         return false;
     }
 
-    int32_t GetLocalShardCnt()
+    size_t LocalRefCnt()
     {
-        return local_shard_cnt_.load(std::memory_order_relaxed);
+        size_t total = total_ref_cnt_.load(std::memory_order_relaxed);
+        size_t remote = remote_ref_cnt_.load(std::memory_order_relaxed);
+        return total - remote > 0 ? total - remote : 0;
     }
 
-    int32_t GetRemoteShardCnt()
+    size_t TotalRefCnt()
     {
-        return remote_shard_cnt_.load(std::memory_order_relaxed);
+        return total_ref_cnt_.load(std::memory_order_relaxed);
     }
 
-    int64_t GetTotalObjSize()
+    std::vector<int64_t> GetTotalObjSizes()
     {
-        return total_obj_size_.load(std::memory_order_relaxed);
+        std::vector<int64_t> results;
+        for (size_t idx = 0; idx < total_obj_sizes_.size(); ++idx)
+        {
+            results.push_back(
+                total_obj_sizes_[idx]->load(std::memory_order_relaxed));
+        }
+
+        return results;
     }
 
     void AddLocalNodeGroupId(uint32_t ng_id)
     {
         vct_ng_id_.push_back(ng_id);
-        if (vct_ng_id_.size() >= 2)
-        {
-            remote_shard_cnt_.fetch_sub(1, std::memory_order_relaxed);
-        }
     }
 
-    void AddRemoteObjSize(int32_t term, int64_t total_obj_size)
+    void AddRemoteObjSize(int32_t term,
+                          const std::vector<int64_t> &total_obj_sizes)
     {
         if (term != term_)
         {
             return;
         }
 
-        total_obj_size_.fetch_add(total_obj_size, std::memory_order_relaxed);
-        remote_shard_cnt_.fetch_sub(1, std::memory_order_relaxed);
-        if (GetLocalShardCnt() == 0 && GetRemoteShardCnt() == 0)
+        for (size_t idx = 0; idx < total_obj_sizes.size(); ++idx)
+        {
+            total_obj_sizes_[idx]->fetch_add(total_obj_sizes[idx],
+                                             std::memory_order_relaxed);
+        }
+
+        remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        size_t ref_cnt = total_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        if (ref_cnt == 1)
         {
             std::unique_lock lk(mux_);
             cv_.notify_one();
@@ -7241,23 +7262,41 @@ public:
 
     void Clear()
     {
-        total_obj_size_.store(0, std::memory_order_relaxed);
-        local_shard_cnt_.store(0, std::memory_order_relaxed);
-        remote_shard_cnt_.store(0, std::memory_order_relaxed);
-        table_name_ = nullptr;
+        total_obj_sizes_.clear();
+        total_obj_sizes_.shrink_to_fit();
+
+        total_ref_cnt_.store(0, std::memory_order_relaxed);
+        remote_ref_cnt_.store(0, std::memory_order_relaxed);
+        table_names_ = nullptr;
         vct_ng_id_.clear();
+    }
+
+    void Wait()
+    {
+        const uint64_t MAX_WAIT_TS = 2000000;
+        std::unique_lock lk(mux_);
+
+        while (TotalRefCnt() > 0)
+        {
+            int wait_res = cv_.wait_for(lk, MAX_WAIT_TS);
+            if (wait_res == ETIMEDOUT && LocalRefCnt() == 0)
+            {
+                LOG(WARNING) << "Waitting timeout for dbsize";
+                break;
+            }
+        }
     }
 
     bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
 protected:
-    std::atomic<int64_t> total_obj_size_;
-    std::atomic<int32_t> local_shard_cnt_;
-    std::atomic<int32_t> remote_shard_cnt_;
+    std::vector<std::unique_ptr<std::atomic<int64_t>>> total_obj_sizes_;
+    std::atomic<size_t> total_ref_cnt_{0};
+    std::atomic<size_t> remote_ref_cnt_{0};
     int32_t term_{0};
     std::vector<uint32_t> vct_ng_id_;
-    const TableName *table_name_;
+    std::vector<TableName> *table_names_{nullptr};
 };
 
 struct EscalateStandbyCcmCc : CcRequestBase

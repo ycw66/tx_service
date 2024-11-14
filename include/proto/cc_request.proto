@@ -1099,14 +1099,14 @@ message PublishRequest {
 
 message DBSizeRequest {
     uint32 src_node_id = 1;
-    string table_name_str = 2;
-    CcTableType table_type = 3;
+    repeated string table_name_str = 2;
+    repeated CcTableType table_type = 3;
     uint32 node_group_id = 4;
     int32 dbsize_term = 5;
 }
 
 message DBSizeResponse {
-    int64 node_obj_size = 1;
+    repeated int64 node_obj_size = 1;
     int32 dbsize_term = 2;
 }
 
