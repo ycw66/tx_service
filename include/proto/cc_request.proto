@@ -381,7 +381,7 @@ message ResetStandbySequenceIdRequest{
     repeated uint32 seq_grp = 2;
     repeated uint64 seq_id = 3;
     uint32 ng_id = 4;
-    int64 ng_term = 5;
+    int64 standby_node_term = 5;
 }
 
 message ResetStandbySequenceIdResponse{
@@ -1156,6 +1156,7 @@ message CcMessage {
         DBSizeRequest = 54;
         DBSizeResponse = 55;
         KeyObjectStandbyForwardRequest = 56;
+        StandbyHeartbeatRequest = 57;
     }
 
     MessageType type = 1;

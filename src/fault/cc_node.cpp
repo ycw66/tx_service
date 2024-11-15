@@ -882,7 +882,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     remote::ResetStandbySequenceIdRequest reset_req;
     remote::ResetStandbySequenceIdResponse reset_resp;
     reset_req.set_ng_id(ng_id_);
-    reset_req.set_ng_term(primary_term);
+    reset_req.set_standby_node_term(standby_term);
     reset_req.set_node_id(node_id_);
     reset_req.mutable_seq_id()->CopyFrom(start_follow_resp.start_sequence_id());
     for (auto i = 0; i < reset_req.seq_id_size(); i++)

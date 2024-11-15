@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -101,6 +102,7 @@ LocalCcShards::LocalCcShards(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
       statistics_worker_ctx_(1),
+      heartbeat_worker_ctx_(1),
       publish_func_(publish_func),
       enable_shard_heap_defragment_(conf.at("enable_shard_heap_defragment"))
 {
@@ -222,6 +224,9 @@ void LocalCcShards::StartBackgroudWorkers()
         statistics_worker_ctx_.worker_thd_.push_back(
             std::thread([this] { SyncTableStatisticsWorker(); }));
     }
+
+    heartbeat_worker_ctx_.worker_thd_.push_back(
+        std::thread([this] { HeartbeatWorker(); }));
 }
 
 uint64_t LocalCcShards::ClockTs()
@@ -2491,6 +2496,8 @@ void LocalCcShards::Terminate()
     {
         statistics_worker_ctx_.Terminate();
     }
+
+    heartbeat_worker_ctx_.Terminate();
 }
 
 void LocalCcShards::DataSyncWorker(size_t worker_idx)
@@ -4898,6 +4905,84 @@ void LocalCcShards::ClearGenerateSkStatus(NodeGroupId ng_id,
 
     RangeGenerateSkStatus &range_status = tx_it->second;
     range_status.erase(partition_id);
+}
+
+void LocalCcShards::HeartbeatWorker()
+{
+    std::unique_lock<std::mutex> heartbeat_worker_lk(
+        heartbeat_worker_ctx_.mux_);
+
+    while (heartbeat_worker_ctx_.status_ == WorkerStatus::Active)
+    {
+        bool wait_res = heartbeat_worker_ctx_.cv_.wait_for(
+            heartbeat_worker_lk,
+            std::chrono::seconds(1),
+            [this] {
+                return heartbeat_worker_ctx_.status_ ==
+                       WorkerStatus::Terminated;
+            });
+
+        if (!wait_res)
+        {
+            SendHeartbeat(heartbeat_worker_lk);
+        }
+    }
+}
+
+void LocalCcShards::SendHeartbeat(std::unique_lock<std::mutex> &worker_lk)
+{
+    auto sender = Sharder::Instance().GetCcStreamSender();
+    if (sender)
+    {
+        std::vector<uint32_t> target_nodes;
+        target_nodes.reserve(heartbeat_target_nodes_.size());
+
+        for (const auto &node : heartbeat_target_nodes_)
+        {
+            target_nodes.push_back(node.first);
+        }
+
+        worker_lk.unlock();
+
+        for (const auto &target_node : target_nodes)
+        {
+            remote::CcMessage message;
+            message.set_type(remote::CcMessage::MessageType::
+                                 CcMessage_MessageType_StandbyHeartbeatRequest);
+            sender->SendMessageToNode(target_node, message);
+        }
+
+        worker_lk.lock();
+    }
+}
+
+void LocalCcShards::AddHeartbeatTargetNode(uint32_t target_node,
+                                           int64_t target_node_standby_term)
+{
+    std::lock_guard<std::mutex> heartbeat_lk(heartbeat_worker_ctx_.mux_);
+    auto iter = heartbeat_target_nodes_.try_emplace(target_node,
+                                                    target_node_standby_term);
+    if (!iter.second)
+    {
+        if (iter.first->second < target_node_standby_term)
+        {
+            iter.first->second = target_node_standby_term;
+        }
+    }
+}
+
+void LocalCcShards::RemoveHeartbeatTargetNode(uint32_t target_node,
+                                              int64_t target_node_standby_term)
+{
+    std::lock_guard<std::mutex> heartbeat_lk(heartbeat_worker_ctx_.mux_);
+    auto iter = heartbeat_target_nodes_.find(target_node);
+    if (iter != heartbeat_target_nodes_.end())
+    {
+        if (iter->second <= target_node_standby_term)
+        {
+            heartbeat_target_nodes_.erase(target_node);
+        }
+    }
 }
 
 }  // namespace txservice

@@ -1606,18 +1606,24 @@ void CcNodeService::ResetStandbySequenceId(
     brpc::ClosureGuard done_guard(done);
     uint32_t ng_id = request->ng_id();
     uint32_t node_id = request->node_id();
-    int64_t ng_term = request->ng_term();
+
+    int64_t standby_node_term = request->standby_node_term();
+    Sharder::Instance().GetLocalCcShards()->AddHeartbeatTargetNode(
+        node_id, standby_node_term);
     std::unordered_map<uint32_t, uint64_t> seq_ids;
     for (auto i = 0; i < request->seq_grp_size(); i++)
     {
         seq_ids.emplace(request->seq_grp(i), request->seq_id(i));
     }
+
     WaitableCc reset_seq_cc(
-        [ng_id, ng_term, node_id, &seq_ids](CcShard &ccs)
+        [ng_id, standby_node_term, node_id, &seq_ids](CcShard &ccs)
         {
-            if (Sharder::Instance().CheckLeaderTerm(ng_id, ng_term))
+            if (Sharder::Instance().CheckLeaderTerm(
+                    ng_id, PrimaryTermFromStandbyTerm(standby_node_term)))
             {
-                ccs.AddSubscribedStandby(node_id, seq_ids.at(ccs.core_id_));
+                ccs.AddSubscribedStandby(
+                    node_id, seq_ids.at(ccs.core_id_), standby_node_term);
             }
             return true;
         },
@@ -1628,6 +1634,7 @@ void CcNodeService::ResetStandbySequenceId(
         local_shards_.EnqueueCcRequest(seq_grp, &reset_seq_cc);
     }
     reset_seq_cc.Wait();
+
     response->set_error(false);
 }
 

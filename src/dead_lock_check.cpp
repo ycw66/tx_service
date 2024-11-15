@@ -166,7 +166,6 @@ void DeadLockCheck::GatherLockDependancy()
         else
         {
             tr::CcMessage send_msg;
-
             send_msg.set_type(tr::CcMessage::MessageType::
                                   CcMessage_MessageType_DeadLockRequest);
             send_msg.set_tx_number(0);
@@ -501,6 +500,13 @@ void DeadLockCheck::Run()
         {
             continue;
         }
+
+#ifdef ON_KEY_OBJECT
+        if (Sharder::Instance().PrimaryNodeTerm() > 0)
+        {
+            continue;
+        }
+#endif
 
         // If the last check riser is this node, it will call dead lock check
         // again. Or if the time spend more than two times than interval time

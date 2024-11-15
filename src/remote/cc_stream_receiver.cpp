@@ -62,7 +62,7 @@ thread_local uint16_t next_core_ = 0;
 void CcStreamReceiver::Shutdown()
 {
     std::unique_lock<std::shared_mutex> lk(inbound_mux_);
-    for (auto &stream_id : inbound_streams_)
+    for (auto &[stream_id, node_id] : inbound_streams_)
     {
         brpc::StreamClose(stream_id);
     }
@@ -94,6 +94,15 @@ void CcStreamReceiver::Connect(::google::protobuf::RpcController *controller,
 
     brpc::StreamOptions stream_options;
     stream_options.idle_timeout_ms = 100000;
+
+#ifdef ON_KEY_OBJECT
+    if (request->type() == remote::StreamType::RegularCcStream)
+    {
+        // 5s
+        stream_options.idle_timeout_ms = 5000;
+    }
+#endif
+
     stream_options.handler = this;
     if (brpc::StreamAccept(&stream_socket, *cntl, &stream_options) != 0)
     {
@@ -124,7 +133,7 @@ void CcStreamReceiver::Connect(::google::protobuf::RpcController *controller,
     std::lock_guard<std::shared_mutex> guard(inbound_mux_);
     if (request->type() == remote::StreamType::RegularCcStream)
     {
-        inbound_streams_.emplace(stream_socket);
+        inbound_streams_.emplace(stream_socket, request->node_id());
     }
     else
     {
@@ -204,6 +213,30 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
     }
 
     return 0;
+}
+
+void CcStreamReceiver::on_idle_timeout(brpc::StreamId stream)
+{
+    std::shared_lock<std::shared_mutex> shared_lk(inbound_mux_);
+    auto inbound_stream = inbound_streams_.find(stream);
+    if (inbound_stream != inbound_streams_.end())
+    {
+        uint32_t stream_node_id = inbound_stream->second;
+        shared_lk.unlock();
+
+        int64_t cur_prim_term = Sharder::Instance().PrimaryNodeTerm();
+        if (cur_prim_term > 0)
+        {
+            NodeGroupId native_ng = Sharder::Instance().NativeNodeGroup();
+            uint32_t leader_node_id =
+                Sharder::Instance().LeaderNodeId(native_ng);
+            if (stream_node_id == leader_node_id)
+            {
+                Sharder::Instance().OnStartFollowing(
+                    native_ng, cur_prim_term, leader_node_id, true);
+            }
+        }
+    }
 }
 
 void CcStreamReceiver::on_closed(brpc::StreamId stream)
@@ -1929,6 +1962,10 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         cc->Reset(std::move(msg));
         local_shards_.EnqueueCcRequest(cc->ForwardMessageGroup(), cc);
 
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_StandbyHeartbeatRequest:
+    {
         break;
     }
     default:

@@ -38,9 +38,7 @@ public:
                              butil::IOBuf *const messages[],
                              size_t size) override;
 
-    void on_idle_timeout(brpc::StreamId stream) override
-    {
-    }
+    void on_idle_timeout(brpc::StreamId stream) override;
 
     void on_closed(brpc::StreamId stream) override;
 
@@ -55,7 +53,7 @@ public:
 private:
     std::shared_mutex inbound_mux_;
     std::condition_variable_any inbound_cv_;
-    std::unordered_set<brpc::StreamId> inbound_streams_;
+    std::unordered_map<brpc::StreamId, NodeId> inbound_streams_;
     std::unordered_set<brpc::StreamId> long_msg_inbound_streams_;
     LocalCcShards &local_shards_;
 

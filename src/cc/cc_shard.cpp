@@ -2156,9 +2156,10 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
         stream_sender_ = Sharder::Instance().GetCcStreamSender();
     }
 
-    for (auto &[node_id, last_sent_seq_id] : subscribed_standby_nodes_)
+    for (auto &[node_id, last_sent_seq_id_and_term] : subscribed_standby_nodes_)
     {
         bool write_succ = false;
+        uint64_t &last_sent_seq_id = last_sent_seq_id_and_term.first;
         if (last_sent_seq_id == seq_id - 1)
         {
             CODE_FAULT_INJECTOR("discard_forward_standby_message", {
@@ -2209,8 +2210,9 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
 bool CcShard::ResendFailedForwardMessages()
 {
     bool all_msgs_sent = true;
-    for (auto &[node_id, seq_id] : subscribed_standby_nodes_)
+    for (auto &[node_id, seq_id_and_term] : subscribed_standby_nodes_)
     {
+        uint64_t &seq_id = seq_id_and_term.first;
         if (seq_id == next_forward_sequence_id_ - 1 || seq_id == UINT64_MAX)
         {
             // No failed message
@@ -2224,6 +2226,7 @@ bool CcShard::ResendFailedForwardMessages()
         {
             // seq id is the last sent msg, start sending from seq id + 1
             size_t pending_buf_idx = (seq_id + 1) % txservice_max_standby_lag;
+
             if (standby_fwded_msg_buffer_[pending_buf_idx] &&
                 standby_fwded_msg_buffer_[pending_buf_idx]->IsFree() &&
                 standby_fwded_msg_buffer_[pending_buf_idx]->SequenceId() ==
@@ -2265,7 +2268,41 @@ bool CcShard::ResendFailedForwardMessages()
                     Sharder::Instance().NativeNodeGroup()));
                 req->set_out_of_sync(true);
                 stream_sender_->SendMessageToNode(node_id, cc_msg);
+
                 seq_id = UINT64_MAX;
+                // Remove heartbeat target node
+                local_shards_.RemoveHeartbeatTargetNode(node_id,
+                                                        seq_id_and_term.second);
+
+                for (size_t core_idx = 0; core_idx < core_cnt_; ++core_idx)
+                {
+                    if (core_idx != core_id_)
+                    {
+                        DispatchTask(
+                            core_idx,
+                            [node_id = node_id,
+                             unsubscribe_standby_term =
+                                 seq_id_and_term.second](CcShard &ccs) -> bool
+                            {
+                                auto subscribe_node_iter =
+                                    ccs.subscribed_standby_nodes_.find(node_id);
+                                if (subscribe_node_iter !=
+                                    ccs.subscribed_standby_nodes_.end())
+                                {
+                                    if (subscribe_node_iter->second.second <=
+                                        unsubscribe_standby_term)
+                                    {
+                                        // erase ?
+                                        subscribe_node_iter->second.first =
+                                            UINT64_MAX;
+                                    }
+                                }
+
+                                return true;
+                            });
+                    }
+                }
+
                 break;
             }
         }

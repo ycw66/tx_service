@@ -1619,6 +1619,12 @@ public:
         return nullptr;
     }
 
+    void AddHeartbeatTargetNode(uint32_t target_node,
+                                int64_t target_node_standby_term);
+
+    void RemoveHeartbeatTargetNode(uint32_t target_node,
+                                   int64_t target_node_standby_term);
+
     /**
      * @brief Generate bucket migration plan based on the new node group config.
      */
@@ -2231,6 +2237,12 @@ private:
 
     WorkerThreadContext statistics_worker_ctx_;
     void SyncTableStatisticsWorker();
+
+    absl::flat_hash_map<uint32_t, int64_t> heartbeat_target_nodes_;
+    WorkerThreadContext heartbeat_worker_ctx_;
+    void HeartbeatWorker();
+
+    void SendHeartbeat(std::unique_lock<std::mutex> &worker_lk);
 
     /**
      * Generate sk from pk

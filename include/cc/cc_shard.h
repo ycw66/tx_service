@@ -853,13 +853,23 @@ public:
     // Called on primary node
     StandbyForwardEntry *GetNextStandbyForwardEntry();
     void ForwardStandbyMessage(StandbyForwardEntry *entry);
-    void AddSubscribedStandby(uint32_t node_id, uint64_t start_seq_id)
+    void AddSubscribedStandby(uint32_t node_id,
+                              uint64_t start_seq_id,
+                              int64_t standby_node_term)
     {
         LOG(INFO) << "start forwarding to node " << node_id << " from seq "
                   << start_seq_id << ", seq grp " << core_id_;
 
-        auto ins_res = subscribed_standby_nodes_.try_emplace(node_id);
-        ins_res.first->second = start_seq_id - 1;
+        auto ins_res = subscribed_standby_nodes_.try_emplace(
+            node_id, std::make_pair(start_seq_id - 1, standby_node_term));
+        if (!ins_res.second)
+        {
+            if (ins_res.first->second.second < standby_node_term)
+            {
+                ins_res.first->second.first = start_seq_id - 1;
+                ins_res.first->second.second = standby_node_term;
+            }
+        }
     }
     uint64_t NextStandbyMessageSequence() const
     {
@@ -878,7 +888,7 @@ public:
     {
         std::vector<uint32_t> node_ids;
         node_ids.reserve(subscribed_standby_nodes_.size());
-        for (auto [node_id, seq_id] : subscribed_standby_nodes_)
+        for (auto [node_id, seq_id_and_term] : subscribed_standby_nodes_)
         {
             node_ids.push_back(node_id);
         }
@@ -982,7 +992,8 @@ private:
     std::vector<StandbyForwardEntry *> standby_fwded_msg_buffer_;
     uint32_t next_foward_idx_{0};
     uint64_t next_forward_sequence_id_{1};
-    std::unordered_map<uint32_t, uint64_t> subscribed_standby_nodes_;
+    std::unordered_map<uint32_t, std::pair<uint64_t, int64_t>>
+        subscribed_standby_nodes_;
     std::unique_ptr<RetryFailedStandbyMsgCc> retry_fwd_msg_cc_;
 
     // Standby forward msg related members used on follower node
