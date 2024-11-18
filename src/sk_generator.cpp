@@ -287,7 +287,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
 
     DataSyncScanCc scan_req(*base_table_name_,
                             0,
-                            0,
                             scan_ts_,
                             node_group_id_,
                             ng_term,

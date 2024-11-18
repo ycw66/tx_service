@@ -2068,24 +2068,6 @@ private:
      */
 
     /**
-     * @brief Called before checkpoint to calculate the storage slice size after
-     * checkpoint and decide if the slice needs to be updated(merge/split).
-     * Update slice info accordingly, but does not update the actual slice size
-     * since the data is not flushed yet.
-     * Also decide the range update plan based on the number of slices after the
-     * slice update.
-     */
-    bool UpdateSliceAndCalculateRangeUpdate(
-        const TableName &table_name,
-        const TableSchema *schema,
-        NodeGroupId node_group_id,
-        int64_t node_group_term,
-        std::vector<FlushRecord> &data_sync_vec,
-        uint64_t data_sync_ts,
-        StoreRange *store_range,
-        std::vector<TxKey> &splitting_info);
-
-    /**
      * @brief Decide the range update plan based on the @@slices_delta_size
      * parameter.
      */

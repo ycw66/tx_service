@@ -3018,41 +3018,68 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
     // 3. Scan records.
     // The data sync worker thread is the owner of those vectors.
+
+    // Sort output vectors in key sorting order.
+    auto key_greater = [](const TxKey &r1, const TxKey &r2) -> bool
+    { return r2 < r1; };
+    auto rec_greater = [](const FlushRecord &r1, const FlushRecord &r2) -> bool
+    { return r2.Key() < r1.Key(); };
+
     std::vector<std::vector<FlushRecord>> data_sync_vecs;
     std::vector<std::vector<FlushRecord>> archive_vecs;
     std::vector<std::vector<TxKey>> mv_base_vecs;
 
-    for (size_t i = 0; i < cc_shards_.size(); i++)
+    for (size_t i = 0; i < cc_shards_.size(); ++i)
     {
         data_sync_vecs.emplace_back();
+        data_sync_vecs.back().reserve(DATA_SYNC_SCAN_BATCH_SIZE);
         archive_vecs.emplace_back();
+        archive_vecs.back().reserve(DATA_SYNC_SCAN_BATCH_SIZE);
         mv_base_vecs.emplace_back();
+        mv_base_vecs.back().reserve(DATA_SYNC_SCAN_BATCH_SIZE);
     }
+    // Add an extra vector as a remaining vector to store the remaining keys
+    // of the current batch of FlushRecords.
+    // DataSyncScanCc request is executed in parallel on all cores. For a
+    // batch of scan results, the end keys among the cores are different.
+    // In order to ensure the accuracy of the calculated subslice keys, for
+    // this batch of FlushRecords, the minimum end key of all cores's scan
+    // result is obtained, and the FlushRecords after this key is placed in
+    // this remaining vector, which will be merged with the next batch of
+    // FlushRecords. For example: core1[10,15,20], core2[8,16,24,32], only
+    // [8,10,15,16,20] will be flushed into data store in this round，and
+    // the remaining vector stores [24,32]
+    data_sync_vecs.emplace_back();
+    data_sync_vecs.back().reserve(DATA_SYNC_SCAN_BATCH_SIZE);
 
+    // Scan the FlushRecords.
     bool scan_data_drained = false;
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
 
-    DataSyncScanCc scan_cc(table_name,
-                           0,
-                           last_sync_ts,
-                           data_sync_task->data_sync_ts_,
-                           ng_id,
-                           ng_term,
-                           cc_shards_.size(),
-                           DATA_SYNC_SCAN_BATCH_SIZE,
-                           data_sync_txm->TxNumber(),
-                           &start_tx_key,
-                           &end_tx_key,
-                           false,
-                           false,
-                           false,
-                           table_schema->Version());
+    bool has_flush_task = true;
+    DataSyncScanCc scan_cc(
+        table_name,
+        last_sync_ts,
+        data_sync_task->data_sync_ts_,
+        ng_id,
+        ng_term,
+        cc_shards_.size(),
+        DATA_SYNC_SCAN_BATCH_SIZE,
+        data_sync_txm->TxNumber(),
+        &start_tx_key,
+        &end_tx_key,
+        false,
+        false, /*TODO: data_sync_task->export_base_table_records_*/
+        false,
+        store_range,
+        &slices_delta_size,
+        table_schema->Version());
 
     while (!scan_data_drained)
     {
-        for (size_t i = 0; i < cc_shards_.size(); i++)
+        for (size_t i = 0; i < cc_shards_.size(); ++i)
         {
             EnqueueToCcShard(i, &scan_cc);
         }
@@ -3060,12 +3087,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
         if (scan_cc.IsError())
         {
-            LOG(INFO) << "DataSync scan failed on table "
-                      << table_name.StringView() << " with error code: "
-                      << static_cast<uint32_t>(scan_cc.ErrorCode());
+            LOG(ERROR) << "DataSync scan FlushRecords failed on table: "
+                       << table_name.StringView() << " with error code: "
+                       << static_cast<uint32_t>(scan_cc.ErrorCode());
 
             txservice::AbortTx(data_sync_txm);
-
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
             data_sync_task_queue_.emplace_front(data_sync_task);
@@ -3076,11 +3102,16 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         else
         {
             scan_data_drained = true;
+            // TODO: get those vector from one pool, and clear the vector
+            // before reuse them.
+            std::vector<FlushRecord> data_sync_vec;
+            std::vector<FlushRecord> archive_vec;
+            std::vector<TxKey> mv_base_vec;
 
-            for (size_t i = 0; i < cc_shards_.size(); i++)
+            // The minimum end key of this batch data between all the cores.
+            TxKey min_scanned_end_key = catalog_factory_->PositiveInfKey();
+            for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
-                size_t offset = data_sync_vecs[i].size();
-
                 for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_[i]; ++j)
                 {
                     auto &rec = scan_cc.DataSyncVec(i)[j];
@@ -3090,184 +3121,102 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                                    rec.payload_status_,
                                                    rec.commit_ts_,
                                                    rec.cce_,
-                                                   rec.delta_size_,
+                                                   rec.post_flush_size_,
                                                    range_id);
                 }
 
                 for (size_t j = 0; j < scan_cc.ArchiveVec(i).size(); ++j)
                 {
                     auto &rec = scan_cc.ArchiveVec(i)[j];
-                    rec.SetKey(
-                        data_sync_vecs[i][rec.GetKeyIndex() + offset].Key());
+                    rec.SetKey(data_sync_vecs[i][rec.GetKeyIndex()].Key());
                 }
 
                 for (size_t j = 0; j < scan_cc.MoveBaseIdxVec(i).size(); ++j)
                 {
                     size_t key_idx = scan_cc.MoveBaseIdxVec(i)[j];
-                    TxKey key_raw = data_sync_vecs[i][key_idx + offset].Key();
+                    TxKey key_raw = data_sync_vecs[i][key_idx].Key();
                     mv_base_vecs[i].emplace_back(std::move(key_raw));
                 }
 
-                // if the data is drained
-                scan_data_drained = scan_cc.IsDrained(i) && scan_data_drained;
-
-                // move the bucket into the tank
+                // Move the bucket into the tank
                 std::move(scan_cc.ArchiveVec(i).begin(),
                           scan_cc.ArchiveVec(i).end(),
                           std::back_inserter(archive_vecs.at(i)));
+
+                scan_data_drained = scan_cc.IsDrained(i) && scan_data_drained;
             }
-            scan_cc.Reset();
-        }
-    }
 
-    std::unique_ptr<std::vector<FlushRecord>> data_sync_vec =
-        std::make_unique<std::vector<FlushRecord>>();
+            MergeSortedVectors(
+                std::move(mv_base_vecs), mv_base_vec, key_greater, false);
 
-    std::unique_ptr<std::vector<FlushRecord>> archive_vec =
-        std::make_unique<std::vector<FlushRecord>>();
+            // Set the ckpt_ts_ of a cc entry repeatedly, which might cause the
+            // ccentry become invalid in between. But, there should be no
+            // duplication here. we don't need to remove duplicate record.
+            MergeSortedVectors(
+                std::move(data_sync_vecs), data_sync_vec, rec_greater, false);
 
-    std::unique_ptr<std::vector<TxKey>> mv_base_vec =
-        std::make_unique<std::vector<TxKey>>();
+            // For archive vec we don't need to worry about duplicate causing
+            // issue since we're not visiting their cc entry. Also we cannot
+            // rely on key compare to dedup archive vec since a key could have
+            // multiple version of archive versions.
+            MergeSortedVectors(
+                std::move(archive_vecs), archive_vec, rec_greater, false);
 
-    // Sort output vectors in key sorting order.
-    auto key_greater = [](const TxKey &r1, const TxKey &r2) -> bool
-    { return r2 < r1; };
-    auto rec_greater = [](const FlushRecord &r1, const FlushRecord &r2) -> bool
-    { return r2.Key() < r1.Key(); };
-
-    MergeSortedVectors(
-        std::move(mv_base_vecs), *mv_base_vec, key_greater, false);
-
-    // Set the ckpt_ts_ of a cc entry repeatedly, which might cause the ccentry
-    // become invalid in between. But, there should be no duplication here. we
-    // don't need to remove duplicate record.
-    MergeSortedVectors(
-        std::move(data_sync_vecs), *data_sync_vec, rec_greater, false);
-
-    // For archive vec we don't need to worry about duplicate causing
-    // issue since we're not visiting their cc entry. Also we cannot
-    // rely on key compare to dedup archive vec since a key could have
-    // multiple version of archive versions.
-    MergeSortedVectors(
-        std::move(archive_vecs), *archive_vec, rec_greater, false);
-
-    // 4. Process the data sync vec
-    if (data_sync_vec->size() != 0 || archive_vec->size() != 0 ||
-        mv_base_vec->size() != 0)
-    {
-        // 4.1 For range partition, execute range split if necessary using
-        // seperate thread.
-        // Fetch range slices info from data store if it's not loaded yet.
-        // Pin the range so that it can't be kicked out during data sync.
-        StoreRange *store_range = range_entry->PinStoreRange();
-        if (!store_range)
-        {
-            WaitableCc cc;
-            // Since node group is pinned, range entry will not be dropped
-            // by ClearNodeGroupCc. This is the only thread that will update
-            // table ranges for this table, so we don't need meta data shared
-            // lock here.
-            range_entry->FetchRangeSlices(
-                range_tbl_name, &cc, ng_id, ng_term, cc_shards_[0].get());
-            cc.Wait();
-            while (cc.IsError())
+            // Fix the vector of FlushRecords.
+            if (!scan_data_drained)
             {
-                // Failed to fetch range slice. If error is caused by
-                // data store unreachable, retry.
-                if (cc.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
-                {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    cc.Reset();
-                    range_entry->FetchRangeSlices(range_tbl_name,
-                                                  &cc,
-                                                  ng_id,
-                                                  ng_term,
-                                                  cc_shards_[0].get());
-                    cc.Wait();
-                }
-                else if (cc.ErrorCode() == CcErrorCode::NG_TERM_CHANGED)
-                {
-                    data_sync_task->SetError();
-                    PopPendingTask(
-                        ng_id, expected_ng_term, table_name, range_id);
-                    // Term is invalid, we are no longer leader. Abort data
-                    // sync.
-                    txservice::AbortTx(data_sync_txm);
-                    return;
-                }
-                else
-                {
-                    assert(false);
-                }
+                // Only flush the keys that are not greater than the
+                // min_scanned_end_key
+                auto iter = std::upper_bound(
+                    data_sync_vec.begin(),
+                    data_sync_vec.end(),
+                    min_scanned_end_key,
+                    [](const TxKey &key, const FlushRecord &rec)
+                    { return key < rec.Key(); });
+
+                auto &remaining_vec = data_sync_vecs[cc_shards_.size()];
+                remaining_vec.clear();
+                remaining_vec.insert(
+                    remaining_vec.begin(),
+                    std::make_move_iterator(iter),
+                    std::make_move_iterator(data_sync_vec.end()));
+                data_sync_vec.erase(iter, data_sync_vec.end());
             }
-            store_range = range_entry->PinStoreRange();
-            assert(store_range != nullptr);
+
+            // TODO(ysw): Updata slices for this batch records.
+
+            // Remove the keys that no need to be flush. This is the case that
+            // the slice need to split, and we just use those keys to calculate
+            // the subslice keys.
+            // TODO(ysw): if (!data_sync_task->export_base_table_records_)
+            {
+                auto it = data_sync_vec.begin();
+                auto flush_it = data_sync_vec.begin();
+                for (; it != data_sync_vec.end(); ++it)
+                {
+                    if (it->cce_)
+                    {
+                        *flush_it = std::move(*it);
+                        ++flush_it;
+                    }
+                }
+                data_sync_vec.erase(flush_it, data_sync_vec.end());
+            }
+
+            // TODO(ysw): Send this flush task to flush worker.
+
+            // Reset
+            scan_cc.Reset();
+            for (size_t i = 0; i < cc_shards_.size(); ++i)
+            {
+                data_sync_vecs.at(i).clear();
+                archive_vecs.at(i).clear();
+                mv_base_vecs.at(i).clear();
+            }
         }
-
-        // Update slice specs with the scanned data
-        std::vector<TxKey> split_keys;
-        bool ret =
-            UpdateSliceAndCalculateRangeUpdate(table_name,
-                                               table_schema.get(),
-                                               ng_id,
-                                               ng_term,
-                                               *data_sync_vec,
-                                               data_sync_task->data_sync_ts_,
-                                               store_range,
-                                               split_keys);
-
-        if (!ret)
-        {
-            LOG(ERROR) << "Pre-data_sync slice update failed on table "
-                       << table_name.StringView();
-
-            data_sync_task->SetError();
-            // Handle the pending tasks for the same range
-            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
-
-            range_entry->UnPinStoreRange();
-            txservice::AbortTx(data_sync_txm);
-
-            return;
-        }
-
-        if (!split_keys.empty())
-        {
-            std::lock_guard<std::mutex> range_split_worker_lk(
-                range_split_worker_ctx_.mux_);
-
-            auto range_split_task =
-                std::make_unique<RangeSplitTask>(data_sync_task,
-                                                 table_schema,
-                                                 std::move(data_sync_vec),
-                                                 std::move(archive_vec),
-                                                 std::move(mv_base_vec),
-                                                 std::move(split_keys),
-                                                 range_entry,
-                                                 data_sync_txm,
-                                                 defer_unpin);
-
-            pending_range_split_task_.push_back(std::move(range_split_task));
-            range_split_worker_ctx_.cv_.notify_one();
-
-            return;
-        }
-
-        // 4.2 Flush records into data store if the range in which the
-        // records locate need't to split.
-        std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-        pending_flush_work_.emplace_back(
-            std::make_unique<FlushDataTask>(data_sync_task,
-                                            table_schema,
-                                            std::move(data_sync_vec),
-                                            std::move(archive_vec),
-                                            std::move(mv_base_vec),
-                                            data_sync_txm,
-                                            false,
-                                            worker_idx));
-        flush_data_worker_ctx_.cv_.notify_one();
     }
-    else
+
+    if (!has_flush_task)
     {
         // Update the task status and last sync ts of this range.
         range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
@@ -3601,7 +3550,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
     DataSyncScanCc scan_cc(table_name,
-                           0,
                            last_sync_ts,
                            data_sync_task->data_sync_ts_,
                            ng_id,
@@ -3860,7 +3808,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                                 rec.payload_status_,
                                                 rec.commit_ts_,
                                                 rec.cce_,
-                                                rec.delta_size_,
+#ifndef ON_KEY_OBJECT
+                                                rec.post_flush_size_,
+#endif
                                                 part_id);
                 }
             }
@@ -4064,113 +4014,6 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
     }
 
     task_limiters_.erase(iter);
-}
-
-bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
-    const TableName &table_name,
-    const TableSchema *schema,
-    NodeGroupId node_group_id,
-    int64_t node_group_term,
-    std::vector<FlushRecord> &flush_batch,
-    uint64_t data_sync_ts,
-    StoreRange *store_range,
-    std::vector<TxKey> &splitting_info)
-{
-    std::mutex work_sender_mux;
-    std::condition_variable work_sender_cv;
-    size_t slice_update_done = 0;
-    size_t slice_load_cnt = 0;
-    bool fail = false;
-    size_t slice_start_idx = 0;
-    auto batch_it = flush_batch.begin();
-
-    auto lower_bound_cmp = [](const FlushRecord &rec, const TxKey &key)
-    { return rec.Key() < key; };
-
-    TxKey range_end_tx_key = store_range->RangeEndTxKey();
-
-    while (batch_it != flush_batch.end())
-    {
-        TxKey slice_start_key = batch_it->Key();
-        StoreSlice *curr_slice = store_range->FindSlice(slice_start_key);
-        TxKey slice_end_tx_key = curr_slice->EndTxKey();
-
-        auto slice_end_it =
-            slice_end_tx_key.KeyPtr() == range_end_tx_key.KeyPtr()
-                ? flush_batch.end()
-                : std::lower_bound(batch_it,
-                                   flush_batch.end(),
-                                   slice_end_tx_key,
-                                   lower_bound_cmp);
-
-        size_t slice_end_idx = std::distance(flush_batch.begin(), slice_end_it);
-        int64_t slice_delta_size = 0;
-        uint64_t slice_size = 0;
-
-        for (; batch_it != slice_end_it; ++batch_it)
-        {
-            slice_delta_size += batch_it->delta_size_;
-        }
-
-        int64_t sum = curr_slice->Size() + slice_delta_size;
-        slice_size = sum >= 0 ? sum : 0;
-        curr_slice->SetPostCkptSize(slice_size);
-        // Skip performing the update slice spec operation when the size of a
-        // single item exceeds the slice upper bound.
-        if (slice_delta_size > 0 && slice_size > StoreSlice::slice_upper_bound)
-        {
-            // Since update slice specs might need loading from
-            // data store, hand it off to the worker and move on
-            // to the next slice.
-            slice_load_cnt++;
-            EnqueueUpdateSliceTask(data_sync_ts,
-                                   node_group_id,
-                                   node_group_term,
-                                   table_name,
-                                   schema,
-                                   store_range,
-                                   curr_slice,
-                                   slice_start_idx,
-                                   slice_end_idx,
-                                   flush_batch,
-                                   work_sender_mux,
-                                   work_sender_cv,
-                                   slice_update_done,
-                                   fail);
-        }
-        batch_it = slice_end_it;
-        slice_start_idx = slice_end_idx;
-        batch_it = slice_end_it;
-    }
-
-    {
-        // Wait for all slice specs in this range are updated.
-        std::unique_lock<std::mutex> work_sender_lk(work_sender_mux);
-        work_sender_cv.wait(work_sender_lk,
-                            [&slice_update_done, &slice_load_cnt]
-                            { return slice_load_cnt == slice_update_done; });
-        if (fail)
-        {
-            return false;
-        }
-    }
-
-    size_t post_ckpt_size = store_range->PostCkptSize();
-    if (post_ckpt_size > StoreRange::range_max_size)
-    {
-        splitting_info = store_range->CalculateRangeSplitKeys(table_name,
-                                                              schema,
-                                                              node_group_id,
-                                                              node_group_term,
-                                                              data_sync_ts,
-                                                              post_ckpt_size);
-        if (!splitting_info.empty())
-        {
-            return true;
-        }
-    }
-
-    return true;
 }
 
 bool LocalCcShards::CalculateRangeUpdate(

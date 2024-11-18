@@ -66,7 +66,16 @@ private:
 
 public:
     RecordStatus payload_status_{RecordStatus::Unknown};
-    int32_t delta_size_{INT32_MAX};
+#ifndef ON_KEY_OBJECT
+    // Size of this version FlushRecord. 0 if the record is in Deleted status.
+    // 1. Used to updated the cce::data_store_size_ after this version item has
+    // been flushed to the data store.
+    // 2. Used to calculate the key of the subslice when the slice need to be
+    // split. At this time, the value is the size of the item in the base table.
+    // In short, the version item has been persisted, and does not need to be
+    // flushed, therefore, the payload of this FlushRecord is nullptr.
+    uint32_t post_flush_size_{0};
+#endif
 
     uint64_t commit_ts_{1U};
     // cce is nullptr means this cce is already persisted on kv and we
@@ -87,7 +96,7 @@ public:
                 RecordStatus payload_status,
                 uint64_t commit_ts,
                 LruEntry *cce,
-                int32_t delta_size,
+                int32_t post_flush_size,
                 int32_t partition_id)
     {
         tx_key_.Release();
@@ -97,7 +106,7 @@ public:
         payload_status_ = payload_status;
         commit_ts_ = commit_ts;
         cce_ = cce;
-        delta_size_ = delta_size;
+        post_flush_size_ = post_flush_size;
         partition_id_ = partition_id;
     }
 #else
@@ -106,7 +115,6 @@ public:
                 RecordStatus payload_status,
                 uint64_t commit_ts,
                 LruEntry *cce,
-                int32_t delta_size,
                 int32_t partition_id)
     {
         tx_key_.Release();
@@ -117,7 +125,6 @@ public:
         payload_status_ = payload_status;
         commit_ts_ = commit_ts;
         cce_ = cce;
-        delta_size_ = delta_size;
         partition_id_ = partition_id;
     }
 #endif
@@ -158,7 +165,9 @@ public:
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
         cce_ = rhs.cce_;
-        delta_size_ = rhs.delta_size_;
+#ifndef ON_KEY_OBJECT
+        post_flush_size_ = rhs.post_flush_size_;
+#endif
         partition_id_ = rhs.partition_id_;
         return *this;
     }
@@ -183,7 +192,9 @@ public:
         payload_ = std::move(rhs.payload_);
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
-        delta_size_ = rhs.delta_size_;
+#ifndef ON_KEY_OBJECT
+        post_flush_size_ = rhs.post_flush_size_;
+#endif
         cce_ = rhs.cce_;
         partition_id_ = rhs.partition_id_;
     }
@@ -290,23 +301,6 @@ public:
 #endif
 
     TxKey Key() const;
-
-    /**
-     * @brief Size of the FlushRecord. 0 if the record is in Deleted status.
-     *
-     * @return size_t
-     */
-    size_t Size() const
-    {
-        if (payload_status_ == RecordStatus::Deleted)
-        {
-            return 0;
-        }
-        else
-        {
-            return Key().Size() + PayloadSize();
-        }
-    }
 
     uint64_t MemUsage()
     {
@@ -1031,14 +1025,17 @@ public:
      * @param ckpt_vec - store the version records to flush into "base table".
      * @param akv_vec - store the version records to flush into "archives
      * table".
-     * @param from_ts - Previous round scan timestamp. We scan the data between
-     * (from_ts, to_ts].
      * @param to_ts - Current round checkpoint timestamp.
-     * @param export_persisted_record_to_ckpt_vec - True means If no larger
+     * @param export_persisted_item_to_ckpt_vec - True means If no larger
      * version exists, we need to export the data which commit_ts same as
      * ckpt_ts to ckpt_vec. Note: This flag only used for RangePartition.
-     * @param export_base_table_record_only - True means only need to export the
+     * @param export_base_table_item_only - True means only need to export the
      * base data. This is used for scan during add index txm.
+     * @param export_persisted_item_key_only - True means if no larger version
+     * exists, need to export the key which commit_ts same as ckpt_ts to
+     * ckpt_vec. This is happen when the slice need to split, and we need the
+     * key to calculate the subslice key. Note: This flag only used for
+     * RangePartition.
      * @return the number of exported version records.
      */
 
@@ -1046,13 +1043,15 @@ public:
                          std::vector<FlushRecord> &ckpt_vec,
                          std::vector<FlushRecord> &akv_vec,
                          std::vector<size_t> &mv_base_vec,
-                         uint64_t from_ts,
                          uint64_t to_ts,
                          uint64_t oldest_active_tx_ts,
                          bool mvcc_enabled,
                          size_t &ckpt_vec_size,
-                         bool export_persisted_record_to_ckpt_vec,
-                         bool export_base_table_record_only,
+                         bool export_persisted_item_to_ckpt_vec,
+                         bool export_base_table_item_only,
+#ifdef RANGE_PARTITION_ENABLED
+                         bool export_persisted_key_only,
+#endif
                          uint64_t &mem_usage) const
     {
         // `export_store_record_if_need` - True means If no larger version needs
@@ -1075,7 +1074,7 @@ public:
             // But we need to migrate data to new range on
             // base table. So we need to export this record
             // for range migration
-            if ((export_persisted_record_to_ckpt_vec) && commit_ts != 1 &&
+            if ((export_persisted_item_to_ckpt_vec) && commit_ts != 1 &&
                 commit_ts <= to_ts &&
                 (rec_status == RecordStatus::Normal ||
                  rec_status == RecordStatus::Deleted))
@@ -1100,9 +1099,38 @@ public:
                 }
 
                 mem_usage += ref.MemUsage();
-                // the size of record is not change.
-                ref.delta_size_ = 0;
+
+                ref.post_flush_size_ = (rec_status == RecordStatus::Normal)
+                                           ? (key.Size() + ref.PayloadSize())
+                                           : 0;
+
                 exported_count++;
+            }
+            else if (export_persisted_key_only && commit_ts != 1 &&
+                     commit_ts <= to_ts &&
+                     (rec_status == RecordStatus::Normal ||
+                      rec_status == RecordStatus::Deleted))
+            {
+                // Just need the key of this version item which is used to
+                // calculate the subslice keys
+                assert(!export_persisted_item_to_ckpt_vec);
+
+                FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
+                ref.CloneOrCopyKey(TxKey(&key));
+
+                // Use nullptr to indicate that this item does not need be
+                // flush.
+                ref.cce_ = nullptr;
+                ref.payload_status_ = rec_status;
+                ref.commit_ts_ = commit_ts;
+
+                mem_usage += ref.MemUsage();
+
+                ref.post_flush_size_ = (rec_status == RecordStatus::Normal)
+                                           ? (key.Size() + payload_->Size())
+                                           : 0;
+
+                ++exported_count;
             }
 
             return exported_count;
@@ -1113,9 +1141,7 @@ public:
 #endif
 
 #ifndef ON_KEY_OBJECT
-        if (from_ts < commit_ts && commit_ts <= to_ts)
-#else
-        if (from_ts < commit_ts)
+        if (commit_ts <= to_ts)
 #endif
         {
             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
@@ -1137,30 +1163,17 @@ public:
             ref.commit_ts_ = commit_ts;
             mem_usage += ref.MemUsage();
 
-#ifdef RANGE_PARTITION_ENABLED
-            if (data_store_size_ != INT32_MAX)
-            {
-                if (ref.payload_status_ != RecordStatus::Deleted)
-                {
-                    ref.delta_size_ =
-                        key.Size() + ref.PayloadSize() - data_store_size_;
-                }
-                else
-                {
-                    ref.delta_size_ = -data_store_size_;
-                }
-            }
-            else
-            {
-                assert(false);
-                // Mark the delta as unknwon
-                ref.delta_size_ = INT32_MAX;
-            }
+#ifndef ON_KEY_OBJECT
+            assert(data_store_size_ != INT32_MAX);
+            ref.post_flush_size_ =
+                (ref.payload_status_ != RecordStatus::Deleted)
+                    ? key.Size() + ref.PayloadSize()
+                    : 0;
 #endif
             exported_count++;
         }
 
-        if (!mvcc_enabled || export_base_table_record_only)
+        if (!mvcc_enabled || export_base_table_item_only)
         {
             return exported_count;
         }
@@ -1173,7 +1186,7 @@ public:
             // Scan data from largest version to smallest version
             for (auto it = archives_->begin(); it != archives_->end(); it++)
             {
-                if (from_ts < it->commit_ts_ && it->commit_ts_ <= to_ts)
+                if (it->commit_ts_ <= to_ts)
                 {
                     if (it->commit_ts_ < ckpt_ts || it->commit_ts_ == 1U)
                     {
@@ -1214,7 +1227,7 @@ public:
                             // flushed(exported_count == 0).
                             // We need to export this record in order to
                             // flush it to new range.
-                            if (export_persisted_record_to_ckpt_vec)
+                            if (export_persisted_item_to_ckpt_vec)
                             {
                                 FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
                                 ref.CloneOrCopyKey(TxKey(&key));
@@ -1233,8 +1246,45 @@ public:
                                 ref.payload_status_ = it->payload_status_;
                                 ref.commit_ts_ = it->commit_ts_;
 
-                                // the size of record is not change.
-                                ref.delta_size_ = 0;
+                                ref.post_flush_size_ =
+                                    (it->payload_status_ ==
+                                     RecordStatus::Normal)
+                                        ? (key.Size() + ref.PayloadSize())
+                                        : 0;
+
+                                mem_usage += ref.MemUsage();
+                                exported_count++;
+                            }
+                            else if (export_persisted_key_only)
+                            {
+                                // Do not need to flush this version item to
+                                // base table(because it has already in the base
+                                // table), just need the key to calculate the
+                                // subsice keys.
+                                assert(!export_persisted_item_to_ckpt_vec);
+                                FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
+                                ref.CloneOrCopyKey(TxKey(&key));
+
+                                // Use nullptr to indicate that this item does
+                                // not need be flush.
+                                ref.cce_ = nullptr;
+
+                                ref.payload_status_ = it->payload_status_;
+                                ref.commit_ts_ = it->commit_ts_;
+
+                                size_t payload_size = 0;
+                                if (it->payload_status_ == RecordStatus::Normal)
+                                {
+                                    payload_size =
+                                        tbl_type == TableType::Secondary
+                                            ? payload_->Size()
+                                            : it->payload_->Size();
+                                }
+                                ref.post_flush_size_ =
+                                    (it->payload_status_ ==
+                                     RecordStatus::Normal)
+                                        ? (key.Size() + payload_size)
+                                        : 0;
 
                                 mem_usage += ref.MemUsage();
                                 exported_count++;
@@ -1262,25 +1312,12 @@ public:
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
                             mem_usage += ref.MemUsage();
-                            if (data_store_size_ == INT32_MAX)
-                            {
-                                // Mark the delta as unknwon
-                                ref.delta_size_ = INT32_MAX;
-                            }
-                            else
-                            {
-                                if (ref.payload_status_ ==
-                                    RecordStatus::Deleted)
-                                {
-                                    ref.delta_size_ = -data_store_size_;
-                                }
-                                else
-                                {
-                                    ref.delta_size_ = key.Size() +
-                                                      ref.PayloadSize() -
-                                                      data_store_size_;
-                                }
-                            }
+
+                            assert(data_store_size_ != INT32_MAX);
+                            ref.post_flush_size_ =
+                                (ref.payload_status_ == RecordStatus::Normal)
+                                    ? (key.Size() + ref.PayloadSize())
+                                    : 0;
                         }
                         else
                         {
@@ -1301,47 +1338,6 @@ public:
 
                         exported_count++;
                     }
-                }
-                else if (from_ts >= it->commit_ts_)
-                {
-                    if (export_persisted_record_to_ckpt_vec &&
-                        exported_count == 0)
-                    {
-                        // 1.it->commit_ts > ckpt_ts: The previous scan has
-                        // exported this record(it->commits_ts <= from_ts).
-                        // 2.it->commit_ts < ckpt_ts: This version has already
-                        // flushed to archive table. We don't need to
-                        // migrate data on archive table. So we don't need
-                        // to export this record.
-                        // 3.it->commit_ts_ == -1: Dummy archive record. Ignore.
-
-                        if (it->commit_ts_ != 1 && it->commit_ts_ == ckpt_ts)
-                        {
-                            FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
-                            ref.CloneOrCopyKey(TxKey(&key));
-
-                            // This record was load from storage. We
-                            // can't safely point to CcEntry of CcMap.
-                            // Because the entry will be kickout after
-                            // UnpinSlice. the pointer will become
-                            // invalidation.
-                            ref.cce_ = nullptr;
-
-                            if (it->payload_status_ == RecordStatus::Normal)
-                            {
-                                ref.SetPayload(it->payload_);
-                            }
-                            ref.payload_status_ = it->payload_status_;
-                            ref.commit_ts_ = it->commit_ts_;
-
-                            // the size of record is not change.
-                            ref.delta_size_ = 0;
-
-                            mem_usage += ref.MemUsage();
-                            exported_count++;
-                        }
-                    }
-                    break;
                 }
                 // else: it->commit_ts_ > to_ts
             }

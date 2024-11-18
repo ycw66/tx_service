@@ -4181,7 +4181,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                 // based on this assumption.
                                 DataSyncScanCc scan_cc(
                                     table_name,
-                                    previous_scan_ts,
                                     0,
                                     ckpt_ts,
                                     node_group,
@@ -4243,7 +4242,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                     rec.payload_status_,
                                                     rec.commit_ts_,
                                                     rec.cce_,
-                                                    rec.delta_size_,
+                                                    rec.post_flush_size_,
                                                     range_id);
                                             }
 
@@ -4521,13 +4520,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                             // = (new_record->delta_size -
                                             // old_record->delta_size).
                                             slice_delta_size +=
-                                                (batch_it->delta_size_ -
+                                                (batch_it->post_flush_size_ -
                                                  iter->second);
                                         }
                                         else
                                         {
                                             slice_delta_size +=
-                                                batch_it->delta_size_;
+                                                batch_it->post_flush_size_;
                                         }
                                     }
                                     else
@@ -5761,7 +5760,8 @@ void SplitFlushRangeOp::MergeFlushRecord(
             {
                 FlushRecord &additional_rec = output.back();
                 auto &new_flush_rec = const_cast<FlushRecord &>(top.first);
-                old_delta_sizes[output.size() - 1] = additional_rec.delta_size_;
+                old_delta_sizes[output.size() - 1] =
+                    additional_rec.post_flush_size_;
                 if (enable_mvcc)
                 {
                     new_archive_records.push_back(std::move(additional_rec));
@@ -5773,7 +5773,8 @@ void SplitFlushRangeOp::MergeFlushRecord(
             {
                 FlushRecord &additional_rec =
                     const_cast<FlushRecord &>(top.first);
-                old_delta_sizes[output.size() - 1] = additional_rec.delta_size_;
+                old_delta_sizes[output.size() - 1] =
+                    additional_rec.post_flush_size_;
 
                 if (enable_mvcc)
                 {

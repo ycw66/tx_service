@@ -631,14 +631,6 @@ public:
      * This function is NOT THREAD SAFE. Only checkpointer should be calling
      * this function and update range specs.
      */
-    virtual std::vector<TxKey> CalculateRangeSplitKeys(
-        const TableName &table_name,
-        const TableSchema *schema,
-        NodeGroupId ng_id,
-        int64_t ng_term,
-        uint64_t flush_ts,
-        size_t post_ckpt_size) = 0;
-
     virtual bool CalculateRangeSplitKeys(
         const TableName &table_name,
         NodeGroupId ng_id,
@@ -1417,52 +1409,6 @@ public:
         }
 
         return RangeSliceId(this, slice);
-    }
-
-    std::vector<TxKey> CalculateRangeSplitKeys(const TableName &table_name,
-                                               const TableSchema *schema,
-                                               NodeGroupId ng_id,
-                                               int64_t ng_term,
-                                               uint64_t flush_ts,
-                                               size_t post_ckpt_size) override
-    {
-        std::vector<TxKey> new_range_keys;
-        uint32_t slice_idx = 0;
-        uint32_t subrange_slice_idx = 0;
-        size_t subrange_cnt =
-            std::ceil(post_ckpt_size / (StoreRange::range_max_size *
-                                        StoreRange::new_range_load_factor));
-        size_t avg_subrange_size = post_ckpt_size / subrange_cnt;
-
-        while (slice_idx < slices_.size())
-        {
-            size_t curr_subrange_size = 0;
-            for (; curr_subrange_size < avg_subrange_size &&
-                   slice_idx < slices_.size();
-                 slice_idx++)
-            {
-                if (slices_.at(slice_idx)->PostCkptSize() != UINT64_MAX)
-                {
-                    curr_subrange_size += slices_.at(slice_idx)->PostCkptSize();
-                }
-                else
-                {
-                    curr_subrange_size += slices_.at(slice_idx)->Size();
-                }
-            }
-            // Skip the first subrange since it will reuse the
-            // current range entry
-            if (subrange_slice_idx != 0)
-            {
-                const KeyT *slice_start =
-                    slices_[subrange_slice_idx]->StartKey();
-                assert(slice_start->Type() == KeyType::Normal);
-                new_range_keys.emplace_back(
-                    std::make_unique<KeyT>(*slice_start));
-            }
-            subrange_slice_idx = slice_idx;
-        }
-        return new_range_keys;
     }
 
     bool CalculateRangeSplitKeys(const TableName &table_name,

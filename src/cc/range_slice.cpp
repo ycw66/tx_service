@@ -536,7 +536,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             reinterpret_cast<uintptr_t>(flush_vec[idx].cce_));
         slice_change_info_vecs[core_cnt].emplace_back(
             flush_vec[idx].Key().GetShallowCopy(),
-            ckpt_size - flush_vec[idx].delta_size_,
+            ckpt_size - flush_vec[idx].post_flush_size_,
             ckpt_size);
     }
 

@@ -3201,33 +3201,34 @@ public:
 
     ~DataSyncScanCc() = default;
 
-    DataSyncScanCc(const TableName &table_name,
-                   uint64_t previous_scan_ts,
-                   uint64_t previous_ckpt_ts,
-                   uint64_t data_sync_ts,
-                   uint64_t node_group_id,
-                   int64_t node_group_term,
-                   uint16_t core_cnt,
-                   size_t scan_batch_size,
-                   uint64_t txn,
-                   const TxKey *target_start_key,
-                   const TxKey *target_end_key,
-                   bool include_persisted_data,
+    DataSyncScanCc(
+        const TableName &table_name,
+        uint64_t previous_ckpt_ts,
+        uint64_t data_sync_ts,
+        uint64_t node_group_id,
+        int64_t node_group_term,
+        uint16_t core_cnt,
+        size_t scan_batch_size,
+        uint64_t txn,
+        const TxKey *target_start_key,
+        const TxKey *target_end_key,
+        bool include_persisted_data,
 #ifdef RANGE_PARTITION_ENABLED
-                   bool export_base_table_rec_if_need = false,
-                   bool export_base_table_rec_only = false
+        bool export_base_table_item = false,
+        bool export_base_table_item_only = false,
+        StoreRange *store_range = nullptr,
+        const std::map<TxKey, int64_t> *old_slices_delta_size = nullptr
 #else
-                   bool only_one_core,
-                   std::function<bool(size_t hash_code)> filter
+        bool only_one_core,
+        std::function<bool(size_t hash_code)> filter
 #endif
-                   ,
-                   uint64_t schema_version = 0)
+        ,
+        uint64_t schema_version = 0)
         : scan_heap_is_full_(false),
           table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
           core_cnt_(core_cnt),
-          previous_scan_ts_(previous_scan_ts),
           previous_ckpt_ts_(previous_ckpt_ts),
           data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
@@ -3240,8 +3241,10 @@ public:
           include_persisted_data_(include_persisted_data)
 #ifdef RANGE_PARTITION_ENABLED
           ,
-          export_base_table_rec_if_need_(export_base_table_rec_if_need),
-          export_base_table_rec_only_(export_base_table_rec_only)
+          export_base_table_item_(export_base_table_item),
+          export_base_table_item_only_(export_base_table_item_only),
+          store_range_(store_range),
+          old_slices_delta_size_(old_slices_delta_size)
 #else
           ,
           only_scan_one_core_(only_one_core),
@@ -3257,7 +3260,7 @@ public:
             data_sync_vec_.emplace_back();
             data_sync_vec_.back().resize(scan_batch_size);
 #ifdef RANGE_PARTITION_ENABLED
-            if (!export_base_table_rec_only_)
+            if (!export_base_table_item_only_)
 #endif
             {
                 archive_vec_.emplace_back();
@@ -3268,6 +3271,10 @@ public:
 
 #ifdef RANGE_PARTITION_ENABLED
             pause_pos_.emplace_back(TxKey(), false);
+            if (!export_base_table_item_)
+            {
+                curr_slice_it_.emplace_back(old_slices_delta_size_->begin());
+            }
 #else
             pause_pos_.emplace_back(nullptr, false);
 #endif
@@ -3276,10 +3283,7 @@ public:
         }
 
 #ifdef RANGE_PARTITION_ENABLED
-        if (export_base_table_rec_if_need)
-        {
-            slice_ids_.resize(core_cnt_);
-        }
+        slice_ids_.resize(core_cnt_);
 #endif
     }
 
@@ -3377,7 +3381,7 @@ public:
         for (size_t i = 0; i < core_cnt_; i++)
         {
 #ifdef RANGE_PARTITION_ENABLED
-            if (!export_base_table_rec_only_)
+            if (!export_base_table_item_only_)
 #endif
             {
                 archive_vec_.at(i).clear();
@@ -3410,10 +3414,7 @@ public:
         if (unfinished_cnt_ == 0)
         {
 #ifdef RANGE_PARTITION_ENABLED
-            if (export_base_table_rec_if_need_)
-            {
-                UnpinSlices();
-            }
+            UnpinSlices();
 #endif
             cv_.notify_one();
         }
@@ -3428,10 +3429,7 @@ public:
         if (unfinished_cnt_ == 0)
         {
 #ifdef RANGE_PARTITION_ENABLED
-            if (export_base_table_rec_if_need_)
-            {
-                UnpinSlices();
-            }
+            UnpinSlices();
 #endif
             cv_.notify_one();
         }
@@ -3456,7 +3454,7 @@ public:
         if (unfinished_cnt_ == 0)
         {
 #ifdef RANGE_PARTITION_ENABLED
-            if (err_ != CcErrorCode::NO_ERROR && export_base_table_rec_if_need_)
+            if (err_ != CcErrorCode::NO_ERROR)
             {
                 UnpinSlices();
             }
@@ -3490,9 +3488,9 @@ public:
         return node_group_term_;
     }
 
+#ifdef RANGE_PARTITION_ENABLED
     void UnpinSlices()
     {
-#ifdef RANGE_PARTITION_ENABLED
         for (size_t i = 0; i < slice_ids_.size(); ++i)
         {
             if (slice_ids_[i].Slice() != nullptr)
@@ -3501,14 +3499,33 @@ public:
                 slice_ids_[i].Reset();
             }
         }
-#endif
     }
+#endif
 
     void SetNotTruncateLog()
     {
         std::lock_guard<std::mutex> lk(mux_);
         err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
     }
+
+#ifdef RANGE_PARTITION_ENABLED
+    StoreRange *StoreRangePtr() const
+    {
+        return store_range_;
+    }
+
+    std::map<TxKey, int64_t>::const_iterator &CurrentSliceIt(uint16_t core_id)
+    {
+        assert(!export_base_table_item_);
+        return curr_slice_it_[core_id];
+    }
+
+    std::map<TxKey, int64_t>::const_iterator EndSliceIt() const
+    {
+        assert(!export_base_table_item_);
+        return old_slices_delta_size_->end();
+    }
+#endif
 
     // For ScanFlushRecords, this indicates the count of keys that have been
     // exported. For ScanDeltaSize, it is the count of slices that have been
@@ -3524,12 +3541,6 @@ private:
     uint32_t node_group_id_;
     int64_t node_group_term_;
     uint16_t core_cnt_;
-    // Used during range split. We only want new data changes after this given
-    // ts, despite there might be older version that is still not synced into
-    // data sotre yet (for mvcc only). It can be used as a hint to decide if a
-    // page has dirty data that need to be put into data sync vec. However it is
-    // not guaranteed that all entries committed before this ts are synced.
-    uint64_t previous_scan_ts_;
     // Used during regular data sync scan. It is used as a hint to decide if a
     // page has dirty data since last round of checkpoint. It is guaranteed that
     // all entries committed before this ts are synced into data store.
@@ -3567,11 +3578,19 @@ private:
 #ifdef RANGE_PARTITION_ENABLED
     // True means we need to export the data in memory and in kv to ckpt vec.
     // Note: This is only used in range partition.
-    bool export_base_table_rec_if_need_{false};
+    bool export_base_table_item_{false};
     std::vector<RangeSliceId> slice_ids_;
 
     // This is used for scan during add index txm.
-    bool export_base_table_rec_only_{false};
+    bool export_base_table_item_only_{false};
+    StoreRange *store_range_{nullptr};
+    // Directory of slice TxKey and the slice delta size.
+    // The main purpose of this variable is to determine whether the slice
+    // currently being scanned needs to be split, if necessary, the pinslice
+    // operation is performed.
+    const std::map<TxKey, int64_t> *old_slices_delta_size_{nullptr};
+    // Slice TxKey currently being scanned.
+    std::vector<std::map<TxKey, int64_t>::const_iterator> curr_slice_it_;
 #else
     bool only_scan_one_core_{false};
     std::function<bool(size_t hash_code)> filter_lambda_;
