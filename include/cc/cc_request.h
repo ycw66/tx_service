@@ -4773,7 +4773,7 @@ public:
 
         if (clean_type == CleanType::CleanCcm)
         {
-            ddl_err_code_ = {false, CcErrorCode::NO_ERROR};
+            upsert_kv_err_code_ = {false, CcErrorCode::NO_ERROR};
         }
     }
 
@@ -4812,7 +4812,7 @@ public:
 
         if (clean_type == CleanType::CleanCcm)
         {
-            ddl_err_code_ = {false, CcErrorCode::NO_ERROR};
+            upsert_kv_err_code_ = {false, CcErrorCode::NO_ERROR};
         }
     }
 
@@ -4846,7 +4846,7 @@ public:
         resume_key_.resize(core_cnt);
         if (clean_type == CleanType::CleanCcm)
         {
-            ddl_err_code_ = {false, CcErrorCode::NO_ERROR};
+            upsert_kv_err_code_ = {false, CcErrorCode::NO_ERROR};
         }
     }
 
@@ -4862,12 +4862,12 @@ public:
         if (clean_type_ == CleanType::CleanCcm)
         {
             // only the first core can safely access `ddl_err_code`
-            // the value of `ddl_err_code_.first` will be updated to true before
-            // calling `UpsertTable` function.
-            bool is_ddl_phase =
-                ccs.core_id_ == 0 && ddl_err_code_.first == true;
+            // the value of `upsert_kv_err_code_.first` will be updated to true
+            // before calling `UpsertTable` function.
+            bool resume_from_upsert_kv =
+                ccs.core_id_ == 0 && upsert_kv_err_code_.first == true;
 
-            if (!is_ddl_phase)
+            if (!resume_from_upsert_kv)
             {
                 if (!CleanCcMap(ccs))
                 {
@@ -4897,7 +4897,7 @@ public:
                         assert(ccs.core_id_ == 0);
                         // Enter ddl phase, update the value of
                         // `ddl_err_code.first` to true
-                        ddl_err_code_ = {true, CcErrorCode::NO_ERROR};
+                        upsert_kv_err_code_ = {true, CcErrorCode::NO_ERROR};
                         Sharder::Instance().GetDataStoreHandler()->UpsertTable(
                             catalog_entry->schema_.get(),
                             OperationType::TruncateTable,
@@ -4908,7 +4908,7 @@ public:
                             nullptr,
                             this,
                             &ccs,
-                            &ddl_err_code_.second);
+                            &upsert_kv_err_code_.second);
                         return false;
                     }
                 }
@@ -4918,16 +4918,13 @@ public:
             else
             {
                 assert(ccs.core_id_ == 0);
-                if (ddl_err_code_.first)
+                if (upsert_kv_err_code_.second != CcErrorCode::NO_ERROR)
                 {
-                    if (ddl_err_code_.second != CcErrorCode::NO_ERROR)
-                    {
-                        return SetError(ddl_err_code_.second);
-                    }
-                    else
-                    {
-                        return SetFinish();
-                    }
+                    return SetError(upsert_kv_err_code_.second);
+                }
+                else
+                {
+                    return SetFinish();
                 }
             }
         }
@@ -5154,8 +5151,8 @@ private:
     std::atomic_uint16_t unfinished_cnt_{0};
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
 
-    // Only first core can access `ddl_err_code_`
-    std::pair<bool, CcErrorCode> ddl_err_code_;
+    // Only first core can access `upsert_kv_err_code_`
+    std::pair<bool, CcErrorCode> upsert_kv_err_code_;
 };
 
 struct ReleaseDataSyncScanHeapCc : public CcRequestBase
