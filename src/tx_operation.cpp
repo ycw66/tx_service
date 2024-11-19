@@ -1636,6 +1636,26 @@ void AcquireAllOp::ResetHandlerTxm(TransactionExecution *txm)
 
 void AcquireAllOp::Forward(TransactionExecution *txm)
 {
+    if (!txm->CheckLeaderTerm())
+    {
+        for (size_t hd_idx = 0; hd_idx < hd_results_.size(); ++hd_idx)
+        {
+            auto &hd_res = hd_results_[hd_idx];
+            if (hd_res.IsFinished())
+            {
+                continue;
+            }
+
+            if (!hd_res.SetResultByTimeoutThread())
+            {
+                continue;
+            }
+            hd_res.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            hd_res.ForceError();
+        }
+        txm->PostProcess(*this);
+        return;
+    }
     // start the state machine if not running.
     if (!is_running_)
     {
@@ -2460,14 +2480,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else if (op_type_ == OperationType::DropTable)
         {
-            // Read table schema from local cc shard. This is because we
-            // could be recovering from commit stage, in which case we
-            // have skipped post_all_intent_op_ and the schema in
-            // catalog_rec_ would be empty.
-            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-            auto catalog_entry =
-                shards->GetCatalog(table_key_.Name(), txm->TxCcNodeId());
-            const TableSchema *table_old_schema = catalog_entry->schema_.get();
+            const TableSchema *table_old_schema = catalog_rec_.Schema();
             assert(table_old_schema->GetBaseTableName() == table_key_.Name());
             assert(clean_ccm_op_.table_names_.empty());
 
@@ -2784,16 +2797,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 else
                 {
                     op_ = &upsert_kv_table_op_;
-                    // Read table schema from local cc shard. This is because we
-                    // could be recovering from commit stage, in which case we
-                    // have skipped post_all_intent_op_ and the schema in
-                    // catalog_rec_ would be empty.
-                    LocalCcShards *shards =
-                        Sharder::Instance().GetLocalCcShards();
-                    auto catalog_entry = shards->GetCatalog(table_key_.Name(),
-                                                            txm->TxCcNodeId());
-                    upsert_kv_table_op_.table_schema_ =
-                        catalog_entry->schema_.get();
+                    upsert_kv_table_op_.table_schema_ = catalog_rec_.Schema();
                     upsert_kv_table_op_.alter_table_info_ = nullptr;
                     txm->PushOperation(&upsert_kv_table_op_);
                     txm->Process(upsert_kv_table_op_);

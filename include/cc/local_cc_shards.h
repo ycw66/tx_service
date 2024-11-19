@@ -485,6 +485,11 @@ public:
         const std::string &catalog_image,
         uint64_t commit_ts);
 
+    TableSchema::uptr CreateTableSchemaFromImage(
+        const TableName &table_name,
+        const std::string &catalog_image,
+        uint64_t version);
+
     CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
                                      NodeGroupId cc_ng_id,
                                      const std::string &catalog_image,

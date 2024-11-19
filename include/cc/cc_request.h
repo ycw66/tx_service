@@ -3869,8 +3869,7 @@ public:
                         // If FetchCatalogCc failure due to storage fault,
                         // FetchCatalogCc::Execute() abort the ReplayLogCc
                         assert(catalog_entry->Version() > 0);
-                        if (catalog_entry->schema_ != nullptr &&
-                            commit_ts_ >= catalog_entry->Version())
+                        if (catalog_entry->schema_ != nullptr)
                         {
                             ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
                             assert(ccm_ != nullptr);
@@ -4877,13 +4876,22 @@ public:
                     return false;
                 }
 
+                const CatalogEntry *catalog_entry =
+                    ccs.GetCatalog(*table_name_, node_group_id_);
+                if (catalog_entry != nullptr &&
+                    catalog_entry->dirty_schema_ != nullptr)
+                {
+                    ccs.UpdateCcmSchema(*table_name_,
+                                        node_group_id_,
+                                        catalog_entry->dirty_schema_.get(),
+                                        catalog_entry->DirtyVersion());
+                }
+
                 if (ccs.core_id_ == 0 && !txservice_skip_kv &&
                     !Sharder::Instance()
                          .GetDataStoreHandler()
                          ->IsSharedStorage())
                 {
-                    const CatalogEntry *catalog_entry =
-                        ccs.GetCatalog(*table_name_, node_group_id_);
                     if (catalog_entry == nullptr)
                     {
                         //  Fetch catalog

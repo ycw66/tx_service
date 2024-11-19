@@ -323,6 +323,19 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
     return {true, &catalog_entry};
 }
 
+TableSchema::uptr LocalCcShards::CreateTableSchemaFromImage(
+    const TableName &table_name,
+    const std::string &catalog_image,
+    uint64_t version)
+{
+    if (catalog_image.empty())
+    {
+        return nullptr;
+    }
+    return catalog_factory_->CreateTableSchema(
+        table_name, catalog_image, version);
+}
+
 std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,

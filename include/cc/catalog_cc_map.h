@@ -156,7 +156,7 @@ public:
         CcEntry<CatalogKey, CatalogRecord> *cce_ptr = it->second;
 
         // Check whether cce key lock holder is the given tx of the
-        // PostWriteAllCc before apply change.
+        // PostWriteAllCc before applying change.
         if (cce_ptr == nullptr || cce_ptr->GetKeyLock() == nullptr ||
             !cce_ptr->GetKeyLock()->HasWriteLockOrWriteIntent(req.Txn()))
         {
@@ -533,9 +533,14 @@ public:
                         catalog_entry->schema_->StatisticsObject());
                 }
 
-                schema_rec->Set(catalog_entry->dirty_schema_,
-                                nullptr,
-                                catalog_entry->DirtyVersion());
+                // If recoverring from commit log, there is no dirty schema,
+                // skip updating schema_rec
+                if (catalog_entry->dirty_schema_ != nullptr)
+                {
+                    schema_rec->Set(catalog_entry->dirty_schema_,
+                                    nullptr,
+                                    catalog_entry->DirtyVersion());
+                }
             }
             else
             {
@@ -584,10 +589,6 @@ public:
 
                 assert(catalog_entry->Version() == 0 || old_schema != nullptr);
                 assert(new_schema->Version() == catalog_entry->DirtyVersion());
-                shard_->UpdateCcmSchema(table_key->Name(),
-                                        req.NodeGroupId(),
-                                        new_schema,
-                                        catalog_entry->DirtyVersion());
 
                 // Sync ddl op to standby nodes.
                 if (shard_->core_id_ == 0 &&
@@ -1005,16 +1006,7 @@ public:
         schema_op_msg.ParseFromArray(content.data(), content.length());
 
         const CatalogEntry *catalog_entry = nullptr;
-        bool is_coordinator = false;
         uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
-
-        if (tx_node_id == req.NodeGroupId())
-        {
-            if (Sharder::Instance().CandidateLeaderTerm(tx_node_id) >= 0)
-            {
-                is_coordinator = true;
-            }
-        }
 
         // Need to parse the string if not include table type in protobuf
         TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
@@ -1022,13 +1014,12 @@ public:
         std::string_view table_name_sv{schema_op_msg.table_name_str()};
         TableName table_name{table_name_sv, table_type};
 
-        if (shard_->core_id_ == 0 && is_coordinator)
+        if (shard_->core_id_ == 0)
         {
             CatalogKey table_key(table_name);
             Iterator it = Find(table_key);
             CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
-            if (cce != nullptr && cce->GetKeyLock() != nullptr &&
-                cce->GetKeyLock()->SearchLock(req.Txn()) != LockType::NoLock)
+            if (cce != nullptr)
             {
                 req.SetFinish();
                 return true;
@@ -1042,18 +1033,10 @@ public:
             if (schema_op_msg.stage() ==
                     ::txlog::SchemaOpMessage_Stage::
                         SchemaOpMessage_Stage_PrepareSchema ||
-                (schema_op_msg.stage() ==
-                     ::txlog::SchemaOpMessage_Stage::
-                         SchemaOpMessage_Stage_CommitSchema &&
-                 is_coordinator) ||
                 schema_op_msg.stage() ==
                     ::txlog::SchemaOpMessage_Stage::
                         SchemaOpMessage_Stage_PrepareIndexTable)
             {
-                // If we are coordinator, we need to recover to the state
-                // right after commit log is flushed since the
-                // upsert_kv_table_op_ might need both old table schema and
-                // new table schema.
                 // If we are recovering from prepare log, we need to restore to
                 // the state right before commit log is flushed, so both current
                 // and dirty schema are needed.
@@ -1188,10 +1171,8 @@ public:
                                          SchemaOpMessage_Stage_PrepareSchema ||
             schema_op_msg.stage() ==
                 ::txlog::SchemaOpMessage_Stage::
-                    SchemaOpMessage_Stage_PrepareIndexTable ||
-            (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
-                                          SchemaOpMessage_Stage_CommitSchema &&
-             is_coordinator))
+                    SchemaOpMessage_Stage_PrepareIndexTable)
+
         {
             const TableSchema *old_schema = catalog_entry->schema_.get();
             const TableSchema *new_schema = catalog_entry->dirty_schema_.get();
@@ -1318,15 +1299,6 @@ public:
         }
         case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema:
         {
-            if (is_coordinator)
-            {
-                // When coordinator is recovering from commit log, we need to
-                // restore the state right after commit log is flushed, so we
-                // need to acquire write lock as well.
-                lock_type = req.RangeSplitting(base_table_name)
-                                ? LockType::WriteIntent
-                                : LockType::WriteLock;
-            }
             break;
         }
         default:

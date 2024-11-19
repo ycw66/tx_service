@@ -10,6 +10,7 @@
 #include "cc_protocol.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
+#include "log_type.h"
 #include "raft_log.pb.h"
 #include "scan.h"
 #include "sharder.h"
@@ -1207,12 +1208,12 @@ void TransactionExecution::ProcessTxRequest(
 {
     tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
     upsert_resp_ = &recover_req.tx_result_;
-    auto &schema_op = recover_req.schema_op_msg_;
-    switch (schema_op.schema_op_case())
+    auto &schema_op_msg = recover_req.schema_op_msg_;
+    switch (schema_op_msg.schema_op_case())
     {
     case ::txlog::SchemaOpMessage::kTableOp:
     {
-        const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
+        const ::txlog::UpsertTableMessage &table_msg = schema_op_msg.table_op();
         OperationType operation_type =
             static_cast<OperationType>(table_msg.op_type());
 
@@ -1232,10 +1233,10 @@ void TransactionExecution::ProcessTxRequest(
             {
                 std::unique_ptr<UpsertTableOp> table_op = nullptr;
                 table_op = std::make_unique<UpsertTableOp>(
-                    schema_op.table_name_str(),
-                    schema_op.old_catalog_blob(),
-                    schema_op.catalog_ts(),
-                    schema_op.new_catalog_blob(),
+                    schema_op_msg.table_name_str(),
+                    schema_op_msg.old_catalog_blob(),
+                    schema_op_msg.catalog_ts(),
+                    schema_op_msg.new_catalog_blob(),
                     operation_type,
                     this);
                 schema_op_ = std::move(table_op);
@@ -1252,26 +1253,51 @@ void TransactionExecution::ProcessTxRequest(
                     .GetLocalCcShards()
                     ->table_schema_op_pool_.pop_back();
 
-                schema_op_->Reset(schema_op.table_name_str(),
-                                  schema_op.old_catalog_blob(),
-                                  schema_op.catalog_ts(),
-                                  schema_op.new_catalog_blob(),
+                schema_op_->Reset(schema_op_msg.table_name_str(),
+                                  schema_op_msg.old_catalog_blob(),
+                                  schema_op_msg.catalog_ts(),
+                                  schema_op_msg.new_catalog_blob(),
                                   operation_type,
                                   this);
             }
             lk.unlock();
 
-            if (schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
-                                         SchemaOpMessage_Stage_PrepareSchema)
+            if (schema_op_msg.stage() ==
+                ::txlog::SchemaOpMessage::Stage::
+                    SchemaOpMessage_Stage_PrepareSchema)
             {
                 schema_op_->prepare_log_op_.hd_result_.SetFinished();
                 schema_op_->op_ = &schema_op_->prepare_log_op_;
             }
             else
             {
-                assert(schema_op.stage() ==
+                assert(schema_op_msg.stage() ==
                        ::txlog::SchemaOpMessage::Stage::
                            SchemaOpMessage_Stage_CommitSchema);
+
+                // extract table schema and dirty schema from schema_op_msg
+                TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
+                    schema_op_msg.table_type());
+                std::string_view table_name_sv{schema_op_msg.table_name_str()};
+                TableName table_name{table_name_sv, table_type};
+                uint64_t schema_ts = schema_op_msg.catalog_ts();
+                std::shared_ptr<TableSchema> schema_ptr =
+                    Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->CreateTableSchemaFromImage(
+                            table_name,
+                            schema_op_msg.old_catalog_blob(),
+                            schema_ts);
+                std::shared_ptr<TableSchema> dirty_schema_ptr =
+                    Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->CreateTableSchemaFromImage(
+                            table_name,
+                            schema_op_msg.new_catalog_blob(),
+                            commit_ts_);
+
+                schema_op_->catalog_rec_.Set(
+                    schema_ptr, dirty_schema_ptr, schema_ts);
                 schema_op_->commit_log_op_.hd_result_.SetFinished();
                 schema_op_->op_ = &schema_op_->commit_log_op_;
             }
@@ -1289,11 +1315,11 @@ void TransactionExecution::ProcessTxRequest(
             {
                 std::unique_ptr<UpsertTableIndexOp> index_op =
                     std::make_unique<UpsertTableIndexOp>(
-                        schema_op.table_name_str(),
-                        schema_op.old_catalog_blob(),
-                        schema_op.catalog_ts(),
-                        schema_op.new_catalog_blob(),
-                        schema_op.alter_table_info_blob(),
+                        schema_op_msg.table_name_str(),
+                        schema_op_msg.old_catalog_blob(),
+                        schema_op_msg.catalog_ts(),
+                        schema_op_msg.new_catalog_blob(),
+                        schema_op_msg.alter_table_info_blob(),
                         operation_type,
                         this);
 
@@ -1306,27 +1332,28 @@ void TransactionExecution::ProcessTxRequest(
                     std::move(local_shards->table_index_op_pool_.back());
                 local_shards->table_index_op_pool_.pop_back();
 
-                index_op_->Reset(schema_op.table_name_str(),
-                                 schema_op.old_catalog_blob(),
-                                 schema_op.catalog_ts(),
-                                 schema_op.new_catalog_blob(),
-                                 schema_op.alter_table_info_blob(),
+                index_op_->Reset(schema_op_msg.table_name_str(),
+                                 schema_op_msg.old_catalog_blob(),
+                                 schema_op_msg.catalog_ts(),
+                                 schema_op_msg.new_catalog_blob(),
+                                 schema_op_msg.alter_table_info_blob(),
                                  operation_type,
                                  this);
             }
             lk.unlock();
 
-            if (schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
-                                         SchemaOpMessage_Stage_PrepareSchema)
+            if (schema_op_msg.stage() ==
+                ::txlog::SchemaOpMessage::Stage::
+                    SchemaOpMessage_Stage_PrepareSchema)
             {
                 index_op_->prepare_log_op_.hd_result_.SetFinished();
                 index_op_->op_ = &index_op_->prepare_log_op_;
             }
-            else if (schema_op.stage() ==
+            else if (schema_op_msg.stage() ==
                      ::txlog::SchemaOpMessage::Stage::
                          SchemaOpMessage_Stage_PrepareIndexTable)
             {
-                if (schema_op.last_key_type() ==
+                if (schema_op_msg.last_key_type() ==
                     ::txlog::SchemaOpMessage::LastKeyType::
                         SchemaOpMessage_LastKeyType_PosInfKey)
                 {
@@ -1341,7 +1368,7 @@ void TransactionExecution::ProcessTxRequest(
                 else
                 {
                     index_op_->last_finished_end_key_str_ =
-                        &schema_op.last_key_value();
+                        &schema_op_msg.last_key_value();
                     index_op_->is_last_finished_key_str_ = true;
                 }
 
@@ -1350,7 +1377,7 @@ void TransactionExecution::ProcessTxRequest(
             }
             else
             {
-                assert(schema_op.stage() ==
+                assert(schema_op_msg.stage() ==
                        ::txlog::SchemaOpMessage::Stage::
                            SchemaOpMessage_Stage_CommitSchema);
                 index_op_->commit_log_op_.hd_result_.SetFinished();
