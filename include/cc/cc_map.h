@@ -44,7 +44,6 @@ struct FaultInjectCC;
 struct CleanCcEntryForTestCc;
 struct FillStoreSliceCc;
 struct InitKeyCacheCc;
-struct GetPostCkptSlice;
 struct KickoutCcEntryCc;
 struct ApplyCc;
 struct UploadTxCommandsCc;
@@ -164,7 +163,6 @@ public:
     virtual bool Execute(CleanCcEntryForTestCc &req) = 0;
     virtual bool Execute(FillStoreSliceCc &req) = 0;
     virtual bool Execute(InitKeyCacheCc &req) = 0;
-    virtual bool Execute(GetPostCkptSlice &req) = 0;
     virtual bool Execute(KickoutCcEntryCc &req) = 0;
     virtual bool Execute(UploadBatchCc &req) = 0;
     virtual bool Execute(ApplyCc &req) = 0;

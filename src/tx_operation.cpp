@@ -4565,21 +4565,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                 slice_size > StoreSlice::slice_upper_bound)
                             {
                                 update_cnt++;
-                                local_cc_shards.EnqueueUpdateSliceTask(
-                                    ckpt_ts,
-                                    node_group,
-                                    tx_term,
-                                    table_name,
-                                    table_schema,
-                                    store_range_,
-                                    curr_slice,
-                                    slice_start_idx,
-                                    slice_end_idx,
-                                    *data_sync_vec,
-                                    mux,
-                                    cv,
-                                    finish_cnt,
-                                    update_fail);
                             }
 
                             batch_it = slice_end_it;

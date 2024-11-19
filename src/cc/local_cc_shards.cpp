@@ -91,14 +91,12 @@ LocalCcShards::LocalCcShards(
 #else
       data_sync_worker_ctx_(conf.at("core_num")),
 #endif
-      slice_update_worker_ctx_(conf.at("core_num")),
       flush_data_worker_ctx_(
           conf.at("core_num") >= 2
               ? std::min(conf.at("core_num") / 2, (uint32_t) 10)
               : 1),
 #else
       data_sync_worker_ctx_(conf.at("core_num")),
-      slice_update_worker_ctx_(conf.at("core_num") * 2),
       flush_data_worker_ctx_(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
@@ -199,13 +197,6 @@ void LocalCcShards::StartBackgroudWorkers()
     }
 
 #ifdef RANGE_PARTITION_ENABLED
-    // Starts slice update worker threads.
-    for (int id = 0; id < slice_update_worker_ctx_.worker_num_; id++)
-    {
-        slice_update_worker_ctx_.worker_thd_.push_back(
-            std::thread([this] { UpdateSliceSpecWorker(); }));
-    }
-
     LOG(INFO) << "Range Split Worker Num: "
               << range_split_worker_ctx_.worker_num_;
     for (int id = 0; id < range_split_worker_ctx_.worker_num_; id++)
@@ -2547,9 +2538,6 @@ void LocalCcShards::Terminate()
     flush_data_worker_ctx_.Terminate();
 
 #ifdef RANGE_PARTITION_ENABLED
-    // Terminate the slice update worker thds.
-    slice_update_worker_ctx_.Terminate();
-
     range_split_worker_ctx_.Terminate();
 #endif
 
@@ -3053,6 +3041,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     data_sync_vecs.back().reserve(DATA_SYNC_SCAN_BATCH_SIZE);
 
     // Scan the FlushRecords.
+    // Paused position
+    UpdateSliceStatus update_slice_status;
+
     bool scan_data_drained = false;
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
     // same Key can be generated. Our subsequent algorithms are based on this
@@ -3183,7 +3174,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 data_sync_vec.erase(iter, data_sync_vec.end());
             }
 
-            // TODO(ysw): Updata slices for this batch records.
+            // Updata slices for this batch records.
+            UpdateSlices(table_name,
+                         table_schema.get(),
+                         store_range,
+                         scan_data_drained,
+                         data_sync_vec,
+                         slices_delta_size,
+                         update_slice_status);
 
             // Remove the keys that no need to be flush. This is the case that
             // the slice need to split, and we just use those keys to calculate
@@ -4016,6 +4014,7 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
     task_limiters_.erase(iter);
 }
 
+#ifdef RANGE_PARTITION_ENABLED
 bool LocalCcShards::CalculateRangeUpdate(
     const TableName &table_name,
     NodeGroupId node_group_id,
@@ -4047,7 +4046,234 @@ bool LocalCcShards::CalculateRangeUpdate(
     return true;
 }
 
-#ifdef RANGE_PARTITION_ENABLED
+void LocalCcShards::UpdateSlices(
+    const TableName &table_name,
+    const TableSchema *schema,
+    StoreRange *store_range,
+    bool all_data_exported,
+    const std::vector<FlushRecord> &data_sync_vec,
+    const std::map<TxKey, int64_t> &slices_delta_size,
+    UpdateSliceStatus &status)
+{
+    auto lower_bound_cmp = [](const FlushRecord &rec, const TxKey &key)
+    { return rec.Key() < key; };
+
+    TxKey range_end_tx_key = store_range->RangeEndTxKey();
+
+    auto flush_record_it = data_sync_vec.begin();
+    while (flush_record_it != data_sync_vec.end())
+    {
+        TxKey search_key = flush_record_it->Key();
+        StoreSlice *curr_slice = store_range->FindSlice(search_key);
+        TxKey slice_start_key = curr_slice->StartTxKey();
+        TxKey slice_end_key = curr_slice->EndTxKey();
+
+        if (status.paused_slice_ &&
+            (status.paused_slice_->StartTxKey().KeyPtr() !=
+             slice_start_key.KeyPtr()))
+        {
+            if (table_name.IsBase() && status.paused_slice_rec_cnt_ != 0)
+            {
+                // Set estimate record size for base table
+                uint64_t post_ckpt_size = status.paused_slice_->PostCkptSize();
+                auto stats_obj = schema->StatisticsObject();
+                if (stats_obj)
+                {
+                    stats_obj->SetEstimateRecordSize(
+                        post_ckpt_size / status.paused_slice_rec_cnt_);
+                }
+            }
+
+            // The paused slice in the last round has already finished. Just
+            // update the slice.
+            if (status.paused_split_keys.size() > 1)
+            {
+                // Update the current slice
+                store_range->UpdateSliceSpec(status.paused_slice_,
+                                             status.paused_split_keys);
+            }
+            status.Reset();
+        }
+        else if (status.paused_slice_)
+        {
+            assert(status.paused_slice_ == curr_slice);
+        }
+
+        auto slice_end_it = slice_end_key.KeyPtr() == range_end_tx_key.KeyPtr()
+                                ? data_sync_vec.end()
+                                : std::lower_bound(flush_record_it,
+                                                   data_sync_vec.end(),
+                                                   slice_end_key,
+                                                   lower_bound_cmp);
+
+        // Whether all items of the current slice are exported. If the current
+        // slice need to be split, only in case that this variable is true, can
+        // update the slice spec.
+        bool all_slice_item_exported =
+            (slice_end_it != data_sync_vec.end() || all_data_exported) ? true
+                                                                       : false;
+
+        auto slice_delta_size_it = slices_delta_size.find(slice_start_key);
+        if (slice_delta_size_it == slices_delta_size.end())
+        {
+            // There is no unpersisted data in the current slice, so no need to
+            // split the slice. Only to migrate this data from the old range to
+            // the new range.
+            assert(!status.paused_slice_);
+            // Move to the next slice
+            flush_record_it = slice_end_it;
+            continue;
+        }
+
+        assert(slice_delta_size_it->first.KeyPtr() == slice_start_key.KeyPtr());
+
+        int64_t slice_post_ckpt_size =
+            curr_slice->Size() + slice_delta_size_it->second;
+        uint64_t slice_size =
+            slice_post_ckpt_size > 0 ? slice_post_ckpt_size : 0;
+        curr_slice->SetPostCkptSize(slice_size);
+
+        if (slice_size <= StoreSlice::slice_upper_bound)
+        {
+            // The current slice does not need to be split.
+            // Move to the next slice
+            assert(!status.paused_slice_);
+            flush_record_it = slice_end_it;
+            continue;
+        }
+
+        // Calculate subslice keys based on the data in the vector of
+        // FlushRecord
+        uint32_t subslice_cnt = slice_size / StoreSlice::slice_upper_bound;
+        subslice_cnt = subslice_cnt < 2 ? 2 : subslice_cnt;
+        uint32_t avg_subslice_size = slice_size / subslice_cnt;
+
+        uint32_t subslice_size = curr_slice->Size() / subslice_cnt;
+        size_t record_cnt = status.paused_slice_rec_cnt_;
+        uint32_t subslice_post_ckpt_size = 0;
+        std::vector<SliceChangeInfo> slice_split_keys =
+            std::move(status.paused_split_keys);
+        if (status.paused_slice_)
+        {
+            assert(!slice_split_keys.empty());
+            uint32_t paused_subslice_post_ckpt_size =
+                slice_split_keys.back().post_update_size_;
+            subslice_post_ckpt_size =
+                paused_subslice_post_ckpt_size < avg_subslice_size
+                    ? paused_subslice_post_ckpt_size
+                    : 0;
+        }
+        else
+        {
+            // Process the current slice for the first time.
+            slice_split_keys.reserve(subslice_cnt);
+        }
+
+        auto update_new_subslices = [curr_slice,
+                                     &search_key,
+                                     &subslice_size,
+                                     &avg_subslice_size,
+                                     &subslice_post_ckpt_size,
+                                     &all_slice_item_exported,
+                                     &slice_split_keys]()
+        {
+            if (slice_split_keys.empty())
+            {
+                // The first sub-slice's start key re-uses the old slice's
+                // start key, so there is no need to allocate a new key.
+                slice_split_keys.emplace_back(curr_slice->StartTxKey(),
+                                              subslice_size,
+                                              subslice_post_ckpt_size);
+            }
+            else if (slice_split_keys.back().post_update_size_ <
+                     avg_subslice_size)
+            {
+                assert(slice_split_keys.back().cur_size_ == subslice_size);
+                // Update the subslice info that was unfinished last round.
+                slice_split_keys.back().post_update_size_ =
+                    subslice_post_ckpt_size;
+            }
+            else
+            {
+                // Clone the key if not all the data of this slice have been
+                // exported.
+                TxKey slice_start_key = all_slice_item_exported
+                                            ? std::move(search_key)
+                                            : search_key.Clone();
+
+                slice_split_keys.emplace_back(std::move(slice_start_key),
+                                              subslice_size,
+                                              subslice_post_ckpt_size);
+            }
+        };
+
+        while (flush_record_it != slice_end_it)
+        {
+            // TODO(ysw): use flush_record_it->post_flush_size_ instead of the
+            // .Key().Size() + .PayloadSize()
+            int32_t ckpt_size =
+                flush_record_it->payload_status_ != RecordStatus::Deleted
+                    ? (flush_record_it->Key().Size() +
+                       flush_record_it->PayloadSize())
+                    : 0;
+            subslice_post_ckpt_size += ckpt_size;
+
+            record_cnt = (ckpt_size != 0) ? (record_cnt + 1) : record_cnt;
+
+            if (subslice_post_ckpt_size >= avg_subslice_size)
+            {
+                update_new_subslices();
+
+                subslice_post_ckpt_size = 0;
+                search_key = std::next(flush_record_it) != slice_end_it
+                                 ? std::next(flush_record_it)->Key()
+                                 : TxKey();
+            }
+
+            // Forward to the next iterator
+            ++flush_record_it;
+        }
+
+        if (subslice_post_ckpt_size > 0)
+        {
+            update_new_subslices();
+        }
+
+        if (all_slice_item_exported)
+        {
+            if (table_name.IsBase() && record_cnt != 0)
+            {
+                // Set estimate record size for base table
+                auto stats_obj = schema->StatisticsObject();
+                if (stats_obj)
+                {
+                    stats_obj->SetEstimateRecordSize(slice_size / record_cnt);
+                }
+            }
+
+            // Update the current slice spec if all the slice data have been
+            // exported.
+            if (slice_split_keys.size() > 1)
+            {
+                // Split StoreSlice in memory. Slice info in KV store will be
+                // updated after checkpoint.
+                store_range->UpdateSliceSpec(curr_slice, slice_split_keys);
+            }
+
+            if (status.paused_slice_)
+            {
+                status.Reset();
+            }
+        }
+        else
+        {
+            assert(flush_record_it == data_sync_vec.end());
+            status.SetPausedPos(
+                curr_slice, record_cnt, std::move(slice_split_keys));
+        }
+    }
+}
+
 void LocalCcShards::SplitFlushRange(
     std::unique_lock<std::mutex> &task_worker_lk)
 {
@@ -4607,67 +4833,6 @@ void LocalCcShards::RangeSplitWorker()
     }
 }
 #endif
-
-void LocalCcShards::UpdateSliceSpecWorker()
-{
-    std::unique_lock<std::mutex> worker_lk(slice_update_worker_ctx_.mux_);
-    while (slice_update_worker_ctx_.status_ == WorkerStatus::Active)
-    {
-        slice_update_worker_ctx_.cv_.wait(
-            worker_lk,
-            [this]
-            {
-                return !pending_slice_work_.empty() ||
-                       slice_update_worker_ctx_.status_ ==
-                           WorkerStatus::Terminated;
-            });
-
-        if (pending_slice_work_.empty())
-        {
-            continue;
-        }
-
-        UpdateSliceSpecWork &cur_work = pending_slice_work_.back();
-
-        uint64_t data_sync_ts = cur_work.data_sync_ts_;
-        uint32_t node_group_id = cur_work.node_group_id_;
-        int64_t node_group_term = cur_work.node_group_term_;
-        TableName table_name = cur_work.table_name_;
-        const TableSchema *schema = cur_work.table_schema_;
-        StoreRange *range = cur_work.range_;
-        StoreSlice *slice = cur_work.slice_;
-        size_t start_idx = cur_work.start_idx_;
-        size_t end_idx = cur_work.end_idx_;
-        const std::vector<FlushRecord> &flush_vec = cur_work.flush_vec_;
-        std::mutex &sender_mux = cur_work.sender_mux_;
-        std::condition_variable &sender_cv = cur_work.sender_cv_;
-        size_t &finish_work_cnt = cur_work.finish_work_cnt_;
-        bool &fail = cur_work.fail_;
-
-        pending_slice_work_.pop_back();
-        worker_lk.unlock();
-
-        bool res = range->UpdateSliceSpec(slice,
-                                          table_name,
-                                          schema,
-                                          node_group_id,
-                                          node_group_term,
-                                          data_sync_ts,
-                                          flush_vec,
-                                          start_idx,
-                                          end_idx);
-        {
-            std::unique_lock<std::mutex> lk(sender_mux);
-            finish_work_cnt++;
-            if (!res)
-            {
-                fail = true;
-            }
-            sender_cv.notify_one();
-        }
-        worker_lk.lock();
-    }
-}
 
 bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
                                      uint64_t ckpt_ts,

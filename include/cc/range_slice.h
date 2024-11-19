@@ -605,15 +605,6 @@ public:
                                   uint64_t range_version,
                                   store::DataStoreHandler *store_hd);
 
-    bool UpdateSliceSpec(StoreSlice *slice,
-                         const TableName &table_name,
-                         const TableSchema *schema,
-                         NodeGroupId ng_id,
-                         int64_t ng_term,
-                         uint64_t flush_ts,
-                         const std::vector<FlushRecord> &flush_vec,
-                         size_t start_idx,
-                         size_t end_idx);
     bool SampleSubRangeKeys(StoreSlice *slice,
                             const TableName &table_name,
                             NodeGroupId ng_id,
@@ -622,10 +613,14 @@ public:
                             size_t key_cnt,
                             size_t first_idx,
                             std::vector<TxKey> &new_range_keys);
+
     void UpdateSliceSpec(StoreSlice *slice,
                          const std::vector<TxKey> &new_range_keys,
                          size_t first_idx,
                          size_t subslice_cnt);
+
+    void UpdateSliceSpec(StoreSlice *slice,
+                         std::vector<SliceChangeInfo> &split_keys);
 
     /**
      * This function is NOT THREAD SAFE. Only checkpointer should be calling

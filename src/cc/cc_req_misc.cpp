@@ -710,46 +710,6 @@ void FillStoreSliceCc::TerminateFilling()
     range_slice_.SetLoadingError(range_, CcErrorCode::DATA_STORE_ERR);
 }
 
-GetPostCkptSlice::GetPostCkptSlice(
-    const TableName &table_name,
-    NodeGroupId ng_id,
-    StoreSlice *slice,
-    StoreRange *range,
-    std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vec,
-    size_t core_cnt,
-    uint64_t ckpt_ts)
-    : table_name_(table_name),
-      cc_ng_id_(ng_id),
-      slice_(slice),
-      range_(range),
-      ckpt_ts_(ckpt_ts),
-      ckpt_cce_raw_ptr_vecs_(ckpt_cce_raw_ptr_vec)
-{
-    unfinished_cnt_ = core_cnt;
-    for (size_t i = 0; i < core_cnt; ++i)
-    {
-        item_vec_size_.emplace_back(0);
-        slice_first_idxs_.emplace_back(0);
-        slice_items_.emplace_back();
-        slice_items_.back().resize(ScanBatchSize);
-        pause_keys_.emplace_back(TxKey(), false);
-    }
-}
-
-bool GetPostCkptSlice::Execute(CcShard &ccs)
-{
-    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-    if (cc_ng_term < 0)
-    {
-        SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        return false;
-    }
-
-    CcMap *ccm = ccs.GetCcm(table_name_, cc_ng_id_);
-    assert(ccm != nullptr);
-    return ccm->Execute(*this);
-}
-
 FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              const TableSchema *tbl_schema,
                              TxKey tx_key,

@@ -998,39 +998,6 @@ public:
         return store_range->AddKey(key, core_id);
     }
 
-    void EnqueueUpdateSliceTask(uint64_t ts,
-                                uint32_t ng_id,
-                                int64_t ng_term,
-                                TableName table_name,
-                                const TableSchema *schema,
-                                StoreRange *range,
-                                StoreSlice *slice,
-                                size_t start_idx,
-                                size_t end_idx,
-                                const std::vector<FlushRecord> &flush_vec,
-                                std::mutex &mux,
-                                std::condition_variable &cv,
-                                size_t &finish_cnt,
-                                bool &fail)
-    {
-        std::unique_lock<std::mutex> worker_lk(slice_update_worker_ctx_.mux_);
-        pending_slice_work_.emplace_back(ng_id,
-                                         ng_term,
-                                         ts,
-                                         table_name,
-                                         schema,
-                                         flush_vec,
-                                         range,
-                                         slice,
-                                         start_idx,
-                                         end_idx,
-                                         mux,
-                                         cv,
-                                         finish_cnt,
-                                         fail);
-        slice_update_worker_ctx_.cv_.notify_one();
-    }
-
     template <typename KeyT>
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                NodeGroupId cc_ng_id,
@@ -1931,6 +1898,29 @@ private:
     WorkerThreadContext range_split_worker_ctx_;
     std::deque<std::unique_ptr<RangeSplitTask>> pending_range_split_task_;
     void RangeSplitWorker();
+
+    struct UpdateSliceStatus
+    {
+        void Reset()
+        {
+            paused_slice_ = nullptr;
+            paused_slice_rec_cnt_ = 0;
+            paused_split_keys.clear();
+        }
+
+        void SetPausedPos(StoreSlice *slice,
+                          size_t record_cnt,
+                          std::vector<SliceChangeInfo> &&split_keys)
+        {
+            paused_slice_ = slice;
+            paused_slice_rec_cnt_ = record_cnt;
+            paused_split_keys = std::move(split_keys);
+        }
+
+        StoreSlice *paused_slice_{nullptr};
+        size_t paused_slice_rec_cnt_{0};
+        std::vector<SliceChangeInfo> paused_split_keys;
+    };
 #endif
 
     /**
@@ -2063,6 +2053,7 @@ private:
     void DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                   size_t worker_idx);
 
+#ifdef RANGE_PARTITION_ENABLED
     /**
      * Range & Slice Update Interface
      */
@@ -2078,6 +2069,27 @@ private:
                               StoreRange *store_range,
                               const std::map<TxKey, int64_t> &slices_delta_size,
                               std::vector<TxKey> &splitting_info);
+
+    /**
+     * @brief Decide if the slice needs to be updated(merge/split). Update slice
+     * info accordingly if all the data of this slice are scanned, but does not
+     * update the actual slice size since the data is not flushed yet.
+     *
+     * @param all_data_exported - True if the scan finished for a DataSync task.
+     * @param data_sync_vec - The vector of current batch data sync data.
+     * @param slices_delta_size - Delta size of all slices that contained the
+     * unpersisted data. Used to decide whether a slice need to be split.
+     * @param status - Only to update a slice spec in case that all data of the
+     * slice are exported in the @@data_sync_vec. Otherwise, store the status of
+     * this slice, and continue to process it in the next batch data.
+     */
+    void UpdateSlices(const TableName &table_name,
+                      const TableSchema *schema,
+                      StoreRange *store_range,
+                      bool all_data_exported,
+                      const std::vector<FlushRecord> &data_sync_vec,
+                      const std::map<TxKey, int64_t> &slices_delta_size,
+                      UpdateSliceStatus &status);
     /**
      * @brief Worker thread that split the target range and flush the data into
      * data store in their new partitions. This is called during checkpoint on a
@@ -2085,67 +2097,6 @@ private:
      * are flushed too.
      */
     void SplitFlushRange(std::unique_lock<std::mutex> &task_worker_lk);
-
-    struct UpdateSliceSpecWork
-    {
-    public:
-        UpdateSliceSpecWork(uint32_t node_group_id,
-                            int64_t node_group_term,
-                            uint64_t data_sync_ts,
-                            const TableName &table_name,
-                            const TableSchema *schema,
-                            const std::vector<FlushRecord> &flush_vec,
-                            StoreRange *range,
-                            StoreSlice *slice,
-                            size_t start_idx,
-                            size_t end_idx,
-                            std::mutex &sender_mux,
-                            std::condition_variable &sender_cv,
-                            size_t &finish_work_cnt,
-                            bool &fail)
-            : node_group_id_(node_group_id),
-              node_group_term_(node_group_term),
-              data_sync_ts_(data_sync_ts),
-              table_name_(table_name),
-              table_schema_(schema),
-              flush_vec_(flush_vec),
-              range_(range),
-              slice_(slice),
-              start_idx_(start_idx),
-              end_idx_(end_idx),
-              sender_mux_(sender_mux),
-              sender_cv_(sender_cv),
-              finish_work_cnt_(finish_work_cnt),
-              fail_(fail)
-        {
-        }
-
-        uint32_t node_group_id_;
-        int64_t node_group_term_;
-        uint64_t data_sync_ts_;
-        TableName table_name_;
-        const TableSchema *table_schema_;
-        const std::vector<FlushRecord> &flush_vec_;
-        StoreRange *range_;
-        StoreSlice *slice_;
-        size_t start_idx_;
-        size_t end_idx_;
-
-        std::mutex &sender_mux_;
-        std::condition_variable &sender_cv_;
-        // Increased by worker after finishing the retrieved work.
-        size_t &finish_work_cnt_;
-        // Set by worker to indicate work result
-        bool &fail_;
-    };
-    // Workers for updating slice specs. Since update slice
-    // spec would cause potential data store read, we launched
-    // workers so we can have some degree of parallelism, but
-    // not to the degree where it slows down regular read from data store.
-    WorkerThreadContext slice_update_worker_ctx_;
-    std::vector<UpdateSliceSpecWork> pending_slice_work_;
-
-    void UpdateSliceSpecWorker();
 
     /**
      * @brief Called after data sync is done. Update data store slice size
@@ -2158,6 +2109,7 @@ private:
                           std::vector<FlushRecord> &flush_batch,
                           bool flush_res,
                           bool during_range_split);
+#endif
 
     /**
      * FlushData Operation Interface
