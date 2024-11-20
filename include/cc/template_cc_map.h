@@ -8028,7 +8028,7 @@ public:
             // Get the target keys
             const std::vector<KeyT> &sample_keys =
                 key_sample_pool->SampleKeys();
-            assert(sample_keys.size() == SampleSubRangeKeysCc::SamplePoolSize);
+            assert(sample_keys.size() <= SampleSubRangeKeysCc::SamplePoolSize);
             std::vector<TxKey> &target_txkeys = req.TargetTxKeys();
             size_t target_cnt = target_txkeys.size();
             size_t step_size = sample_keys.size() / (target_cnt + 1);

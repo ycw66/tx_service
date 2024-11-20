@@ -1747,13 +1747,17 @@ private:
 #endif
     );
 
-#ifndef RANGE_PARTITION_ENABLED
     void PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
+#ifndef RANGE_PARTITION_ENABLED
                                  const TableSchema *table_schema,
-                                 TransactionExecution *data_sync_txm,
-                                 DataSyncTask::CkptErrorCode ckpt_err,
-                                 size_t worker_idx);
 #endif
+                                 TransactionExecution *data_sync_txm,
+                                 DataSyncTask::CkptErrorCode ckpt_err
+#ifndef RANGE_PARTITION_ENABLED
+                                 ,
+                                 uint16_t worker_idx
+#endif
+    );
 
     const uint32_t node_id_;
     // Native node group
@@ -2106,7 +2110,7 @@ private:
     bool UpdateStoreSlice(const TableName &tbl_name,
                           uint64_t ckpt_ts,
                           NodeGroupId node_group_id,
-                          std::vector<FlushRecord> &flush_batch,
+                          uint32_t range_id,
                           bool flush_res,
                           bool during_range_split);
 #endif
@@ -2122,11 +2126,8 @@ private:
                       std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
                       std::unique_ptr<std::vector<FlushRecord>> archive_vec,
                       std::unique_ptr<std::vector<TxKey>> mv_base_vec,
-#ifdef ON_KEY_OBJECT
                       uint64_t vec_mem_usage,
-#endif
                       TransactionExecution *data_sync_txm,
-                      bool during_range_split,
                       size_t scan_task_worker_idx)
             : node_group_id_(data_sync_task->node_group_id_),
               node_group_term_(data_sync_task->node_group_term_),
@@ -2137,11 +2138,8 @@ private:
               data_sync_vec_(std::move(data_sync_vec)),
               archive_vec_(std::move(archive_vec)),
               mv_base_vec_(std::move(mv_base_vec)),
-#ifdef ON_KEY_OBJECT
               vec_mem_usage_(vec_mem_usage),
-#endif
               vec_owner_(true),
-              during_range_split(during_range_split),
               scan_task_worker_idx_(scan_task_worker_idx),
               data_sync_task_(data_sync_task),
               data_sync_txm_(data_sync_txm),
@@ -2168,7 +2166,6 @@ private:
               archive_vec_ptr_(archive_vec),
               mv_base_vec_ptr_(mv_base_vec),
               vec_owner_(false),
-              during_range_split(during_range_split),
               hand_res_(res)
         {
         }
@@ -2182,14 +2179,11 @@ private:
         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
         std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
-#ifdef ON_KEY_OBJECT
         uint64_t vec_mem_usage_{0};
-#endif
         std::vector<FlushRecord> *data_sync_vec_ptr_{nullptr};
         std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
         std::vector<TxKey> *mv_base_vec_ptr_{nullptr};
         bool vec_owner_{true};
-        bool during_range_split{false};
         size_t scan_task_worker_idx_{0};
 
         // Increased by worker after finishing the retrieved work.

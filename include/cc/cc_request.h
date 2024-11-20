@@ -5327,18 +5327,14 @@ struct ReleaseDataSyncScanHeapCc : public CcRequestBase
 public:
     static constexpr size_t VEC_ERASE_BATCH_SIZE = 1000;
 
-    ReleaseDataSyncScanHeapCc(size_t core_cnt,
-                              std::vector<FlushRecord> *data_sync_vec,
+    ReleaseDataSyncScanHeapCc(std::vector<FlushRecord> *data_sync_vec,
                               std::vector<FlushRecord> *archive_vec)
-        : pending_shard_(core_cnt),
-          data_sync_vec_(data_sync_vec),
-          archive_vec_(archive_vec)
+        : data_sync_vec_(data_sync_vec), archive_vec_(archive_vec)
     {
-#ifdef RANGE_PARTITION_ENABLED
-        data_sync_paused_pos_.resize(pending_shard_, 0);
-        archive_paused_pos_.resize(pending_shard_, 0);
-#endif
     }
+
+    ReleaseDataSyncScanHeapCc(const ReleaseDataSyncScanHeapCc &) = delete;
+    ReleaseDataSyncScanHeapCc(ReleaseDataSyncScanHeapCc &&) = delete;
 
     bool Execute(CcShard &ccs) override
     {
@@ -5346,53 +5342,6 @@ public:
         // memory freed can be directly refelct to the mi stats allocated and
         // committed, otherwise the the stats updates will delayed to next
         // allocation
-#ifdef RANGE_PARTITION_ENABLED
-        size_t count = 0;
-        auto &data_sync_paused_pos = data_sync_paused_pos_[ccs.core_id_];
-        while (data_sync_vec_ != nullptr &&
-               data_sync_paused_pos < data_sync_vec_->size() &&
-               count < VEC_ERASE_BATCH_SIZE)
-        {
-            auto &ref = data_sync_vec_->at(data_sync_paused_pos);
-            if (((ref.Key().Hash() & 0x3FF) % ccs.core_cnt_) == ccs.core_id_)
-            {
-#ifndef ONE_KEY_OBJECT
-                ref.ReleasePayload();
-#endif
-            }
-            ++data_sync_paused_pos;
-            ++count;
-        }
-        if (data_sync_vec_ != nullptr &&
-            data_sync_paused_pos < data_sync_vec_->size())
-        {
-            ccs.Enqueue(this);
-            return false;
-        }
-
-        count = 0;
-        auto &archive_paused_pos = archive_paused_pos_[ccs.core_id_];
-        while (archive_vec_ != nullptr &&
-               archive_paused_pos < archive_vec_->size() &&
-               count < VEC_ERASE_BATCH_SIZE)
-        {
-            auto &ref = archive_vec_->at(archive_paused_pos);
-            if (((ref.Key().Hash() & 0x3FF) % ccs.core_cnt_) == ccs.core_id_)
-            {
-#ifndef ONE_KEY_OBJECT
-                ref.ReleasePayload();
-#endif
-            }
-            ++archive_paused_pos;
-            ++count;
-        }
-        if (archive_vec_ != nullptr &&
-            archive_paused_pos < archive_vec_->size())
-        {
-            ccs.Enqueue(this);
-            return false;
-        }
-#else
         if (data_sync_vec_ != nullptr)
         {
             // to avoid large jitter when releasing big memory chunck,
@@ -5405,7 +5354,6 @@ public:
                 size_t cnt = 0;
                 while (cnt < VEC_ERASE_BATCH_SIZE && data_sync_vec_->size() > 0)
                 {
-                    FlushRecord rec = std::move(data_sync_vec_->back());
                     data_sync_vec_->pop_back();
                     cnt++;
                 }
@@ -5439,7 +5387,6 @@ public:
                 size_t cnt = 0;
                 while (cnt < VEC_ERASE_BATCH_SIZE && archive_vec_->size() > 0)
                 {
-                    FlushRecord rec = std::move(archive_vec_->back());
                     archive_vec_->pop_back();
                     cnt++;
                 }
@@ -5463,18 +5410,11 @@ public:
                 }
             }
         }
-#endif
 
         {
             std::lock_guard<std::mutex> lk(mux_);
-            if (--pending_shard_ == 0)
-            {
-                cv_.notify_one();
-                // Reset waiting ckpt flag. Shards should be
-                // able to request ckpt again if no cc entries
-                // can be kicked out.
-                ccs.SetWaitingCkpt(false);
-            }
+            is_finished_ = true;
+            cv_.notify_one();
         }
 
         return false;
@@ -5483,18 +5423,14 @@ public:
     void Wait()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return pending_shard_ == 0; });
+        cv_.wait(lk, [this] { return is_finished_ == true; });
     }
 
     std::mutex mux_;
     std::condition_variable cv_;
-    size_t pending_shard_;
+    bool is_finished_{false};
     std::vector<FlushRecord> *const data_sync_vec_{nullptr};
     std::vector<FlushRecord> *const archive_vec_{nullptr};
-#ifdef RANGE_PARTITION_ENABLED
-    std::vector<size_t> data_sync_paused_pos_;
-    std::vector<size_t> archive_paused_pos_;
-#endif
 };
 
 struct PostFlushDataCc : public CcRequestBase

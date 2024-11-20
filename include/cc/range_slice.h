@@ -385,7 +385,7 @@ public:
     bool ChangeAllowed()
     {
         std::unique_lock<std::mutex> lk(slice_mux_);
-        return pins_ == 1;
+        return pins_ == 0;
     }
 
     size_t MemUsage() const
@@ -1432,7 +1432,7 @@ public:
                    slice_idx < slices_.size();
                  ++slice_idx)
             {
-                StoreSlice *curr_slice = slices_[slice_idx].get();
+                curr_slice = slices_[slice_idx].get();
                 if (curr_slice->PostCkptSize() != UINT64_MAX)
                 {
                     if (curr_slice->PostCkptSize() > avg_subrange_size)
@@ -1461,6 +1461,7 @@ public:
                 // obtained by sampling.
                 size_t subranges_cnt =
                     std::ceil(curr_slice->PostCkptSize() / avg_subrange_size);
+                subrange_cnt = (subrange_cnt < 2) ? 2 : subrange_cnt;
                 if (subrange_slice_idx != 0)
                 {
                     // Skip the first subrange.
@@ -1494,6 +1495,9 @@ public:
                     curr_slice, new_range_keys, subrange_key_cnt, subrange_cnt);
 
                 subrange_key_cnt += (subrange_cnt - 1);
+
+                // Update the slice index:
+                slice_idx += subrange_cnt;
             }
             // Skip the first subrange since it will reuse the current range
             // entry.

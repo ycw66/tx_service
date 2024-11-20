@@ -47,9 +47,7 @@ public:
                  uint32_t ng_id,
                  int64_t ng_term,
                  uint64_t data_sync_ts,
-#ifndef RANGE_PARTITION_ENABLED
                  uint64_t flush_data_mem_quote,
-#endif
                  std::shared_ptr<DataSyncStatus> status,
                  bool is_dirty,
                  bool need_adjust_ts,
@@ -66,10 +64,10 @@ public:
           range_version_(range_version),
           node_group_id_(ng_id),
           node_group_term_(ng_term),
-          data_sync_ts_(data_sync_ts)
+          data_sync_ts_(data_sync_ts),
+          flush_data_mem_quote_(flush_data_mem_quote)
 #ifndef RANGE_PARTITION_ENABLED
           ,
-          flush_data_mem_quote_(flush_data_mem_quote),
           filter_lambda_(filter_lambda),
           forward_cache_(forward_cache),
           is_standby_node_ckpt_(is_standby_node_ckpt)
@@ -102,7 +100,6 @@ public:
         sync_ts_adjustable_ = false;
     }
 
-#ifdef ON_KEY_OBJECT
     // Function to allocate memory quote
     uint64_t AllocateFlushDataMemQuote(uint64_t quote)
     {
@@ -166,11 +163,10 @@ public:
         return old_usage;
     }
 
-    uint64_t FlushMemQuote()
+    uint64_t FlushMemQuote() const
     {
         return flush_data_mem_quote_;
     }
-#endif
 
     const TableName table_name_;
     int32_t range_id_;
@@ -179,7 +175,6 @@ public:
     int64_t node_group_term_{-1};
     uint64_t data_sync_ts_{0};
 
-#ifndef RANGE_PARTITION_ENABLED
     enum class CkptErrorCode
     {
         NO_ERROR = 0,
@@ -199,11 +194,12 @@ public:
     bthread::ConditionVariable mem_cv_;
     // Memory usage tracking
     uint64_t flush_data_mem_usage_{0};
-    uint64_t flush_data_mem_quote_{0};
+    const uint64_t flush_data_mem_quote_{0};
 
     // Flush data task cnt + 1 (Data sync task)
     int64_t flight_task_cnt_{0};
     CkptErrorCode ckpt_err_{CkptErrorCode::NO_ERROR};
+#ifndef RANGE_PARTITION_ENABLED
     std::function<bool(size_t)> filter_lambda_;
     bool forward_cache_{false};
     bool is_standby_node_ckpt_{false};

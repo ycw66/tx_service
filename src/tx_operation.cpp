@@ -5375,7 +5375,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     }
 
                     ReleaseDataSyncScanHeapCc release_scan_heap_cc(
-                        local_shards->Count(), data_sync_vec, nullptr);
+                        data_sync_vec, nullptr);
                     for (size_t core_idx = 0; core_idx < local_shards->Count();
                          ++core_idx)
                     {
