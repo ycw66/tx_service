@@ -153,7 +153,6 @@ int Sharder::Init(
 
         standby_node_term_cache_.store(-1, std::memory_order_relaxed);
         candidate_standby_node_term_cache_.store(-1, std::memory_order_relaxed);
-        node_tx_cache_restored_.store(false, std::memory_order_relaxed);
 
         if (ng_configs != nullptr)
         {
@@ -638,19 +637,6 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
     find_it->second->FinishLogGroupReplay(
         log_group_id, cc_ng_term, latest_txn_no, last_ckpt_ts);
     local_shards_->UpdateTsBase(last_ckpt_ts);
-}
-
-void Sharder::FinishRestoreTxCache(uint32_t cc_ng_id, int64_t cc_ng_term)
-{
-    std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
-
-    auto find_it = cluster_config_.cc_nodes_.find(cc_ng_id);
-    if (find_it == cluster_config_.cc_nodes_.end())
-    {
-        return;
-    }
-
-    find_it->second->FinishRestoreTxCache(cc_ng_id, cc_ng_term);
 }
 
 bool Sharder::CheckLogGroupReplayFinished(uint32_t cc_ng_id,

@@ -285,9 +285,7 @@ public:
                 // if ccm contains all the ccentries, then unknown status means
                 // that we can skip accessing kv store and return deleted status
                 // directly.
-                if (ccm_has_full_entries_ || txservice_skip_kv ||
-                    (!txservice_enable_cache_replacement &&
-                     Sharder::Instance().IsTxCacheRestored()))
+                if (ccm_has_full_entries_ || txservice_skip_kv)
                 {
                     cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
                     cce->SetCkptTs(1U);
@@ -1508,9 +1506,7 @@ public:
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
                 if (!has_overwrite && obj_version != 1 &&
-                    !ccm_has_full_entries_ &&
-                    (txservice_enable_cache_replacement ||
-                     !Sharder::Instance().IsTxCacheRestored()))
+                    !ccm_has_full_entries_)
                 {
                     if (Sharder::Instance().StandbyNodeTerm() > 0)
                     {
@@ -1694,8 +1690,9 @@ public:
 
             if (!success)
             {
-                if (!req.cancel_data_loading_on_error_->load(
-                        std::memory_order_relaxed))
+                // This check makes sure only one line of log printed
+                if (req.cancel_data_loading_on_error_->load(
+                        std::memory_order_relaxed) == CcErrorCode::NO_ERROR)
                 {
                     int64_t alloc, commit;
                     CcShardHeap *shard_heap = shard_->GetShardHeap();

@@ -43,8 +43,6 @@ public:
                               uint32_t latest_committed_txn_no,
                               uint64_t last_ckpt_ts);
 
-    void FinishRestoreTxCache(uint32_t cc_ng_id, int64_t cc_ng_term);
-
     /**
      * Pin data of this node group if this ccnode is group leader.
      * Must be called in pair with UnpinData().

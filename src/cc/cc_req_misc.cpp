@@ -1,5 +1,6 @@
 #include "cc/cc_req_misc.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <mutex>
@@ -966,11 +967,12 @@ RestoreCcMapCc::RestoreCcMapCc()
 {
 }
 
-void RestoreCcMapCc::Reset(const TableName *table_name,
-                           uint32_t cc_group_id,
-                           int64_t cc_group_term,
-                           const uint16_t core_cnt,
-                           std::atomic<bool> *cancel_data_loading_on_error)
+void RestoreCcMapCc::Reset(
+    const TableName *table_name,
+    uint32_t cc_group_id,
+    int64_t cc_group_term,
+    const uint16_t core_cnt,
+    std::atomic<CcErrorCode> *cancel_data_loading_on_error)
 {
     table_name_ = table_name;
     cc_ng_id_ = cc_group_id;
@@ -1007,11 +1009,14 @@ bool RestoreCcMapCc::Execute(CcShard &ccs)
     if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_ &&
         std::max(standby_candid_term, standby_term) != cc_ng_term_)
     {
+        cancel_data_loading_on_error_->store(CcErrorCode::NG_TERM_CHANGED,
+                                             std::memory_order_release);
         SetFinished(CcErrorCode::NG_TERM_CHANGED);
         return false;
     }
 
-    if (cancel_data_loading_on_error_->load(std::memory_order_acquire))
+    if (cancel_data_loading_on_error_->load(std::memory_order_acquire) !=
+        CcErrorCode::NO_ERROR)
     {
         SetFinished(CcErrorCode::FORCE_FAIL);
         return false;
@@ -1060,11 +1065,12 @@ void RestoreCcMapCc::SetFinished(CcErrorCode error_code)
     {
         error_code_ = error_code;
 
-        if (!cancel_data_loading_on_error_->load(std::memory_order_acquire))
+        if (cancel_data_loading_on_error_->load(std::memory_order_acquire) ==
+            CcErrorCode::NO_ERROR)
         {
-            bool expected = false;
+            CcErrorCode expected = CcErrorCode::NO_ERROR;
             cancel_data_loading_on_error_->compare_exchange_strong(expected,
-                                                                   true);
+                                                                   error_code_);
         }
         DLOG(INFO) << "RestoreCcMapCc " << this
                    << " error: " << static_cast<int>(error_code_);

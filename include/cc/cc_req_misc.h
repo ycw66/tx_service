@@ -998,7 +998,7 @@ public:
                uint32_t cc_group_id,
                int64_t cc_group_term,
                const uint16_t core_cnt,
-               std::atomic<bool> *cancel_data_loading_on_error);
+               std::atomic<CcErrorCode> *cancel_data_loading_on_error);
 
     bool Execute(CcShard &ccs) override;
 
@@ -1056,7 +1056,7 @@ public:
     std::vector<std::deque<RawSliceDataItem>> slice_data_;
     std::vector<std::deque<SliceDataItem>> decoded_slice_data_;
     std::vector<size_t> next_idxs_;
-    std::atomic<bool> *cancel_data_loading_on_error_;
+    std::atomic<CcErrorCode> *cancel_data_loading_on_error_;
 
     std::vector<size_t> data_item_decoded_{};
     CcErrorCode error_code_{CcErrorCode::NO_ERROR};
