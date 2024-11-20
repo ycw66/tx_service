@@ -1,5 +1,3 @@
-#include "remote/cc_node_service.h"
-
 #include <brpc/controller.h>
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
@@ -13,12 +11,14 @@
 #include "cc_request.h"
 #include "cc_request.pb.h"
 #include "error_messages.h"
+#include "remote/cc_node_service.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
 #include "sk_generator.h"
 #include "tx_operation_result.h"
 #include "tx_request.h"
 #include "tx_service.h"
+#include "tx_util.h"  // BackupUtil
 #include "type.h"
 #include "util.h"
 
@@ -1529,7 +1529,7 @@ void CcNodeService::RequestStorageSnapshotSync(
     // Then, notify standby nodes that data committed before subscribe timepoint
     // has been flushed to kvstore. (standby nodes begin fetch record from
     // kvstore on cache miss).
-    store_hd->OnSnapshotSyncRequested(request);
+    store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
     response->set_error(false);
 }
 
@@ -1636,6 +1636,198 @@ void CcNodeService::ResetStandbySequenceId(
     reset_seq_cc.Wait();
 
     response->set_error(false);
+}
+
+void CcNodeService::CreateBackup(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::CreateBackupRequest *request,
+    ::txservice::remote::CreateBackupResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    uint32_t ng_id = request->ng_id();
+    response->set_ng_id(ng_id);
+    int64_t leader_term = Sharder::Instance().LeaderTerm(ng_id);
+    if (leader_term < 0)
+    {
+        DLOG(INFO) << "Reject backup task for this node is not leader";
+        response->set_status(BackupTaskStatus::Failed);
+        return;
+    }
+
+    auto *store_hd = Sharder::Instance().GetDataStoreHandler();
+    assert(!request->backup_name().empty());
+    assert(store_hd != nullptr);
+    if (store_hd && !request->backup_name().empty())
+    {
+        assert(!request->dest_path().empty());
+        auto st = store::SnapshotManager::Instance().CreateBackup(request);
+        response->set_status(st);
+    }
+    else
+    {
+        LOG(ERROR) << "Failed to create backup for kvstore is disabled.";
+        response->set_status(BackupTaskStatus::Failed);
+    }
+}
+
+void CcNodeService::FetchBackup(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::FetchBackupRequest *request,
+    ::txservice::remote::FetchBackupResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    uint32_t ng_id = request->ng_id();
+
+    int64_t leader_term = Sharder::Instance().LeaderTerm(ng_id);
+    if (leader_term < 0)
+    {
+        DLOG(INFO) << "Reject backup task for this node is not leader";
+        response->set_status(BackupTaskStatus::Unknown);
+        return;
+    }
+
+    const std::string &backup_name = request->backup_name();
+    auto *store_hd = Sharder::Instance().GetDataStoreHandler();
+    assert(store_hd != nullptr);
+    if (store_hd && !backup_name.empty())
+    {
+        auto st = store::SnapshotManager::Instance().GetBackupStatus(
+            ng_id, backup_name);
+        response->set_status(st);
+    }
+    else
+    {
+        LOG(ERROR) << "Failed to create backup for kvstore is disabled.";
+        response->set_status(BackupTaskStatus::Unknown);
+    }
+}
+
+void CcNodeService::TerminateBackup(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::TerminateBackupRequest *request,
+    ::txservice::remote::TerminateBackupResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    uint32_t ng_id = request->ng_id();
+    const std::string &backup_name = request->backup_name();
+    response->set_ng_id(ng_id);
+
+    auto *store_hd = Sharder::Instance().GetDataStoreHandler();
+    assert(!backup_name.empty());
+    assert(store_hd != nullptr);
+    if (store_hd && !backup_name.empty())
+    {
+        store::SnapshotManager::Instance().TerminateBackup(ng_id, backup_name);
+    }
+    else
+    {
+        LOG(ERROR) << "Failed to Terminate backup for kvstore is disabled.";
+    }
+}
+
+void CcNodeService::CreateClusterBackup(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::CreateClusterBackupRequest *request,
+    ::txservice::remote::ClusterBackupResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    // Also print default value in json response.
+    auto *brpc_cntl = static_cast<brpc::Controller *>(controller);
+    brpc_cntl->set_always_print_primitive_fields(true);
+
+    const std::string &backup_name = request->backup_name();
+    const std::string &dest_path = request->dest_path();
+    const std::string &dest_user = request->dest_user();
+    const std::string &dest_host = request->dest_host();
+    response->set_backup_name(backup_name);
+
+    if (backup_name.empty())
+    {
+        response->set_result("failed");
+        return;
+    }
+
+    std::unordered_map<txservice::NodeGroupId,
+                       txservice::remote::BackupTaskStatus>
+        backup_status;
+    auto result = BackupUtil::CreateBackup(
+        backup_name, dest_path, dest_host, dest_user, backup_status);
+
+    for (auto &[ng_id, st] : backup_status)
+    {
+        auto *ref = response->add_backup_infos();
+        ref->set_ng_id(ng_id);
+        ref->set_status(st);
+    }
+
+    switch (result)
+    {
+    case BackupUtil::BackupResult::Failed:
+        response->set_result("failed");
+        break;
+    case BackupUtil::BackupResult::Finished:
+        response->set_result("finished");
+        break;
+    case BackupUtil::BackupResult::Running:
+        response->set_result("running");
+        break;
+    default:
+        assert(false);
+        break;
+    }
+}
+
+void CcNodeService::FetchClusterBackup(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::FetchClusterBackupRequest *request,
+    ::txservice::remote::ClusterBackupResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    // Also print default value in json response.
+    auto *brpc_cntl = static_cast<brpc::Controller *>(controller);
+    brpc_cntl->set_always_print_primitive_fields(true);
+
+    const std::string &backup_name = request->backup_name();
+    response->set_backup_name(backup_name);
+
+    if (backup_name.empty())
+    {
+        response->set_result("failed");
+        return;
+    }
+
+    std::unordered_map<txservice::NodeGroupId,
+                       txservice::remote::BackupTaskStatus>
+        backup_status;
+    auto result = BackupUtil::GetBackupStatus(backup_name, backup_status);
+
+    for (auto &[ng_id, st] : backup_status)
+    {
+        auto *ref = response->add_backup_infos();
+        ref->set_ng_id(ng_id);
+        ref->set_status(st);
+    }
+
+    switch (result)
+    {
+    case BackupUtil::BackupResult::Failed:
+        response->set_result("failed");
+        break;
+    case BackupUtil::BackupResult::Finished:
+        response->set_result("finished");
+        break;
+    case BackupUtil::BackupResult::Running:
+        response->set_result("running");
+        break;
+    default:
+        assert(false);
+        break;
+    }
 }
 
 }  // namespace remote

@@ -388,6 +388,79 @@ message ResetStandbySequenceIdResponse{
     bool error = 1;
 }
 
+enum BackupTaskStatus{
+    Unknown = 0;
+    Inited = 1;
+    Running = 2;
+    Terminating = 4;
+    Failed = 5;
+    Finished = 6;
+}
+
+// used on one node group
+message CreateBackupRequest{
+    uint32 ng_id = 1;
+    string backup_name = 2;
+    
+    string dest_host = 3;
+    string dest_user = 4;
+    string dest_path = 5;
+
+    // only used on datastore processing the task.
+    int64 ng_term = 6;
+    BackupTaskStatus status = 7;
+}
+
+message CreateBackupResponse{
+    uint32 ng_id = 1;
+    BackupTaskStatus status = 2;
+}
+
+message FetchBackupRequest{
+    uint32 ng_id = 1;
+    string backup_name = 2;
+}
+
+message FetchBackupResponse{
+    uint32 ng_id = 1;
+    BackupTaskStatus status = 2;
+}
+
+message TerminateBackupRequest{
+    uint32 ng_id = 1;
+    string backup_name = 2;
+}
+
+message TerminateBackupResponse{
+    uint32 ng_id = 1;
+}
+
+
+// used on all node group
+message CreateClusterBackupRequest{
+    string backup_name = 1;
+    string dest_host = 2;
+    string dest_user = 3;
+    string dest_path = 4;
+}
+
+message BackupInfo{
+    uint32 ng_id = 1;
+    BackupTaskStatus status = 2;
+}
+
+message ClusterBackupResponse{
+    string backup_name = 1;
+    // failed, finished, running.
+    string result = 2;
+    repeated BackupInfo backup_infos = 3;
+}
+
+message FetchClusterBackupRequest{
+    string backup_name = 1;
+}
+
+
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -420,6 +493,11 @@ service CcRpcService {
     rpc OnSnapshotSynced(OnSnapshotSyncedRequest) returns (OnSnapshotSyncedResponse);
     rpc FetchNodeInfo(FetchNodeInfoRequest) returns (FetchNodeInfoResponse);
     rpc ResetStandbySequenceId(ResetStandbySequenceIdRequest) returns (ResetStandbySequenceIdResponse);
+    rpc CreateBackup(CreateBackupRequest) returns (CreateBackupResponse);
+    rpc FetchBackup(FetchBackupRequest) returns (FetchBackupResponse);
+    rpc TerminateBackup(TerminateBackupRequest) returns (TerminateBackupResponse);
+    rpc CreateClusterBackup(CreateClusterBackupRequest) returns (ClusterBackupResponse);
+    rpc FetchClusterBackup(FetchClusterBackupRequest) returns (ClusterBackupResponse);
 }
 
 message NodeConfigBuf

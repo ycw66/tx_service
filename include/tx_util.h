@@ -94,4 +94,278 @@ static inline TxErrorCode TxReadCatalog(TransactionExecution *txm,
         }
     }
 }
+
+class BackupUtil
+{
+public:
+    enum struct BackupResult : int8_t
+    {
+        Running = 0,
+        Failed,
+        Finished
+    };
+
+    static BackupResult CreateBackup(
+        const std::string &backup_name,
+        const std::string &dest_path,
+        const std::string &dest_host,
+        const std::string &dest_user,
+        std::unordered_map<NodeGroupId, txservice::remote::BackupTaskStatus>
+            &ng_backup_result)
+    {
+        uint32_t node_group_cnt =
+            txservice::Sharder::Instance().NodeGroupCount();
+
+        std::vector<std::unique_ptr<txservice::remote::CreateBackupRequest>>
+            req_vec;
+        std::vector<std::unique_ptr<txservice::remote::CreateBackupResponse>>
+            resp_vec;
+        std::vector<std::unique_ptr<brpc::Controller>> cntl_vec;
+        std::unordered_map<uint32_t, uint32_t> sent_nodes;
+        bool failed = false;
+        for (uint32_t ng_id = 0; ng_id < node_group_cnt; ng_id++)
+        {
+            auto leader_node =
+                txservice::Sharder::Instance().LeaderNodeId(ng_id);
+            std::shared_ptr<brpc::Channel> channel =
+                Sharder::Instance().GetCcNodeServiceChannel(leader_node);
+            if (channel == nullptr)
+            {
+                LOG(ERROR) << "Fail to init the channel to the node("
+                           << leader_node << ") .";
+
+                failed = true;
+                ng_backup_result.try_emplace(
+                    ng_id, txservice::remote::BackupTaskStatus::Failed);
+                break;
+            }
+
+            sent_nodes.try_emplace(ng_id, leader_node);
+
+            ng_backup_result.try_emplace(
+                ng_id, txservice::remote::BackupTaskStatus::Unknown);
+            req_vec.emplace_back(
+                std::make_unique<txservice::remote::CreateBackupRequest>());
+            resp_vec.emplace_back(
+                std::make_unique<txservice::remote::CreateBackupResponse>());
+            cntl_vec.emplace_back(std::make_unique<brpc::Controller>());
+
+            auto *req = req_vec.back().get();
+            auto *resp = resp_vec.back().get();
+            auto *cntl = cntl_vec.back().get();
+
+            req->set_ng_id(ng_id);
+            // req->set_node_id(node.node_id_);
+            req->set_backup_name(backup_name);
+            req->set_dest_path(dest_path);
+            req->set_dest_host(dest_host);
+            req->set_dest_user(dest_user);
+            cntl->set_timeout_ms(1000);
+            cntl->set_max_retry(2);
+            txservice::remote::CcRpcService_Stub stub(channel.get());
+            stub.CreateBackup(cntl, req, resp, brpc::DoNothing());
+        }
+
+        for (auto &ref : cntl_vec)
+        {
+            // wait all rpc call
+            brpc::Join(ref->call_id());
+        }
+
+        for (size_t i = 0; i < resp_vec.size(); i++)
+        {
+            // handler results
+            auto *resp = resp_vec.at(i).get();
+            auto *cntl = cntl_vec.at(i).get();
+
+            uint32_t ng_id = req_vec.at(i)->ng_id();
+
+            if (cntl->Failed())
+            {
+                DLOG(INFO) << "CreateBackup rpc call failed, "
+                           << cntl->ErrorText();
+                ng_backup_result.at(ng_id) =
+                    txservice::remote::BackupTaskStatus::Failed;
+                failed = true;
+                sent_nodes.erase(ng_id);
+            }
+            else
+            {
+                DLOG(INFO) << "CreateBackup ng# " << ng_id
+                           << ", result:" << resp->status();
+                ng_backup_result.at(ng_id) = resp->status();
+            }
+        }
+
+        if (failed && !sent_nodes.empty())
+        {
+            TerminateBackup(backup_name, sent_nodes);
+        }
+
+        return failed ? BackupResult::Failed : BackupResult::Running;
+    }
+
+    static BackupResult GetBackupStatus(
+        const std::string &backup_name,
+        std::unordered_map<NodeGroupId, txservice::remote::BackupTaskStatus>
+            &backup_status)
+    {
+        uint32_t node_group_cnt =
+            txservice::Sharder::Instance().NodeGroupCount();
+
+        std::vector<std::unique_ptr<txservice::remote::FetchBackupRequest>>
+            req_vec;
+        std::vector<std::unique_ptr<txservice::remote::FetchBackupResponse>>
+            resp_vec;
+        std::vector<std::unique_ptr<brpc::Controller>> cntl_vec;
+
+        bool failed = false;
+        for (uint32_t ng_id = 0; ng_id < node_group_cnt; ng_id++)
+        {
+            backup_status.try_emplace(
+                ng_id, txservice::remote::BackupTaskStatus::Unknown);
+            auto leader_node =
+                txservice::Sharder::Instance().LeaderNodeId(ng_id);
+            std::shared_ptr<brpc::Channel> channel =
+                Sharder::Instance().GetCcNodeServiceChannel(leader_node);
+            if (channel == nullptr)
+            {
+                LOG(ERROR) << "Fail to init the channel to the node("
+                           << leader_node << ") .";
+                failed = true;
+                continue;
+            }
+
+            req_vec.emplace_back(
+                std::make_unique<txservice::remote::FetchBackupRequest>());
+            resp_vec.emplace_back(
+                std::make_unique<txservice::remote::FetchBackupResponse>());
+            cntl_vec.emplace_back(std::make_unique<brpc::Controller>());
+
+            auto *req = req_vec.back().get();
+            auto *resp = resp_vec.back().get();
+            auto *cntl = cntl_vec.back().get();
+
+            req->set_ng_id(ng_id);
+            // req->set_node_id(node.node_id_);
+            req->set_backup_name(backup_name);
+            cntl->set_timeout_ms(1000);
+            cntl->set_max_retry(2);
+            txservice::remote::CcRpcService_Stub stub(channel.get());
+            stub.FetchBackup(cntl, req, resp, brpc::DoNothing());
+        }
+
+        for (auto &ref : cntl_vec)
+        {
+            // wait all rpc call
+            brpc::Join(ref->call_id());
+        }
+        bool finished = true;
+        for (size_t i = 0; i < resp_vec.size(); i++)
+        {
+            // handler results
+            auto *resp = resp_vec.at(i).get();
+            auto *cntl = cntl_vec.at(i).get();
+
+            uint32_t ng_id = req_vec.at(i)->ng_id();
+
+            if (cntl->Failed())
+            {
+                DLOG(INFO) << "FetchBackup rpc call failed, "
+                           << cntl->ErrorText();
+                backup_status.at(ng_id) =
+                    txservice::remote::BackupTaskStatus::Unknown;
+                failed = true;
+            }
+            else
+            {
+                auto st = resp->status();
+                backup_status.at(ng_id) = st;
+                if (st == remote::BackupTaskStatus::Failed)
+                {
+                    failed = true;
+                }
+                else if (st != remote::BackupTaskStatus::Finished)
+                {
+                    finished = false;
+                }
+            }
+        }
+
+        if (failed)
+        {
+            return BackupResult::Failed;
+        }
+        else if (finished)
+        {
+            return BackupResult::Finished;
+        }
+        return BackupResult::Running;
+    }
+
+    static void TerminateBackup(const std::string &backup_name,
+                                std::unordered_map<NodeGroupId, NodeId> &nodes)
+    {
+        std::vector<std::unique_ptr<txservice::remote::TerminateBackupRequest>>
+            req_vec;
+        std::vector<std::unique_ptr<txservice::remote::TerminateBackupResponse>>
+            resp_vec;
+        std::vector<std::unique_ptr<brpc::Controller>> cntl_vec;
+
+        for (auto &[ng_id, node_id] : nodes)
+        {
+            std::shared_ptr<brpc::Channel> channel =
+                Sharder::Instance().GetCcNodeServiceChannel(node_id);
+            if (channel == nullptr)
+            {
+                LOG(ERROR) << "Fail to init the channel to the node(" << node_id
+                           << ") .";
+                continue;
+            }
+
+            req_vec.emplace_back(
+                std::make_unique<txservice::remote::TerminateBackupRequest>());
+            resp_vec.emplace_back(
+                std::make_unique<txservice::remote::TerminateBackupResponse>());
+            cntl_vec.emplace_back(std::make_unique<brpc::Controller>());
+
+            auto *req = req_vec.back().get();
+            auto *resp = resp_vec.back().get();
+            auto *cntl = cntl_vec.back().get();
+
+            req->set_ng_id(ng_id);
+            req->set_backup_name(backup_name);
+            cntl->set_timeout_ms(1000);
+            cntl->set_max_retry(2);
+            txservice::remote::CcRpcService_Stub stub(channel.get());
+            stub.TerminateBackup(cntl, req, resp, brpc::DoNothing());
+        }
+
+        for (auto &ref : cntl_vec)
+        {
+            // wait all rpc call
+            brpc::Join(ref->call_id());
+        }
+
+        // Does not care about the returned result
+        for (size_t i = 0; i < resp_vec.size(); i++)
+        {
+            // handler results
+            auto *cntl = cntl_vec.at(i).get();
+
+            uint32_t ng_id = req_vec.at(i)->ng_id();
+
+            if (cntl->Failed())
+            {
+                DLOG(INFO) << "Terminate Backup ng#" << ng_id
+                           << " rpc call failed, " << cntl->ErrorText();
+            }
+            else
+            {
+                DLOG(INFO) << "Terminate Backup ng# " << ng_id;
+            }
+        }
+    }
+};
+
 }  // namespace txservice

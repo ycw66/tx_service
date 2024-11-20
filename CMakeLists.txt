@@ -213,6 +213,7 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/sk_generator.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/data_sync_task.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/standby.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/store/snapshot_manager.cpp
     ${METRICS_SERVICE_SOURCE_DIR}/src/metrics.cc
 )
 

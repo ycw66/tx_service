@@ -358,10 +358,34 @@ public:
         return true;
     }
 
-    virtual void OnSnapshotSyncRequested(
-        const txservice::remote::StorageSnapshotSyncRequest *req)
+    virtual bool CreateSnapshotForStandby(
+        std::vector<std::string> &snapshot_files)
     {
         assert(false);
+        return true;
+    }
+
+    virtual bool CreateSnapshotForBackup(
+        const std::string &backup_name,
+        std::vector<std::string> &snapshot_files)
+    {
+        assert(false);
+        return true;
+    }
+
+    virtual bool SendSnapshotToRemote(uint32_t ng_id,
+                                      int64_t ng_term,
+                                      std::vector<std::string> &snapshot_files,
+                                      const std::string &remote_dest)
+    {
+        assert(false);
+        return true;
+    }
+
+    virtual bool RemoveBackupSnapshot(const std::string &backup_name)
+    {
+        assert(false);
+        return true;
     }
 
     virtual bool OnSnapshotReceived(

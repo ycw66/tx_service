@@ -174,6 +174,34 @@ public:
         ::txservice::remote::ResetStandbySequenceIdResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void CreateBackup(::google::protobuf::RpcController *controller,
+                      const ::txservice::remote::CreateBackupRequest *request,
+                      ::txservice::remote::CreateBackupResponse *response,
+                      ::google::protobuf::Closure *done) override;
+
+    void FetchBackup(::google::protobuf::RpcController *controller,
+                     const ::txservice::remote::FetchBackupRequest *request,
+                     ::txservice::remote::FetchBackupResponse *response,
+                     ::google::protobuf::Closure *done) override;
+
+    void TerminateBackup(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::TerminateBackupRequest *request,
+        ::txservice::remote::TerminateBackupResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void CreateClusterBackup(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::CreateClusterBackupRequest *,
+        ::txservice::remote::ClusterBackupResponse *,
+        ::google::protobuf::Closure *done) override;
+
+    void FetchClusterBackup(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::FetchClusterBackupRequest *,
+        ::txservice::remote::ClusterBackupResponse *,
+        ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

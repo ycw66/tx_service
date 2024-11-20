@@ -1,0 +1,81 @@
+
+#pragma once
+
+#include <atomic>
+#include <string>
+#include <thread>
+#include <unordered_map>
+
+#include "store/data_store_handler.h"
+
+namespace txservice
+{
+
+namespace store
+{
+// used on primary node
+class SnapshotManager
+{
+public:
+    static SnapshotManager &Instance()
+    {
+        static SnapshotManager instance_;
+        return instance_;
+    }
+
+    void Init(store::DataStoreHandler *store_hd)
+    {
+        store_hd_ = store_hd;
+    }
+    void Start();
+    void Shutdown();
+
+    void OnSnapshotSyncRequested(
+        const txservice::remote::StorageSnapshotSyncRequest *req);
+
+    txservice::remote::BackupTaskStatus CreateBackup(
+        const txservice::remote::CreateBackupRequest *req);
+
+    txservice::remote::BackupTaskStatus GetBackupStatus(
+        txservice::NodeGroupId ng_id, const std::string &backup_name);
+
+    void TerminateBackup(txservice::NodeGroupId ng_id,
+                         const std::string &backup_name);
+
+    // Run one round checkpoint to flush data in memory to kvstore.
+    bool RunOneRoundCheckpoint(uint32_t node_group, int64_t ng_leader_term);
+
+private:
+    SnapshotManager() = default;
+    ~SnapshotManager() = default;
+
+    void StandbySyncWorker();
+    void SyncWithStandby();
+
+    void HandleBackupTask(txservice::remote::CreateBackupRequest *task);
+    void UpdateBackupTaskStatus(txservice::remote::CreateBackupRequest *task,
+                                txservice::remote::BackupTaskStatus st);
+
+    store::DataStoreHandler *store_hd_{nullptr};
+
+    std::thread standby_sync_worker_;
+    std::mutex standby_sync_mux_;
+    std::condition_variable standby_sync_cv_;
+    std::unordered_map<uint32_t, txservice::remote::StorageSnapshotSyncRequest>
+        pending_req_;
+    bool terminated_{false};
+
+    const std::string backup_path_;
+    std::mutex backup_tasks_mux_;
+    static const size_t MaxBackupTaskCount = 100;
+    std::deque<txservice::remote::CreateBackupRequest *> backup_task_queue_;
+    std::unordered_map<
+        txservice::NodeGroupId,
+        std::unordered_map<std::string, txservice::remote::CreateBackupRequest>>
+        ng_backup_tasks_;
+
+    txservice::TxWorkerPool backup_worker_{1};
+};
+
+}  // namespace store
+}  // namespace txservice

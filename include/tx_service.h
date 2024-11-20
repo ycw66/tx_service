@@ -35,6 +35,7 @@
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
 #include "spinlock.h"
+#include "store/snapshot_manager.h"  // SnapshotManager
 #include "tx_execution.h"
 #include "tx_request.h"
 #include "tx_service_common.h"
@@ -1107,6 +1108,11 @@ public:
                 return -1;
             }
         }
+
+        // must start before host_manager
+        store::SnapshotManager::Instance().Init(local_cc_shards_.store_hd_);
+        store::SnapshotManager::Instance().Start();
+
         uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
         if (Sharder::Instance().Init(node_id,
                                      ng_id,
@@ -1163,6 +1169,7 @@ public:
 
     void Shutdown()
     {
+        store::SnapshotManager::Instance().Shutdown();
         DeadLockCheck::SetStop();
         ckpt_.Terminate();
         ckpt_.Join();
