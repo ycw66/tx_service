@@ -970,7 +970,6 @@ message AnalyzeTableAllRequest {
   uint32 node_group_id = 2;
   string table_name_str = 3;
   CcTableType table_type = 4;
-  repeated uint32 sample_range_ids = 5;
 }
 
 message AnalyzeTableAllResponse {
@@ -1188,6 +1187,17 @@ message DBSizeResponse {
     int32 dbsize_term = 2;
 }
 
+message InvalidateTableCacheRequest {
+  uint32 src_node_id = 1;
+  uint32 node_group_id = 2;
+  string table_name_str = 3;
+  CcTableType table_type = 4;
+}
+
+message InvalidateTableCacheResponse {
+  int32 error_code = 1;
+}
+
 message CcMessage {
     enum MessageType {
         AcquireRequest = 0;
@@ -1235,6 +1245,8 @@ message CcMessage {
         DBSizeResponse = 55;
         KeyObjectStandbyForwardRequest = 56;
         StandbyHeartbeatRequest = 57;
+        InvalidateTableCacheRequest = 58;
+        InvalidateTableCacheResponse = 59;
     }
 
     MessageType type = 1;
@@ -1288,5 +1300,7 @@ message CcMessage {
         DBSizeRequest dbsize_req = 62;
         DBSizeResponse db_size_resp = 63;
         KeyObjectStandbyForwardRequest key_obj_standby_forward_req=64;
+        InvalidateTableCacheRequest invalidate_table_cache_req = 65;
+        InvalidateTableCacheResponse invalidate_table_cache_resp = 66;
     }
 }

@@ -9257,4 +9257,201 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
         }
     }
 }
+
+InvalidateTableCacheOp::InvalidateTableCacheOp(TransactionExecution *txm)
+    : hd_result_(txm)
+{
+}
+
+void InvalidateTableCacheOp::Reset(uint32_t hres_ref_cnt)
+{
+    hd_result_.Reset();
+    hd_result_.SetRefCnt(hres_ref_cnt);
+}
+
+void InvalidateTableCacheOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
+}
+
+void InvalidateTableCacheOp::Forward(TransactionExecution *txm)
+{
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        if (hd_result_.IsError() &&
+            hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+        {
+            Sharder::Instance().UpdateLeaders();
+        }
+        txm->PostProcess(*this);
+    }
+    else if (hd_result_.LocalRefCnt() == 0)
+    {
+        bool timeout = false;
+        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+        {
+            timeout = true;
+        }
+        if (timeout)
+        {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "Forward.IsTimeOut",
+                txm,
+                [txm]() -> std::string
+                {
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(txm->TxNumber()))
+                        .append(",\"term\":")
+                        .append(std::to_string(txm->TxTerm()));
+                });
+
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+            }
+        }
+    }
+}
+
+InvalidateTableCacheCompositeOp::InvalidateTableCacheCompositeOp(
+    const TableName *table_name, TransactionExecution *txm)
+    : CompositeTransactionOperation(),
+      table_name_(table_name),
+      catalog_key_(*table_name),
+      acquire_all_lock_op_(txm),
+      invalidate_table_cache_op_(txm),
+      post_all_lock_op_(txm)
+{
+    acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_lock_op_.keys_.emplace_back(&catalog_key_);
+    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
+    acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
+    invalidate_table_cache_op_.table_name_ = table_name;
+    post_all_lock_op_.table_name_ = &catalog_ccm_name;
+    post_all_lock_op_.keys_.emplace_back(&catalog_key_);
+    post_all_lock_op_.recs_.push_back(&catalog_rec_);
+    post_all_lock_op_.op_type_ = OperationType::Update;
+    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+}
+
+void InvalidateTableCacheCompositeOp::Reset(const TableName *table_name,
+                                            TransactionExecution *txm)
+{
+    // Reset TransactionOperation
+    retry_num_ = RETRY_NUM;
+    is_running_ = false;
+    op_start_ = metrics::TimePoint::max();
+
+    // Reset CompositeTransactionOperation
+    op_ = nullptr;
+
+    table_name_ = table_name;
+    catalog_key_ = CatalogKey(*table_name);
+    acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_lock_op_.keys_.clear();
+    acquire_all_lock_op_.keys_.emplace_back(&catalog_key_);
+    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
+    acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
+    invalidate_table_cache_op_.table_name_ = table_name;
+    post_all_lock_op_.table_name_ = &catalog_ccm_name;
+    post_all_lock_op_.keys_.clear();
+    post_all_lock_op_.keys_.emplace_back(&catalog_key_);
+    post_all_lock_op_.recs_.clear();
+    post_all_lock_op_.recs_.push_back(&catalog_rec_);
+    post_all_lock_op_.op_type_ = OperationType::Update;
+    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+
+    acquire_all_lock_op_.ResetHandlerTxm(txm);
+    invalidate_table_cache_op_.ResetHandlerTxm(txm);
+    post_all_lock_op_.ResetHandlerTxm(txm);
+}
+
+void InvalidateTableCacheCompositeOp::Forward(TransactionExecution *txm)
+{
+    if (op_ == nullptr)
+    {
+        ForwardToSubOperation(txm, &acquire_all_lock_op_);
+    }
+    else if (op_ == &acquire_all_lock_op_)
+    {
+        if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_relaxed) > 0)
+        {
+            LOG(ERROR) << "Invalidate table cache transaction failed to obtain "
+                          "write lock, tx_number:"
+                       << txm->TxNumber();
+            txm->commit_ts_ = tx_op_failed_ts_;
+            ForwardToSubOperation(txm, &post_all_lock_op_);
+            return;
+        }
+
+        ForwardToSubOperation(txm, &invalidate_table_cache_op_);
+    }
+    else if (op_ == &invalidate_table_cache_op_)
+    {
+        // Release write lock. No value needs to apply.
+        txm->commit_ts_ = tx_op_failed_ts_;
+        ForwardToSubOperation(txm, &post_all_lock_op_);
+    }
+    else if (op_ == &post_all_lock_op_)
+    {
+        if (post_all_lock_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                RetrySubOperation(txm, &post_all_lock_op_);
+                return;
+            }
+            else
+            {
+                txm->void_resp_->FinishError(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+            }
+        }
+        else
+        {
+            assert(txm->commit_ts_ == tx_op_failed_ts_);
+            if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_relaxed) >
+                0)
+            {
+                for (size_t idx = 0; idx < acquire_all_lock_op_.upload_cnt_;
+                     ++idx)
+                {
+                    CcHandlerResult<AcquireAllResult> &hd_result =
+                        acquire_all_lock_op_.hd_results_[idx];
+                    if (hd_result.IsError())
+                    {
+                        txm->void_resp_->FinishError(
+                            txm->ConvertCcError(hd_result.ErrorCode()));
+                        break;
+                    }
+                }
+                assert(txm->void_resp_->IsError());
+            }
+            else if (invalidate_table_cache_op_.hd_result_.IsError())
+            {
+                txm->void_resp_->FinishError(txm->ConvertCcError(
+                    invalidate_table_cache_op_.hd_result_.ErrorCode()));
+            }
+            else
+            {
+                txm->void_resp_->Finish(void_);
+            }
+        }
+
+        txm->state_stack_.pop_back();
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        assert(txm->state_stack_.empty());
+        std::unique_lock<std::mutex> lk(shards->invalidate_table_cache_op_mux_);
+        shards->invalidate_table_cache_op_pool_.emplace_back(
+            std::move(txm->invalidate_table_cache_composite_op_));
+    }
+}
+
 }  // namespace txservice

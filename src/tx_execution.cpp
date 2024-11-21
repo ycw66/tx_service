@@ -70,6 +70,9 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
 #endif
       scan_open_(this),
       scan_next_(this),
+      read_catalog_op_(),
+      catalog_tx_key_(&read_catalog_key_),
+      read_catalog_result_(this),
 #ifdef RANGE_PARTITION_ENABLED
       obj_cmd_(this, &lock_range_result_),
       multi_obj_cmd_(this, &lock_range_result_),
@@ -77,9 +80,6 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       obj_cmd_(this, &lock_bucket_result_),
       multi_obj_cmd_(this, &lock_bucket_result_),
 #endif
-      read_catalog_op_(),
-      catalog_tx_key_(&read_catalog_key_),
-      read_catalog_result_(this),
 #ifdef RANGE_PARTITION_ENABLED
       lock_write_ranges_(&lock_range_result_),
 #else
@@ -144,6 +144,7 @@ void TransactionExecution::Reset()
     schema_op_ = nullptr;
     split_flush_op_ = nullptr;
     index_op_ = nullptr;
+    invalidate_table_cache_composite_op_ = nullptr;
 
     if (drain_batch_.capacity() > 32)
     {
@@ -1014,6 +1015,42 @@ void TransactionExecution::ProcessTxRequest(FaultInjectTxRequest &fi_req)
         fi_req.fault_name_, fi_req.fault_paras_, fi_req.vct_node_id_);
     PushOperation(&fault_inject_op_);
     Process(fault_inject_op_);
+}
+
+void TransactionExecution::ProcessTxRequest(InvalidateTableCacheTxRequest &req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    void_resp_ = &req.tx_result_;
+    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+
+    std::unique_lock<std::mutex> lk(
+        local_shards->invalidate_table_cache_op_mux_);
+    if (local_shards->invalidate_table_cache_op_pool_.empty())
+    {
+        invalidate_table_cache_composite_op_ =
+            std::make_unique<InvalidateTableCacheCompositeOp>(req.table_name_,
+                                                              this);
+    }
+    else
+    {
+        invalidate_table_cache_composite_op_ =
+            std::move(local_shards->invalidate_table_cache_op_pool_.back());
+        local_shards->invalidate_table_cache_op_pool_.pop_back();
+        invalidate_table_cache_composite_op_->Reset(req.table_name_, this);
+    }
+    lk.unlock();
+
+    PushOperation(invalidate_table_cache_composite_op_.get());
 }
 
 void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
@@ -7166,6 +7203,52 @@ void TransactionExecution::Process(
 void TransactionExecution::PostProcess(
     CheckMigrationIsFinishedOp &notify_migration_finished_op)
 {
+    state_stack_.pop_back();
+}
+
+void TransactionExecution::Process(
+    InvalidateTableCacheOp &invalidate_table_cache_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &invalidate_table_cache_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
+    invalidate_table_cache_op.Reset(node_group_cnt);
+    invalidate_table_cache_op.is_running_ = true;
+    for (uint32_t ng_id = 0; ng_id < node_group_cnt; ++ng_id)
+    {
+        cc_handler_->InvalidateTableCache(
+            *invalidate_table_cache_op.table_name_,
+            ng_id,
+            TxNumber(),
+            TxTerm(),
+            CommandId(),
+            invalidate_table_cache_op.hd_result_);
+    }
+    StartTiming();
+}
+
+void TransactionExecution::PostProcess(
+    InvalidateTableCacheOp &invalidate_table_cache_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &invalidate_table_cache_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
     state_stack_.pop_back();
 }
 

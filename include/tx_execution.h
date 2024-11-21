@@ -47,6 +47,7 @@ struct RangeSplitRecoveryTxRequest;
 struct UnlockTuple;
 struct BatchReadTxRequest;
 struct DataMigrationTxRequest;
+struct InvalidateTableCacheTxRequest;
 
 class TxProcessor;
 
@@ -133,6 +134,7 @@ public:
     void ProcessTxRequest(RangeSplitRecoveryTxRequest &recover_req);
     void ProcessTxRequest(BatchReadTxRequest &batch_read_req);
     void ProcessTxRequest(DataMigrationTxRequest &data_migration_req);
+    void ProcessTxRequest(InvalidateTableCacheTxRequest &req);
 
     /**
      * Interface for storage engine runtime.
@@ -372,6 +374,9 @@ private:
     void Process(CheckMigrationIsFinishedOp &notify_migration_finished_op);
     void PostProcess(CheckMigrationIsFinishedOp &notify_migration_finished_op);
 
+    void Process(InvalidateTableCacheOp &invalidate_table_cache_op);
+    void PostProcess(InvalidateTableCacheOp &invalidate_table_cache_op);
+
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
     void ScanClose(const std::vector<UnlockTuple> &unlock_batch,
@@ -524,6 +529,9 @@ private:
 
     std::unique_ptr<ClusterScaleOp> cluster_scale_op_;
     std::unique_ptr<DataMigrationOp> migration_op_;
+
+    std::unique_ptr<InvalidateTableCacheCompositeOp>
+        invalidate_table_cache_composite_op_;
 
     std::unordered_map<
         uint64_t,
@@ -708,7 +716,9 @@ private:
     friend struct DataMigrationOp;
     friend struct NotifyStartMigrateOp;
     friend struct CheckMigrationIsFinishedOp;
-    friend class TxProcessor;
     friend struct BatchReadOperation;
+    friend struct InvalidateTableCacheOp;
+    friend struct InvalidateTableCacheCompositeOp;
+    friend class TxProcessor;
 };
 }  // namespace txservice

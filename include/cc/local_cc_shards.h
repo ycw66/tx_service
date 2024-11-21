@@ -49,6 +49,7 @@ class Checkpointer;
 class TxService;
 struct ClusterScaleOp;
 struct DataMigrationOp;
+struct InvalidateTableCacheCompositeOp;
 class SkGenerator;
 
 struct DataMigrationStatus
@@ -1514,7 +1515,7 @@ public:
     StatisticsEntry *GetTableStatistics(const TableName &table_name,
                                         NodeGroupId ng_id);
 
-    void CleanTableStatistics(const TableName &table_name);
+    void CleanTableStatistics(const TableName &table_name, NodeGroupId ng_id);
 
     void DropTableStatistics(NodeGroupId ng_id);
 
@@ -1682,6 +1683,10 @@ public:
 
     std::vector<std::unique_ptr<ClusterScaleOp>> cluster_scale_op_pool_;
     std::mutex cluster_scale_op_mux_;
+
+    std::vector<std::unique_ptr<InvalidateTableCacheCompositeOp>>
+        invalidate_table_cache_op_pool_;
+    std::mutex invalidate_table_cache_op_mux_;
 
     std::mutex data_migration_op_pool_mux_;
     std::vector<std::unique_ptr<DataMigrationOp>> migration_op_pool_;

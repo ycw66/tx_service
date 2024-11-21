@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <utility>
 
 #include "cc/local_cc_shards.h"
 #include "cc_req_pool.h"
@@ -34,6 +35,8 @@ thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
 thread_local CcRequestPool<RemoteScanSlice> scan_slice_pool;
 thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
 thread_local CcRequestPool<RemoteReloadCacheCc> reload_cache_pool_;
+thread_local CcRequestPool<RemoteInvalidateTableCacheCc>
+    invalidate_table_cache_pool_;
 thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
 thread_local CcRequestPool<RemoteBroadcastStatisticsCc> broadcast_stat_pool_;
 thread_local CcRequestPool<RemoteAnalyzeTableAllCc> analyze_table_all_pool_;
@@ -1966,6 +1969,68 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_StandbyHeartbeatRequest:
     {
+        break;
+    }
+    case CcMessage::MessageType::
+        CcMessage_MessageType_InvalidateTableCacheRequest:
+    {
+        RemoteInvalidateTableCacheCc *invalidate_req =
+            invalidate_table_cache_pool_.NextRequest();
+        invalidate_req->Reset(std::move(msg));
+        TX_TRACE_ASSOCIATE(msg.get(), invalidate_req);
+        local_shards_.EnqueueCcRequest(0, invalidate_req);
+        break;
+    }
+    case CcMessage::MessageType::
+        CcMessage_MessageType_InvalidateTableCacheResponse:
+    {
+        assert(msg->has_invalidate_table_cache_resp());
+
+        CcHandlerResult<Void> *hd_res = nullptr;
+
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+        int64_t tx_term = msg->tx_term();
+        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+        {
+            msg_pool_.enqueue(std::move(msg));
+            break;
+        }
+        else
+        {
+            hd_res =
+                reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
+
+            if (!hd_res->SetResultByStreamThread())
+            {
+                LOG(INFO) << "InvalidateTableCacheResponse rejected due to txm "
+                             "timeout";
+                msg_pool_.enqueue(std::move(msg));
+                break;
+            }
+
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
+            {
+                msg_pool_.enqueue(std::move(msg));
+                hd_res->DecreaseCurrentHandlingResponse();
+                break;
+            }
+        }
+
+        const InvalidateTableCacheResponse &invalidate_resp =
+            msg->invalidate_table_cache_resp();
+        if (invalidate_resp.error_code() != 0)
+        {
+            hd_res->SetRemoteError(
+                ToLocalType::ConvertCcErrorCode(invalidate_resp.error_code()));
+        }
+        else
+        {
+            hd_res->SetRemoteFinished();
+        }
+
+        hd_res->DecreaseCurrentHandlingResponse();
+        msg_pool_.enqueue(std::move(msg));
         break;
     }
     default:

@@ -2057,6 +2057,37 @@ void txservice::LocalCcHandler::VerifyOrphanLock(TxNumber txn)
     cc_shards_.GetCcShard(thd_id_)->VerifyOrphanLock(cc_shards_.NodeId(), txn);
 }
 
+void txservice::LocalCcHandler::InvalidateTableCache(
+    const TableName &table_name,
+    uint32_t ng_id,
+    TxNumber tx_number,
+    int64_t tx_term,
+    uint64_t command_id,
+    CcHandlerResult<Void> &hres)
+{
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id == cc_shards_.NodeId())
+    {
+        InvalidateTableCacheCc *req = invalidate_table_cache_pool.NextRequest();
+        req->Reset(&table_name, ng_id, tx_number, tx_term, &hres);
+        cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
+    }
+    else
+    {
+        hres.IncrementRemoteRef();
+        remote_hd_.InvalidateTableCache(cc_shards_.node_id_,
+                                        table_name,
+                                        ng_id,
+                                        tx_number,
+                                        tx_term,
+                                        command_id,
+                                        hres);
+    }
+}
+
 /*
  * Get the node id which runs the current transaction.
  */

@@ -610,7 +610,7 @@ public:
         int64_t cc_ng_term,
         CcRequestBase *requester);
 
-    void CleanTableStatistics(const TableName &table_name);
+    void CleanTableStatistics(const TableName &table_name, NodeGroupId ng_id);
 
     void DropBucketInfo(NodeGroupId ng_id);
 

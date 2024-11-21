@@ -1063,3 +1063,31 @@ void txservice::remote::RemoteCcHandler::UploadTxCommands(
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }
+
+void txservice::remote::RemoteCcHandler::InvalidateTableCache(
+    uint32_t src_node_id,
+    const TableName &table_name,
+    NodeGroupId ng_id,
+    TxNumber tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    CcHandlerResult<Void> &hres)
+{
+    CcMessage send_msg;
+
+    send_msg.set_type(CcMessage::MessageType::
+                          CcMessage_MessageType_InvalidateTableCacheRequest);
+    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_tx_term(tx_term);
+    send_msg.set_command_id(command_id);
+    send_msg.set_tx_number(tx_number);
+
+    InvalidateTableCacheRequest *invalidate_req =
+        send_msg.mutable_invalidate_table_cache_req();
+    invalidate_req->set_src_node_id(src_node_id);
+    invalidate_req->set_node_group_id(ng_id);
+    invalidate_req->set_table_name_str(table_name.String());
+    invalidate_req->set_table_type(
+        ToRemoteType::ConvertTableType(table_name.Type()));
+    stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
+}

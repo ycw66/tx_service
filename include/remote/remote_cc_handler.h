@@ -314,6 +314,14 @@ public:
                           bool has_overwrite,
                           CcHandlerResult<PostProcessResult> &hres);
 
+    void InvalidateTableCache(uint32_t src_node_id,
+                              const TableName &table_name,
+                              NodeGroupId ng_id,
+                              TxNumber tx_number,
+                              int64_t tx_term,
+                              uint16_t command_id,
+                              CcHandlerResult<Void> &hres);
+
 private:
     CcStreamSender &stream_sender_;
 };

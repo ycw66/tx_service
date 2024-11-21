@@ -1,7 +1,9 @@
 #include "remote/remote_cc_request.h"
 
 #include <atomic>
+#include <memory>
 #include <string_view>
+#include <utility>
 
 #include "cc/cc_handler_result.h"
 #include "cc/ccm_scanner.h"
@@ -2081,4 +2083,61 @@ bool txservice::remote::RemoteDbSizeCc::Execute(CcShard &ccs)
     }
 
     return false;
+}
+
+txservice::remote::RemoteInvalidateTableCacheCc::RemoteInvalidateTableCacheCc()
+    : cc_res_(nullptr)
+{
+    res_ = &cc_res_;
+
+    output_msg_.set_type(
+        CcMessage::MessageType::
+            CcMessage_MessageType_InvalidateTableCacheResponse);
+    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
+    {
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+
+        InvalidateTableCacheResponse *resp =
+            output_msg_.mutable_invalidate_table_cache_resp();
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
+
+        const InvalidateTableCacheRequest &req =
+            input_msg_->invalidate_table_cache_req();
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemoteInvalidateTableCacheCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_invalidate_table_cache_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_invalidate_table_cache_resp();
+
+    const InvalidateTableCacheRequest &req =
+        input_msg->invalidate_table_cache_req();
+    std::string_view table_name_sv(req.table_name_str());
+    remote_table_name_ = TableName(
+        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+
+    InvalidateTableCacheCc::Reset(&remote_table_name_,
+                                  req.node_group_id(),
+                                  input_msg->tx_number(),
+                                  input_msg->tx_term(),
+                                  &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
 }

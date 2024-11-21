@@ -4372,6 +4372,7 @@ public:
     uint32_t visit_slices_{0};
 };
 
+// Execute cache reloading callback implemented by computing layer.
 struct ReloadCacheCc : public TemplatedCcRequest<ReloadCacheCc, Void>
 {
     ReloadCacheCc() = default;
@@ -4424,6 +4425,33 @@ struct ReloadCacheCc : public TemplatedCcRequest<ReloadCacheCc, Void>
 private:
     bool done_{false};
     bool ok_{false};
+};
+
+// Invalidate table cache and table meta cache in TxService for given table.
+// Mainly used after Physical importing.
+struct InvalidateTableCacheCc
+    : public TemplatedCcRequest<InvalidateTableCacheCc, Void>
+{
+    InvalidateTableCacheCc() = default;
+
+    void Reset(const TableName *table_name,
+               uint32_t node_group_id,
+               TxNumber tx_number,
+               int64_t tx_term,
+               CcHandlerResult<Void> *res)
+    {
+        TemplatedCcRequest<InvalidateTableCacheCc, Void>::Reset(
+            &catalog_ccm_name, res, node_group_id, tx_number, tx_term);
+
+        invalidate_table_name_ = table_name;
+    }
+
+    void ResetCcm()
+    {
+        ccm_ = nullptr;
+    }
+
+    const TableName *invalidate_table_name_{nullptr};
 };
 
 struct FaultInjectCC : public TemplatedCcRequest<FaultInjectCC, bool>

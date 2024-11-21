@@ -1300,9 +1300,10 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
     return statistics_entry;
 }
 
-void CcShard::CleanTableStatistics(const TableName &table_name)
+void CcShard::CleanTableStatistics(const TableName &table_name,
+                                   NodeGroupId ng_id)
 {
-    return local_shards_.CleanTableStatistics(table_name);
+    return local_shards_.CleanTableStatistics(table_name, ng_id);
 }
 
 const BucketInfo *CcShard::GetBucketInfo(uint16_t bucket_id,

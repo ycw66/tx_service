@@ -83,7 +83,7 @@ struct TransactionOperation
 
     int retry_num_{RETRY_NUM};
     bool is_running_{false};
-    static const uint64_t tx_op_failed_ts_ = 0;
+    static constexpr uint64_t tx_op_failed_ts_ = 0;
     metrics::TimePoint op_start_{metrics::TimePoint::max()};
 };
 
@@ -1545,6 +1545,45 @@ public:
     CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
     std::vector<ScanBatchTuple>::iterator lock_it_;
 #endif
+};
+
+struct InvalidateTableCacheOp : TransactionOperation
+{
+public:
+    explicit InvalidateTableCacheOp(TransactionExecution *txm);
+
+    void Reset(uint32_t hres_ref_cnt);
+
+    void ResetHandlerTxm(TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm);
+
+    const TableName *table_name_;
+
+    CcHandlerResult<Void> hd_result_;
+};
+
+struct InvalidateTableCacheCompositeOp : CompositeTransactionOperation
+{
+    InvalidateTableCacheCompositeOp() = delete;
+
+    InvalidateTableCacheCompositeOp(const TableName *table_name,
+                                    TransactionExecution *txm);
+
+    void Reset(const TableName *table_name, TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm) override;
+
+    const TableName *table_name_;
+
+    CatalogKey catalog_key_;
+    CatalogRecord catalog_rec_;
+
+    AcquireAllOp acquire_all_lock_op_;
+
+    InvalidateTableCacheOp invalidate_table_cache_op_;
+
+    PostWriteAllOp post_all_lock_op_;
 };
 
 }  // namespace txservice

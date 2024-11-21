@@ -824,7 +824,7 @@ public:
             // Drop table range before drop catalog
             if (req.OpType() == OperationType::DropTable)
             {
-                shard_->CleanTableStatistics(table_key->Name());
+                shard_->CleanTableStatistics(table_key->Name(), cc_ng_id_);
 #ifdef RANGE_PARTITION_ENABLED
                 TableName range_table_name{table_key->Name().StringView(),
                                            TableType::RangePartition};
@@ -1753,6 +1753,87 @@ public:
         // should not reach here
         assert(false);
         return true;
+    }
+
+    bool Execute(InvalidateTableCacheCc &req) override
+    {
+        CcHandlerResult<Void> *hd_res = req.Result();
+
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
+        }
+
+        const TableName &base_table_name = *req.invalidate_table_name_;
+        CatalogKey catalog_key(base_table_name);
+        Iterator it =
+            TemplateCcMap<CatalogKey, CatalogRecord>::Find(catalog_key);
+        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+        assert(cce->GetKeyLock()->HasWriteLock(req.Txn()));
+
+        if (cce->PayloadStatus() == RecordStatus::Unknown)
+        {
+            const CatalogEntry *catalog_entry =
+                shard_->GetCatalog(base_table_name, req.NodeGroupId());
+            if (catalog_entry != nullptr)
+            {
+                assert(catalog_entry->schema_);
+                // upload catalog record
+                cce->payload_ = std::make_unique<CatalogRecord>();
+                cce->payload_->Set(catalog_entry->schema_,
+                                   catalog_entry->dirty_schema_,
+                                   catalog_entry->Version());
+                cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
+                                              RecordStatus::Normal);
+            }
+            else
+            {
+                shard_->FetchCatalog(
+                    base_table_name, req.NodeGroupId(), ng_term, &req);
+                return false;
+            }
+        }
+
+        CatalogRecord *catalog_rec = cce->payload_.get();
+        const TableSchema *table_schema = catalog_rec->Schema();
+
+        TableName base_range_name(base_table_name.StringView(),
+                                  TableType::RangePartition);
+        shard_->DropCcm(base_table_name, cc_ng_id_);
+        shard_->DropCcm(base_range_name, cc_ng_id_);
+
+        for (TableName index_table_name : table_schema->IndexNames())
+        {
+            TableName index_range_name(index_table_name.StringView(),
+                                       TableType::RangePartition);
+            shard_->DropCcm(index_table_name, cc_ng_id_);
+            shard_->DropCcm(index_range_name, cc_ng_id_);
+        }
+
+        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+            return false;
+        }
+        else
+        {
+            shard_->CleanTableRange(base_range_name, cc_ng_id_);
+            shard_->CleanTableStatistics(base_table_name, cc_ng_id_);
+
+            for (TableName index_table_name : table_schema->IndexNames())
+            {
+                TableName index_range_name(index_table_name.StringView(),
+                                           TableType::RangePartition);
+                shard_->CleanTableRange(index_range_name, cc_ng_id_);
+                shard_->CleanTableStatistics(index_table_name, cc_ng_id_);
+            }
+
+            hd_res->SetFinished();
+            return true;
+        }
     }
 
     TableType Type() const override

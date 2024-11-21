@@ -1561,14 +1561,15 @@ StatisticsEntry *LocalCcShards::GetTableStatistics(const TableName &table_name,
                : &statistics_it->second;
 }
 
-void LocalCcShards::CleanTableStatistics(const TableName &table_name)
+void LocalCcShards::CleanTableStatistics(const TableName &table_name,
+                                         NodeGroupId ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
 
     auto ng_statistics_it = table_statistics_map_.find(table_name);
     if (ng_statistics_it != table_statistics_map_.end())
     {
-        table_statistics_map_.erase(ng_statistics_it);
+        ng_statistics_it->second.erase(ng_id);
     }
 }
 

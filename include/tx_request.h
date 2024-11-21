@@ -1235,4 +1235,21 @@ public:
     bool local_cache_checked_;
 };
 
+struct InvalidateTableCacheTxRequest
+    : public TemplateTxRequest<InvalidateTableCacheTxRequest, Void>
+{
+public:
+    InvalidateTableCacheTxRequest(
+        const TableName *table_name,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          table_name_(table_name)
+    {
+    }
+
+    const TableName *table_name_;
+};
+
 }  // namespace txservice

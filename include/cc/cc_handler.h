@@ -569,6 +569,13 @@ public:
                              uint64_t range_version = UINT64_MAX) = 0;
 
     virtual void VerifyOrphanLock(TxNumber txn) = 0;
+
+    virtual void InvalidateTableCache(const TableName &table_name,
+                                      uint32_t ng_id,
+                                      TxNumber tx_number,
+                                      int64_t tx_term,
+                                      uint64_t command_id,
+                                      CcHandlerResult<Void> &hres) = 0;
 };
 
 }  // namespace txservice

@@ -455,6 +455,13 @@ public:
 
     void VerifyOrphanLock(TxNumber txn) override;
 
+    void InvalidateTableCache(const TableName &table_name,
+                              uint32_t ng_id,
+                              TxNumber tx_number,
+                              int64_t tx_term,
+                              uint64_t command_id,
+                              CcHandlerResult<Void> &hres) override;
+
 private:
     /// <summary>
     /// Thread Id is the local offset of the core to which the handler is
@@ -481,6 +488,7 @@ private:
     CcRequestPool<KickoutCcEntryCc> kickout_ccentry_pool_;
     CcRequestPool<ApplyCc> apply_pool;
     CcRequestPool<UploadTxCommandsCc> cmd_commit_pool;
+    CcRequestPool<InvalidateTableCacheCc> invalidate_table_cache_pool;
 
     CircularQueue<std::unique_ptr<CcScanner>> pk_forward_scanner_{64};
     CircularQueue<std::unique_ptr<CcScanner>> pk_backward_scanner_{64};

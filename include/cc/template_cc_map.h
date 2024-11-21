@@ -7787,6 +7787,11 @@ public:
         return true;
     }
 
+    bool Execute(InvalidateTableCacheCc &req) override
+    {
+        return true;
+    }
+
     bool Execute(ApplyCc &req) override
     {
         return true;
