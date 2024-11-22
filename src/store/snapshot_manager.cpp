@@ -1,5 +1,6 @@
-#include "cc/local_cc_shards.h"
 #include "store/snapshot_manager.h"
+
+#include "cc/local_cc_shards.h"
 
 namespace txservice
 {

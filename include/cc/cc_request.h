@@ -3872,7 +3872,18 @@ public:
                         if (catalog_entry->schema_ != nullptr)
                         {
                             ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
-                            assert(ccm_ != nullptr);
+                            if (ccm_ == nullptr)
+                            {
+                                // The base table schema exists but the index
+                                // table is dropped. Skips replaying the log for
+                                // this cc map.
+                                assert(table_name_->Type() ==
+                                           TableType::Secondary ||
+                                       table_name_->Type() ==
+                                           TableType::UniqueSecondary);
+                                SetFinish();
+                                return true;
+                            }
                         }
                         else
                         {

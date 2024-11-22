@@ -1,6 +1,8 @@
 
 #pragma once
 
+#include <tx_worker_pool.h>
+
 #include <atomic>
 #include <string>
 #include <thread>

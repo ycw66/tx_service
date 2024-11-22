@@ -1417,6 +1417,31 @@ void TransactionExecution::ProcessTxRequest(
                 assert(schema_op_msg.stage() ==
                        ::txlog::SchemaOpMessage::Stage::
                            SchemaOpMessage_Stage_CommitSchema);
+
+                // extract table schema and dirty schema from schema_op_msg
+                TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
+                    schema_op_msg.table_type());
+                std::string_view table_name_sv{schema_op_msg.table_name_str()};
+                TableName table_name{table_name_sv, table_type};
+                uint64_t schema_ts = schema_op_msg.catalog_ts();
+                std::shared_ptr<TableSchema> schema_ptr =
+                    Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->CreateTableSchemaFromImage(
+                            table_name,
+                            schema_op_msg.old_catalog_blob(),
+                            schema_ts);
+                std::shared_ptr<TableSchema> dirty_schema_ptr =
+                    Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->CreateTableSchemaFromImage(
+                            table_name,
+                            schema_op_msg.new_catalog_blob(),
+                            commit_ts_);
+
+                index_op_->catalog_rec_.Set(
+                    schema_ptr, dirty_schema_ptr, schema_ts);
+
                 index_op_->commit_log_op_.hd_result_.SetFinished();
                 index_op_->op_ = &index_op_->commit_log_op_;
             }

@@ -939,18 +939,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else if (op_type_ == OperationType::DropIndex)
         {
-            LOG(INFO) << "Alter Table Index transaction upsert data store"
+            ACTION_FAULT_INJECTOR("term_AlterTableDropIndex_PostCommitAllWLOp");
+            LOG(INFO) << "Drop Index transaction upsert data store"
                       << " info, txn: " << txm->TxNumber();
             op_ = &upsert_kv_table_op_;
-            // Read table schema from local cc shard. This is because we
-            // could be recovering from commit stage, in which case we have
-            // skipped post_all_intent_op_ and the schema in catalog_rec_
-            // would be empty.
-            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-            auto catalog_entry =
-                shards->GetCatalog(table_key_.Name(), txm->TxCcNodeId());
-            upsert_kv_table_op_.table_schema_ =
-                catalog_entry->dirty_schema_.get();
+            upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
             upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
             txm->PushOperation(&upsert_kv_table_op_);
             txm->Process(upsert_kv_table_op_);
