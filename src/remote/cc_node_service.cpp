@@ -1500,6 +1500,14 @@ void CcNodeService::RequestStorageSnapshotSync(
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
+#ifndef ON_KEY_OBJECT
+    assert(false);
+    response->set_error(true);
+    LOG(ERROR) << "RequestStorageSnapshotSync should not be called if standby "
+                  "feature is disabled.";
+    return;
+#else
+
     auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
     if (!store_hd)
     {
@@ -1532,6 +1540,7 @@ void CcNodeService::RequestStorageSnapshotSync(
     // kvstore on cache miss).
     store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
     response->set_error(false);
+#endif
 }
 
 void CcNodeService::OnSnapshotSynced(
@@ -1646,6 +1655,12 @@ void CcNodeService::CreateBackup(
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
+#ifndef ON_KEY_OBJECT
+    assert(false);
+    LOG(ERROR)
+        << "CreateBackup should not be called if backup feature is disabled.";
+    return;
+#else
     uint32_t ng_id = request->ng_id();
     response->set_ng_id(ng_id);
     int64_t leader_term = Sharder::Instance().LeaderTerm(ng_id);
@@ -1670,6 +1685,7 @@ void CcNodeService::CreateBackup(
         LOG(ERROR) << "Failed to create backup for kvstore is disabled.";
         response->set_status(BackupTaskStatus::Failed);
     }
+#endif
 }
 
 void CcNodeService::FetchBackup(
@@ -1679,8 +1695,15 @@ void CcNodeService::FetchBackup(
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
-    uint32_t ng_id = request->ng_id();
 
+#ifndef ON_KEY_OBJECT
+    assert(false);
+    LOG(ERROR)
+        << "FetchBackup should not be called if backup feature is disabled.";
+    return;
+#else
+
+    uint32_t ng_id = request->ng_id();
     int64_t leader_term = Sharder::Instance().LeaderTerm(ng_id);
     if (leader_term < 0)
     {
@@ -1703,6 +1726,7 @@ void CcNodeService::FetchBackup(
         LOG(ERROR) << "Failed to create backup for kvstore is disabled.";
         response->set_status(BackupTaskStatus::Unknown);
     }
+#endif
 }
 
 void CcNodeService::TerminateBackup(
@@ -1712,6 +1736,13 @@ void CcNodeService::TerminateBackup(
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
+
+#ifndef ON_KEY_OBJECT
+    assert(false);
+    LOG(ERROR) << "TerminateBackup should not be called if backup feature is "
+                  "disabled.";
+    return;
+#else
     uint32_t ng_id = request->ng_id();
     const std::string &backup_name = request->backup_name();
     response->set_ng_id(ng_id);
@@ -1727,6 +1758,7 @@ void CcNodeService::TerminateBackup(
     {
         LOG(ERROR) << "Failed to Terminate backup for kvstore is disabled.";
     }
+#endif
 }
 
 void CcNodeService::CreateClusterBackup(
@@ -1739,6 +1771,14 @@ void CcNodeService::CreateClusterBackup(
     // Also print default value in json response.
     auto *brpc_cntl = static_cast<brpc::Controller *>(controller);
     brpc_cntl->set_always_print_primitive_fields(true);
+
+#ifndef ON_KEY_OBJECT
+    assert(false);
+    response->set_result("failed");
+    LOG(ERROR) << "CreateClusterBackup should not be called if backup feature "
+                  "is disabled.";
+    return;
+#else
 
     const std::string &backup_name = request->backup_name();
     const std::string &dest_path = request->dest_path();
@@ -1780,6 +1820,7 @@ void CcNodeService::CreateClusterBackup(
         assert(false);
         break;
     }
+#endif
 }
 
 void CcNodeService::FetchClusterBackup(
@@ -1793,6 +1834,13 @@ void CcNodeService::FetchClusterBackup(
     auto *brpc_cntl = static_cast<brpc::Controller *>(controller);
     brpc_cntl->set_always_print_primitive_fields(true);
 
+#ifndef ON_KEY_OBJECT
+    assert(false);
+    response->set_result("failed");
+    LOG(ERROR) << "FetchClusterBackup should not be called if backup feature "
+                  "is disabled.";
+    return;
+#else
     const std::string &backup_name = request->backup_name();
     response->set_backup_name(backup_name);
 
@@ -1829,6 +1877,7 @@ void CcNodeService::FetchClusterBackup(
         assert(false);
         break;
     }
+#endif
 }
 
 }  // namespace remote

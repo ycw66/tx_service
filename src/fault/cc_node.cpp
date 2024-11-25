@@ -530,6 +530,12 @@ bool CcNode::OnLeaderStop(int64_t term)
 
 void CcNode::OnStartFollowing(uint32_t node_id, int64_t term, bool resubscribe)
 {
+#ifndef ON_KEY_OBJECT
+    assert(false);
+    LOG(ERROR) << "OnStartFollowing should not be called if standby feature is "
+                  "disabled.";
+    return;
+#else
     int64_t expected = -1;
     while (!requested_subscribe_primary_term_.compare_exchange_strong(
         expected, term, std::memory_order_acq_rel))
@@ -552,6 +558,7 @@ void CcNode::OnStartFollowing(uint32_t node_id, int64_t term, bool resubscribe)
     {
         SubscribePrimaryNode(node_id, term, false);
     }
+#endif
 }
 
 bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
@@ -595,6 +602,14 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
                                   int64_t primary_term,
                                   bool resubscribe)
 {
+#ifndef ON_KEY_OBJECT
+    assert(false);
+    LOG(ERROR)
+        << "SubscribePrimaryNode should not be called if standby feature "
+           "is disabled.";
+    return;
+#endif
+
     assert(ng_id_ == Sharder::Instance().NativeNodeGroup());
     bool expected = false;
     while (!is_processing_.compare_exchange_strong(

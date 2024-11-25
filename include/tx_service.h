@@ -35,13 +35,16 @@
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
 #include "spinlock.h"
-#include "store/snapshot_manager.h"  // SnapshotManager
 #include "tx_execution.h"
 #include "tx_request.h"
 #include "tx_service_common.h"
 #include "tx_service_metrics.h"
 #include "tx_start_ts_collector.h"
 #include "txlog.h"
+
+#ifdef ON_KEY_OBJECT
+#include "store/snapshot_manager.h"  // SnapshotManager
+#endif
 
 using namespace std::chrono_literals;
 namespace bthread
@@ -1109,10 +1112,11 @@ public:
             }
         }
 
+#ifdef ON_KEY_OBJECT
         // must start before host_manager
         store::SnapshotManager::Instance().Init(local_cc_shards_.store_hd_);
         store::SnapshotManager::Instance().Start();
-
+#endif
         uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
         if (Sharder::Instance().Init(node_id,
                                      ng_id,
@@ -1169,7 +1173,9 @@ public:
 
     void Shutdown()
     {
+#ifdef ON_KEY_OBJECT
         store::SnapshotManager::Instance().Shutdown();
+#endif
         DeadLockCheck::SetStop();
         ckpt_.Terminate();
         ckpt_.Join();

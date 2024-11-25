@@ -8,6 +8,8 @@ namespace txservice
 namespace store
 {
 
+#ifdef ON_KEY_OBJECT
+
 void SnapshotManager::Start()
 {
     standby_sync_worker_ = std::thread([this] { StandbySyncWorker(); });
@@ -113,6 +115,7 @@ void SnapshotManager::SyncWithStandby()
     if (!ckpt_res)
     {
         // data flush failed. Retry on next run.
+        LOG(ERROR) << "Failed to do checkpoint on SyncWithStandby";
         return;
     }
 
@@ -187,7 +190,6 @@ void SnapshotManager::SyncWithStandby()
         uint16_t port;
         Sharder::Instance().GetNodeAddress(node_id, ip, port);
         std::string remote_dest = req.user() + "@" + ip + ":" + req.dest_path();
-        // std::atomic<bool> succ{true};
         int64_t req_standby_node_term = req.standby_node_term();
         int64_t req_primary_term =
             PrimaryTermFromStandbyTerm(req_standby_node_term);
@@ -427,6 +429,7 @@ void SnapshotManager::HandleBackupTask(
             LOG(ERROR) << "Failed to create snpashot for backup";
             this->UpdateBackupTaskStatus(
                 task_ptr, txservice::remote::BackupTaskStatus::Failed);
+            store_hd_->RemoveBackupSnapshot(backup_name);
             return;
         }
     }
@@ -459,6 +462,7 @@ void SnapshotManager::HandleBackupTask(
 
             this->UpdateBackupTaskStatus(
                 task_ptr, txservice::remote::BackupTaskStatus::Failed);
+            store_hd_->RemoveBackupSnapshot(backup_name);
 
             return;
         }
@@ -494,15 +498,6 @@ void SnapshotManager::HandleBackupTask(
                       << ", dest_path:" << remote_dest;
             this->UpdateBackupTaskStatus(
                 task_ptr, txservice::remote::BackupTaskStatus::Finished);
-
-            // remove local temporary store directory of backup files.
-            if (!store_hd_->RemoveBackupSnapshot(backup_name))
-            {
-                LOG(ERROR)
-                    << "Failed to remove local temporary store directory of "
-                       "backup files , backup name:"
-                    << backup_name;
-            }
         }
         else
         {
@@ -511,6 +506,20 @@ void SnapshotManager::HandleBackupTask(
                 << backup_name << ", dest_path:" << remote_dest;
             this->UpdateBackupTaskStatus(
                 task_ptr, txservice::remote::BackupTaskStatus::Failed);
+        }
+
+        // remove local temporary store directory of backup files.
+        if (store_hd_->RemoveBackupSnapshot(backup_name))
+        {
+            LOG(INFO) << "Removed local temporary store directory of "
+                         "backup files , backup name:"
+                      << backup_name;
+        }
+        else
+        {
+            LOG(ERROR) << "Failed to remove local temporary store directory of "
+                          "backup files , backup name:"
+                       << backup_name;
         }
     }
 }
@@ -538,6 +547,10 @@ txservice::remote::BackupTaskStatus SnapshotManager::CreateBackup(
             txservice::NodeGroupId ng_id = backup_task_queue_.front()->ng_id();
             const std::string &backup_name =
                 backup_task_queue_.front()->backup_name();
+            if (!store_hd_->IsSharedStorage())
+            {
+                store_hd_->RemoveBackupSnapshot(backup_name);
+            }
             ng_backup_tasks_.at(ng_id).erase(backup_name);
             backup_task_queue_.pop_front();
         }
@@ -619,6 +632,8 @@ void SnapshotManager::TerminateBackup(txservice::NodeGroupId ng_id,
         }
     }
 }
+
+#endif
 
 }  // namespace store
 }  // namespace txservice
