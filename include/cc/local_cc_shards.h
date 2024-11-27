@@ -1399,7 +1399,14 @@ public:
             range_entry->SetAcceptsDirtyRangeData(false);
 
             bool kickout_any = false;
-            idx = clean_guard->MarkCleanInRange(store_range, idx, kickout_any);
+            uint64_t dirty_range_version =
+                range_entry->GetRangeInfo()->DirtyTs();
+            idx = clean_guard->MarkCleanInRange(
+                store_range,
+                idx,
+                kickout_any,
+                (range_entry->GetRangeInfo()->IsDirty() ? &dirty_range_version
+                                                        : nullptr));
             if (kickout_any)
             {
                 // If the key is kicked out, we need to update the bucket
@@ -1572,6 +1579,25 @@ public:
         int64_t ng_term,
         uint64_t data_sync_ts,
         CcHandlerResult<Void> *hres);
+
+#ifdef RANGE_PARTITION_ENABLED
+    /**
+     * @brief Construct one DataSyncTask for each sub-ranges of this range
+     * identified by @@range_entry, and enqueue to the datasync task queue.
+     *
+     * @param range_entry - The old range entry.
+     * @param txn - The tx_number of the split range transaction which is the
+     * transaction who launch this split range actually.
+     */
+    void EnqueueDataSyncTaskForSplittingRange(const TableName &table_name,
+                                              uint32_t ng_id,
+                                              int64_t ng_term,
+                                              TableRangeEntry *range_entry,
+                                              uint64_t data_sync_ts,
+                                              bool is_dirty,
+                                              uint64_t txn,
+                                              CcHandlerResult<Void> *hres);
+#endif
 
     void InitPrebuiltTables(NodeGroupId ng_id, int64_t term);
 
@@ -2104,15 +2130,14 @@ private:
 
     /**
      * @brief Called after data sync is done. Update data store slice size
-     * in memory and in data store. Reset post ckpt size in store slice. It
-     * is expected that flush_batch is in the same range.
+     * in memory and in data store. Reset post ckpt size in store slice.
      */
     bool UpdateStoreSlice(const TableName &tbl_name,
                           uint64_t ckpt_ts,
-                          NodeGroupId node_group_id,
-                          uint32_t range_id,
-                          bool flush_res,
-                          bool during_range_split);
+                          TableRangeEntry *range_entry,
+                          const TxKey *start_key,
+                          const TxKey *end_key,
+                          bool flush_res);
 #endif
 
     /**

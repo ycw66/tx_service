@@ -2162,6 +2162,83 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
         return false;
     }
 }
+
+void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
+    const TableName &table_name,
+    uint32_t ng_id,
+    int64_t ng_term,
+    TableRangeEntry *range_entry,
+    uint64_t data_sync_ts,
+    bool is_dirty,
+    uint64_t txn,
+    CcHandlerResult<Void> *hres)
+{
+    std::shared_ptr<DataSyncStatus> status =
+        std::make_shared<DataSyncStatus>(false);
+    const std::vector<TxKey> *new_keys = range_entry->GetRangeInfo()->NewKey();
+    assert(new_keys);
+
+    // Push task to worker task queue.
+    // There is no need to construct DataSyncTaskLimiter for those subrange
+    // tasks, due to the following reasons:
+    // 1. For the first subrange which is the old range, already exists one. And
+    // the ongoing DataSync task for this range is the one that launch this
+    // split range transaction.
+    // 2. For the remaining subranges, there is only one task for them. So there
+    // is no need to construct a limiter.
+    std::unique_lock<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
+
+    TxKey old_start_key = range_entry->GetRangeInfo()->StartTxKey();
+    TxKey old_end_key = range_entry->GetRangeInfo()->EndTxKey();
+    // The old range
+    data_sync_task_queue_.emplace_back(std::make_shared<DataSyncTask>(
+        table_name,
+        ng_id,
+        ng_term,
+        range_entry,
+        range_entry->GetRangeInfo()->StartTxKey(),
+        *new_keys->begin(),
+        data_sync_ts,
+        is_dirty,
+        false,
+        txn,
+        status,
+        hres));
+
+    bool need_copy_range = store_hd_->NeedCopyRange();
+    for (auto iter = new_keys->begin(); iter != new_keys->end(); ++iter)
+    {
+        TxKey end_key = (std::next(iter) == new_keys->end()
+                             ? range_entry->GetRangeInfo()->EndTxKey()
+                             : std::next(iter)->GetShallowCopy());
+        data_sync_task_queue_.emplace_back(
+            std::make_shared<DataSyncTask>(table_name,
+                                           ng_id,
+                                           ng_term,
+                                           range_entry,
+                                           *iter,
+                                           end_key,
+                                           data_sync_ts,
+                                           is_dirty,
+                                           need_copy_range,
+                                           txn,
+                                           status,
+                                           hres));
+    }
+
+    data_sync_worker_ctx_.cv_.notify_all();
+    task_worker_lk.unlock();
+
+    {
+        std::lock_guard<std::mutex> status_lk(status->mux_);
+        status->unfinished_tasks_ += (new_keys->size() + 1);
+        status->all_task_started_ = true;
+        if (status->unfinished_tasks_ == 0)
+        {
+            hres->SetFinished();
+        }
+    }
+}
 #else
 bool LocalCcShards::EnqueueDataSyncTaskToCore(
     const TableName &table_name,
@@ -2595,6 +2672,128 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
 }
 
 #ifdef RANGE_PARTITION_ENABLED
+void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
+                                            TransactionExecution *data_sync_txm,
+                                            DataSyncTask::CkptErrorCode err)
+{
+    std::unique_lock<bthread::Mutex> flight_task_lk(task->flight_task_mux_);
+    int64_t flight_task_cnt = --task->flight_task_cnt_;
+
+    if (task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
+    {
+        task->ckpt_err_ = err;
+    }
+
+    auto task_ckpt_err = task->ckpt_err_;
+    flight_task_lk.unlock();
+
+    // All flush tasks of this datasync task are finished (flight_task_cnt == 0)
+    if (flight_task_cnt == 0)
+    {
+        TableRangeEntry *range_entry = nullptr;
+        const TxKey *start_key = nullptr;
+        const TxKey *end_key = nullptr;
+        if (!task->during_split_range_)
+        {
+            range_entry = const_cast<TableRangeEntry *>(GetTableRangeEntry(
+                task->table_name_, task->node_group_id_, task->range_id_));
+        }
+        else
+        {
+            range_entry = task->range_entry_;
+            start_key = &task->start_key_;
+            end_key = &task->end_key_;
+        }
+        assert(range_entry);
+
+        if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
+        {
+            // Update the slice size.
+            while (!UpdateStoreSlice(task->table_name_,
+                                     task->data_sync_ts_,
+                                     range_entry,
+                                     start_key,
+                                     end_key,
+                                     true))
+            {
+                // Keep retrying here since we've finished the flush
+                // already, it's too expensive to start from the beginning
+                // all over again.
+                LOG(ERROR) << "DataSync failed to update store slice of range#"
+                           << task->range_id_ << " on table "
+                           << task->table_name_.Trace() << ", retrying.";
+                std::this_thread::sleep_for(1s);
+                if (!Sharder::Instance().CheckLeaderTerm(
+                        task->node_group_id_, task->node_group_term_))
+                {
+                    LOG(ERROR)
+                        << "Leader term changed during store slice update";
+                    task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                    break;
+                }
+            }
+
+            if (!task->during_split_range_)
+            {
+                // Commit the data sync txm
+                txservice::CommitTx(data_sync_txm);
+
+                // Update the task status for this range.
+                range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+
+                range_entry->UnPinStoreRange();
+
+                PopPendingTask(task->node_group_id_,
+                               task->node_group_term_,
+                               task->table_name_,
+                               task->range_id_);
+            }
+            task->SetFinish();
+        }
+        else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
+        {
+            if (!task->during_split_range_)
+            {
+                txservice::AbortTx(data_sync_txm);
+            }
+            std::lock_guard<std::mutex> task_worker_lk(
+                data_sync_worker_ctx_.mux_);
+            data_sync_task_queue_.emplace_front(task);
+            data_sync_worker_ctx_.cv_.notify_all();
+        }
+        else
+        {
+            assert(task_ckpt_err == DataSyncTask::CkptErrorCode::FLUSH_ERROR);
+            CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR;
+            // Reset the post ckpt size if flush failed
+            UpdateStoreSlice(task->table_name_,
+                             task->data_sync_ts_,
+                             range_entry,
+                             start_key,
+                             end_key,
+                             false);
+
+            if (!task->during_split_range_)
+            {
+                // Abort the data sync txm
+                txservice::AbortTx(data_sync_txm);
+
+                range_entry->UnPinStoreRange();
+
+                PopPendingTask(task->node_group_id_,
+                               task->node_group_term_,
+                               task->table_name_,
+                               task->range_id_);
+            }
+
+            if (Sharder::Instance().LeaderTerm(task->node_group_id_) <= 0)
+            {
+                err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+            }
+            task->SetError(err_code);
+        }
+    }
+}
 
 void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                              size_t worker_idx)
@@ -2619,311 +2818,364 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
     int64_t expected_ng_term = data_sync_task->node_group_term_;
-    bool is_dirty = data_sync_task->is_dirty_;
-    uint64_t last_sync_ts = 0;
-    bool need_process = false;
-    std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
-
     int32_t range_id = data_sync_task->range_id_;
-    TableName range_tbl_name{table_name.StringView(),
-                             TableType::RangePartition};
-    TableRangeEntry *range_entry =
-        GetTableRangeEntryInternal(range_tbl_name, ng_id, range_id);
-    if (range_entry == nullptr)
+    bool is_dirty = data_sync_task->is_dirty_;
+    bool during_split_range = data_sync_task->during_split_range_;
+    uint64_t last_sync_ts = 0;
+    int64_t ng_term = -1;
+    uint64_t tx_number = 0;
+    bool need_process = false;
+    TxKey start_tx_key, end_tx_key;
+    std::shared_ptr<const TableSchema> table_schema = nullptr;
+    uint64_t schema_version = 0;
+    TableRangeEntry *range_entry = nullptr;
+    TransactionExecution *data_sync_txm = nullptr;
+    StoreRange *store_range = nullptr;
+    // Guard to unpin node group on finish.
+    std::shared_ptr<void> defer_unpin = nullptr;
+
+    if (!during_split_range)
     {
-        // table dropped
-        data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-        ClearAllPendingTasks(ng_id, expected_ng_term, table_name, range_id);
-    }
-    else
-    {
-        NodeGroupId range_ng =
-            GetRangeOwnerInternal(range_id, ng_id)->BucketOwner();
-        if (range_ng == ng_id)
+        std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+
+        TableName range_tbl_name{table_name.StringView(),
+                                 TableType::RangePartition};
+        range_entry =
+            GetTableRangeEntryInternal(range_tbl_name, ng_id, range_id);
+        if (range_entry == nullptr)
         {
-            if (data_sync_task->SyncTsAdjustable())
-            {
-                auto task_limiter_key = TaskLimiterKey(ng_id,
-                                                       expected_ng_term,
-                                                       table_name.StringView(),
-                                                       table_name.Type(),
-                                                       range_id);
-                std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
-                auto iter = task_limiters_.find(task_limiter_key);
-                assert(iter != task_limiters_.end());
-                uint64_t latest_pending_task_ts =
-                    iter->second->UnsetLatestPendingTs();
-                data_sync_task->data_sync_ts_ = std::max(
-                    latest_pending_task_ts, data_sync_task->data_sync_ts_);
-                data_sync_task->UnsetSyncTsAdjustable();
-            }
-
-            // For dirty tables (create index in process), data older than
-            // last sync ts will be continously written into memory. We
-            // cannot rely on last sync ts to determin if there's dirty data
-            // that needs to be flushed.
-            last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
-            if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
-            {
-                data_sync_task->SetFinish();
-                PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
-                assert(need_process == false);
-            }
-            else
-            {
-                need_process = true;
-            }
-        }
-        else
-        {
-            // range no longer belong to this ng.
-            data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
-        }
-    }
-
-    if (!need_process)
-    {
-        return;
-    }
-
-    meta_lk.unlock();
-
-    // Check the leader
-    int64_t ng_term = Sharder::Instance().TryPinNodeGroupData(ng_id);
-    if (ng_term < 0 || ng_term != expected_ng_term)
-    {
-        LOG(ERROR) << "DataSync: node is not the leader of ng#" << ng_id
-                   << " with leader term: " << ng_term
-                   << ", and the expected leader term: " << expected_ng_term;
-
-        // Finish this task and notify the caller.
-        data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
-
-        if (ng_term >= 0)
-        {
-            Sharder::Instance().UnpinNodeGroupData(ng_id);
-        }
-
-        return;
-    }
-
-    assert(ng_term == expected_ng_term);
-    if (Sharder::Instance().LeaderTerm(ng_id) < 0)
-    {
-        // node is still candidate leader of node group. Log replay is not
-        // finished yet. In this case we can flush data and kickout cce, but we
-        // cannot truncate redo log based on this data sync ts since we might
-        // miss the data that has not been recovered yet.
-        data_sync_task->SetErrorCode(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-    }
-
-    // guard to unpin node group on finish.
-    std::shared_ptr<void> defer_unpin(
-        nullptr,
-        [ng_id](void *) { Sharder::Instance().UnpinNodeGroupData(ng_id); });
-    // Process this task.
-    // 1. Get a new txm and init
-    TransactionExecution *data_sync_txm =
-        txservice::NewTxInit(tx_service_,
-                             IsolationLevel::RepeatableRead,
-                             CcProtocol::Locking,
-                             ng_id);
-
-    if (data_sync_txm == nullptr)
-    {
-        LOG(ERROR) << "DataSync init data sync transaction failed.";
-
-        std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
-        data_sync_task_queue_.emplace_front(data_sync_task);
-        data_sync_worker_ctx_.cv_.notify_one();
-        return;
-    }
-
-    // 2. Issue read catalog tx_request to acquire read lock on catalog
-    // cc_entry using base table name, and acquire read lock in one
-    // shard is good enough to block schema change.
-    // If table_name has been dropped at this point, read lock would
-    // not be acquired.
-    const TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                    TableType::Primary};
-
-    CatalogKey table_key(base_table_name);
-    TxKey tbl_tx_key{&table_key};
-    CatalogRecord catalog_rec;
-
-    ReadTxRequest read_req;
-    read_req.Set(
-        &catalog_ccm_name, 0, &tbl_tx_key, &catalog_rec, false, false, true);
-    data_sync_txm->Execute(&read_req);
-    read_req.Wait();
-
-    RecordStatus rec_status = read_req.Result().first;
-
-    if (read_req.IsError() || rec_status != RecordStatus::Normal)
-    {
-        // Use AbortTxRequest to release read lock.
-        txservice::AbortTx(data_sync_txm);
-
-        if (rec_status != RecordStatus::Normal)
-        {
-            LOG(ERROR) << "DataSync try to add read lock on deleted table, "
-                          "table name: "
-                       << table_key.Name().StringView();
-            // If table is deleted(!Normal), skip the table. Return finish
-            // directly.
-            data_sync_task->SetError();
-
+            // table dropped
+            data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
             ClearAllPendingTasks(ng_id, expected_ng_term, table_name, range_id);
         }
         else
         {
-            LOG(ERROR) << "DataSync add read lock on table failed, "
-                          "table name: "
-                       << table_key.Name().StringView();
+            NodeGroupId range_ng =
+                GetRangeOwnerInternal(range_id, ng_id)->BucketOwner();
+            if (range_ng == ng_id)
+            {
+                if (data_sync_task->SyncTsAdjustable())
+                {
+                    auto task_limiter_key =
+                        TaskLimiterKey(ng_id,
+                                       expected_ng_term,
+                                       table_name.StringView(),
+                                       table_name.Type(),
+                                       range_id);
+                    std::lock_guard<std::mutex> task_limiter_lk(
+                        task_limiter_mux_);
+                    auto iter = task_limiters_.find(task_limiter_key);
+                    assert(iter != task_limiters_.end());
+                    uint64_t latest_pending_task_ts =
+                        iter->second->UnsetLatestPendingTs();
+                    data_sync_task->data_sync_ts_ = std::max(
+                        latest_pending_task_ts, data_sync_task->data_sync_ts_);
+                    data_sync_task->UnsetSyncTsAdjustable();
+                }
 
-            // If read lock acquire failed, retry next time.
-            // Put back into the beginning.
+                // For dirty tables (create index in process), data older than
+                // last sync ts will be continously written into memory. We
+                // cannot rely on last sync ts to determin if there's dirty data
+                // that needs to be flushed.
+                last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
+                if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
+                {
+                    data_sync_task->SetFinish();
+                    PopPendingTask(
+                        ng_id, expected_ng_term, table_name, range_id);
+                    assert(need_process == false);
+                }
+                else
+                {
+                    need_process = true;
+                }
+            }
+            else
+            {
+                // range no longer belong to this ng.
+                data_sync_task->SetError(
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+            }
+        }
+
+        if (!need_process)
+        {
+            return;
+        }
+
+        meta_lk.unlock();
+
+        // Check the leader
+        ng_term = Sharder::Instance().TryPinNodeGroupData(ng_id);
+        if (ng_term < 0 || ng_term != expected_ng_term)
+        {
+            LOG(ERROR) << "DataSync: node is not the leader of ng#" << ng_id
+                       << " with leader term: " << ng_term
+                       << ", and the expected leader term: "
+                       << expected_ng_term;
+
+            // Finish this task and notify the caller.
+            data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+
+            if (ng_term >= 0)
+            {
+                Sharder::Instance().UnpinNodeGroupData(ng_id);
+            }
+
+            return;
+        }
+
+        assert(ng_term == expected_ng_term);
+        if (Sharder::Instance().LeaderTerm(ng_id) < 0)
+        {
+            // node is still candidate leader of node group. Log replay is not
+            // finished yet. In this case we can flush data and kickout cce, but
+            // we cannot truncate redo log based on this data sync ts since we
+            // might miss the data that has not been recovered yet.
+            data_sync_task->SetErrorCode(
+                CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        }
+
+        defer_unpin = std::move(std::shared_ptr<void>(
+            nullptr,
+            [ng_id](void *)
+            { Sharder::Instance().UnpinNodeGroupData(ng_id); }));
+
+        // Process this task.
+        // 1. Get a new txm and init
+        data_sync_txm = txservice::NewTxInit(tx_service_,
+                                             IsolationLevel::RepeatableRead,
+                                             CcProtocol::Locking,
+                                             ng_id);
+
+        if (data_sync_txm == nullptr)
+        {
+            LOG(ERROR) << "DataSync init data sync transaction failed.";
 
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
             data_sync_task_queue_.emplace_front(data_sync_task);
             data_sync_worker_ctx_.cv_.notify_one();
+            return;
         }
-        return;
-    }
 
-    // Get the table schema. The basic strategy is that, 1) for pk table, must
-    // use the current table schema, 2) for the [Unique]secondary table, only
-    // in the case that there is no key schema corresponding to the index table
-    // in the current table schema, should use the dirty table schema.
+        tx_number = data_sync_txm->TxNumber();
+        // 2. Issue read catalog tx_request to acquire read lock on catalog
+        // cc_entry using base table name, and acquire read lock in one
+        // shard is good enough to block schema change.
+        // If table_name has been dropped at this point, read lock would
+        // not be acquired.
+        const TableName base_table_name{table_name.GetBaseTableNameSV(),
+                                        TableType::Primary};
 
-    std::shared_ptr<const TableSchema> table_schema = catalog_rec.CopySchema();
-    if (table_name.Type() == TableType::Secondary ||
-        table_name.Type() == TableType::UniqueSecondary)
-    {
-        if (catalog_rec.DirtySchema() &&
-            !table_schema->IndexKeySchema(table_name))
+        CatalogKey table_key(base_table_name);
+        TxKey tbl_tx_key{&table_key};
+        CatalogRecord catalog_rec;
+
+        ReadTxRequest read_req;
+        read_req.Set(&catalog_ccm_name,
+                     0,
+                     &tbl_tx_key,
+                     &catalog_rec,
+                     false,
+                     false,
+                     true);
+        data_sync_txm->Execute(&read_req);
+        read_req.Wait();
+
+        RecordStatus rec_status = read_req.Result().first;
+
+        if (read_req.IsError() || rec_status != RecordStatus::Normal)
         {
-            table_schema = catalog_rec.CopyDirtySchema();
+            // Use AbortTxRequest to release read lock.
+            txservice::AbortTx(data_sync_txm);
+
+            if (rec_status != RecordStatus::Normal)
+            {
+                LOG(ERROR) << "DataSync try to add read lock on deleted table, "
+                              "table name: "
+                           << table_key.Name().StringView();
+                // If table is deleted(!Normal), skip the table. Return finish
+                // directly.
+                data_sync_task->SetError();
+
+                ClearAllPendingTasks(
+                    ng_id, expected_ng_term, table_name, range_id);
+            }
+            else
+            {
+                LOG(ERROR) << "DataSync add read lock on table failed, "
+                              "table name: "
+                           << table_key.Name().StringView();
+
+                // If read lock acquire failed, retry next time.
+                // Put back into the beginning.
+
+                std::lock_guard<std::mutex> task_worker_lk(
+                    data_sync_worker_ctx_.mux_);
+                data_sync_task_queue_.emplace_front(data_sync_task);
+                data_sync_worker_ctx_.cv_.notify_one();
+            }
+            return;
         }
-        // For index table, if this table has been dropped, skip it.
-        if (!table_schema->IndexKeySchema(table_name))
-        {
-            // Use CommitTx to release read lock.
-            txservice::CommitTx(data_sync_txm);
-            LOG(INFO) << "DataSync on the deleted table: " << table_name.Trace()
-                      << ". Return finish directly.";
 
-            data_sync_task->SetFinish();
+        // Get the table schema. The basic strategy is that, 1) for pk table,
+        // must use the current table schema, 2) for the [Unique]secondary
+        // table, only in the case that there is no key schema corresponding to
+        // the index table in the current table schema, should use the dirty
+        // table schema.
+
+        table_schema = catalog_rec.CopySchema();
+        if (table_name.Type() == TableType::Secondary ||
+            table_name.Type() == TableType::UniqueSecondary)
+        {
+            if (catalog_rec.DirtySchema() &&
+                !table_schema->IndexKeySchema(table_name))
+            {
+                table_schema = catalog_rec.CopyDirtySchema();
+            }
+            // For index table, if this table has been dropped, skip it.
+            if (!table_schema->IndexKeySchema(table_name))
+            {
+                // Use CommitTx to release read lock.
+                txservice::CommitTx(data_sync_txm);
+                LOG(INFO) << "DataSync on the deleted table: "
+                          << table_name.Trace() << ". Return finish directly.";
+
+                data_sync_task->SetFinish();
+                PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+
+                return;
+            }
+        }
+        schema_version = table_schema->Version();
+
+        // Lock bucket so that bucket cannot be migrated away during data sync.
+        uint64_t expected_range_version = data_sync_task->range_version_;
+        RangeBucketRecord bucket_rec;
+        RangeBucketKey bucket_key(
+            Sharder::Instance().MapRangeIdToBucketId(range_id));
+        TxKey bucket_tx_key{&bucket_key};
+        read_req.Reset();
+        read_req.Set(&range_bucket_ccm_name,
+                     0,
+                     &bucket_tx_key,
+                     &bucket_rec,
+                     false,
+                     false,
+                     true);
+        data_sync_txm->Execute(&read_req);
+        read_req.Wait();
+
+        if (read_req.IsError())
+        {
+            // Use AbortTxRequest to release read lock.
+            LOG(ERROR) << "DataSync add read lock on bucket failed, "
+                          "bucket id: "
+                       << Sharder::Instance().MapRangeIdToBucketId(range_id);
+
+            txservice::AbortTx(data_sync_txm);
+            // If read lock acquire failed, retry next time.
+            // Put back into the beginning.
+            std::lock_guard<std::mutex> task_worker_lk(
+                data_sync_worker_ctx_.mux_);
+            data_sync_task_queue_.emplace_front(data_sync_task);
+            data_sync_worker_ctx_.cv_.notify_one();
+            return;
+        }
+
+        // Now that we have acquired read lock on catalog and bucket, there
+        // won't be any ddl on this range. Update store_range and check if this
+        // range is still owned by this node group.
+        range_entry = const_cast<TableRangeEntry *>(
+            GetTableRangeEntry(range_tbl_name, ng_id, range_id));
+        if (bucket_rec.GetBucketInfo()->BucketOwner() != ng_id)
+        {
+            assert(range_entry);
+            // Skip the range, it might be dropped or migrated away.
+            // Use AbortTxRequest to release read lock.
+            txservice::AbortTx(data_sync_txm);
+
+            data_sync_task->SetError();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             return;
         }
-    }
-
-    // Lock bucket so that bucket cannot be migrated away during data sync.
-    uint64_t expected_range_version = data_sync_task->range_version_;
-    RangeBucketRecord bucket_rec;
-    RangeBucketKey bucket_key(
-        Sharder::Instance().MapRangeIdToBucketId(range_id));
-    TxKey bucket_tx_key{&bucket_key};
-    read_req.Reset();
-    read_req.Set(&range_bucket_ccm_name,
-                 0,
-                 &bucket_tx_key,
-                 &bucket_rec,
-                 false,
-                 false,
-                 true);
-    data_sync_txm->Execute(&read_req);
-    read_req.Wait();
-
-    if (read_req.IsError())
-    {
-        // Use AbortTxRequest to release read lock.
-        LOG(ERROR) << "DataSync add read lock on bucket failed, "
-                      "bucket id: "
-                   << Sharder::Instance().MapRangeIdToBucketId(range_id);
-
-        txservice::AbortTx(data_sync_txm);
-        // If read lock acquire failed, retry next time.
-        // Put back into the beginning.
-        std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
-        data_sync_task_queue_.emplace_front(data_sync_task);
-        data_sync_worker_ctx_.cv_.notify_one();
-        return;
-    }
-
-    // Now that we have acquired read lock on catalog and bucket, there won't be
-    // any ddl on this range. Update store_range and check if this range is
-    // still owned by this node group.
-    range_entry = const_cast<TableRangeEntry *>(
-        GetTableRangeEntry(range_tbl_name, ng_id, range_id));
-    if (bucket_rec.GetBucketInfo()->BucketOwner() != ng_id)
-    {
-        assert(range_entry);
-        // Skip the range, it might be dropped or migrated away.
-        // Use AbortTxRequest to release read lock.
-        txservice::AbortTx(data_sync_txm);
-
-        data_sync_task->SetError();
-        PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
-
-        return;
-    }
-    else if (range_entry->Version() != expected_range_version)
-    {
-        // If the range spec has been updated since we create the task,
-        // we might miss the data in the new range during data sync scan.
-        // So we need to mark this round of data sync as failed.
-        LOG(WARNING) << "DataSync range version mismatch with data sync ts: "
-                     << data_sync_task->data_sync_ts_;
-        data_sync_task->SetErrorCode(CcErrorCode::GET_RANGE_ID_ERR);
-    }
-
-    StoreRange *store_range = range_entry->PinStoreRange();
-    if (!store_range)
-    {
-        WaitableCc cc;
-        // Since node group is pinned, range entry will not be dropped by
-        // ClearNodeGroupCc. This is the only thread that will update table
-        // ranges for this table, so we don't need meta data shared lock here.
-        range_entry->FetchRangeSlices(
-            range_tbl_name, &cc, ng_id, ng_term, cc_shards_[0].get());
-        cc.Wait();
-        while (cc.IsError())
+        else if (range_entry->Version() != expected_range_version)
         {
-            // Failed to fetch range slice. If error is caused by data store
-            // unreachable, retry.
-            if (cc.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                cc.Reset();
-                range_entry->FetchRangeSlices(
-                    range_tbl_name, &cc, ng_id, ng_term, cc_shards_[0].get());
-                cc.Wait();
-            }
-            else if (cc.ErrorCode() == CcErrorCode::NG_TERM_CHANGED)
-            {
-                data_sync_task->SetError();
-                PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
-                // Term is invalid, we are no longer leader. Abort data sync.
-                txservice::AbortTx(data_sync_txm);
-                return;
-            }
-            else
-            {
-                assert(false);
-            }
+            // If the range spec has been updated since we create the task,
+            // we might miss the data in the new range during data sync scan.
+            // So we need to mark this round of data sync as failed.
+            LOG(WARNING)
+                << "DataSync range version mismatch with data sync ts: "
+                << data_sync_task->data_sync_ts_;
+            data_sync_task->SetErrorCode(CcErrorCode::GET_RANGE_ID_ERR);
         }
+
         store_range = range_entry->PinStoreRange();
-        assert(store_range != nullptr);
+        if (!store_range)
+        {
+            WaitableCc cc;
+            // Since node group is pinned, range entry will not be dropped by
+            // ClearNodeGroupCc. This is the only thread that will update table
+            // ranges for this table, so we don't need meta data shared lock
+            // here.
+            range_entry->FetchRangeSlices(
+                range_tbl_name, &cc, ng_id, ng_term, cc_shards_[0].get());
+            cc.Wait();
+            while (cc.IsError())
+            {
+                // Failed to fetch range slice. If error is caused by data store
+                // unreachable, retry.
+                if (cc.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    cc.Reset();
+                    range_entry->FetchRangeSlices(range_tbl_name,
+                                                  &cc,
+                                                  ng_id,
+                                                  ng_term,
+                                                  cc_shards_[0].get());
+                    cc.Wait();
+                }
+                else if (cc.ErrorCode() == CcErrorCode::NG_TERM_CHANGED)
+                {
+                    data_sync_task->SetError();
+                    PopPendingTask(
+                        ng_id, expected_ng_term, table_name, range_id);
+                    // Term is invalid, we are no longer leader. Abort data
+                    // sync.
+                    txservice::AbortTx(data_sync_txm);
+                    return;
+                }
+                else
+                {
+                    assert(false);
+                }
+            }
+            store_range = range_entry->PinStoreRange();
+            assert(store_range != nullptr);
+        }
+        start_tx_key = range_entry->GetRangeInfo()->StartTxKey();
+        end_tx_key = range_entry->GetRangeInfo()->EndTxKey();
+    }
+    else
+    {
+        ng_term = data_sync_task->node_group_term_;
+        tx_number = data_sync_task->tx_number_;
+        start_tx_key = data_sync_task->start_key_.GetShallowCopy();
+        end_tx_key = data_sync_task->end_key_.GetShallowCopy();
+        range_entry = data_sync_task->range_entry_;
+        assert(range_entry);
+        store_range = range_entry->RangeSlices();
+        assert(store_range);
+
+        last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
+        schema_version = 0;
     }
 
-    TxKey start_tx_key = range_entry->GetRangeInfo()->StartTxKey();
-    TxKey end_tx_key = range_entry->GetRangeInfo()->EndTxKey();
     // Scan the delta slice size
     std::map<TxKey, int64_t> slices_delta_size;
     ScanSliceDeltaSizeCc scan_delta_size_cc(table_name,
@@ -2949,7 +3201,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                    << table_name.StringView() << " with error code: "
                    << static_cast<uint32_t>(scan_delta_size_cc.ErrorCode());
 
-        txservice::AbortTx(data_sync_txm);
+        if (!during_split_range)
+        {
+            txservice::AbortTx(data_sync_txm);
+        }
         std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
         data_sync_task_queue_.emplace_front(data_sync_task);
         data_sync_worker_ctx_.cv_.notify_one();
@@ -2974,51 +3229,59 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             << "No items need to be sync in this round data sync of range#"
             << range_id << " for table: " << table_name.StringView()
             << ". Finish this task directly.";
-        txservice::CommitTx(data_sync_txm);
+        if (!during_split_range)
+        {
+            txservice::CommitTx(data_sync_txm);
+            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+        }
         data_sync_task->SetFinish();
-        PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
         return;
     }
     assert(slices_delta_size.size() > 0);
 
-    std::vector<TxKey> split_keys;
-    bool ret = CalculateRangeUpdate(table_name,
-                                    ng_id,
-                                    ng_term,
-                                    data_sync_task->data_sync_ts_,
-                                    store_range,
-                                    slices_delta_size,
-                                    split_keys);
-    if (!ret)
+    if (!during_split_range)
     {
-        LOG(ERROR) << "Calculate subranges key failed on table "
-                   << table_name.StringView();
+        // If the task comes from split range transaction, it is assumed that
+        // there will be no further splitting.
+        std::vector<TxKey> split_keys;
+        bool ret = CalculateRangeUpdate(table_name,
+                                        ng_id,
+                                        ng_term,
+                                        data_sync_task->data_sync_ts_,
+                                        store_range,
+                                        slices_delta_size,
+                                        split_keys);
+        if (!ret)
+        {
+            LOG(ERROR) << "Calculate subranges key failed on table "
+                       << table_name.StringView();
 
-        data_sync_task->SetError();
-        // Handle the pending tasks for the same range
-        PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+            data_sync_task->SetError();
+            // Handle the pending tasks for the same range
+            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
-        range_entry->UnPinStoreRange();
-        txservice::AbortTx(data_sync_txm);
-        return;
-    }
+            range_entry->UnPinStoreRange();
+            txservice::AbortTx(data_sync_txm);
+            return;
+        }
 
-    if (!split_keys.empty())
-    {
-        std::lock_guard<std::mutex> range_split_worker_lk(
-            range_split_worker_ctx_.mux_);
+        if (!split_keys.empty())
+        {
+            std::lock_guard<std::mutex> range_split_worker_lk(
+                range_split_worker_ctx_.mux_);
 
-        auto range_split_task =
-            std::make_unique<RangeSplitTask>(data_sync_task,
-                                             table_schema,
-                                             std::move(split_keys),
-                                             range_entry,
-                                             data_sync_txm,
-                                             defer_unpin);
+            auto range_split_task =
+                std::make_unique<RangeSplitTask>(data_sync_task,
+                                                 table_schema,
+                                                 std::move(split_keys),
+                                                 range_entry,
+                                                 data_sync_txm,
+                                                 defer_unpin);
 
-        pending_range_split_task_.push_back(std::move(range_split_task));
-        range_split_worker_ctx_.cv_.notify_one();
-        return;
+            pending_range_split_task_.push_back(std::move(range_split_task));
+            range_split_worker_ctx_.cv_.notify_one();
+            return;
+        }
     }
 
     // 3. Scan records.
@@ -3065,23 +3328,22 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
-    DataSyncScanCc scan_cc(
-        table_name,
-        last_sync_ts,
-        data_sync_task->data_sync_ts_,
-        ng_id,
-        ng_term,
-        cc_shards_.size(),
-        DATA_SYNC_SCAN_BATCH_SIZE,
-        data_sync_txm->TxNumber(),
-        &start_tx_key,
-        &end_tx_key,
-        false,
-        false, /*TODO: data_sync_task->export_base_table_records_*/
-        false,
-        store_range,
-        &slices_delta_size,
-        table_schema->Version());
+    DataSyncScanCc scan_cc(table_name,
+                           last_sync_ts,
+                           data_sync_task->data_sync_ts_,
+                           ng_id,
+                           ng_term,
+                           cc_shards_.size(),
+                           DATA_SYNC_SCAN_BATCH_SIZE,
+                           tx_number,
+                           &start_tx_key,
+                           &end_tx_key,
+                           false,
+                           data_sync_task->export_base_table_items_,
+                           false,
+                           store_range,
+                           &slices_delta_size,
+                           schema_version);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
@@ -3222,7 +3484,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             // Remove the keys that no need to be flush. This is the case that
             // the slice need to split, and we just use those keys to calculate
             // the subslice keys.
-            // TODO(ysw): if (!data_sync_task->export_base_table_records_)
+            if (!data_sync_task->export_base_table_items_)
             {
                 auto it = data_sync_vec->begin();
                 auto flush_it = data_sync_vec->begin();
@@ -3301,6 +3563,103 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                             DataSyncTask::CkptErrorCode::NO_ERROR);
 }
 #else
+void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
+                                            const TableSchema *table_schema,
+                                            TransactionExecution *data_sync_txm,
+                                            DataSyncTask::CkptErrorCode err,
+                                            uint16_t worker_idx)
+{
+    std::unique_lock<bthread::Mutex> flight_task_lk(task->flight_task_mux_);
+    int64_t flight_task_cnt = --task->flight_task_cnt_;
+
+    if (task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
+    {
+        task->ckpt_err_ = err;
+    }
+
+    auto task_ckpt_err = task->ckpt_err_;
+
+    flight_task_lk.unlock();
+
+    // All flush tasks of this task are finished (flight_task_cnt == 0)
+    if (flight_task_cnt == 0)
+    {
+        if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
+        {
+            // Commit the data sync txm
+            txservice::CommitTx(data_sync_txm);
+            PopPendingTask(task->node_group_id_,
+                           task->node_group_term_,
+                           task->table_name_,
+                           worker_idx);
+
+            bool res = store_hd_->CkptEnd(task->table_name_,
+                                          table_schema,
+                                          task->node_group_id_,
+                                          task->node_group_term_);
+            if (!res)
+            {
+                task->SetError(CcErrorCode::DATA_STORE_ERR);
+                return;
+            }
+
+            {
+                std::shared_lock<std::shared_mutex> meta_data_lk(
+                    meta_data_mux_);
+                const TableName base_table_name{
+                    task->table_name_.GetBaseTableNameSV(), TableType::Primary};
+                CatalogEntry *catalog_entry =
+                    GetCatalogInternal(base_table_name, task->node_group_id_);
+                if (catalog_entry && task->data_sync_ts_ != UINT64_MAX)
+                {
+                    catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
+                                                        worker_idx);
+                }
+            }
+
+            task->SetFinish();
+        }
+        else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
+        {
+            txservice::AbortTx(data_sync_txm);
+
+            std::lock_guard<std::mutex> task_worker_lk(
+                data_sync_worker_ctx_.mux_);
+            data_sync_task_queue_[worker_idx].emplace_front(task);
+            data_sync_worker_ctx_.cv_.notify_all();
+        }
+        else
+        {
+            assert(task_ckpt_err == DataSyncTask::CkptErrorCode::FLUSH_ERROR);
+            CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR;
+            if (task->is_standby_node_ckpt_)
+            {
+                if (Sharder::Instance().LeaderTerm(task->node_group_id_) !=
+                    task->node_group_term_)
+                {
+                    err_code = CcErrorCode::NG_TERM_CHANGED;
+                }
+            }
+            else
+            {
+                if (Sharder::Instance().StandbyNodeTerm() !=
+                    task->node_group_term_)
+                {
+                    err_code = CcErrorCode::NG_TERM_CHANGED;
+                }
+            }
+
+            task->SetError(err_code);
+
+            PopPendingTask(task->node_group_id_,
+                           task->node_group_term_,
+                           task->table_name_,
+                           worker_idx);
+
+            txservice::AbortTx(data_sync_txm);
+        }
+    }
+}
 
 void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                              size_t worker_idx)
@@ -3902,190 +4261,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 }
 #endif
 
-void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
-#ifndef RANGE_PARTITION_ENABLED
-                                            const TableSchema *table_schema,
-#endif
-                                            TransactionExecution *data_sync_txm,
-                                            DataSyncTask::CkptErrorCode err
-#ifndef RANGE_PARTITION_ENABLED
-                                            ,
-                                            uint16_t worker_idx
-#endif
-)
-{
-    std::unique_lock<bthread::Mutex> flight_task_lk(task->flight_task_mux_);
-    int64_t flight_task_cnt = --task->flight_task_cnt_;
-
-    if (task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
-    {
-        task->ckpt_err_ = err;
-    }
-
-    auto task_ckpt_err = task->ckpt_err_;
-
-    if (flight_task_cnt > 0 &&
-        flight_task_cnt < flush_data_worker_ctx_.worker_num_ * 3)
-    {
-        task->flight_task_cv_.notify_one();
-    }
-
-    flight_task_lk.unlock();
-
-    // All flush tasks of this task are finished (flight_task_cnt == 0)
-    if (flight_task_cnt == 0)
-    {
-        if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
-        {
-            // Commit the data sync txm
-            txservice::CommitTx(data_sync_txm);
-
-#ifdef RANGE_PARTITION_ENABLED
-            // TODO(ysw): for range split, get the range_entry from
-            // task->range_entry_
-            TableRangeEntry *range_entry =
-                const_cast<TableRangeEntry *>(GetTableRangeEntry(
-                    task->table_name_, task->node_group_id_, task->range_id_));
-            assert(range_entry);
-            // Update the slice size in data store.
-            while (!UpdateStoreSlice(
-                task->table_name_,
-                task->data_sync_ts_,
-                task->node_group_id_,
-                task->range_id_, /*TODO(ysw): old range id */
-                true,
-                false /* TODO(ysw): task->during_range_split_*/
-                ))
-            {
-                // Keep retrying here since we've finished the flush already,
-                // it's too expensive to start from the beginning all over
-                // again.
-                LOG(ERROR)
-                    << "Data sync failed to update store slice info of range#"
-                    << task->range_id_ << " on table "
-                    << task->table_name_.Trace() << ", retrying.";
-                std::this_thread::sleep_for(1s);
-                if (!Sharder::Instance().CheckLeaderTerm(
-                        task->node_group_id_, task->node_group_term_))
-                {
-                    LOG(ERROR)
-                        << "Leader term changed during store slice update";
-                    task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                    break;
-                }
-            }
-            // Update the task status for this range.
-            range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
-
-            range_entry->UnPinStoreRange();
-#else
-            bool res = store_hd_->CkptEnd(task->table_name_,
-                                          table_schema,
-                                          task->node_group_id_,
-                                          task->node_group_term_);
-            if (!res)
-            {
-                PopPendingTask(task->node_group_id_,
-                               task->node_group_term_,
-                               task->table_name_,
-                               worker_idx);
-                task->SetError(CcErrorCode::DATA_STORE_ERR);
-                return;
-            }
-
-            {
-                std::shared_lock<std::shared_mutex> meta_data_lk(
-                    meta_data_mux_);
-                const TableName base_table_name{
-                    task->table_name_.GetBaseTableNameSV(), TableType::Primary};
-                CatalogEntry *catalog_entry =
-                    GetCatalogInternal(base_table_name, task->node_group_id_);
-                if (catalog_entry && task->data_sync_ts_ != UINT64_MAX)
-                {
-                    catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
-                                                        worker_idx);
-                }
-            }
-#endif
-
-            PopPendingTask(task->node_group_id_,
-                           task->node_group_term_,
-                           task->table_name_,
-#ifdef RANGE_PARTITION_ENABLED
-                           task->range_id_ /*TODO(ysw): old range id */
-#else
-                           worker_idx
-#endif
-            );
-
-            task->SetFinish();
-        }
-        else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
-        {
-            txservice::AbortTx(data_sync_txm);
-
-            std::lock_guard<std::mutex> task_worker_lk(
-                data_sync_worker_ctx_.mux_);
-#ifdef RANGE_PARTITION_ENABLED
-            data_sync_task_queue_.emplace_front(task);
-#else
-            data_sync_task_queue_[worker_idx].emplace_front(task);
-#endif
-            data_sync_worker_ctx_.cv_.notify_all();
-        }
-        else
-        {
-            assert(task_ckpt_err == DataSyncTask::CkptErrorCode::FLUSH_ERROR);
-            // About the data sync txm
-            txservice::AbortTx(data_sync_txm);
-            CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR;
-#ifndef RANGE_PARTITION_ENABLED
-            if (task->is_standby_node_ckpt_)
-            {
-                if (Sharder::Instance().LeaderTerm(task->node_group_id_) !=
-                    task->node_group_term_)
-                {
-                    err_code = CcErrorCode::NG_TERM_CHANGED;
-                }
-            }
-            else
-            {
-                if (Sharder::Instance().StandbyNodeTerm() !=
-                    task->node_group_term_)
-                {
-                    err_code = CcErrorCode::NG_TERM_CHANGED;
-                }
-            }
-#else
-            // Reset the post ckpt size if flush failed
-            UpdateStoreSlice(task->table_name_,
-                             task->data_sync_ts_,
-                             task->node_group_id_,
-                             task->range_id_,
-                             false,
-                             false /* TODO(ysw): task->during_range_split_*/
-            );
-            if (Sharder::Instance().LeaderTerm(task->node_group_id_) <= 0)
-            {
-                err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
-            }
-#endif
-
-            task->SetError(err_code);
-
-            PopPendingTask(task->node_group_id_,
-                           task->node_group_term_,
-                           task->table_name_,
-#ifdef RANGE_PARTITION_ENABLED
-                           task->range_id_
-#else
-                           worker_idx
-#endif
-            );
-        }
-    }
-}
-
 void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
                                    int64_t ng_term,
                                    const TableName &table_name,
@@ -4620,6 +4795,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                 Sharder::Instance().UnpinNodeGroupData(node_group);
             }
         });
+    bool during_split_range = data_sync_task->during_split_range_;
 #else
     int64_t ng_term = -1;
     if (data_sync_task->is_standby_node_ckpt_)
@@ -4697,7 +4873,28 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             if (flush_ret)
             {
 #ifdef RANGE_PARTITION_ENABLED
-                /* TODO(ysw): if (!data_sync_task->during_range_split_)*/
+                bool need_update_ckpt_ts = true;
+                if (during_split_range)
+                {
+                    TableRangeEntry *range_entry = data_sync_task->range_entry_;
+                    assert(range_entry &&
+                           data_sync_task->data_sync_ts_ ==
+                               range_entry->GetRangeInfo()->DirtyTs());
+                    // Only update the ckpt ts if the owner of the current
+                    // subrange still falls on the current node. Because the
+                    // data in the subranges that fall on other nodes will be
+                    // forcibly evicted from the current node, there is no need
+                    // to update ckpt ts.
+                    // NOTE: Even if the ckpt ts of these data are updated, they
+                    // will not be kicked out from memory until the dirty state
+                    // of the old range is reset.
+                    NodeGroupId range_owner =
+                        GetRangeOwner(data_sync_task->range_id_, node_group)
+                            ->BucketOwner();
+                    need_update_ckpt_ts = range_owner == node_group;
+                }
+
+                if (need_update_ckpt_ts)
                 {
                     std::vector<std::vector<FlushRecord *>>
                         flush_records_per_core(Count());
@@ -4747,7 +4944,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
 #ifdef RANGE_PARTITION_ENABLED
         // other wise, split flush operation will do the work
-        /* TODO(ysw): if (!data_sync_task->during_range_split_)*/
+        if (!during_split_range)
         {
             PostFlushDataCc reset_cc(Count());
             for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
@@ -4850,50 +5047,36 @@ void LocalCcShards::RangeSplitWorker()
         SplitFlushRange(range_split_worker_lk);
     }
 }
-#endif
 
 bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
                                      uint64_t ckpt_ts,
-                                     NodeGroupId node_group_id,
-                                     uint32_t range_id,
-                                     bool flush_res,
-                                     bool during_range_split)
+                                     TableRangeEntry *range_entry,
+                                     const TxKey *start_key,
+                                     const TxKey *end_key,
+                                     bool flush_res)
 {
     bool success = true;
-
-    uint64_t range_version = 0;
-    StoreRange *range = nullptr;
-
-    {
-        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
-        TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
-
-        TableRangeEntry *entry = GetTableRangeEntryInternal(
-            range_table_name, node_group_id, range_id);
-        assert(entry);
-
-        range_version = entry->Version();
-        // All records in data sync vec should belong to the same range.
-        range = entry->RangeSlices();
-        assert(range);
-    }
+    assert(range_entry);
+    uint64_t range_version = range_entry->Version();
+    StoreRange *range = range_entry->RangeSlices();
+    assert(range);
 
     // Update in-memory slice size
-    bool range_updated = range->UpdateSliceSizeAfterFlush(flush_res);
+    bool range_updated =
+        range->UpdateSliceSizeAfterFlush(start_key, end_key, flush_res);
 
-    if (!during_range_split)
+    // Update data store slice size
+    // start_key != nullptr, means that it is during split range, and for this
+    // case, this job will be done in the split range operation.
+    if (start_key == nullptr && flush_res && range_updated)
     {
-        // Update data store slice size
-        if (flush_res && range_updated)
-        {
-            success = range->UpdateRangeSlicesInStore(
-                table_name, ckpt_ts, range_version, store_hd_);
-        }
+        success = range->UpdateRangeSlicesInStore(
+            table_name, ckpt_ts, range_version, store_hd_);
     }
     // else: SplitFlushRangeOp will update range slice in store
     return success;
 }
+#endif
 
 void LocalCcShards::SyncTableStatisticsWorker()
 {

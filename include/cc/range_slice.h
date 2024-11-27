@@ -637,7 +637,9 @@ public:
     // Update slice size after data flush. If flush is successful,
     // update slice size to precalculated post ckpt size. Otherwise,
     // reset post ckpt size.
-    virtual bool UpdateSliceSizeAfterFlush(bool flush_res) = 0;
+    virtual bool UpdateSliceSizeAfterFlush(const TxKey *start_key,
+                                           const TxKey *end_key,
+                                           bool flush_res) = 0;
 
     virtual TxKey RangeStartTxKey() const = 0;
     virtual TxKey RangeEndTxKey() const = 0;
@@ -1620,20 +1622,33 @@ public:
         return size;
     }
 
-    bool UpdateSliceSizeAfterFlush(bool flush_res) override
+    bool UpdateSliceSizeAfterFlush(const TxKey *start_key,
+                                   const TxKey *end_key,
+                                   bool flush_res) override
     {
         std::shared_lock<std::shared_mutex> s_lk(mux_);
         bool updated = false;
+        size_t slice_start_idx = 0;
+        size_t slice_end_idx = slices_.size();
+        if (start_key)
+        {
+            assert(end_key);
+            const KeyT *typed_key = start_key->GetKey<KeyT>();
+            slice_start_idx = SearchSlice(*typed_key, true);
+            typed_key = end_key->GetKey<KeyT>();
+            slice_end_idx = SearchSlice(*typed_key, true);
+        }
+
         // Iterate over all slices
-        for (auto &slice : slices_)
+        for (size_t idx = slice_start_idx; idx < slice_end_idx; ++idx)
         {
             if (flush_res)
             {
-                updated |= slice->UpdateSize();
+                updated |= slices_[idx]->UpdateSize();
             }
             else
             {
-                slice->SetPostCkptSize(UINT64_MAX);
+                slices_[idx]->SetPostCkptSize(UINT64_MAX);
             }
         }
 

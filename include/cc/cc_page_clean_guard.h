@@ -130,7 +130,12 @@ protected:
         bool delay_free_;
     };
     virtual CanBeCleanedResult CanBeCleaned(
-        const CcEntry<KeyT, ValueT> *cce) const = 0;
+        const CcEntry<KeyT, ValueT> *cce
+#ifdef RANGE_PARTITION_ENABLED
+        ,
+        const uint64_t *const dirty_range_ts = nullptr
+#endif
+    ) const = 0;
 
     virtual bool IsCleanTarget(const KeyT &key,
                                const CcEntry<KeyT, ValueT> *cce) const = 0;
@@ -150,7 +155,8 @@ protected:
 #ifdef RANGE_PARTITION_ENABLED
     size_t MarkCleanInRange(TemplateStoreRange<KeyT> *store_range,
                             size_t idx_in_page,
-                            bool &kickout_any)
+                            bool &kickout_any,
+                            const uint64_t *const dirty_range_ts)
     {
         kickout_any = false;
         bool remove_from_key_cache = RemoveFromKeyCache();
@@ -191,7 +197,8 @@ protected:
                 auto &cce = page_->entries_[idx];
 
                 bool is_clean_target = IsCleanTarget(key, cce.get());
-                auto [can_be_cleaned, delay_free] = CanBeCleaned(cce.get());
+                auto [can_be_cleaned, delay_free] =
+                    CanBeCleaned(cce.get(), dirty_range_ts);
 
                 if (is_clean_target && can_be_cleaned)
                 {
@@ -335,9 +342,29 @@ public:
 
 private:
     typename CcPageCleanGuard<KeyT, ValueT>::CanBeCleanedResult CanBeCleaned(
-        const CcEntry<KeyT, ValueT> *cce) const override
+        const CcEntry<KeyT, ValueT> *cce
+#ifdef RANGE_PARTITION_ENABLED
+        ,
+        const uint64_t *const dirty_range_ts = nullptr
+#endif
+    ) const override
     {
+#ifdef RANGE_PARTITION_ENABLED
+        if (dirty_range_ts && cce->CkptTs() == *dirty_range_ts)
+        {
+            // During the split range, if the ckpt ts of cce is equal to the
+            // dirty range version ts, it means that cce is only flushed into
+            // the new range, but the new range entry has not been installed
+            // into the range cc map. At this time, we cannot evict this cce
+            // because the read request will still access the old range.
+            assert(*dirty_range_ts > 0);
+            return {false, false};
+        }
+
         return {(cce->IsFree() && !cce->GetBeingCkpt()), false};
+#else
+        return {(cce->IsFree() && !cce->GetBeingCkpt()), false};
+#endif
     }
 
     bool IsCleanTarget(const KeyT &key,
@@ -435,7 +462,12 @@ private:
 
 private:
     typename CcPageCleanGuard<KeyT, ValueT>::CanBeCleanedResult CanBeCleaned(
-        const CcEntry<KeyT, ValueT> *cce) const override
+        const CcEntry<KeyT, ValueT> *cce
+#ifdef RANGE_PARTITION_ENABLED
+        ,
+        const uint64_t *const dirty_range_ts = nullptr
+#endif
+    ) const override
     {
         // Check if the cce has any locks on it. If so recycle the lock entry
         // before deleting cce.

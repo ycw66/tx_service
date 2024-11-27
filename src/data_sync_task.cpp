@@ -9,6 +9,37 @@
 namespace txservice
 {
 
+#ifdef RANGE_PARTITION_ENABLED
+DataSyncTask::DataSyncTask(const TableName &table_name,
+                           uint32_t ng_id,
+                           int64_t ng_term,
+                           TableRangeEntry *range_entry,
+                           const TxKey &start_key,
+                           const TxKey &end_key,
+                           uint64_t data_sync_ts,
+                           bool is_dirty,
+                           bool export_base_table_items,
+                           uint64_t txn,
+                           std::shared_ptr<DataSyncStatus> status,
+                           CcHandlerResult<Void> *hres)
+    : table_name_(table_name),
+      node_group_id_(ng_id),
+      node_group_term_(ng_term),
+      data_sync_ts_(data_sync_ts),
+      status_(status),
+      is_dirty_(is_dirty),
+      task_res_(hres),
+      start_key_(start_key.GetShallowCopy()),
+      end_key_(end_key.GetShallowCopy()),
+      range_entry_(range_entry),
+      during_split_range_(true),
+      export_base_table_items_(export_base_table_items),
+      tx_number_(txn)
+{
+    range_id_ = range_entry_->GetRangeInfo()->GetKeyNewRangeId(start_key_);
+}
+#endif
+
 void DataSyncTask::SetFinish()
 {
     std::unique_lock<std::mutex> task_sender_lk(status_->mux_);

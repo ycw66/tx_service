@@ -9,6 +9,7 @@
 #include "cc_handler_result.h"
 #include "cc_req_misc.h"
 #include "sharder.h"
+#include "tx_key.h"
 #include "type.h"
 
 namespace txservice
@@ -37,6 +38,8 @@ struct DataSyncStatus
     std::mutex mux_;
     std::condition_variable cv_;
 };
+
+struct TableRangeEntry;
 
 struct DataSyncTask
 {
@@ -79,6 +82,21 @@ public:
           task_res_(hres)
     {
     }
+
+#ifdef RANGE_PARTITION_ENABLED
+    DataSyncTask(const TableName &table_name,
+                 uint32_t ng_id,
+                 int64_t ng_term,
+                 TableRangeEntry *range_entry,
+                 const TxKey &start_key,
+                 const TxKey &end_key,
+                 uint64_t data_sync_ts,
+                 bool is_dirty,
+                 bool export_base_table_items,
+                 uint64_t txn,
+                 std::shared_ptr<DataSyncStatus> status,
+                 CcHandlerResult<Void> *hres);
+#endif
 
     void SetFinish();
 
@@ -185,7 +203,6 @@ public:
     };
 
     bthread::Mutex flight_task_mux_;
-    bthread::ConditionVariable flight_task_cv_;
 
     // Accumulated pending flush data memory usage for back pressure the
     // DataSyncScan
@@ -216,5 +233,14 @@ public:
     bool sync_ts_adjustable_{true};
     // Indicate the single task result.
     CcHandlerResult<Void> *task_res_{nullptr};
+
+#ifdef RANGE_PARTITION_ENABLED
+    const TxKey start_key_;
+    const TxKey end_key_;
+    TableRangeEntry *range_entry_{nullptr};
+    bool during_split_range_{false};
+    bool export_base_table_items_{false};
+    uint64_t tx_number_{0};
+#endif
 };
 }  // namespace txservice
