@@ -733,6 +733,11 @@ public:
 
                 forward_req->set_key(std::move(key_str));
             }
+            else
+            {
+                forward_req = &forward_entry->Request();
+                assert(forward_req->tx_number() == req.Txn());
+            }
         }
 
         // if cce is already expired
@@ -894,6 +899,12 @@ public:
         if (exec_rst == ExecResult::Block)
         {
             assert(!req.apply_and_commit_);
+            if (forward_entry)
+            {
+                // reset forward entry before releasing lock.
+                forward_entry->Free();
+                cce->SetForwardEntry(nullptr);
+            }
             cce->PushBlockRequest(&req);
             cce->SetDirtyPayload(nullptr);
             cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
@@ -904,6 +915,12 @@ public:
         else if (exec_rst == ExecResult::Unlock)
         {
             assert(!req.apply_and_commit_);
+            if (forward_entry)
+            {
+                // reset forward entry before releasing lock.
+                forward_entry->Free();
+                cce->SetForwardEntry(nullptr);
+            }
             cce->SetDirtyPayload(nullptr);
             cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
             ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
