@@ -738,6 +738,10 @@ public:
         // if cce is already expired
         if (obj_result.ttl_expired_)
         {
+            if (cce->PayloadStatus() == RecordStatus::Normal)
+            {
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+            }
             cce->SetDirtyPayload(nullptr);
             cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
             cce->SetPendingCmd(nullptr);

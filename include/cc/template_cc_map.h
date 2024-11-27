@@ -8712,7 +8712,8 @@ protected:
         std::deque<SliceDataItem> &slice_items,
         std::vector<std::pair<size_t, bool>> &location_infos,
         size_t new_key_cnt,
-        size_t first_key_index_in_page)
+        size_t first_key_index_in_page,
+        int32_t &normal_rec_change)
     {
         size_t new_first_key_idx_in_page = 0;
         bool need_forward_iter = true;
@@ -8732,7 +8733,8 @@ protected:
                                    first_key_index_in_page,  // start index
                                    total_size,               // end index
                                    first_key_index_in_page,  // offset
-                                   shard_->EnableMvcc());
+                                   shard_->EnableMvcc(),
+                                   normal_rec_change);
 
             shard_->UpdateLruList(target_page, true);
             TryUpdatePageKey(target_iter);
@@ -8785,7 +8787,8 @@ protected:
                                        0,
                                        data_cnt_per_page,
                                        offset,
-                                       shard_->EnableMvcc());
+                                       shard_->EnableMvcc(),
+                                       normal_rec_change);
 
                 if (page_idx == 0)
                 {
@@ -8846,7 +8849,8 @@ protected:
                         0,
                         remain_size,
                         page_cnt * data_cnt_per_page,
-                        shard_->EnableMvcc());
+                        shard_->EnableMvcc(),
+                        normal_rec_change);
 
                     target_page->next_page_->last_dirty_commit_ts_ =
                         std::max(target_page->next_page_->last_dirty_commit_ts_,
@@ -8879,7 +8883,8 @@ protected:
                                        0,
                                        remain_size,
                                        page_cnt * data_cnt_per_page,
-                                       shard_->EnableMvcc());
+                                       shard_->EnableMvcc(),
+                                       normal_rec_change);
 
                 target_page->last_dirty_commit_ts_ =
                     old_page_last_dirty_commit_ts;
@@ -8944,6 +8949,7 @@ protected:
             }
         }
 
+        int32_t normal_rec_change = 0;
         typename decltype(ccmp_)::iterator target_iter;
         CcPage<KeyT, ValueT> *target_page = nullptr;
 
@@ -9044,8 +9050,11 @@ protected:
                                    slice_items,
                                    location_infos,
                                    new_key_cnt,
-                                   first_key_index_in_page);
-
+                                   first_key_index_in_page,
+                                   normal_rec_change);
+#ifdef ON_KEY_OBJECT
+            normal_obj_sz_ += normal_rec_change;
+#endif
             size_ += (end_idx - first_index);
 
             return true;
@@ -9078,7 +9087,8 @@ protected:
                                                slice_items,
                                                location_infos,
                                                new_key_cnt,
-                                               first_key_index_in_page);
+                                               first_key_index_in_page,
+                                               normal_rec_change);
 
                     assert(new_key_cnt > 0);
                     // Update CCMap size
@@ -9136,7 +9146,8 @@ protected:
                 // payload
                 target_page->Entry(key_idx_in_page)
                     ->UpdateCcEntry(slice_items[item_idx],
-                                    shard_->EnableMvcc());
+                                    shard_->EnableMvcc(),
+                                    normal_rec_change);
                 item_idx++;
                 key_idx_in_page++;
             }
@@ -9162,12 +9173,17 @@ protected:
                                    slice_items,
                                    location_infos,
                                    new_key_cnt,
-                                   first_key_index_in_page);
+                                   first_key_index_in_page,
+                                   normal_rec_change);
 
             assert(new_key_cnt > 0);
             // Update Ccmap size
             size_ += new_key_cnt;
         }
+
+#ifdef ON_KEY_OBJECT
+        normal_obj_sz_ += normal_rec_change;
+#endif
 
         return true;
     }

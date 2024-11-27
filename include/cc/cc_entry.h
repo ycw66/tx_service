@@ -1392,7 +1392,9 @@ public:
         return exported_count;
     }
 
-    void UpdateCcEntry(SliceDataItem &data_item, bool enable_mvcc)
+    void UpdateCcEntry(SliceDataItem &data_item,
+                       bool enable_mvcc,
+                       int32_t &normal_rec_change)
     {
 #ifdef RANGE_PARTITION_ENABLED
         // Initialize the data store size if it is unspecified
@@ -1456,9 +1458,14 @@ public:
         const uint64_t cce_version = CommitTs();
         if (cce_version < data_item.version_ts_)
         {
+            bool obj_already_exist = PayloadStatus() == RecordStatus::Normal;
             if (data_item.is_deleted_)
             {
                 payload_ = nullptr;
+                if (obj_already_exist)
+                {
+                    normal_rec_change--;
+                }
             }
             else
             {
@@ -1466,6 +1473,10 @@ public:
                 // payload_.reset(static_cast<ValueT *>(rec_clone.release()));
                 payload_.reset(
                     static_cast<ValueT *>(data_item.record_.release()));
+                if (!obj_already_exist)
+                {
+                    normal_rec_change++;
+                }
             }
             RecordStatus status = data_item.is_deleted_ ? RecordStatus::Deleted
                                                         : RecordStatus::Normal;
@@ -1789,7 +1800,8 @@ struct CcPage : public LruPage
         size_t start_index,
         size_t end_index,
         size_t offset,
-        bool enable_mvcc)
+        bool enable_mvcc,
+        int32_t &normal_rec_change)
     {
         assert(start_index >= 0 && end_index <= Size());
         assert(offset + (end_index - start_index) <= location_infos.size());
@@ -1803,7 +1815,8 @@ struct CcPage : public LruPage
                 // Emplace new key to target page
                 auto new_cc_entry = std::make_unique<CcEntry<KeyT, ValueT>>();
                 new_cc_entry->UpdateCcEntry(slice_items[location_info.first],
-                                            enable_mvcc);
+                                            enable_mvcc,
+                                            normal_rec_change);
 
                 // emplace new key into page
                 const KeyT *item_key =
