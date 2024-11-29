@@ -2189,8 +2189,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (lock_cluster_config_op_.hd_result_->IsError())
         {
-            DLOG(ERROR) << "Upsert table read cluster config failed, tx_number:"
-                        << txm->TxNumber();
+            LOG(ERROR) << "Upsert table read cluster config failed, tx_number:"
+                       << txm->TxNumber();
             if (!prepare_log_op_.hd_result_.IsFinished())
             {
                 txm->commit_ts_ = tx_op_failed_ts_;
@@ -2211,6 +2211,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             op_ = &acquire_all_intent_op_;
             txm->PushOperation(&acquire_all_intent_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process acquire_all_intent_op_";
             txm->Process(acquire_all_intent_op_);
         }
     }
@@ -2219,9 +2221,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
             0)
         {
-            DLOG(ERROR)
-                << "Upsert table acquire write intent failed, tx_number:"
-                << txm->TxNumber();
+            LOG(ERROR) << "Upsert table acquire write intent failed, tx_number:"
+                       << txm->TxNumber();
             txm->upsert_resp_->SetErrorCode(
                 TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL);
             // Fails to acquire the write intent on the schema. Since write
@@ -2266,6 +2267,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             prepare_log_op_.hd_result_.SetError(CcErrorCode::WRITE_LOG_FAILED);
             return;
         });
+        DLOG(INFO) << "txn: " << txm->TxNumber()
+                   << " process acquire_all_intent_op_";
         txm->Process(prepare_log_op_);
     }
     else if (op_ == &prepare_log_op_)
@@ -2280,7 +2283,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 // coordinator itself is no longer leader
                 if (txm->CheckLeaderTerm())
                 {
-                    DLOG(WARNING)
+                    LOG(WARNING)
                         << "Upsert table write prepare log result unknown, "
                            "tx_number:"
                         << txm->TxNumber() << ", keep retrying";
@@ -2294,10 +2297,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 }
                 else
                 {
-                    DLOG(ERROR) << "Upsert table write prepare log result "
-                                   "unknown, tx_number:"
-                                << txm->TxNumber()
-                                << ", not leader any more, stop retrying";
+                    LOG(ERROR) << "Upsert table write prepare log result "
+                                  "unknown, tx_number:"
+                               << txm->TxNumber()
+                               << ", not leader any more, stop retrying";
                     // Not leader anymore, just quit. New leader will know
                     // whether prepare log succeeds and continue the rest if
                     // it does. Should not release the write intents. If
@@ -2320,7 +2323,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                DLOG(ERROR)
+                LOG(ERROR)
                     << "Upsert table write prepare log failed, tx_number:"
                     << txm->TxNumber();
                 // Fails to flush the prepare log. The schema operation is
@@ -2345,6 +2348,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             op_ = &post_all_intent_op_;
 
             txm->PushOperation(&post_all_intent_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process post_all_intent_op_";
             txm->Process(post_all_intent_op_);
         }
     }
@@ -2365,6 +2370,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 catalog_rec_.SetSchemaImage(image_str_);
 
                 txm->PushOperation(&post_all_intent_op_);
+                DLOG(INFO) << "txn: " << txm->TxNumber()
+                           << " process post_all_intent_op_";
                 txm->Process(post_all_intent_op_);
             }
             else
@@ -2380,6 +2387,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // is flushed.
             op_ = &acquire_all_lock_op_;
             txm->PushOperation(&acquire_all_lock_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process acquire_all_lock_op_";
             txm->Process(acquire_all_lock_op_);
         }
         else
@@ -2436,6 +2445,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     op_type_ == OperationType::TruncateTable)
                 {
                     txm->PushOperation(&upsert_kv_table_op_);
+                    DLOG(INFO) << "txn: " << txm->TxNumber()
+                               << " process upsert_kv_table_op_";
                     txm->Process(upsert_kv_table_op_);
                 }
                 else
@@ -2500,6 +2511,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             op_ = &clean_ccm_op_;
             txm->PushOperation(&clean_ccm_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process clean_ccm_op_";
             txm->Process(clean_ccm_op_);
         }
         else if (op_type_ == OperationType::TruncateTable)
@@ -2519,6 +2532,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             op_ = &clean_ccm_op_;
             txm->PushOperation(&clean_ccm_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process clean_ccm_op_";
             txm->Process(clean_ccm_op_);
         }
         else if (op_type_ == OperationType::CreateTable &&
@@ -2740,6 +2755,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             op_ = &commit_log_op_;
             FillCommitLogRequest(txm);
             txm->PushOperation(&commit_log_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process commit_log_op_";
             txm->Process(commit_log_op_);
         }
     }
@@ -2758,6 +2775,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                         .mutable_write_log_request();
                 log_req->set_retry(true);
                 txm->PushOperation(&commit_log_op_);
+                DLOG(INFO) << "txn: " << txm->TxNumber()
+                           << " process commit_log_op_";
                 txm->Process(commit_log_op_);
             }
             else
@@ -2792,6 +2811,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
                     op_ = &clean_ccm_op_;
                     txm->PushOperation(&clean_ccm_op_);
+                    DLOG(INFO) << "txn: " << txm->TxNumber()
+                               << " process clean_ccm_op_";
                     txm->Process(clean_ccm_op_);
                 }
                 else
@@ -2800,6 +2821,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     upsert_kv_table_op_.table_schema_ = catalog_rec_.Schema();
                     upsert_kv_table_op_.alter_table_info_ = nullptr;
                     txm->PushOperation(&upsert_kv_table_op_);
+                    DLOG(INFO) << "txn: " << txm->TxNumber()
+                               << " process upsert_kv_table_op_";
                     txm->Process(upsert_kv_table_op_);
                 }
             }
@@ -2850,6 +2873,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         // flushed.
         op_ = &post_all_lock_op_;
         txm->PushOperation(&post_all_lock_op_);
+        DLOG(INFO) << "txn: " << txm->TxNumber()
+                   << " process post_all_lock_op_";
         txm->Process(post_all_lock_op_);
     }
     else if (op_ == &post_all_lock_op_)
@@ -2901,6 +2926,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // 2. if flush kx fails, the schema op has to roll backward. Retry
             // this step to reject dirty schema and remove write locks.
             txm->PushOperation(&post_all_lock_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process post_all_lock_op_";
             txm->Process(post_all_lock_op_);
             return;
         }
@@ -2938,6 +2965,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             op_ = &clean_log_op_;
             FillCleanLogRequestCommon(txm, clean_log_op_);
             txm->PushOperation(&clean_log_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process clean_log_op_";
             txm->Process(clean_log_op_);
         }
     }
@@ -2952,6 +2981,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     .mutable_write_log_request();
             log_req->set_retry(true);
             txm->PushOperation(&clean_log_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process clean_log_op_";
             txm->Process(clean_log_op_);
         }
         else
