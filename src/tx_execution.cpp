@@ -1088,17 +1088,13 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
         local_shards->split_flush_range_op_pool_mux_);
     if (local_shards->split_flush_range_op_pool_.empty())
     {
-        split_flush_op_ = std::make_unique<SplitFlushRangeOp>(
-            *req.table_name_,
-            req.schema_,
-            req.store_range_,
-            req.old_range_info_,
-            std::move(req.new_range_info_),
-            req.previous_scan_ts_,
-            std::move(req.previous_data_sync_vec_),
-            std::move(req.previous_archive_vec_),
-            std::move(req.previous_mv_base_vec_),
-            this);
+        split_flush_op_ =
+            std::make_unique<SplitFlushRangeOp>(*req.table_name_,
+                                                std::move(req.schema_),
+                                                req.range_entry_,
+                                                std::move(req.new_range_info_),
+                                                this,
+                                                req.is_dirty_);
     }
     else
     {
@@ -1107,15 +1103,11 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
         local_shards->split_flush_range_op_pool_.pop_back();
         assert(split_flush_op_ != nullptr);
         split_flush_op_->Reset(*req.table_name_,
-                               req.schema_,
-                               req.store_range_,
-                               req.old_range_info_,
+                               std::move(req.schema_),
+                               req.range_entry_,
                                std::move(req.new_range_info_),
-                               req.previous_scan_ts_,
-                               std::move(req.previous_data_sync_vec_),
-                               std::move(req.previous_archive_vec_),
-                               std::move(req.previous_mv_base_vec_),
-                               this);
+                               this,
+                               req.is_dirty_);
     }
     lk.unlock();
 
@@ -1498,11 +1490,6 @@ void TransactionExecution::ProcessTxRequest(
                                     recover_req.new_partition_ids_[i]);
     }
 
-    uint64_t previous_scan_ts = 0;
-    std::vector<FlushRecord> previous_data_sync_vec;
-    std::vector<FlushRecord> previous_archive_vec;
-    std::vector<TxKey> previous_mv_base_vec;
-
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     std::unique_ptr<SplitFlushRangeOp> split_range_op = nullptr;
     std::unique_lock<std::mutex> lk(
@@ -1511,15 +1498,11 @@ void TransactionExecution::ProcessTxRequest(
     {
         split_range_op = std::make_unique<SplitFlushRangeOp>(
             table_name,
-            recover_req.table_schema_,
-            recover_req.store_range_,
-            recover_req.range_info_,
+            std::move(recover_req.table_schema_),
+            recover_req.range_entry_,
             std::move(new_range_info),
-            previous_scan_ts,
-            std::move(previous_data_sync_vec),
-            std::move(previous_archive_vec),
-            std::move(previous_mv_base_vec),
-            this);
+            this,
+            recover_req.is_dirty_);
     }
     else
     {
@@ -1528,15 +1511,11 @@ void TransactionExecution::ProcessTxRequest(
         local_shards->split_flush_range_op_pool_.pop_back();
         assert(split_range_op != nullptr);
         split_range_op->Reset(table_name,
-                              recover_req.table_schema_,
-                              recover_req.store_range_,
-                              recover_req.range_info_,
+                              std::move(recover_req.table_schema_),
+                              recover_req.range_entry_,
                               std::move(new_range_info),
-                              previous_scan_ts,
-                              std::move(previous_data_sync_vec),
-                              std::move(previous_archive_vec),
-                              std::move(previous_mv_base_vec),
-                              this);
+                              this,
+                              recover_req.is_dirty_);
     }
     lk.unlock();
     assert(split_range_op != nullptr);
@@ -1557,7 +1536,7 @@ void TransactionExecution::ProcessTxRequest(
 
     LOG(INFO) << "Recovering split flush tx " << TxNumber() << " on table "
               << table_name.StringView() << ", range id "
-              << recover_req.range_info_->PartitionId();
+              << recover_req.range_entry_->GetRangeInfo()->PartitionId();
     split_flush_op_ = std::move(split_range_op);
     PushOperation(split_flush_op_.get());
 }
@@ -5787,50 +5766,6 @@ void TransactionExecution::PostProcess(AsyncOp<ResultType> &ds_op)
 template void TransactionExecution::PostProcess(AsyncOp<Void> &ds_op);
 template void TransactionExecution::PostProcess(
     AsyncOp<PostProcessResult> &ds_op);
-
-void TransactionExecution::Process(FlushDataOp &flush_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &flush_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    flush_op.hd_result_.Reset();
-    flush_op.is_running_ = true;
-
-    Sharder::Instance().GetLocalCcShards()->FlushData(
-        *flush_op.tab_name_,
-        flush_op.schema_,
-        flush_op.data_sync_ts_,
-        tx_term_,
-        flush_op.node_group_,
-        flush_op.data_sync_vec_,
-        flush_op.archive_vec_,
-        flush_op.mv_vec_,
-        flush_op.hd_result_,
-        flush_op.during_range_split);
-}
-
-void TransactionExecution::PostProcess(FlushDataOp &flush_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &ckpt_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-
-    state_stack_.pop_back();
-}
 
 void TransactionExecution::Process(NoOp &no_op)
 {

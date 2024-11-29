@@ -2132,6 +2132,36 @@ void txservice::LocalCcHandler::InvalidateTableCache(
     }
 }
 
+#ifdef RANGE_PARTITION_ENABLED
+void txservice::LocalCcHandler::UpdateKeyCache(const TableName &table_name,
+                                               NodeGroupId ng_id,
+                                               int64_t tx_term,
+                                               const TxKey &start_key,
+                                               const TxKey &end_key,
+                                               StoreRange *store_range,
+                                               CcHandlerResult<Void> &hres)
+{
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
+
+    size_t core_cnt = cc_shards_.Count();
+    UpdateKeyCacheCc *req = update_key_cache_pool_.NextRequest();
+    req->Reset(table_name,
+               ng_id,
+               tx_term,
+               core_cnt,
+               start_key,
+               end_key,
+               store_range,
+               &hres);
+    for (size_t idx = 0; idx < core_cnt; ++idx)
+    {
+        cc_shards_.EnqueueCcRequest(idx, req);
+    }
+}
+#endif
+
 /*
  * Get the node id which runs the current transaction.
  */

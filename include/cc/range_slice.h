@@ -1423,7 +1423,7 @@ public:
                                         StoreRange::new_range_load_factor));
         size_t avg_subrange_size = post_ckpt_size / subrange_cnt;
 
-        new_range_keys.resize(subrange_cnt);
+        new_range_keys.resize(subrange_cnt - 1);
 
         while (slice_idx < slices_.size())
         {
@@ -1461,9 +1461,17 @@ public:
                 // The start key of the first sub-range is the start key of the
                 // current slice, and start keys of the remaining sub-ranges are
                 // obtained by sampling.
-                size_t subranges_cnt =
+                size_t slice_subranges_cnt =
                     std::ceil(curr_slice->PostCkptSize() / avg_subrange_size);
-                subrange_cnt = (subrange_cnt < 2) ? 2 : subrange_cnt;
+
+                slice_subranges_cnt =
+                    (slice_subranges_cnt < 2) ? 2 : slice_subranges_cnt;
+                /**
+                 * If curr_subrange_size == 0, then subrange_slice_index ==
+                 * slice_index, otherwise, subrange_slice_index < slice_index.
+                 * Anyway, should use the start key of the slice with
+                 * subrange_slice_index as one subrange key.
+                 */
                 if (subrange_slice_idx != 0)
                 {
                     // Skip the first subrange.
@@ -1480,7 +1488,7 @@ public:
                                         ng_id,
                                         ng_term,
                                         data_sync_ts,
-                                        (subranges_cnt - 1),
+                                        (slice_subranges_cnt - 1),
                                         subrange_key_cnt,
                                         new_range_keys))
                 {
@@ -1493,13 +1501,15 @@ public:
                 // NOTE: The new slice spec is not the final status, the new
                 // subslices boundary is equal to the boundary of the subrange
                 // which the new subslice belong to.
-                UpdateSliceSpec(
-                    curr_slice, new_range_keys, subrange_key_cnt, subrange_cnt);
+                UpdateSliceSpec(curr_slice,
+                                new_range_keys,
+                                subrange_key_cnt,
+                                slice_subranges_cnt);
 
-                subrange_key_cnt += (subrange_cnt - 1);
+                subrange_key_cnt += (slice_subranges_cnt - 1);
 
                 // Update the slice index:
-                slice_idx += subrange_cnt;
+                slice_idx += slice_subranges_cnt;
             }
             // Skip the first subrange since it will reuse the current range
             // entry.
@@ -1516,6 +1526,9 @@ public:
             subrange_slice_idx = slice_idx;
         }
 
+        assert(new_range_keys.size() >= subrange_key_cnt);
+        new_range_keys.erase(new_range_keys.begin() + subrange_key_cnt,
+                             new_range_keys.end());
         return true;
     }
 

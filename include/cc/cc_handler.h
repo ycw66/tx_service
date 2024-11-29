@@ -582,6 +582,27 @@ public:
                                       int64_t tx_term,
                                       uint64_t command_id,
                                       CcHandlerResult<Void> &hres) = 0;
+
+#ifdef RANGE_PARTITION_ENABLED
+    /**
+     * @brief Delete key that are between start_key and end_key from key cache.
+     *
+     * @param table_name table name.
+     * @param ng_id The node group id that to execute the operation.
+     * @param tx_term Term of the tx node
+     * @param start_key The start key of the data
+     * @param end_key The end key of the data
+     * @param store_range The store range that the keys belong to.
+     * @param hres Result handler of the request
+     */
+    virtual void UpdateKeyCache(const TableName &table_name,
+                                NodeGroupId ng_id,
+                                int64_t tx_term,
+                                const TxKey &start_key,
+                                const TxKey &end_key,
+                                StoreRange *store_range,
+                                CcHandlerResult<Void> &hres) = 0;
+#endif
 };
 
 }  // namespace txservice

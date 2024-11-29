@@ -638,6 +638,11 @@ public:
                     ACTION_FAULT_INJECTOR(
                         "range_split_post_commit_participant");
                 }
+
+                // Reset waiting ckpt flag. Shards should be able to request
+                // ckpt again if no cc entries can be kicked out. Set the flag
+                // on one core is enough.
+                shard_->SetWaitingCkpt(false);
             }
             else
             {
@@ -650,6 +655,14 @@ public:
                     new_range_entries.push_back(range_entry);
                 }
             }
+
+            // The flush data operation performed during the range splitting
+            // process only flushes the data that falls into the new range to
+            // the new range. Therefore, it can only be removed from the memory
+            // after the range write lock is acquired. In other words, only
+            // after committing the dirty range can the start page be cleaned
+            // and the wait queue be dequeued.
+            shard_->OnDirtyDataFlushed();
 
             assert(new_range_entries.size());
 
@@ -720,8 +733,6 @@ public:
         const std::string_view &content = req.LogContentView();
         ::txlog::SplitRangeOpMessage ds_split_range_op_msg;
         ds_split_range_op_msg.ParseFromArray(content.data(), content.length());
-
-        const TableSchema *table_schema = req.GetTableSchema();
 
         // Restore old range key
         std::unique_ptr<KeyT> old_range_key = std::make_unique<KeyT>();
@@ -1180,7 +1191,6 @@ public:
                 shard_->local_shards_.CreateSplitRangeRecoveryTx(
                     req,
                     ds_split_range_op_msg,
-                    table_schema,
                     partition_id,
                     old_range_info,
                     std::move(new_range_keys),

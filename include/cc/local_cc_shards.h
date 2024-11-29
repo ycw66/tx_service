@@ -551,7 +551,6 @@ public:
     void CreateSplitRangeRecoveryTx(
         ReplayLogCc &replay_log_cc,
         const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
-        const TableSchema *table_schema,
         int32_t partition_id,
         const RangeInfo *range_info,
         std::vector<TxKey> &&new_range_key,
@@ -1268,17 +1267,6 @@ public:
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
-    void FlushData(const TableName &table_name,
-                   const TableSchema *schema,
-                   uint64_t ckpt_ts,
-                   int64_t term,
-                   uint64_t node_group,
-                   std::vector<FlushRecord> *ckpt_vec,
-                   std::vector<FlushRecord> *archive_vec,
-                   std::vector<TxKey> *mv_vec,
-                   CcHandlerResult<Void> &hres,
-                   bool during_range_split);
-
     // Return last succ ckpt timestamp on table.
     void EnqueueDataSyncTaskForTable(
         const TableName &table_name,
@@ -1589,14 +1577,16 @@ public:
      * @param txn - The tx_number of the split range transaction which is the
      * transaction who launch this split range actually.
      */
-    void EnqueueDataSyncTaskForSplittingRange(const TableName &table_name,
-                                              uint32_t ng_id,
-                                              int64_t ng_term,
-                                              TableRangeEntry *range_entry,
-                                              uint64_t data_sync_ts,
-                                              bool is_dirty,
-                                              uint64_t txn,
-                                              CcHandlerResult<Void> *hres);
+    void EnqueueDataSyncTaskForSplittingRange(
+        const TableName &table_name,
+        uint32_t ng_id,
+        int64_t ng_term,
+        std::shared_ptr<const TableSchema> table_schema,
+        TableRangeEntry *range_entry,
+        uint64_t data_sync_ts,
+        bool is_dirty,
+        uint64_t txn,
+        CcHandlerResult<Void> *hres);
 #endif
 
     void InitPrebuiltTables(NodeGroupId ng_id, int64_t term);
@@ -1876,17 +1866,11 @@ private:
     {
         RangeSplitTask(std::shared_ptr<DataSyncTask> data_sync_task,
                        std::shared_ptr<const TableSchema> schema,
-                       std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
-                       std::unique_ptr<std::vector<FlushRecord>> archive_vec,
-                       std::unique_ptr<std::vector<TxKey>> mv_base_vec,
                        std::vector<TxKey> &&split_keys,
                        TableRangeEntry *range_entry,
                        TransactionExecution *data_sync_txm,
                        std::shared_ptr<void> defer_unpin)
             : schema_(schema),
-              data_sync_vec_(std::move(data_sync_vec)),
-              archive_vec_(std::move(archive_vec)),
-              mv_base_vec_(std::move(mv_base_vec)),
               split_keys_(std::move(split_keys)),
               range_entry_(range_entry),
               data_sync_task_(data_sync_task),
@@ -1895,25 +1879,7 @@ private:
         {
         }
 
-        RangeSplitTask(std::shared_ptr<DataSyncTask> data_sync_task,
-                       std::shared_ptr<const TableSchema> schema,
-                       std::vector<TxKey> &&split_keys,
-                       TableRangeEntry *range_entry,
-                       TransactionExecution *data_sync_txm,
-                       std::shared_ptr<void> defer_unpin)
-            : schema_(schema),
-              split_keys_(std::move(split_keys)),
-              range_entry_(range_entry),
-              data_sync_task_(data_sync_task),
-              data_sync_txm_(data_sync_txm),
-              defer_unpin_(defer_unpin_)
-        {
-        }
-
         std::shared_ptr<const TableSchema> schema_;
-        std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
-        std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
-        std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
 
         std::vector<TxKey> split_keys_;
 
@@ -2152,69 +2118,36 @@ private:
                       std::unique_ptr<std::vector<FlushRecord>> archive_vec,
                       std::unique_ptr<std::vector<TxKey>> mv_base_vec,
                       uint64_t vec_mem_usage,
-                      TransactionExecution *data_sync_txm,
-                      size_t scan_task_worker_idx)
-            : node_group_id_(data_sync_task->node_group_id_),
-              node_group_term_(data_sync_task->node_group_term_),
-              data_sync_ts_(data_sync_task->data_sync_ts_),
-              table_name_(data_sync_task->table_name_),
-              schema_(schema),
-              schema_ptr_(schema.get()),
+                      TransactionExecution *data_sync_txm
+#ifndef RANGE_PARTITION_ENABLED
+                      ,
+                      size_t scan_task_worker_idx
+#endif
+                      )
+            : schema_(schema),
               data_sync_vec_(std::move(data_sync_vec)),
               archive_vec_(std::move(archive_vec)),
               mv_base_vec_(std::move(mv_base_vec)),
               vec_mem_usage_(vec_mem_usage),
-              vec_owner_(true),
+#ifndef RANGE_PARTITION_ENABLED
               scan_task_worker_idx_(scan_task_worker_idx),
+#endif
               data_sync_task_(data_sync_task),
-              data_sync_txm_(data_sync_txm),
-              hand_res_(nullptr)
+              data_sync_txm_(data_sync_txm)
         {
         }
 
-        FlushDataTask(uint32_t node_group_id,
-                      int64_t node_group_term,
-                      uint64_t data_sync_ts,
-                      const TableName &table_name,
-                      const TableSchema *schema,
-                      std::vector<FlushRecord> *data_sync_vec,
-                      std::vector<FlushRecord> *archive_vec,
-                      std::vector<TxKey> *mv_base_vec,
-                      CcHandlerResult<Void> *res,
-                      bool during_range_split)
-            : node_group_id_(node_group_id),
-              node_group_term_(node_group_term),
-              data_sync_ts_(data_sync_ts),
-              table_name_(table_name),
-              schema_ptr_(schema),
-              data_sync_vec_ptr_(data_sync_vec),
-              archive_vec_ptr_(archive_vec),
-              mv_base_vec_ptr_(mv_base_vec),
-              vec_owner_(false),
-              hand_res_(res)
-        {
-        }
-
-        uint32_t node_group_id_;
-        int64_t node_group_term_;
-        uint64_t data_sync_ts_;
-        TableName table_name_;
         std::shared_ptr<const TableSchema> schema_{nullptr};
-        const TableSchema *schema_ptr_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
         std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
         uint64_t vec_mem_usage_{0};
-        std::vector<FlushRecord> *data_sync_vec_ptr_{nullptr};
-        std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
-        std::vector<TxKey> *mv_base_vec_ptr_{nullptr};
-        bool vec_owner_{true};
+#ifndef RANGE_PARTITION_ENABLED
         size_t scan_task_worker_idx_{0};
-
+#endif
         // Increased by worker after finishing the retrieved work.
         std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};
         TransactionExecution *data_sync_txm_{nullptr};
-        CcHandlerResult<Void> *hand_res_{nullptr};
     };
     // For flush data work
     WorkerThreadContext flush_data_worker_ctx_;

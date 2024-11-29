@@ -831,54 +831,27 @@ struct NoOp : public TransactionOperation
     CcHandlerResult<Void> hd_result_;
 };
 
-struct FlushDataOp : public TransactionOperation
-{
-    FlushDataOp(TransactionExecution *txm);
-    void ResetHandlerTxm(TransactionExecution *txm);
-    void Forward(TransactionExecution *txm) override;
-    void Reset();
-
-    const TableName *tab_name_{nullptr};
-    uint64_t data_sync_ts_;
-    NodeGroupId node_group_;
-    int64_t tx_term_;
-    const TableSchema *schema_{nullptr};
-    std::vector<FlushRecord> *data_sync_vec_{nullptr};
-    std::vector<FlushRecord> *archive_vec_{nullptr};
-    std::vector<TxKey> *mv_vec_{nullptr};
-    CcHandlerResult<Void> hd_result_;
-    bool during_range_split{false};
-};
-
 struct SplitFlushRangeOp : public CompositeTransactionOperation
 {
     SplitFlushRangeOp() = delete;
 
     SplitFlushRangeOp(const TableName &table_name,
-                      const TableSchema *table_schema,
-                      StoreRange *store_range,
-                      const RangeInfo *old_range_info,
+                      std::shared_ptr<const TableSchema> &&table_schema,
+                      TableRangeEntry *range_entry,
                       std::vector<std::pair<TxKey, int32_t>> &&new_range_info,
-                      uint64_t previous_scan_ts,
-                      std::vector<FlushRecord> &&previous_data_sync_vec,
-                      std::vector<FlushRecord> &&previous_archive_vec,
-                      std::vector<TxKey> &&previous_mv_base_vec,
-                      TransactionExecution *txm);
+                      TransactionExecution *txm,
+                      bool is_dirty);
 
     void Reset(const TableName &table_name,
-               const TableSchema *table_schema,
-               StoreRange *store_range,
-               const RangeInfo *old_range_info,
+               std::shared_ptr<const TableSchema> &&table_schema,
+               TableRangeEntry *range_entry,
                std::vector<std::pair<TxKey, int32_t>> &&new_range_info,
-               uint64_t previous_scan_ts,
-               std::vector<FlushRecord> &&previous_data_sync_vec,
-               std::vector<FlushRecord> &&previous_archive_vec,
-               std::vector<TxKey> &&previous_mv_base_vec,
-               TransactionExecution *txm);
+               TransactionExecution *txm,
+               bool is_dirty);
 
     void Forward(TransactionExecution *txm) override;
 
-    const TableSchema *table_schema_{nullptr};
+    std::shared_ptr<const TableSchema> table_schema_{nullptr};
     TableName table_name_;        // TableName owner.
     TableName range_table_name_;  // References table_name_.
     CcHandlerResult<ReadKeyResult> read_cluster_result_;
@@ -892,21 +865,11 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     // or raw pointers to inf key instances otherwise.
     TxKey old_start_key_;
     TxKey old_end_key_;
-    StoreRange *store_range_;
+    TableRangeEntry *range_entry_;
     // vector< new start key, new partition id >
     std::vector<std::pair<TxKey, int32_t>> new_range_info_;
 
-    // vector buffer used during checkpoint scan
-    std::vector<FlushRecord> data_sync_vec_;
-    std::vector<FlushRecord> archive_vec_;
-    std::vector<TxKey> mv_base_vec_;
-
-    uint64_t previous_scan_ts_{0};
-    std::vector<FlushRecord> previous_data_sync_vec_;
-    std::vector<FlushRecord> previous_archive_vec_;
-    std::vector<TxKey> previous_mv_base_vec_;
-    bool scan_finished_{false};
-    std::unordered_map<size_t, int32_t> old_delta_sizes_;
+    bool is_dirty_{false};
 
     std::vector<std::pair<TxKey, int32_t>>::const_iterator kickout_data_it_;
     bool cleaning_old_range_dirty_owner_{false};
@@ -946,17 +909,11 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      */
     PostReadOperation unlock_cluster_config_op_;
     /**
-     * @brief Scan for data before commit_ts in the splitting range. We need to
-     * make these data available to the new range before we commit the range
-     * split.
+     * @brief Scan and Flush data in memory before commit_ts to KV storage.
+     * These data will be flushed into new partitions. We can't safely update
+     * ckpt_ts of CcEntry for now.
      */
-    AsyncOp<Void> data_sync_scan_op_;
-    /**
-     * @brief Flush data in memory before commit_ts to KV storage. These data
-     * will be flushed into new partitions. We can't safely update ckpt_ts of
-     * CcEntry for now.
-     */
-    FlushDataOp flush_op_;
+    AsyncOp<Void> data_sync_op_;
     /**
      * @brief Acquire write lock on all node group on the old partition and
      * new partition.
@@ -964,10 +921,9 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     AcquireAllOp commit_acquire_all_write_op_;
 
     /**
-     * @brief We can safely update ckpt_ts of CcEntry after acquiring range
-     * write lock
+     * @brief Update key cache if key cache is enabled.
      */
-    AsyncOp<Void> update_ckpt_ts_op_;
+    AsyncOp<Void> update_key_cache_op_;
 
     /**
      * @brief Write commit log.
@@ -1016,7 +972,6 @@ private:
     void FillCommitLogRequest(TransactionExecution *txm);
     void FillCleanLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
-    void ClearDataSyncVec();
     void ClearInfos();
     bool ForwardKickoutIterator(TransactionExecution *txm);
     std::vector<SplitRangeInfo> GenSplittedRangeInfos();

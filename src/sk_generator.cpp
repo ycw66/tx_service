@@ -286,7 +286,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     size_t core_cnt = cc_shards->Count();
 
     DataSyncScanCc scan_req(*base_table_name_,
-                            0,
                             scan_ts_,
                             node_group_id_,
                             ng_term,
@@ -295,13 +294,12 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                             tx_number,
                             start_key,
                             end_key,
-                            false
+                            false,
 #ifdef RANGE_PARTITION_ENABLED
-                            ,
                             true,
                             true
 #else
-                            ,
+                            0,
                             false,
                             [](size_t hash_code) { return true; }
 

@@ -461,6 +461,25 @@ public:
                      uint64_t range_version = UINT64_MAX) override;
 
     void VerifyOrphanLock(TxNumber txn) override;
+#ifdef RANGE_PARTITION_ENABLED
+    /// <summary>
+    /// Delete key that are between start_key and end_key from key cache.
+    /// </summary>
+    /// <param name="table_name">table name</param>
+    /// <param name="ng_id">Id of the node group that to exec. the req.</param>
+    /// <param name="tx_term">Term of the tx node</param>
+    /// <param name="start_key">The start key of the data</param>
+    /// <param name="end_key">The end key of the data</param>
+    /// <param name="store_range">The range that the keys belong to</param>
+    /// <param name="hres">Result handler of the request</param>
+    virtual void UpdateKeyCache(const TableName &table_name,
+                                NodeGroupId ng_id,
+                                int64_t tx_term,
+                                const TxKey &start_key,
+                                const TxKey &end_key,
+                                StoreRange *store_range,
+                                CcHandlerResult<Void> &hres) override;
+#endif
 
     void InvalidateTableCache(const TableName &table_name,
                               uint32_t ng_id,
@@ -496,6 +515,9 @@ private:
     CcRequestPool<ApplyCc> apply_pool;
     CcRequestPool<UploadTxCommandsCc> cmd_commit_pool;
     CcRequestPool<InvalidateTableCacheCc> invalidate_table_cache_pool;
+#ifdef RANGE_PARTITION_ENABLED
+    CcRequestPool<UpdateKeyCacheCc> update_key_cache_pool_;
+#endif
 
     CircularQueue<std::unique_ptr<CcScanner>> pk_forward_scanner_{64};
     CircularQueue<std::unique_ptr<CcScanner>> pk_backward_scanner_{64};

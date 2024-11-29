@@ -3203,7 +3203,6 @@ public:
 
     DataSyncScanCc(
         const TableName &table_name,
-        uint64_t previous_ckpt_ts,
         uint64_t data_sync_ts,
         uint64_t node_group_id,
         int64_t node_group_term,
@@ -3217,19 +3216,18 @@ public:
         bool export_base_table_item = false,
         bool export_base_table_item_only = false,
         StoreRange *store_range = nullptr,
-        const std::map<TxKey, int64_t> *old_slices_delta_size = nullptr
+        const std::map<TxKey, int64_t> *old_slices_delta_size = nullptr,
 #else
+        uint64_t previous_ckpt_ts,
         bool only_one_core,
-        std::function<bool(size_t hash_code)> filter
+        std::function<bool(size_t hash_code)> filter,
 #endif
-        ,
         uint64_t schema_version = 0)
         : scan_heap_is_full_(false),
           table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
           core_cnt_(core_cnt),
-          previous_ckpt_ts_(previous_ckpt_ts),
           data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
@@ -3238,19 +3236,17 @@ public:
           unfinished_cnt_(core_cnt_),
           mux_(),
           cv_(),
-          include_persisted_data_(include_persisted_data)
+          include_persisted_data_(include_persisted_data),
 #ifdef RANGE_PARTITION_ENABLED
-          ,
           export_base_table_item_(export_base_table_item),
           export_base_table_item_only_(export_base_table_item_only),
           store_range_(store_range),
-          old_slices_delta_size_(old_slices_delta_size)
+          old_slices_delta_size_(old_slices_delta_size),
 #else
-          ,
+          previous_ckpt_ts_(previous_ckpt_ts),
           only_scan_one_core_(only_one_core),
-          filter_lambda_(filter)
+          filter_lambda_(filter),
 #endif
-          ,
           schema_version_(schema_version)
     {
         tx_number_ = txn;
@@ -3273,6 +3269,7 @@ public:
             pause_pos_.emplace_back(TxKey(), false);
             if (!export_base_table_item_)
             {
+                assert(old_slices_delta_size_->size() > 0);
                 curr_slice_it_.emplace_back(old_slices_delta_size_->begin());
             }
 #else
@@ -3541,10 +3538,6 @@ private:
     uint32_t node_group_id_;
     int64_t node_group_term_;
     uint16_t core_cnt_;
-    // Used during regular data sync scan. It is used as a hint to decide if a
-    // page has dirty data since last round of checkpoint. It is guaranteed that
-    // all entries committed before this ts are synced into data store.
-    uint64_t previous_ckpt_ts_;
     // Target ts. Collect all data changes committed before this ts into data
     // sync vec.
     uint64_t data_sync_ts_;
@@ -3592,6 +3585,10 @@ private:
     // Slice TxKey currently being scanned.
     std::vector<std::map<TxKey, int64_t>::const_iterator> curr_slice_it_;
 #else
+    // Used during regular data sync scan. It is used as a hint to decide if a
+    // page has dirty data since last round of checkpoint. It is guaranteed that
+    // all entries committed before this ts are synced into data store.
+    uint64_t previous_ckpt_ts_;
     bool only_scan_one_core_{false};
     std::function<bool(size_t hash_code)> filter_lambda_;
 #endif
@@ -3905,6 +3902,22 @@ public:
                     }
 
                     table_schema_ = catalog_entry->schema_.get();
+                    TableType table_type =
+                        TableName::Type(table_name_->StringView());
+                    if ((table_type == TableType::Secondary ||
+                         table_type == TableType::UniqueSecondary) &&
+                        catalog_entry->dirty_schema_)
+                    {
+                        // If the range table corresponds to a dirty table (such
+                        // as dirty index), should use the dirty table schema.
+                        TableName index_name(table_name_->StringView(),
+                                             table_type);
+                        if (!table_schema_->IndexKeySchema(index_name))
+                        {
+                            table_schema_ = catalog_entry->dirty_schema_.get();
+                            assert(table_schema_->IndexKeySchema(index_name));
+                        }
+                    }
 
                     // The request is toward a special cc map that contains a
                     // tabmode's ranges.
@@ -5433,147 +5446,73 @@ public:
     std::vector<FlushRecord> *const archive_vec_{nullptr};
 };
 
-struct PostFlushDataCc : public CcRequestBase
-{
-public:
-    explicit PostFlushDataCc(size_t core_cnt) : pending_shard_(core_cnt)
-    {
-    }
-
-    bool Execute(CcShard &ccs) override
-    {
-        ccs.ResetCleanStart();
-        if (ccs.WaitListSizeForMemory() > 0)
-        {
-            ccs.WakeUpShardCleanCc();
-        }
-
-        {
-            std::lock_guard<std::mutex> lk(mux_);
-            if (--pending_shard_ == 0)
-            {
-                cv_.notify_one();
-                // Reset waiting ckpt flag. Shards should be
-                // able to request ckpt again if no cc entries
-                // can be kicked out.
-                ccs.SetWaitingCkpt(false);
-            }
-        }
-
-        return false;
-    }
-
-    void Wait()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return pending_shard_ == 0; });
-    }
-
-    std::mutex mux_;
-    std::condition_variable cv_;
-    size_t pending_shard_;
-    std::vector<std::unique_ptr<std::vector<FlushRecord>>>
-        data_sync_vec_per_core_;
-    std::vector<std::unique_ptr<std::vector<FlushRecord>>>
-        archive_vec_per_core_;
-};
-
 struct UpdateKeyCacheCc : public CcRequestBase
 {
-    static const size_t BatchSize = 256;
-    UpdateKeyCacheCc(const TableName &tbl_name,
-                     int64_t ng_term,
-                     uint32_t ng_id,
-                     std::vector<std::vector<FlushRecord *>> &&key_vecs,
-                     StoreRange *range)
-        : table_name_(tbl_name),
-          ng_term_(ng_term),
-          node_group_id_(ng_id),
-          key_vecs_(std::move(key_vecs)),
-          store_range_(range),
-          unfinished_core_(key_vecs_.size())
+    static constexpr size_t BatchSize = 256;
+
+    UpdateKeyCacheCc() = default;
+
+    UpdateKeyCacheCc(const UpdateKeyCacheCc &) = delete;
+    UpdateKeyCacheCc(UpdateKeyCacheCc &&) = delete;
+
+    void Reset(const TableName &tbl_name,
+               uint32_t ng_id,
+               int64_t ng_term,
+               size_t core_cnt,
+               const TxKey &start_key,
+               const TxKey &end_key,
+               StoreRange *range,
+               CcHandlerResult<Void> *res)
+
     {
-        assert(table_name_.Type() == TableType::Primary);
-        pause_idx_.resize(key_vecs_.size(), 0);
+        assert(table_name_->Type() == TableType::Primary);
+        table_name_ = &tbl_name;
+        ng_term_ = ng_term;
+        node_group_id_ = ng_id;
+        start_key_ = &start_key;
+        end_key_ = &end_key;
+        store_range_ = range;
+        unfinished_core_ = core_cnt;
+        hd_res_ = res;
+        pause_idx_.clear();
+        pause_idx_.resize(core_cnt, 0);
     }
 
     bool Execute(CcShard &ccs) override
     {
         int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-        if (ng_term < 0)
+        if (ng_term < 0 || ng_term != ng_term_)
         {
-            SetFinish();
-            return false;
+            return SetFinish();
         }
 
-        if (key_vecs_[ccs.core_id_].empty())
+        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
+        assert(ccm != nullptr);
+
+        return ccm->Execute(*this);
+    }
+
+    bool SetFinish()
+    {
+        if (unfinished_core_.fetch_sub(1, std::memory_order_acq_rel) == 1)
         {
-            SetFinish();
-            return false;
+            hd_res_->SetFinished();
+            return true;
         }
-
-        CcMap *ccm = ccs.GetCcm(table_name_, node_group_id_);
-
-        if (ccm == nullptr)
-        {
-            // Fetch/Get Catalog is based on base table name, but Get
-            // ccmap is based on the real table name, for example, index
-            // should get the corresponding sk_ccmap.
-            assert(!table_name_.IsMeta());
-            const CatalogEntry *catalog_entry =
-                ccs.InitCcm(table_name_, node_group_id_, ng_term_, this);
-            if (catalog_entry == nullptr)
-            {
-                // The local node does not contain the table's schema
-                // instance. The FetchCatalog() method will send an
-                // async request toward the data store to fetch the
-                // catalog. After fetching is finished, this cc request
-                // is re-enqueued for re-execution.
-                return false;
-            }
-            else
-            {
-                if (catalog_entry->schema_ == nullptr)
-                {
-                    // The local node (LocalCcShards) contains a schema
-                    // instance, which indicates that the table has been
-                    // dropped. No need to update the key cache.
-                    SetFinish();
-                    return false;
-                }
-
-                ccm = ccs.GetCcm(table_name_, node_group_id_);
-            }
-        }
-        ccm->Execute(*this);
-
         return false;
     }
 
-    void SetFinish()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        if (--unfinished_core_ == 0)
-        {
-            cv_.notify_one();
-        }
-    }
-
-    void Wait()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return unfinished_core_ == 0; });
-    }
-
-    const TableName &table_name_;
+    const TableName *table_name_{nullptr};
     int64_t ng_term_;
     uint32_t node_group_id_;
-    std::vector<std::vector<FlushRecord *>> key_vecs_;
-    StoreRange *store_range_;
+    const TxKey *start_key_{nullptr};
+    const TxKey *end_key_{nullptr};
+    StoreRange *store_range_{nullptr};
     std::vector<size_t> pause_idx_;
-    std::mutex mux_;
-    std::condition_variable cv_;
-    size_t unfinished_core_;
+    std::atomic<size_t> unfinished_core_;
+    CcHandlerResult<Void> *hd_res_{nullptr};
+    // TODO(ysw): for compile
+    std::vector<std::vector<FlushRecord *>> key_vecs_;
 };
 
 struct GetTableLastCommitTsCc : public CcRequestBase

@@ -13,6 +13,7 @@ namespace txservice
 DataSyncTask::DataSyncTask(const TableName &table_name,
                            uint32_t ng_id,
                            int64_t ng_term,
+                           std::shared_ptr<const TableSchema> table_schema,
                            TableRangeEntry *range_entry,
                            const TxKey &start_key,
                            const TxKey &end_key,
@@ -20,23 +21,34 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
                            bool is_dirty,
                            bool export_base_table_items,
                            uint64_t txn,
+                           uint64_t flush_data_mem_quote,
                            std::shared_ptr<DataSyncStatus> status,
                            CcHandlerResult<Void> *hres)
     : table_name_(table_name),
       node_group_id_(ng_id),
       node_group_term_(ng_term),
       data_sync_ts_(data_sync_ts),
+      flush_data_mem_quote_(flush_data_mem_quote),
       status_(status),
       is_dirty_(is_dirty),
       task_res_(hres),
       start_key_(start_key.GetShallowCopy()),
       end_key_(end_key.GetShallowCopy()),
+      table_schema_(table_schema),
       range_entry_(range_entry),
       during_split_range_(true),
       export_base_table_items_(export_base_table_items),
       tx_number_(txn)
 {
-    range_id_ = range_entry_->GetRangeInfo()->GetKeyNewRangeId(start_key_);
+    if (start_key_.KeyPtr() ==
+        range_entry->GetRangeInfo()->StartTxKey().KeyPtr())
+    {
+        range_id_ = range_entry->GetRangeInfo()->PartitionId();
+    }
+    else
+    {
+        range_id_ = range_entry_->GetRangeInfo()->GetKeyNewRangeId(start_key_);
+    }
 }
 #endif
 

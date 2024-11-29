@@ -5790,10 +5790,6 @@ public:
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
 
-        // Only scan for updates after given from ts. previous_ckpt_ts_
-        // is used during regular ckpt.
-        uint64_t from_ts = req.previous_ckpt_ts_;
-
         // DataSyncScanCc is running on TxProcessor thread. To avoid
         // blocking other transaction for a long time, we only process
         // CkptScanBatch number of pages in each round.
@@ -5829,7 +5825,7 @@ public:
             CcPage<KeyT, ValueT> *ccp = it.GetPage();
             assert(ccp);
 
-            if (ccp->last_dirty_commit_ts_ <= from_ts &&
+            if (ccp->last_dirty_commit_ts_ <= req.previous_ckpt_ts_ &&
                 !req.include_persisted_data_)
             {
                 // Skip the pages that have no updates since last data

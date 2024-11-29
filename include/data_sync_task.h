@@ -87,6 +87,7 @@ public:
     DataSyncTask(const TableName &table_name,
                  uint32_t ng_id,
                  int64_t ng_term,
+                 std::shared_ptr<const TableSchema> table_schema,
                  TableRangeEntry *range_entry,
                  const TxKey &start_key,
                  const TxKey &end_key,
@@ -94,6 +95,7 @@ public:
                  bool is_dirty,
                  bool export_base_table_items,
                  uint64_t txn,
+                 uint64_t flush_data_mem_quote,
                  std::shared_ptr<DataSyncStatus> status,
                  CcHandlerResult<Void> *hres);
 #endif
@@ -237,6 +239,7 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
     const TxKey start_key_;
     const TxKey end_key_;
+    std::shared_ptr<const TableSchema> table_schema_{nullptr};
     TableRangeEntry *range_entry_{nullptr};
     bool during_split_range_{false};
     bool export_base_table_items_{false};

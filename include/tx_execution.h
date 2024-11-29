@@ -334,9 +334,6 @@ private:
     void Process(PostReadOperation &post_read_operation);
     void PostProcess(PostReadOperation &post_read_operation);
 
-    void Process(FlushDataOp &flush_op);
-    void PostProcess(FlushDataOp &flush_op);
-
     void Process(NoOp &no_op);
     void PostProcess(NoOp &no_op);
 
@@ -692,7 +689,6 @@ private:
     friend struct CleanCcEntryForTestOp;
     friend struct CleanArchivesOp;
     friend struct SplitFlushRangeOp;
-    friend struct FlushDataOp;
     friend struct DsSplitOp;
     friend struct AnalyzeTableAllOp;
     friend struct BroadcastStatisticsOp;

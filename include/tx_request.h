@@ -726,35 +726,23 @@ struct UpsertTableTxRequest
 struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
 {
     SplitFlushTxRequest(const TableName &table_name,
-                        const TableSchema *schema,
-                        StoreRange *store_range,
-                        const RangeInfo *old_info,
+                        std::shared_ptr<const TableSchema> &&schema,
+                        TableRangeEntry *range_entry,
                         std::vector<std::pair<TxKey, int32_t>> &&new_range_info,
-                        uint64_t previous_scan_ts,
-                        std::vector<FlushRecord> &&previous_data_sync_vec,
-                        std::vector<FlushRecord> &&previous_archive_vec,
-                        std::vector<TxKey> &&previous_mv_base_vec)
+                        bool is_dirty)
         : TemplateTxRequest(nullptr, nullptr, nullptr),
           table_name_(&table_name),
-          schema_(schema),
-          store_range_(store_range),
-          old_range_info_(old_info),
+          schema_(std::move(schema)),
+          range_entry_(range_entry),
           new_range_info_(std::move(new_range_info)),
-          previous_scan_ts_(previous_scan_ts),
-          previous_data_sync_vec_(std::move(previous_data_sync_vec)),
-          previous_archive_vec_(std::move(previous_archive_vec)),
-          previous_mv_base_vec_(std::move(previous_mv_base_vec))
+          is_dirty_(is_dirty)
     {
     }
     const TableName *table_name_{nullptr};
-    const TableSchema *schema_{nullptr};
-    StoreRange *store_range_{nullptr};
-    const RangeInfo *old_range_info_{nullptr};
+    std::shared_ptr<const TableSchema> schema_{nullptr};
+    TableRangeEntry *range_entry_{nullptr};
     std::vector<std::pair<TxKey, int32_t>> new_range_info_;
-    uint64_t previous_scan_ts_;
-    std::vector<FlushRecord> previous_data_sync_vec_;
-    std::vector<FlushRecord> previous_archive_vec_;
-    std::vector<TxKey> previous_mv_base_vec_;
+    bool is_dirty_{false};
 };
 
 struct DataMigrationTxRequest
@@ -1111,33 +1099,33 @@ struct RangeSplitRecoveryTxRequest
 {
     RangeSplitRecoveryTxRequest(
         const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
-        const TableSchema *table_schema,
+        std::shared_ptr<const TableSchema> &&table_schema,
         int32_t partition_id,
-        StoreRange *store_range,
-        const RangeInfo *range_info,
+        TableRangeEntry *range_entry,
         std::vector<TxKey> &&new_range_keys,
         std::vector<int32_t> &&new_partition_ids,
-        uint32_t node_group_id)
+        uint32_t node_group_id,
+        bool is_dirty)
         : TemplateTxRequest(nullptr, nullptr),
           ds_split_range_op_msg_(ds_split_range_op_msg),
-          table_schema_(table_schema),
+          table_schema_(std::move(table_schema)),
           partition_id_(partition_id),
-          store_range_(store_range),
-          range_info_(range_info),
+          range_entry_(range_entry),
           new_range_keys_(std::move(new_range_keys)),
           new_partition_ids_(std::move(new_partition_ids)),
-          node_group_id_(node_group_id)
+          node_group_id_(node_group_id),
+          is_dirty_(is_dirty)
     {
     }
 
     const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg_;
-    const TableSchema *table_schema_;
+    std::shared_ptr<const TableSchema> table_schema_{nullptr};
     int32_t partition_id_;
-    StoreRange *store_range_;
-    const RangeInfo *range_info_;
+    TableRangeEntry *range_entry_;
     std::vector<TxKey> new_range_keys_;
     std::vector<int32_t> new_partition_ids_;
     uint32_t node_group_id_;
+    bool is_dirty_;
 };
 
 struct ReloadCacheTxRequest

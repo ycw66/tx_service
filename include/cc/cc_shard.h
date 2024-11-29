@@ -967,6 +967,15 @@ public:
 
     bool EnableDefragment() const;
 
+    void OnDirtyDataFlushed()
+    {
+        ResetCleanStart();
+        if (WaitListSizeForMemory() > 0)
+        {
+            WakeUpShardCleanCc();
+        }
+    }
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
