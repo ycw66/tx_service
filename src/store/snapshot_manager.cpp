@@ -216,7 +216,7 @@ void SnapshotManager::SyncWithStandby()
             {
                 remote::CcRpcService_Stub stub(channel.get());
                 brpc::Controller cntl;
-                cntl.set_timeout_ms(5000);
+                cntl.set_timeout_ms(1);
                 remote::OnSnapshotSyncedRequest on_synced_req;
                 remote::OnSnapshotSyncedResponse on_sync_resp;
                 on_synced_req.set_snapshot_path(req.dest_path());

@@ -307,6 +307,7 @@ bool CcNode::OnLeaderStart(int64_t term,
         // Sharder::Instance().SetStandbyNodeTerm(-1);
         assert(prev_standby_term < 0);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+        LOG(INFO) << "Candidate standby cannot escalate to leader";
 
         // transfer leader to next node
         retry = false;
@@ -585,6 +586,8 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
         int64_t standby_term = req->standby_node_term();
         Sharder::Instance().SetStandbyNodeTerm(standby_term);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+        LOG(INFO) << "node #" << node_id_
+                  << " is caught up with primary node in ng#" << ng_id_;
         // when kv is enabled, and cache replacement is disabled, then load all
         // datas from kv
         if (!txservice_skip_kv && !txservice_enable_cache_replacement)
@@ -670,18 +673,6 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         Sharder::Instance().UpdateLeader(ng_id_, leader_node_id);
     }
     auto *store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
-
-    if (need_clear_ccm)
-    {
-        uint16_t core_cnt = local_cc_shards_.Count();
-        ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
-        for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
-        {
-            local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
-        }
-        clear_ccm_req.Wait();
-    }
-
     //  term is already updated. Release processing latch to allow other rpc
     //  to proceed.
     is_processing_.store(false, std::memory_order_release);
@@ -769,6 +760,20 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         is_processing_.store(false, std::memory_order_release);
         return;
     }
+
+    // Do not clear ccm until we're sure that the new elected leader is
+    // qualified to become the leader of the ng.
+    if (need_clear_ccm)
+    {
+        uint16_t core_cnt = local_cc_shards_.Count();
+        ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
+        for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+        {
+            local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
+        }
+        clear_ccm_req.Wait();
+    }
+
     if (!txservice_skip_kv)
     {
         store_hd->OnStartFollowing();
@@ -851,6 +856,8 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     else
     {
         Sharder::Instance().SetStandbyNodeTerm(standby_term);
+        LOG(INFO) << "node #" << node_id_
+                  << " is caught up with primary node in ng#" << ng_id_;
     }
 
     // Ask primary to resend msg from the given seq id since some of the
