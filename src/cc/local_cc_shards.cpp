@@ -234,9 +234,19 @@ uint64_t LocalCcShards::ClockTs()
     return LocalCcShards::local_clock.load(std::memory_order_relaxed);
 }
 
+uint64_t LocalCcShards::ClockTsInMillseconds()
+{
+    return ClockTs() / 1000;
+}
+
 uint64_t LocalCcShards::TsBase()
 {
     return ts_base_.load(std::memory_order_relaxed);
+}
+
+uint64_t LocalCcShards::TsBaseInMillseconds()
+{
+    return TsBase() / 1000;
 }
 
 void LocalCcShards::UpdateTsBase(uint64_t timestamp)

@@ -468,7 +468,7 @@ public:
         }
 
         // if ttl is expired
-        if (ttl < shard_->Now())
+        if (ttl < shard_->NowInMilliseconds())
         {
             if (req.IsReadOnly())
             {
@@ -534,6 +534,7 @@ public:
 
         // Now we know whether the object exists or not
         bool object_not_exist;
+        bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
         if (req.Isolation() == IsolationLevel::ReadCommitted &&
             cmd->IsReadOnly())
         {
@@ -743,10 +744,6 @@ public:
         // if cce is already expired
         if (obj_result.ttl_expired_)
         {
-            if (cce->PayloadStatus() == RecordStatus::Normal)
-            {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
-            }
             cce->SetDirtyPayload(nullptr);
             cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
             cce->SetPendingCmd(nullptr);
@@ -759,6 +756,10 @@ public:
                 // Early return logic for read-write command.
                 if (req.apply_and_commit_)
                 {
+                    if (s_obj_exist)
+                    {
+                        TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+                    }
                     cce->payload_ = nullptr;
                     const uint64_t commit_ts = std::max(
                         {cce->CommitTs() + 1, req.TxTs(), shard_->Now()});
@@ -992,15 +993,14 @@ public:
                 cce->PopBlockRequest(shard_, cce->payload_.get());
             }
 
-            if (object_not_exist &&
-                cce->PayloadStatus() == RecordStatus::Normal)
-            {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
-            }
-            else if (!object_not_exist &&
-                     cce->PayloadStatus() != RecordStatus::Normal)
+            if (s_obj_exist && cce->PayloadStatus() != RecordStatus::Normal)
             {
                 TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+            }
+            else if (!s_obj_exist &&
+                     cce->PayloadStatus() == RecordStatus::Normal)
+            {
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
             }
         }
 
@@ -2246,7 +2246,7 @@ private:
             TxObject *obj = static_cast<TxObject *>(cce->payload_.get());
             if (obj != nullptr && obj->HasTTL())
             {
-                if (obj->GetTTL() < shard_->Now())
+                if (obj->GetTTL() < shard_->NowInMilliseconds())
                 {
                     return false;
                 }

@@ -366,7 +366,9 @@ public:
     }
 
     static uint64_t ClockTs();
+    static uint64_t ClockTsInMillseconds();
     uint64_t TsBase();
+    uint64_t TsBaseInMillseconds();
     void UpdateTsBase(uint64_t timestamp);
     void StartBackgroudWorkers();
 

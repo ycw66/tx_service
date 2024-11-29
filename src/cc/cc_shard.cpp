@@ -1995,6 +1995,11 @@ uint64_t CcShard::Now() const
     return local_shards_.TsBase();
 }
 
+uint64_t CcShard::NowInMilliseconds() const
+{
+    return Now() / 1000;
+}
+
 void CcShard::UpdateTsBase(uint64_t ts)
 {
     local_shards_.UpdateTsBase(ts);

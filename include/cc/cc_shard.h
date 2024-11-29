@@ -364,6 +364,7 @@ public:
     }
 
     uint64_t Now() const;
+    uint64_t NowInMilliseconds() const;
     void UpdateTsBase(uint64_t ts);
 
     size_t QueueSize()
