@@ -3116,6 +3116,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 #else
 
 void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
+                                            const TableSchema *table_schema,
                                             TransactionExecution *data_sync_txm,
                                             DataSyncTask::CkptErrorCode err,
                                             size_t worker_idx)
@@ -3151,6 +3152,7 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                            worker_idx);
 
             bool res = store_hd_->CkptEnd(task->table_name_,
+                                          table_schema,
                                           task->node_group_id_,
                                           task->node_group_term_);
             if (!res)
@@ -3471,6 +3473,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                        << static_cast<int>(scan_cc.ErrorCode());
 
             PostProcessDataSyncTask(std::move(data_sync_task),
+                                    catalog_rec.Schema(),
                                     data_sync_txm,
                                     DataSyncTask::CkptErrorCode::SCAN_ERROR,
                                     worker_idx);
@@ -3499,6 +3502,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                << ng_id;
                     PostProcessDataSyncTask(
                         std::move(data_sync_task),
+                        catalog_rec.Schema(),
                         data_sync_txm,
                         DataSyncTask::CkptErrorCode::SCAN_ERROR,
                         worker_idx);
@@ -3543,6 +3547,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                 new UploadBatchClosure(
                                     [this,
                                      data_sync_task,
+                                     catalog_rec,
                                      data_sync_txm,
                                      worker_idx](CcErrorCode res_code,
                                                  int32_t dest_ng_term)
@@ -3557,6 +3562,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                         // failure.
                                         PostProcessDataSyncTask(
                                             std::move(data_sync_task),
+                                            catalog_rec.Schema(),
                                             data_sync_txm,
                                             DataSyncTask::CkptErrorCode::
                                                 NO_ERROR,
@@ -3805,6 +3811,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     }
 
     PostProcessDataSyncTask(std::move(data_sync_task),
+                            catalog_rec.Schema(),
                             data_sync_txm,
                             DataSyncTask::CkptErrorCode::NO_ERROR,
                             worker_idx);
@@ -4470,6 +4477,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                    << " quote: " << data_sync_task->flush_data_mem_quote_
                    << " flight_tasks: " << data_sync_task->flight_task_cnt_;
         PostProcessDataSyncTask(std::move(data_sync_task),
+                                schema,
                                 data_sync_txm,
                                 ckpt_err,
                                 scan_task_worker_idx);

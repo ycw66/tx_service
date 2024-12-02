@@ -438,6 +438,7 @@ public:
                              CcHandlerResult<bool> &hres) = 0;
 
     virtual void DataStoreUpsertTable(
+        const TableSchema *old_schema,
         const TableSchema *schema,
         OperationType op_type,
         uint64_t commit_ts,

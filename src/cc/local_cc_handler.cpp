@@ -1649,6 +1649,7 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
 }
 
 void txservice::LocalCcHandler::DataStoreUpsertTable(
+    const TableSchema *old_schema,
     const TableSchema *schema,
     OperationType op_type,
     uint64_t commit_ts,
@@ -1668,8 +1669,14 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
 
     ACTION_FAULT_INJECTOR("kv_upsert_table");
 
-    cc_shards_.store_hd_->UpsertTable(
-        schema, op_type, commit_ts, ng_id, tx_term, &hres, alter_table_info);
+    cc_shards_.store_hd_->UpsertTable(old_schema,
+                                      schema,
+                                      op_type,
+                                      commit_ts,
+                                      ng_id,
+                                      tx_term,
+                                      &hres,
+                                      alter_table_info);
 }
 
 void txservice::LocalCcHandler::AnalyzeTableAll(const TableName &table_name,

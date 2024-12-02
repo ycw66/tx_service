@@ -614,6 +614,7 @@ struct DsUpsertTableOp : public TransactionOperation
     void Forward(TransactionExecution *txm) override;
 
     const TableName *table_name_{nullptr};
+    const TableSchema *table_schema_old_{nullptr};
     const TableSchema *table_schema_{nullptr};
     OperationType op_type_{OperationType::Upsert};
     CcHandlerResult<Void> hd_result_;

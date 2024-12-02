@@ -2428,6 +2428,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         // The post write request right after flushing the prepare log
         // installs the dirty schema in the tx service and returns a
         // local view (pointer) of the committed and dirty schema.
+        upsert_kv_table_op_.table_schema_old_ = catalog_rec_.Schema();
         upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
         upsert_kv_table_op_.alter_table_info_ = nullptr;
         txm->PushOperation(&upsert_kv_table_op_);
@@ -2489,40 +2490,23 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (op_type_ == OperationType::DropTable)
+        else if (op_type_ == OperationType::DropTable ||
+                 op_type_ == OperationType::TruncateTable)
         {
             const TableSchema *table_old_schema = catalog_rec_.Schema();
             assert(table_old_schema->GetBaseTableName() == table_key_.Name());
             assert(clean_ccm_op_.table_names_.empty());
 
             auto clean_ccm_names = table_old_schema->IndexNames();
+#ifdef ON_KEY_OBJECT
+            assert(clean_ccm_names.empty());
+#endif
             clean_ccm_names.emplace_back(
                 table_old_schema->GetBaseTableName().StringView().data(),
                 table_old_schema->GetBaseTableName().StringView().size(),
                 table_old_schema->GetBaseTableName().Type());
             clean_ccm_op_.table_names_ = std::move(clean_ccm_names);
 
-            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
-            clean_ccm_op_.commit_ts_ = txm->CommitTs();
-
-            LOG(INFO)
-                << "UpsertTableOp: Clean all ccmap on all node groups, txn: "
-                << txm->TxNumber();
-
-            op_ = &clean_ccm_op_;
-            txm->PushOperation(&clean_ccm_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process clean_ccm_op_";
-            txm->Process(clean_ccm_op_);
-        }
-        else if (op_type_ == OperationType::TruncateTable)
-        {
-            assert(clean_ccm_op_.table_names_.empty());
-
-            clean_ccm_op_.table_names_.emplace_back(
-                table_key_.Name().StringView().data(),
-                table_key_.Name().StringView().size(),
-                table_key_.Name().Type());
             clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
             clean_ccm_op_.commit_ts_ = txm->CommitTs();
 
@@ -2818,7 +2802,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 else
                 {
                     op_ = &upsert_kv_table_op_;
-                    upsert_kv_table_op_.table_schema_ = catalog_rec_.Schema();
+                    upsert_kv_table_op_.table_schema_old_ =
+                        catalog_rec_.Schema();
+                    upsert_kv_table_op_.table_schema_ =
+                        catalog_rec_.DirtySchema();
                     upsert_kv_table_op_.alter_table_info_ = nullptr;
                     txm->PushOperation(&upsert_kv_table_op_);
                     DLOG(INFO) << "txn: " << txm->TxNumber()

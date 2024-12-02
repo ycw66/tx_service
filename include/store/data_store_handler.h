@@ -120,6 +120,7 @@ public:
      * @return whether all entries are written to data store successfully
      */
     virtual bool CkptEnd(const txservice::TableName &table_name,
+                         const txservice::TableSchema *schema,
                          uint32_t node_group,
                          uint64_t version)
     {
@@ -127,7 +128,8 @@ public:
     }
 
     virtual void UpsertTable(
-        const TableSchema *table_schema,
+        const TableSchema *old_table_schema,
+        const TableSchema *new_table_schema,
         OperationType op_type,
         uint64_t commit_ts,
         NodeGroupId ng_id,

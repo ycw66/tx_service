@@ -5307,7 +5307,8 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
 #ifdef EXT_TX_PROC_ENABLED
     ds_upsert_table_op.hd_result_.SetToBlock();
 #endif
-    cc_handler_->DataStoreUpsertTable(ds_upsert_table_op.table_schema_,
+    cc_handler_->DataStoreUpsertTable(ds_upsert_table_op.table_schema_old_,
+                                      ds_upsert_table_op.table_schema_,
                                       ds_upsert_table_op.op_type_,
                                       commit_ts_,
                                       TxCcNodeId(),

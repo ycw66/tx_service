@@ -4947,6 +4947,7 @@ public:
                         upsert_kv_err_code_ = {true, CcErrorCode::NO_ERROR};
                         Sharder::Instance().GetDataStoreHandler()->UpsertTable(
                             catalog_entry->schema_.get(),
+                            catalog_entry->dirty_schema_.get(),
                             OperationType::TruncateTable,
                             clean_ts_,
                             node_group_id_,

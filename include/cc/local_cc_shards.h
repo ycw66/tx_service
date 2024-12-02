@@ -1786,6 +1786,7 @@ private:
 
 #ifndef RANGE_PARTITION_ENABLED
     void PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
+                                 const TableSchema *table_schema,
                                  TransactionExecution *data_sync_txm,
                                  DataSyncTask::CkptErrorCode ckpt_err,
                                  size_t worker_idx);

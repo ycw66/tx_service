@@ -1650,6 +1650,7 @@ public:
                         KeyObjectStandbyForwardCc::DDLPhase::KvOpPhase);
                     shard_->local_shards_.store_hd_->UpsertTable(
                         catalog_entry->schema_.get(),
+                        catalog_entry->dirty_schema_.get(),
                         OperationType::TruncateTable,
                         commit_ts,
                         cc_ng_id_,
@@ -1681,6 +1682,7 @@ public:
                     req.DDLKvOpErrorCode() = CcErrorCode::NO_ERROR;
                     shard_->local_shards_.store_hd_->UpsertTable(
                         catalog_entry->schema_.get(),
+                        catalog_entry->dirty_schema_.get(),
                         OperationType::TruncateTable,
                         commit_ts,
                         cc_ng_id_,

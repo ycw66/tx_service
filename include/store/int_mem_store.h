@@ -85,6 +85,7 @@ public:
     }
 
     void UpsertTable(
+        const txservice::TableSchema *old_table_schema,
         const txservice::TableSchema *table_schema,
         OperationType op_type,
         uint64_t commit_ts,
