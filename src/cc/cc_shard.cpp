@@ -2106,13 +2106,18 @@ StandbyForwardEntry *CcShard::GetNextStandbyForwardEntry()
 {
     size_t cnt = 0;
     bool found = false;
-    while (!found && cnt < standby_fwd_vec_.size())
+    while (cnt < standby_fwd_vec_.size())
     {
         StandbyForwardEntry &ety = standby_fwd_vec_[next_foward_idx_];
         found =
             (ety.IsFree() && (ety.SequenceId() == UINT64_MAX ||
                               next_forward_sequence_id_ - ety.SequenceId() >=
                                   txservice_max_standby_lag));
+
+        if (found)
+        {
+            break;
+        }
 
         // Only overwrite standby entry if it is already older than the
         // oldest buffered msg.
@@ -2200,7 +2205,7 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
                 last_sent_seq_id++;
             }
         }
-        if (write_succ && !retry_fwd_msg_cc_->InUse())
+        if (!write_succ && !retry_fwd_msg_cc_->InUse())
         {
             // If the latest message is not successfully written to standby,
             // enqueue retry cc req that will keep retrying to send message from
