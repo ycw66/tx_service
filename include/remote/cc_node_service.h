@@ -202,6 +202,18 @@ public:
         ::txservice::remote::ClusterBackupResponse *,
         ::google::protobuf::Closure *done) override;
 
+    void NotifyShutdownCkpt(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::NotifyShutdownCkptRequest *request,
+        ::txservice::remote::NotifyShutdownCkptResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void CheckCkptStatus(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::CheckCkptStatusRequest *request,
+        ::txservice::remote::CheckCkptStatusResponse *response,
+        ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

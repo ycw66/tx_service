@@ -227,7 +227,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             std::make_shared<DataSyncStatus>(true);
 
         uint64_t last_succ_ckpt_ts = UINT64_MAX;
-        bool can_be_skipped = (is_last_ckpt == false);
+        bool can_be_skipped = !is_last_ckpt;
 
         // Iterate all the tables and execute CkptScanCc requests on this node
         // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
@@ -425,7 +425,7 @@ void Checkpointer::Run()
 
         last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
         lk.unlock();
-        Ckpt();
+        Ckpt(false);
         lk.lock();
 
         request_ckpt_ = false;
@@ -435,7 +435,6 @@ void Checkpointer::Run()
     // terminating request during the last checkpoint.
     lk.unlock();
     Ckpt(true);
-
     lk.lock();
     ckpt_thd_status_ = Status::Terminated;
 }
@@ -464,9 +463,17 @@ bool Checkpointer::IsTerminated()
 void Checkpointer::Terminate()
 {
     std::unique_lock<std::mutex> lk(ckpt_mux_);
-    assert(ckpt_thd_status_ == Status::Active);
-    ckpt_thd_status_ = Status::Terminating;
-    ckpt_cv_.notify_one();
+    if (ckpt_thd_status_ == Status::Terminated)
+    {
+        // The cluster is in standby mode. The final round of checkpointing was
+        // performed as part of the cluster stop command issued via eloqctl.
+    }
+    else
+    {
+        assert(ckpt_thd_status_ == Status::Active);
+        ckpt_thd_status_ = Status::Terminating;
+        ckpt_cv_.notify_one();
+    }
 }
 
 void Checkpointer::Join()

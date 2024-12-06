@@ -498,6 +498,34 @@ service CcRpcService {
     rpc TerminateBackup(TerminateBackupRequest) returns (TerminateBackupResponse);
     rpc CreateClusterBackup(CreateClusterBackupRequest) returns (ClusterBackupResponse);
     rpc FetchClusterBackup(FetchClusterBackupRequest) returns (ClusterBackupResponse);
+    rpc NotifyShutdownCkpt(NotifyShutdownCkptRequest) returns (NotifyShutdownCkptResponse);
+    rpc CheckCkptStatus(CheckCkptStatusRequest) returns (CheckCkptStatusResponse);
+}
+
+enum ShutdownStatus{
+    ShutdownTriggered = 0;
+    ShutdownOngoing = 1;
+    ShutdownFailed = 2;
+}
+
+message NotifyShutdownCkptRequest {}
+message NotifyShutdownCkptResponse {
+    ShutdownStatus status = 1;
+    uint64 trigger_ckpt_ts = 2;
+}
+
+enum CkptStatus{
+    CkptUnknown = 0;
+    CkptRunning = 1;
+    CkptFailed = 2;
+    CkptFinished = 3;
+}
+
+message CheckCkptStatusRequest {
+    uint64 trigger_ckpt_ts = 1;
+}
+message CheckCkptStatusResponse {
+    CkptStatus status = 1;
 }
 
 message NodeConfigBuf

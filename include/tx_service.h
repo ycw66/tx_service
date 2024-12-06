@@ -874,7 +874,6 @@ public:
     }
 #endif
 
-private:
     bool IsIdle()
     {
         return active_tx_cnt_.load(std::memory_order_relaxed) == 0 &&
@@ -882,6 +881,21 @@ private:
                !terminated_.load(std::memory_order_relaxed);
     }
 
+    bool AllTxFinished()
+    {
+#ifdef EXT_TX_PROC_ENABLED
+        active_tx_lock_.Lock();
+        int external_ongoing_tx_cnt = active_tx_map_.size();
+        active_tx_lock_.Unlock();
+
+        return external_ongoing_tx_cnt == 0 &&
+               active_tx_cnt_.load(std::memory_order_relaxed) == 0;
+#else
+        return active_tx_cnt_.load(std::memory_order_relaxed) == 0;
+#endif
+    }
+
+private:
     /**
      * @brief Notifies the tx processor that a tx or a cc request waits to be
      * processed and wakes up the processor if it is asleep and there is no
@@ -1215,6 +1229,14 @@ public:
         tx_runs += tx_run_offset;
         size_t sid = run_cnt % pool_.size();
         return pool_[sid]->NewTx();
+    }
+
+    bool AllTxFinished()
+    {
+        return std::all_of(pool_.begin(),
+                           pool_.end(),
+                           [](const std::unique_ptr<TxProcessor> &tp)
+                           { return tp->AllTxFinished(); });
     }
 
 #ifdef EXT_TX_PROC_ENABLED

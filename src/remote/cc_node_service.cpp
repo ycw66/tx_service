@@ -1880,5 +1880,85 @@ void CcNodeService::FetchClusterBackup(
 #endif
 }
 
+void CcNodeService::NotifyShutdownCkpt(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::NotifyShutdownCkptRequest *request,
+    ::txservice::remote::NotifyShutdownCkptResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    LOG(INFO) << "Cluster shutting down...";
+
+    // 1. Block external requests
+    bool succeed = Sharder::Instance().NotifyShutdown();
+    if (!succeed)
+    {
+        LOG(WARNING) << "Shutdown has been triggered already.";
+        response->set_trigger_ckpt_ts(0);
+        response->set_status(ShutdownStatus::ShutdownOngoing);
+        return;
+    }
+
+    // 2. Wait for ongoing tx to finish
+    while (!local_shards_.GetTxService()->AllTxFinished())
+    {
+        bthread_usleep(1000000);
+    }
+
+    // 3. Identify leader node groups and trigger final round of checkpoint
+    uint64_t trigger_ckpt_ts =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    for (uint32_t ng_id : Sharder::Instance().LocalNodeGroups())
+    {
+        if (Sharder::Instance().LeaderTerm(ng_id) < 0)
+        {
+            LOG(WARNING) << "This node is no longer leader.";
+            response->set_trigger_ckpt_ts(0);
+            response->set_status(ShutdownStatus::ShutdownFailed);
+            return;
+        }
+
+        assert(Sharder::Instance().LeaderNodeId(ng_id) ==
+               Sharder::Instance().NodeId());
+    }
+
+    local_shards_.GetTxService()->ckpt_.Terminate();
+
+    response->set_trigger_ckpt_ts(trigger_ckpt_ts);
+    response->set_status(ShutdownStatus::ShutdownTriggered);
+}
+
+void CcNodeService::CheckCkptStatus(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::CheckCkptStatusRequest *request,
+    ::txservice::remote::CheckCkptStatusResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    for (uint32_t ng_id : Sharder::Instance().LocalNodeGroups())
+    {
+        if (Sharder::Instance().LeaderTerm(ng_id) < 0)
+        {
+            LOG(WARNING) << "Leader transfer during shutdown checkpoint.";
+            response->set_status(CkptStatus::CkptFailed);
+            return;
+        }
+
+        if (Sharder::Instance().GetNodeGroupCkptTs(ng_id) <=
+            request->trigger_ckpt_ts())
+        {
+            response->set_status(CkptStatus::CkptRunning);
+            return;
+        }
+    }
+
+    response->set_status(CkptStatus::CkptFinished);
+    return;
+}
+
 }  // namespace remote
 }  // namespace txservice

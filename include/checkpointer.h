@@ -30,7 +30,7 @@ public:
 
     ~Checkpointer() = default;
 
-    void Ckpt(bool is_last_ckpt = false);
+    void Ckpt(bool is_last_ckpt);
 
     std::pair<uint64_t, uint64_t> GetNewCheckpointTs(uint32_t node_group_id,
                                                      bool is_last_ckpt);

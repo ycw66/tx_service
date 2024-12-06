@@ -654,6 +654,19 @@ public:
         return native_ng_;
     }
 
+    bool NotifyShutdown()
+    {
+        bool expect = false;
+        return cluster_is_shutting_down_.compare_exchange_strong(
+            expect, true, std::memory_order_acq_rel);
+    }
+
+    bool CheckShutdownStatus()
+    {
+        return Sharder::Instance().cluster_is_shutting_down_.load(
+            std::memory_order_acquire);
+    }
+
 private:
     Sharder();
 
@@ -762,5 +775,11 @@ private:
     std::string hm_ip_{""};
     uint16_t hm_port_{0};
     brpc::Channel hm_channel_;
+
+    // To stop the cluster, it should perform a checkpoint before any node is
+    // terminated (as the final checkpoint will fail if the majority of nodes
+    // are down). Additionally, the service should block external requests once
+    // the cluster initiates the shutdown process.
+    std::atomic<bool> cluster_is_shutting_down_{false};
 };
 }  // namespace txservice
