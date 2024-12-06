@@ -2440,8 +2440,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
-                // Keep retrying if it is DropTable or DropIndex or
-                // TruncateTable.
+                // Keep retrying if it is DropTable or TruncateTable.
                 if (op_type_ == OperationType::DropTable ||
                     op_type_ == OperationType::TruncateTable)
                 {
@@ -2595,9 +2594,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            op_ = &acquire_all_lock_op_;
-            txm->PushOperation(&acquire_all_lock_op_);
-            txm->Process(acquire_all_lock_op_);
+            assert(op_type_ == OperationType::CreateTable ||
+                   op_type_ == OperationType::Update);
+            op_ = &lock_cluster_config_op_;
+            txm->PushOperation(&lock_cluster_config_op_);
+            txm->Process(lock_cluster_config_op_);
         }
     }
     else if (op_ == &sequence_data_log_op_)
