@@ -187,7 +187,11 @@ private:
 
     // to_connect_flag_ is used to avoid to wait one second timeout in
     // to_connect_cv_ wait_for.
-    std::atomic<bool> to_connect_flag_;
+    bool to_connect_flag_;
+    // Spam reconnect after cluster topology changed so that cluster can be
+    // ready asap . This is set to true in UpdateRemoteNodes and set back to
+    // false once all pending streams have been connected.
+    bool spam_stream_connect_{false};
 };
 }  // namespace remote
 }  // namespace txservice

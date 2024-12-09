@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 
@@ -187,7 +188,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
         // always wake up connector thread to either reconnect streams or
         // resend messages.
-        to_connect_flag_.store(true, std::memory_order_release);
+        to_connect_flag_ = true;
         to_connect_cv_.notify_one();
         return true;
     }
@@ -312,7 +313,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
                 // always wake up connector thread to either reconnect streams
                 // or resend messages.
-                to_connect_flag_.store(true, std::memory_order_release);
+                to_connect_flag_ = true;
                 to_connect_cv_.notify_one();
 
                 return true;
@@ -373,7 +374,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
 
         // always wake up connector thread to either reconnect streams or
         // resend messages.
-        to_connect_flag_.store(true, std::memory_order_release);
+        to_connect_flag_ = true;
         to_connect_cv_.notify_one();
         return true;
     }
@@ -469,7 +470,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                     std::make_unique<ResendScanSliceResp>(msg, res));
 
                 // wake up connector thread to reconnect streams
-                to_connect_flag_.store(true, std::memory_order_release);
+                to_connect_flag_ = true;
                 to_connect_cv_.notify_one();
 
                 return true;
@@ -507,6 +508,7 @@ void CcStreamSender::UpdateRemoteNodes(
     const std::unordered_map<NodeId, NodeConfig> &nodes_configs)
 {
     std::unique_lock<std::shared_mutex> lk(outbound_mux_);
+    bool pending_connect_streams = false;
 
     for (const auto &[node_id, config] : nodes_configs)
     {
@@ -530,6 +532,7 @@ void CcStreamSender::UpdateRemoteNodes(
             {
                 // Add it to the reconnect lists, the connect_thd_ will
                 // connect to these nodes later.
+                pending_connect_streams = true;
                 std::unique_lock<std::mutex> to_connect_lk(to_connect_mux_);
                 to_connect_regular_streams_.try_emplace(node_id, 0);
                 to_connect_long_msg_streams_.try_emplace(node_id, 0);
@@ -587,11 +590,18 @@ void CcStreamSender::UpdateRemoteNodes(
     {
         outbound_channels_.erase(nid);
     }
+
+    if (pending_connect_streams)
+    {
+        std::unique_lock<std::mutex> lk(to_connect_mux_);
+        spam_stream_connect_ = true;
+    }
 }
 
 void CcStreamSender::NotifyConnectStream()
 {
-    to_connect_flag_.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(to_connect_mux_);
+    to_connect_flag_ = true;
     to_connect_cv_.notify_one();
 }
 
@@ -758,7 +768,7 @@ void CcStreamSender::ConnectStreams()
             [this]
             {
                 return terminate_.load(std::memory_order_acquire) ||
-                       to_connect_flag_.load(std::memory_order_acquire);
+                       to_connect_flag_ || spam_stream_connect_;
             });
 
         if (terminate_.load(std::memory_order_acquire))
@@ -766,11 +776,12 @@ void CcStreamSender::ConnectStreams()
             break;
         }
 
-        to_connect_flag_.store(false, std::memory_order_release);
+        to_connect_flag_ = false;
 
         if (to_connect_regular_streams_.size() == 0 &&
             to_connect_long_msg_streams_.size() == 0)
         {
+            spam_stream_connect_ = false;
             continue;
         }
 

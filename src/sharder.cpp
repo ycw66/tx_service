@@ -364,7 +364,6 @@ int Sharder::Init(
 
         remote::HostMangerService_Stub stub(&hm_channel_);
         brpc::Controller cntl;
-        cntl.set_timeout_ms(1000);
         remote::StartNodeRequest req;
         remote::StartNodeResponse response;
         req.set_node_id(node_id_);
@@ -414,10 +413,9 @@ int Sharder::Init(
 
         cntl.set_timeout_ms(500);
         stub.StartNode(&cntl, &req, &response, nullptr);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        for (int retry = 120; retry > 0 && cntl.Failed(); --retry)
+        for (int retry = 1000; retry > 0 && cntl.Failed(); --retry)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             cntl.Reset();
             cntl.set_timeout_ms(500);
             stub.StartNode(&cntl, &req, &response, nullptr);
@@ -1198,6 +1196,7 @@ void Sharder::UpdateClusterConfig(
             }
 
             cc_stream_sender_->UpdateRemoteNodes(new_nodes_configs);
+            cc_stream_sender_->NotifyConnectStream();
 
             cc_shard->Enqueue(cc_req);
         });
@@ -1222,5 +1221,6 @@ void Sharder::ConnectCcStreamSender()
     std::unordered_map<uint32_t, NodeConfig> nodes_configs;
     ExtractNodesConfigs(cluster_config_.ng_configs_, nodes_configs);
     cc_stream_sender_->UpdateRemoteNodes(nodes_configs);
+    cc_stream_sender_->NotifyConnectStream();
 }
 }  // namespace txservice
