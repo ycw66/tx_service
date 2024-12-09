@@ -1828,7 +1828,7 @@ public:
                 return false;
             }
 
-            bool has_overwrite =
+            bool ignore_previous_version =
                 *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
             offset += sizeof(uint8_t);
 
@@ -1837,12 +1837,12 @@ public:
                        << ", commit ts: " << commit_ts
                        << ", cmds len: " << cmds_len << ", cmds str: "
                        << std::string_view(log_blob.data() + offset, cmds_len)
-                       << " has_overwrite: " << has_overwrite;
+                       << " has_overwrite: " << ignore_previous_version;
 
             // load payload from kvstore before committing pending commands.
             // If there's already read intent on cce, that means a previous
             // replay cc has already sent fetch record.
-            if (!has_overwrite &&
+            if (!ignore_previous_version &&
                 cce->PayloadStatus() == RecordStatus::Unknown &&
                 (!cce->GetKeyLock() || cce->GetKeyLock()->IsEmpty()))
             {
@@ -1907,8 +1907,10 @@ public:
             bool s_obj_exist = (payload_status == RecordStatus::Normal);
 
             BufferedTxnCmdList &buffered_cmd_list = cce->BufferedCommandList();
-            TxnCmd txn_cmd(
-                obj_version, commit_ts, has_overwrite, std::move(cmd_list));
+            TxnCmd txn_cmd(obj_version,
+                           commit_ts,
+                           ignore_previous_version,
+                           std::move(cmd_list));
 
             if (txn_cmd.obj_version_ >= current_version)
             {

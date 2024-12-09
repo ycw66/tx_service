@@ -113,11 +113,12 @@ struct CmdSetEntry
 {
     CmdSetEntry(uint64_t object_version,
                 uint64_t last_vali_ts,
-                std::string &&key)
+                std::string &&key,
+                bool apply_on_deleted)
         : object_version_(object_version),
           last_vali_ts_(last_vali_ts),
           obj_key_str_(std::move(key)),
-          has_overwrite_(false)
+          ignore_previous_version_(apply_on_deleted)
     {
     }
 
@@ -128,7 +129,7 @@ struct CmdSetEntry
         {
             // clear all the commands since we don't need to write them into log
             cmd_str_list_.clear();
-            has_overwrite_ = true;
+            ignore_previous_version_ = true;
         }
 
         std::string cmd_str;
@@ -155,7 +156,7 @@ struct CmdSetEntry
     std::vector<std::string> cmd_str_list_{};
     // Whether a overwrite command exists. If true, commands before this cmd are
     // discarded since there is no point writing them into the log.
-    bool has_overwrite_{};
+    bool ignore_previous_version_{};
     // Store the forward write key_shard_code info If this key's bucket is in
     // migration
     std::unique_ptr<CmdForwardEntry> forward_entry_{nullptr};

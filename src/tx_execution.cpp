@@ -4381,6 +4381,7 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
             {
                 const std::string &key_str = cmd_entry->obj_key_str_;
                 uint64_t obj_version = cmd_entry->object_version_;
+
                 const std::vector<std::string> &cmd_str_list =
                     cmd_entry->cmd_str_list_;
 
@@ -4395,7 +4396,7 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
                 log_ng_blob.append(reinterpret_cast<const char *>(&cmds_len),
                                    sizeof(cmds_len));
 
-                uint8_t has_overwrite = cmd_entry->has_overwrite_;
+                uint8_t has_overwrite = cmd_entry->ignore_previous_version_;
                 log_ng_blob.append(
                     reinterpret_cast<const char *>(&has_overwrite),
                     sizeof(has_overwrite));
@@ -4796,7 +4797,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                         cmd_set_entry.object_version_,
                         commit_ts_,
                         &cmd_set_entry.cmd_str_list_,
-                        cmd_set_entry.has_overwrite_,
+                        cmd_set_entry.ignore_previous_version_,
                         post_process.hd_result_);
                     ++idx;
                 }
@@ -6191,6 +6192,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                     obj_cmd_.command_->RetireExpiredTTLObjectCommand();
                 rw_set_.AddObjectCommand(*table_name,
                                          cce_addr,
+                                         obj_status,
                                          commit_ts,
                                          last_vali_ts,
                                          obj_cmd_.key_,
@@ -6208,6 +6210,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                     obj_cmd_.command_->RecoverTTLObjectCommand();
                 rw_set_.AddObjectCommand(*table_name,
                                          cce_addr,
+                                         obj_status,
                                          commit_ts,
                                          last_vali_ts,
                                          obj_cmd_.key_,
@@ -6225,6 +6228,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             rw_set_.AddObjectCommand(
                 *table_name,
                 cce_addr,
+                obj_status,
                 commit_ts,
                 last_vali_ts,
                 obj_cmd_op.key_,
@@ -6584,6 +6588,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
             {
                 rw_set_.AddObjectCommand(*req->table_name_,
                                          cmd_res.cce_addr_,
+                                         cmd_res.rec_status_,
                                          cmd_res.commit_ts_,
                                          cmd_res.last_vali_ts_,
                                          &vct_key->at(i),
@@ -6640,6 +6645,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         rw_set_.AddObjectCommand(
                             *req->table_name_,
                             cmd_res.cce_addr_,
+                            cmd_res.rec_status_,
                             cmd_res.commit_ts_,
                             cmd_res.last_vali_ts_,
                             &vct_key->at(i),
@@ -6656,6 +6662,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     rw_set_.AddObjectCommand(
                         *req->table_name_,
                         cmd_res.cce_addr_,
+                        cmd_res.rec_status_,
                         cmd_res.commit_ts_,
                         cmd_res.last_vali_ts_,
                         &vct_key->at(i),

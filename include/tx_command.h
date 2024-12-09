@@ -237,11 +237,11 @@ struct TxnCmd
 {
     TxnCmd(uint64_t obj_ver,
            uint64_t commit_ts,
-           bool has_del,
+           bool ignore_previous_version,
            std::vector<std::unique_ptr<TxCommand>> &&cmd_list)
         : obj_version_(obj_ver),
           new_version_(commit_ts),
-          has_del_(has_del),
+          ignore_previous_version_(ignore_previous_version),
           cmd_list_(std::move(cmd_list))
     {
     }
@@ -251,8 +251,8 @@ struct TxnCmd
     uint64_t obj_version_{};
     // commit_ts of the txn
     uint64_t new_version_{};
-    // whether this txn has a del command on this object
-    bool has_del_{};
+    // whether this txn can ignore the previous version of this object
+    bool ignore_previous_version_{};
     // the commands the txn applies to this object
     std::vector<std::unique_ptr<TxCommand>> cmd_list_;
 };
@@ -299,7 +299,7 @@ struct BufferedTxnCmdList
             return;
         }
 
-        if (txn_cmd.has_del_)
+        if (txn_cmd.ignore_previous_version_)
         {
             // For Del command, remove the txn commands before this txn since
             // the old object was deleted.
@@ -331,7 +331,7 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
     // iterate the list and apply the commands in version order
     for (auto it = txn_cmd_list.begin(); it != txn_cmd_list.end();)
     {
-        if (it->has_del_ && it->obj_version_ >= cur_ver)
+        if (it->ignore_previous_version_ && it->obj_version_ >= cur_ver)
         {
             cur_ver = it->obj_version_;
         }
@@ -341,6 +341,22 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
         {
             break;
         }
+
+        if (!it->cmd_list_.empty())
+        {
+            auto &first_cmd = it->cmd_list_.front();
+
+            // If a commnd was applied on deleted record, we set `has_overwrite`
+            // flag to true in the log. If the first command doesn't have an
+            // overwrite property, we need to create an empty object.
+            if (it->ignore_previous_version_ && !first_cmd->IsOverwrite())
+            {
+                std::unique_ptr<TxRecord> obj_ptr =
+                    first_cmd->CreateObject(nullptr);
+                payload.reset(static_cast<T *>(obj_ptr.release()));
+            }
+        }
+
         // apply the commands of this txn
         for (auto &cmd : it->cmd_list_)
         {
@@ -399,7 +415,7 @@ void EmplaceAndCommitBufferedTxnCommand(std::unique_ptr<T> &payload,
 
     buffered_cmd_list.EmplaceTxnCmd(txn_cmd);
 
-    if (!waiting_for_fetch || txn_cmd.has_del_)
+    if (!waiting_for_fetch || txn_cmd.ignore_previous_version_)
     {
         TryCommitBufferedCommands(payload, buffered_cmd_list, cur_ver);
         status =

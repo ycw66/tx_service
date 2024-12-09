@@ -566,6 +566,7 @@ public:
 
     void AddObjectCommand(const TableName &table_name,
                           const CcEntryAddr &cce_addr,
+                          RecordStatus payload_status,
                           uint64_t cce_version,
                           uint64_t last_vali_ts,
                           const TxKey *key,
@@ -582,8 +583,15 @@ public:
             std::string key_str;
             key->Serialize(key_str);
             bool inserted = false;
-            std::tie(cce_it, inserted) = table_cmd_set.try_emplace(
-                cce_addr, cce_version, last_vali_ts, std::move(key_str));
+            bool cmd_apply_on_deleted =
+                (payload_status == RecordStatus::Deleted);
+
+            std::tie(cce_it, inserted) =
+                table_cmd_set.try_emplace(cce_addr,
+                                          cce_version,
+                                          last_vali_ts,
+                                          std::move(key_str),
+                                          cmd_apply_on_deleted);
             assert(inserted);
             cce_with_writelock_size_++;
         }
