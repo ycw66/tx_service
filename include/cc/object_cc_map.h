@@ -260,12 +260,23 @@ public:
             {
                 // The apply request needs a new cc entry but the cc map has
                 // reached the maximal capacity.
-                // If skip_kv or cache replacement (every entry should be in
-                // mem) is disabled, return error directly.
-                if (txservice_skip_kv || !txservice_enable_cache_replacement)
+                if (txservice_skip_kv || ccm_has_full_entries_)
                 {
-                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
+                    // If skip_kv or cache replacement is disabled, all data is
+                    // cached in memory. Return DELETED if this is a readonly
+                    // request, error out otherwise
+                    if (req.IsReadOnly())
+                    {
+                        obj_result.rec_status_ = RecordStatus::Deleted;
+                        obj_result.commit_ts_ = 1;
+                        hd_res->SetFinished();
+                        return true;
+                    }
+                    else
+                    {
+                        hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                        return true;
+                    }
                 }
                 // Otherwise, block the request by putting it into wait list
                 // util capacity is available.
@@ -1633,7 +1644,7 @@ public:
                 {
                     // Recycles the lock if this and prior commands have been
                     // applied and there is no pending command.
-                    bool lock_recycled = cce->RecycleKeyLock(*shard_);
+                    cce->RecycleKeyLock(*shard_);
                 }
             }
         }

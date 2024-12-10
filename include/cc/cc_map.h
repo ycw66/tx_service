@@ -104,6 +104,11 @@ enum struct CleanType
      * This is used to clean all data during upsert table operation.
      */
     CleanCcm,
+    /*
+     * Clean deleted data in ccms. This is only used when we do not allow cache
+     * replacement when memory is full.
+     */
+    CleanDeletedData,
 };
 
 class CcShard;

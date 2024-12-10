@@ -9,10 +9,8 @@
 #include <cstdint>
 #include <deque>
 #include <iterator>
-#include <map>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "cc_entry.h"
@@ -7279,13 +7277,11 @@ public:
         if (!start_key)
         {
             start_key = KeyT::NegativeInfinity();
-            req.SetStartKey(KeyT::NegativeInfinity());
         }
         const KeyT *end_key = static_cast<const KeyT *>(req.EndKey());
         if (!end_key)
         {
             end_key = KeyT::PositiveInfinity();
-            req.SetEndKey(KeyT::NegativeInfinity());
         }
         LruPage *lru_page;
         uint16_t pause_idx = shard_->core_id_;
@@ -7331,7 +7327,8 @@ public:
             ++scan_page_cnt;
             // Move to next page
             ccp = static_cast<CcPage<KeyT, ValueT> *>(next_page);
-            if (!is_success)
+            if (!is_success &&
+                req.GetCleanType() != CleanType::CleanDeletedData)
             {
                 // Clean failed, retry in the next round.
                 LOG(ERROR) << "Failed to clean all target ccentries on core: "
@@ -7879,12 +7876,6 @@ public:
 
         LruPage *next_page =
             RebalancePage(page, page_it, success, kickout_cc == nullptr);
-
-        size_ -= free_cnt;
-        if (free_cnt > 0)
-        {
-            ccm_has_full_entries_ = false;
-        }
 
         return {free_cnt, next_page};
     }
@@ -10347,10 +10338,15 @@ protected:
             page_it = ccmp_.find(key);
         }
         clean_guard->Compact();
-        free_cnt += clean_guard->CleanCount();
+        free_cnt += clean_guard->FreedCount();
 #ifdef ON_KEY_OBJECT
         normal_obj_sz_ -= clean_guard->CleanObjectCount();
 #endif
+        size_ -= clean_guard->FreedCount();
+        if (clean_guard->EvictedValidKeys())
+        {
+            ccm_has_full_entries_ = false;
+        }
 
         success = clean_guard->CleanSuccess();
 

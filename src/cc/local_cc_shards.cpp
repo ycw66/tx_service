@@ -16,6 +16,7 @@
 #include <unordered_map>
 
 #include "catalog_key_record.h"
+#include "cc_handler_result.h"
 #include "cc_node_service.h"
 #include "cc_request.h"
 #include "cc_request.pb.h"
@@ -30,6 +31,7 @@
 #include "tx_execution.h"
 #include "tx_key.h"
 #include "tx_service.h"
+#include "tx_service_common.h"
 #include "tx_util.h"
 #include "type.h"
 
@@ -103,6 +105,7 @@ LocalCcShards::LocalCcShards(
 #endif
       statistics_worker_ctx_(1),
       heartbeat_worker_ctx_(1),
+      purge_deleted_worker_ctx_(1),
       publish_func_(publish_func),
       enable_shard_heap_defragment_(conf.at("enable_shard_heap_defragment"))
 {
@@ -228,6 +231,14 @@ void LocalCcShards::StartBackgroudWorkers()
 
     heartbeat_worker_ctx_.worker_thd_.push_back(
         std::thread([this] { HeartbeatWorker(); }));
+
+    if (!txservice_enable_cache_replacement)
+    {
+        // In this mode we will not try to evict cce when memory is full. We
+        // need to periodically clean up deleted cces to avoid memory overflow.
+        purge_deleted_worker_ctx_.worker_thd_.push_back(
+            std::thread([this] { PurgeDeletedData(); }));
+    }
 }
 
 uint64_t LocalCcShards::ClockTs()
@@ -2523,6 +2534,11 @@ void LocalCcShards::Terminate()
     }
 
     heartbeat_worker_ctx_.Terminate();
+
+    if (!txservice_enable_cache_replacement)
+    {
+        purge_deleted_worker_ctx_.Terminate();
+    }
 }
 
 void LocalCcShards::DataSyncWorker(size_t worker_idx)
@@ -5014,6 +5030,104 @@ void LocalCcShards::RemoveHeartbeatTargetNode(uint32_t target_node,
         if (iter->second <= target_node_standby_term)
         {
             heartbeat_target_nodes_.erase(target_node);
+        }
+    }
+}
+
+void LocalCcShards::PurgeDeletedData()
+{
+    std::unique_lock<std::mutex> worker_lk(purge_deleted_worker_ctx_.mux_);
+    KickoutCcEntryCc purge_cc;
+    CcHandlerResult<Void> res(nullptr);
+    std::mutex mux;
+    std::condition_variable cv;
+    bool done = false;
+    res.post_lambda_ = [&done, &mux, &cv](CcHandlerResult<Void> *res)
+    {
+        std::unique_lock<std::mutex> lk(mux);
+        done = true;
+        cv.notify_one();
+    };
+
+    while (purge_deleted_worker_ctx_.status_ == WorkerStatus::Active)
+    {
+        bool wait_res = purge_deleted_worker_ctx_.cv_.wait_for(
+            worker_lk,
+            std::chrono::seconds(10),
+            [this] {
+                return purge_deleted_worker_ctx_.status_ ==
+                       WorkerStatus::Terminated;
+            });
+
+        if (wait_res)
+        {
+            return;
+        }
+
+        int64_t candidate_standby_node_term =
+            Sharder::Instance().CandidateStandbyNodeTerm();
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        bool is_standby_node =
+            standby_node_term > 0 || candidate_standby_node_term > 0;
+        std::vector<uint32_t> node_groups;
+        if (is_standby_node)
+        {
+            node_groups.push_back(Sharder::Instance().NativeNodeGroup());
+        }
+        else
+        {
+            node_groups = Sharder::Instance().LocalNodeGroups();
+        }
+        // Send purge cc req to each core.
+        for (uint32_t node_group : node_groups)
+        {
+            int64_t ng_term;
+            if (is_standby_node)
+            {
+                ng_term =
+                    std::max(standby_node_term, candidate_standby_node_term);
+            }
+            else
+            {
+                ng_term = Sharder::Instance().LeaderTerm(node_group);
+            }
+
+            if (ng_term < 0)
+            {
+                continue;
+            }
+            std::unordered_map<TableName, bool> tables =
+                GetCatalogTableNameSnapshot(ng_id_, ClockTs());
+
+            std::vector<TableName> table_names;
+            for (auto &table : tables)
+            {
+                if (table.first.IsMeta())
+                {
+                    continue;
+                }
+                table_names.push_back(table.first);
+            }
+
+            for (auto &table_name : table_names)
+            {
+                res.Reset();
+                {
+                    std::unique_lock<std::mutex> lk(mux);
+                    done = false;
+                }
+                purge_cc.Reset(table_name,
+                               node_group,
+                               &res,
+                               Count(),
+                               CleanType::CleanDeletedData);
+                for (auto &shard : cc_shards_)
+                {
+                    shard->Enqueue(&purge_cc);
+                }
+                std::unique_lock<std::mutex> lk(mux);
+                cv.wait(lk, [&done] { return done; });
+            }
         }
     }
 }

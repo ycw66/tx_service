@@ -2257,6 +2257,9 @@ private:
 
     void SendHeartbeat(std::unique_lock<std::mutex> &worker_lk);
 
+    WorkerThreadContext purge_deleted_worker_ctx_;
+    void PurgeDeletedData();
+
     /**
      * Generate sk from pk
      */

@@ -55,6 +55,7 @@
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
+#include "tx_service_common.h"
 #include "type.h"
 #include "util.h"
 
@@ -4769,7 +4770,7 @@ protected:
 struct KickoutCcEntryCc : public TemplatedCcRequest<KickoutCcEntryCc, Void>
 {
 public:
-    static constexpr size_t KickoutPageBatchSize = 32;
+    static constexpr size_t KickoutPageBatchSize = 8;
 
     enum struct KickoutStatus
     {
@@ -4820,8 +4821,8 @@ public:
 
     void Reset(const TableName &table_name,
                const uint32_t ng_id,
-               uint16_t core_cnt,
                CcHandlerResult<Void> *res,
+               uint16_t core_cnt,
                CleanType clean_type,
                const TxKey *start_key = nullptr,
                const TxKey *end_key = nullptr,
@@ -4891,17 +4892,26 @@ public:
     bool Execute(CcShard &ccs) override
     {
         int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (ng_term < 0 && clean_type_ == CleanType::CleanDeletedData)
+        {
+            // Purge deleted data is the only type of kickout cc that will
+            // be executed on standby node.
+            int64_t standby_term = Sharder::Instance().StandbyNodeTerm();
+            int64_t candidate_standby_term =
+                Sharder::Instance().CandidateStandbyNodeTerm();
+            ng_term = std::max(standby_term, candidate_standby_term);
+        }
 
         if (ng_term < 0)
         {
-            return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return SetError(CcErrorCode::TX_NODE_NOT_LEADER);
         }
 
         if (clean_type_ == CleanType::CleanCcm)
         {
             // only the first core can safely access `ddl_err_code`
-            // the value of `upsert_kv_err_code_.first` will be updated to true
-            // before calling `UpsertTable` function.
+            // the value of `upsert_kv_err_code_.first` will be updated to
+            // true before calling `UpsertTable` function.
             bool resume_from_upsert_kv =
                 ccs.core_id_ == 0 && upsert_kv_err_code_.first == true;
 
@@ -5106,20 +5116,24 @@ public:
         return SetFinish();
     }
 
-    template <typename KeyT>
-    bool IsCleanTarget(const KeyT &key, const LruEntry *entry) const
+    template <typename KeyT, typename ValueT>
+    bool IsCleanTarget(const KeyT &key,
+                       const CcEntry<KeyT, ValueT> *entry,
+                       CcShard *ccs) const
     {
         switch (clean_type_)
         {
         case CleanType::CleanRangeData:
         case CleanType::CleanRangeDataForMigration:
         {
-            assert(start_key_ && end_key_);
             const KeyT *start = static_cast<const KeyT *>(start_key_);
             const KeyT *end = static_cast<const KeyT *>(end_key_);
-
-            if (*start < key || *start == key)
+            if (start == nullptr || *start < key || *start == key)
             {
+                if (end == nullptr)
+                {
+                    return true;
+                }
                 return key < *end;
             }
 
@@ -5142,6 +5156,24 @@ public:
         {
             return entry->CommitTs() <= clean_ts_ && entry->CommitTs() > 1;
         }
+        case CleanType::CleanDeletedData:
+        {
+            if (entry->PayloadStatus() == RecordStatus::Deleted)
+            {
+                return true;
+            }
+#ifdef ON_KEY_OBJECT
+            // Expired object is also treated as deleted object.
+            if (entry->payload_ && entry->payload_->HasTTL())
+            {
+                if (entry->payload_->GetTTL() < ccs->NowInMilliseconds())
+                {
+                    return true;
+                }
+            }
+#endif
+            return false;
+        }
         default:
             assert(false);
             return false;
@@ -5159,6 +5191,19 @@ public:
             return true;
         case CleanType::CleanForAlterTable:
             return entry->IsFree() && !entry->GetBeingCkpt();
+        case CleanType::CleanDeletedData:
+        {
+            if (txservice_skip_kv)
+            {
+                // If no kv is attached, we can evict this entry as long as
+                // there's no one trying to access it.
+                return !entry->IsReferenced();
+            }
+            else
+            {
+                return entry->IsFree() && !entry->GetBeingCkpt();
+            }
+        }
         default:
             assert(false && "Unknown type");
             return false;

@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "cc_entry.h"
+#include "cc_map.h"
 #include "cc_req_misc.h"
 #include "cc_request.h"
 #include "cc_shard.h"
@@ -65,12 +66,25 @@ public:
                            { return cce.get() != nullptr; }));
     }
 
-    size_t CleanCount() const
+    // Number of keys freed.
+    size_t FreedCount() const
     {
-        return clean_cnt_;
+        return free_cnt_;
+    }
+
+    // If any valid key is evicted. This is used to update if ccm is still fully
+    // cached. Note that this does not include
+    // 1. Deleted/expired keys. Freeing deleted keys does not affect cache
+    // completeness.
+    // 2. Keys that are migrated away. Since keys are removed since the
+    // ownership changed, it does not affect ccm completeness.
+    bool EvictedValidKeys() const
+    {
+        return evicted_valid_key_;
     }
 
 #ifdef ON_KEY_OBJECT
+    // Number of normal keys freed.
     size_t CleanObjectCount() const
     {
         return clean_obj_cnt_;
@@ -95,6 +109,12 @@ protected:
     virtual bool NeedInvalidateLockTerm() const = 0;
 
     virtual bool RemoveFromKeyCache() const = 0;
+
+    // If cleaning normarl keys will affect ccm_has_full_entries_.
+    // For some cleaning operations, we're removing keys that are no
+    // longer owned by this ccm, in which case it won't affect cache
+    // completeness.
+    virtual bool AffectCacheCompleteness() const = 0;
 
 #ifdef RANGE_PARTITION_ENABLED
     size_t MarkCleanInRange(TemplateStoreRange<KeyT> *store_range,
@@ -186,7 +206,7 @@ protected:
 #endif
 
     /**
-     * @brief Mark a key if it is can be cleanned.
+     * @brief Mark a key if it can be cleanned.
      *
      * Under range partition, OrphanKey is the key whose StoreRange metadata has
      * been kicked out.
@@ -212,13 +232,18 @@ protected:
                    std::unique_ptr<CcEntry<KeyT, ValueT>> &cce,
                    bool delay_free)
     {
-#ifdef ON_KEY_OBJECT
         if (cce->PayloadStatus() == RecordStatus::Normal)
         {
+#ifdef ON_KEY_OBJECT
             ++clean_obj_cnt_;
-        }
 #endif
+            if (AffectCacheCompleteness())
+            {
+                evicted_valid_key_ = true;
+            }
+        }
 
+        cce->ClearLocks(*cc_shard_, cc_ng_id);
         if (delay_free)
         {
             // Do not free this cce directly since it might be visited
@@ -227,19 +252,13 @@ protected:
             DLOG(WARNING) << "Cleanning up cce that still being referenced, "
                              "adding it to invalid cce list. cce: "
                           << cce.get();
-            delay_free = true;
-        }
-
-        cce->ClearLocks(*cc_shard_, cc_ng_id);
-        if (delay_free)
-        {
             cc_shard_->AddInvalidCce(std::move(cce));
         }
         else
         {
             cce.reset(nullptr);  // Set cce to nullptr to indicate deleting.
         }
-        ++clean_cnt_;
+        ++free_cnt_;
     }
 
 protected:
@@ -248,7 +267,8 @@ protected:
     const TableName &table_name_;
     CcPage<KeyT, ValueT> *page_{nullptr};
     uint64_t last_commit_ts_{0};
-    uint64_t clean_cnt_{0};
+    uint64_t free_cnt_{0};
+    bool evicted_valid_key_{false};
 #ifdef ON_KEY_OBJECT
     uint64_t clean_obj_cnt_{0};
 #endif
@@ -301,6 +321,11 @@ private:
         return false;
     }
 
+    bool AffectCacheCompleteness() const override
+    {
+        return true;
+    }
+
     // Returns true if the key should be removed from key cache regardless
     // of rec status.
     bool RemoveFromKeyCache() const override
@@ -335,8 +360,14 @@ public:
     void Compact() override
     {
         CcPageCleanGuard<KeyT, ValueT>::Compact();
-
-        UpdatePageDirtyCommitTs();
+        CleanType type = kickout_cc_->GetCleanType();
+        if (type == CleanType::CleanRangeData ||
+            type == CleanType::CleanRangeDataForMigration ||
+            type == CleanType::CleanBucketData)
+        {
+            // Only in these clean types will we kickout dirty data.
+            UpdatePageDirtyCommitTs();
+        }
     }
 
 private:
@@ -380,7 +411,7 @@ private:
     bool IsCleanTarget(const KeyT &key,
                        const CcEntry<KeyT, ValueT> *cce) const override
     {
-        return kickout_cc_->IsCleanTarget(key, cce);
+        return kickout_cc_->IsCleanTarget(key, cce, this->cc_shard_);
     }
 
     void Reserve(const CcEntry<KeyT, ValueT> *cce,
@@ -390,6 +421,11 @@ private:
         {
             clean_success_ = false;
         }
+    }
+
+    bool AffectCacheCompleteness() const override
+    {
+        return kickout_cc_->GetCleanType() == CleanType::CleanForAlterTable;
     }
 
     bool NeedInvalidateLockTerm() const override

@@ -1090,6 +1090,16 @@ public:
             txservice_enable_key_cache =
                 conf.at("enable_key_cache") && !enable_mvcc;
         }
+
+        if (txservice_skip_kv)
+        {
+            if (txservice_enable_cache_replacement)
+            {
+                LOG(WARNING) << "Txservice cache replacement is disabled since "
+                                "no kv is attached.";
+                txservice_enable_cache_replacement = false;
+            }
+        }
     }
 
     int Start(uint32_t node_id,
@@ -1107,16 +1117,7 @@ public:
               const std::string &local_path,
               bool enable_brpc_builtin_services = true)
     {
-        if (txservice_skip_kv)
-        {
-            if (txservice_enable_cache_replacement)
-            {
-                LOG(ERROR) << "When enable_cache_replacement is true, skip_kv "
-                              "must be false";
-                return -1;
-            }
-        }
-        else if (!txservice_enable_cache_replacement)
+        if (!txservice_enable_cache_replacement && !txservice_skip_kv)
         {
             if (local_cc_shards_.store_hd_->IsSharedStorage())
             {
