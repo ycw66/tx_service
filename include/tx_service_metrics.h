@@ -33,6 +33,7 @@ inline const metrics::Name NAME_REMOTE_REQUEST_DURATION{
     "remote_request_duration"};
 inline const metrics::Name NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT{
     "remote_request_in_flight_count"};
+inline const metrics::Name NAME_STANDBY_LAGGING_MESGS{"standby_lagging_msgs"};
 
 inline bool enable_memory_usage{false};
 inline bool enable_cache_hit_rate{false};
@@ -40,8 +41,10 @@ inline bool enable_tx_metrics{false};
 inline bool enable_remote_request_metrics{false};
 inline bool enable_busy_round_metrics{false};
 inline bool enable_kv_metrics{false};
+inline bool enable_standby_metrics{false};
 
 inline size_t collect_memory_usage_round{0};
 inline size_t collect_tx_duration_round{0};
 inline size_t busy_round_threshold{0};
+inline size_t collect_standby_metrics_round{10000};
 }  // namespace metrics

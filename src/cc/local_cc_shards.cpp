@@ -160,6 +160,7 @@ LocalCcShards::LocalCcShards(
                                       *this,
                                       catalog_factory_,
                                       system_handler,
+                                      ng_configs,
                                       cluster_config_version,
                                       metrics_registry,
                                       common_labels));

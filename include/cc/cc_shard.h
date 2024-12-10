@@ -144,6 +144,7 @@ public:
             LocalCcShards &local_shards,
             CatalogFactory *catalog_factory,
             SystemHandler *system_handler,
+            std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
             uint64_t cluster_config_version,
             metrics::MetricsRegistry *metrics_registry = nullptr,
             metrics::CommonLabels common_labels = {});
@@ -268,6 +269,17 @@ public:
                 meter_->Collect(metrics::NAME_MEMORY_USAGE, allocated);
             }
         }
+
+        if (metrics::enable_standby_metrics)
+        {
+            if (standby_metrics_round_++ >
+                metrics::collect_standby_metrics_round)
+            {
+                standby_metrics_round_ = 0;
+                CollectStandbyMetrics();
+            }
+        }
+
         if (queue_size == 0)
         {
             return 0;
@@ -880,6 +892,8 @@ public:
     // Try to send previous failed message to standby nodes.
     bool ResendFailedForwardMessages();
 
+    void CollectStandbyMetrics();
+
     uint64_t GetNextForwardSequnceId() const
     {
         return next_forward_sequence_id_;
@@ -1058,6 +1072,7 @@ private:
     uint8_t lock_sparse_num_{0};
 
     std::unique_ptr<metrics::Meter> meter_;
+    size_t standby_metrics_round_{1};
 
     /**
      * @brief The variable bookkeeps the latest time when any record in this

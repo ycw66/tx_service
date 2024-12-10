@@ -33,18 +33,20 @@ DECLARE_bool(cmd_read_catalog);
 
 namespace txservice
 {
-CcShard::CcShard(uint16_t core_id,
-                 uint32_t core_cnt,
-                 uint32_t node_memory_limit_mb,
-                 uint32_t node_log_limit_mb,
-                 bool realtime_sampling,
-                 uint32_t ng_id,
-                 LocalCcShards &local_shards,
-                 CatalogFactory *catalog_factory,
-                 SystemHandler *system_handler,
-                 uint64_t cluster_config_version,
-                 metrics::MetricsRegistry *metrics_registry,
-                 metrics::CommonLabels common_labels)
+CcShard::CcShard(
+    uint16_t core_id,
+    uint32_t core_cnt,
+    uint32_t node_memory_limit_mb,
+    uint32_t node_log_limit_mb,
+    bool realtime_sampling,
+    uint32_t ng_id,
+    LocalCcShards &local_shards,
+    CatalogFactory *catalog_factory,
+    SystemHandler *system_handler,
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
+    uint64_t cluster_config_version,
+    metrics::MetricsRegistry *metrics_registry,
+    metrics::CommonLabels common_labels)
     : ng_id_(ng_id),
       core_id_(core_id),
       core_cnt_(core_cnt),
@@ -130,6 +132,7 @@ CcShard::CcShard(uint16_t core_id,
     // init meter
     if (metrics::enable_metrics)
     {
+        common_labels.emplace("native_ng", std::to_string(ng_id_));
         meter_ =
             std::make_unique<metrics::Meter>(metrics_registry, common_labels);
     }
@@ -151,6 +154,24 @@ CcShard::CcShard(uint16_t core_id,
     if (metrics::enable_memory_usage)
     {
         meter_->Register(metrics::NAME_MEMORY_USAGE, metrics::Type::Gauge);
+    }
+
+    if (metrics::enable_standby_metrics)
+    {
+        // NOTICE(lzx): If standby member nodes can be adjust dynamically, all
+        // nodes must be registered as "standby_node_id" label values at here.
+        std::vector<metrics::LabelGroup> labels;
+        labels.emplace_back("standby_node_id", std::vector<std::string>());
+        auto &node_ids = labels[0].second;
+        const std::vector<NodeConfig> &member_nodes = ng_configs->at(ng_id_);
+        for (const auto &node : member_nodes)
+        {
+            node_ids.emplace_back(std::to_string(node.node_id_));
+        }
+
+        meter_->Register(metrics::NAME_STANDBY_LAGGING_MESGS,
+                         metrics::Type::Gauge,
+                         std::move(labels));
     }
 
     last_read_ts_ = Now();
@@ -2313,12 +2334,33 @@ bool CcShard::ResendFailedForwardMessages()
                             });
                     }
                 }
-
                 break;
             }
         }
+        if (seq_id < next_forward_sequence_id_ - 1)
+        {
+            all_msgs_sent = false;
+        }
     }
+
     return all_msgs_sent;
+}
+
+void CcShard::CollectStandbyMetrics()
+{
+    assert(metrics::enable_standby_metrics);
+    for (auto &[node_id, seq_id_and_term] : subscribed_standby_nodes_)
+    {
+        uint64_t unsent_msgs_count = 0;
+        uint64_t &seq_id = seq_id_and_term.first;
+        if (seq_id != UINT64_MAX)
+        {
+            unsent_msgs_count = (next_forward_sequence_id_ - 1 - seq_id);
+        }
+        meter_->Collect(metrics::NAME_STANDBY_LAGGING_MESGS,
+                        unsent_msgs_count,
+                        std::to_string(node_id));
+    }
 }
 
 bool CcShard::UpdateLastReceivedStandbySequenceId(
