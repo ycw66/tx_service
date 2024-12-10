@@ -211,6 +211,54 @@ public:
                 err_code = CcErrorCode::NO_ERROR;
                 acquired_lock = obj_result.lock_acquired_;
             }
+            else if (req.block_type_ ==
+                     ApplyCc::ApplyBlockType::BlockOnCondition)
+            {
+                // try to reacquire the write lock
+                std::tie(acquired_lock, err_code) =
+                    AcquireCceKeyLock(cce,
+                                      ccp,
+                                      RecordStatus::Normal,
+                                      &req,
+                                      req.NodeGroupId(),
+                                      ng_term,
+                                      req.TxTerm(),
+                                      CcOperation::Write,
+                                      req.Isolation(),
+                                      req.Protocol(),
+                                      0,
+                                      false);
+                switch (err_code)
+                {
+                case CcErrorCode::NO_ERROR:
+                {
+                    // lock acquired
+                    assert(acquired_lock == LockType::WriteLock);
+                    obj_result.lock_acquired_ = acquired_lock;
+                    break;
+                }
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+                {
+                    // If the read request comes from a remote node, sends
+                    // acknowledgement to the sender when the request is
+                    // blocked.
+                    if (!req.IsLocal())
+                    {
+                        //                req.Acknowledge();
+                    }
+                    req.block_type_ = ApplyCc::ApplyBlockType::BlockOnWriteLock;
+                    // Acquire lock fail should stop the execution of current
+                    // ApplyCc request since it's already in blocking queue.
+                    return false;
+                }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(err_code);
+                    return true;
+                }
+                }
+            }
             req.block_type_ = ApplyCc::ApplyBlockType::NoBlocking;
         }
         else if (cce_addr.CcePtr() == 0)
@@ -289,8 +337,24 @@ public:
             // status on the cce since a previous cmd might ignores
             // old payload value and directly applied dirty payload
             // status.
+
+            NonBlockingLock *lk = cce->GetKeyLock();
+            bool check_dirty_status = cc_op != CcOperation::Read ||
+                                      (lk != nullptr && lk->HasWriteLock() &&
+                                       lk->WriteLockTx() == txn);
+
+            // When do we need to FetchRecord from KV?
+            // First, the payload status must be unknown, then:
+            // If the dirty payload doesn't exist, or it exists but this command
+            // only reads the committed status and doesn't check the dirty
+            // status. Which means, the dirty status could be set by another txn
+            // and this txn only reads the committed payload (under OCC read)
+            // and cannot read the uncommitted dirty status, should FetchRecord.
+            // In summary, FetchRecord if the cce's payload status is unknown
+            // and the command don't check_dirty_status or the dirty status does
+            // not exist;
             if (cce->PayloadStatus() == RecordStatus::Unknown &&
-                (!cce->GetKeyLock() ||
+                (!check_dirty_status || lk == nullptr ||
                  cce->DirtyPayloadStatus() == RecordStatus::NonExistent))
             {
                 // if ccm contains all the ccentries, then unknown status means
@@ -502,68 +566,49 @@ public:
             obj_result.ttl_reset_ = true;
         }
 
-        if (req.Isolation() > IsolationLevel::ReadCommitted ||
-            !cmd->IsReadOnly())
-        {
-            // Create the dirty object if there is already a pending command on
-            // this object.
-            RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
-            if (dirty_payload_status == RecordStatus::Uncreated)
-            {
-                auto var_cmd = cce->PendingCmd();
-                TxCommand *pending_cmd = nullptr;
-                if (std::holds_alternative<TxCommand *>(var_cmd))
-                {
-                    pending_cmd = std::get<TxCommand *>(var_cmd);
-                }
-                else
-                {
-                    pending_cmd =
-                        std::get<std::unique_ptr<TxCommand>>(var_cmd).get();
-                }
-
-                std::unique_ptr<ValueT> dirty_payload = cce->DirtyPayload();
-                // Since pending_cmd_ exists, the payload must also exist.
-                // Otherwise, the dirty payload should have already been
-                // created by the last command.
-                assert(pending_cmd != nullptr);
-                assert(cce->PayloadStatus() == RecordStatus::Normal &&
-                       cce->payload_ != nullptr);
-
-                std::tie(dirty_payload, dirty_payload_status) =
-                    CreateDirtyPayloadFromExistingPayload(cce->payload_.get());
-                assert(dirty_payload_status == RecordStatus::Normal);
-
-                // Commit the pending command.
-                CommitCommandOnDirtyPayload(
-                    dirty_payload, dirty_payload_status, *pending_cmd);
-                cce->SetDirtyPayload(std::move(dirty_payload));
-                cce->SetDirtyPayloadStatus(dirty_payload_status);
-                cce->SetPendingCmd(nullptr);
-            }
-        }
-
-        // Now we know whether the object exists or not
         bool object_not_exist;
         bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
-        if (req.Isolation() == IsolationLevel::ReadCommitted &&
-            cmd->IsReadOnly())
+
+        NonBlockingLock *lk = cce->GetKeyLock();
+        bool check_dirty_status =
+            cc_op != CcOperation::Read ||
+            (cc_op == CcOperation::Read && lk != nullptr &&
+             lk->HasWriteLock() && lk->WriteLockTx() == txn);
+
+        assert(cc_op == CcOperation::Read ||
+               acquired_lock >= LockType::WriteIntent);
+
+        // Create the dirty object only when we have to access it.
+        if (check_dirty_status &&
+            cce->DirtyPayloadStatus() == RecordStatus::Uncreated)
         {
-            // Read only commands in read committed isolation level just checks
-            // the payload. `Deleted` status means current payload is deleted,
-            // `Unknown` status means the current payload is being created.
-            object_not_exist = cce->PayloadStatus() == RecordStatus::Deleted ||
-                               cce->PayloadStatus() == RecordStatus::Unknown;
+            CreateDirtyPayloadFromPendingCommand(cce);
         }
-        else
+
+        // If reaches here and the payload status is still unknown, there must
+        // be a command that ignores the KV value, either this command or a
+        // previous command of this txn. Because only commands that ignore KV
+        // value skip FetchRecord and leave the payload status unknown.
+        if (cce->PayloadStatus() == RecordStatus::Unknown &&
+            !cmd->IgnoreKvValue())
         {
-            // If dirty payload exists, use dirty_payload_status. Use payload
-            // status only if dirty payload doesn't exist.
-            object_not_exist =
-                cce->DirtyPayloadStatus() == RecordStatus::Deleted ||
-                (cce->DirtyPayloadStatus() == RecordStatus::NonExistent &&
-                 cce->PayloadStatus() == RecordStatus::Deleted);
+            assert(cce->DirtyPayloadStatus() != RecordStatus::Uncreated);
+            assert(lk != nullptr);
+            assert(lk->HasWriteLock());
+            assert(lk->WriteLockTx() == txn);
         }
+        assert(cce->PayloadStatus() != RecordStatus::Unknown ||
+               cce->DirtyPayloadStatus() != RecordStatus::Uncreated ||
+               cmd->IgnoreKvValue());
+
+        object_not_exist =
+            check_dirty_status
+                // If dirty payload exists, use dirty_payload_status. Use
+                // payload status only if dirty payload doesn't exist.
+                ? cce->DirtyPayloadStatus() == RecordStatus::Deleted ||
+                      (cce->DirtyPayloadStatus() == RecordStatus::NonExistent &&
+                       cce->PayloadStatus() == RecordStatus::Deleted)
+                : cce->PayloadStatus() == RecordStatus::Deleted;
 
         // This branch processes and returns the results for all read-only
         // commands.
@@ -582,18 +627,8 @@ public:
                 obj_result.rec_status_ = RecordStatus::Normal;
             }
             // Object exists and proceeds
-            else if (req.Isolation() == IsolationLevel::ReadCommitted)
+            else if (check_dirty_status)
             {
-                assert(cce->PayloadStatus() == RecordStatus::Normal);
-                assert(cce->payload_ != nullptr);
-                ValueT &object = *cce->payload_;
-                cmd->ExecuteOn(object);
-                obj_result.rec_status_ = cce->PayloadStatus();
-            }
-            else
-            {
-                assert(req.Isolation() > IsolationLevel::ReadCommitted);
-
                 RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
                 if (dirty_payload_status == RecordStatus::Normal)
                 {
@@ -617,12 +652,24 @@ public:
                     obj_result.rec_status_ = cce->PayloadStatus();
                 }
             }
+            else
+            {
+                assert(cce->PayloadStatus() == RecordStatus::Normal);
+                assert(cce->payload_ != nullptr);
+                ValueT &object = *cce->payload_;
+                cmd->ExecuteOn(object);
+                obj_result.rec_status_ = cce->PayloadStatus();
+            }
 
             if (req.apply_and_commit_)
             {
                 // Release and try to recycle the lock.
-                ReleaseCceLock(
-                    cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+                if (acquired_lock != LockType::NoLock)
+                {
+                    assert(req.Isolation() > IsolationLevel::ReadCommitted);
+                    ReleaseCceLock(
+                        cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+                }
                 obj_result.lock_acquired_ = LockType::NoLock;
             }
 
@@ -632,8 +679,10 @@ public:
             return true;
         }
 
-        // This branch processes read-write commands that have not acquired
-        // writelock yet.
+        // This is a write command.
+        assert(acquired_lock >= LockType::WriteIntent);
+
+        // 1. Upgrade to the write lock if the write command proceeds.
         if (acquired_lock != LockType::WriteLock)
         {
             bool need_write_lock =
@@ -665,6 +714,7 @@ public:
                 if (req.apply_and_commit_)
                 {
                     // Release and try to recycle the lock.
+                    assert(acquired_lock != LockType::NoLock);
                     ReleaseCceLock(
                         cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
                     obj_result.lock_acquired_ = LockType::NoLock;
@@ -713,6 +763,8 @@ public:
         }
 
         assert(obj_result.lock_acquired_ == LockType::WriteLock);
+
+        // 2. Execute the command on dirty object or the real object.
 
         StandbyForwardEntry *forward_entry = nullptr;
         remote::KeyObjectStandbyForwardRequest *forward_req = nullptr;
@@ -777,6 +829,7 @@ public:
                     cce->SetCommitTsPayloadStatus(commit_ts,
                                                   RecordStatus::Deleted);
                     // Release and try to recycle the lock.
+                    assert(acquired_lock != LockType::NoLock);
                     ReleaseCceLock(
                         cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
                     obj_result.lock_acquired_ = LockType::NoLock;
@@ -796,6 +849,7 @@ public:
         RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
         if (object_not_exist)
         {
+            // The object does not exist but the write lock is acquired.
             assert(cmd->ProceedOnNonExistentObject());
             // Create an empty temporary object to process the commands, the
             // dirty payload will be uploaded to payload in PostWriteCc if
@@ -920,8 +974,10 @@ public:
             cce->PushBlockRequest(&req);
             cce->SetDirtyPayload(nullptr);
             cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
+            assert(acquired_lock != LockType::NoLock);
             ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
+            req.block_type_ = ApplyCc::ApplyBlockType::BlockOnCondition;
             return false;
         }
         else if (exec_rst == ExecResult::Unlock)
@@ -935,6 +991,7 @@ public:
             }
             cce->SetDirtyPayload(nullptr);
             cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
+            assert(acquired_lock != LockType::NoLock);
             ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
             obj_result.commit_ts_ = shard_->Now();
@@ -997,6 +1054,7 @@ public:
             }
 
             // Release and try to recycle the lock.
+            assert(acquired_lock != LockType::NoLock);
             ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
             if (object_modified)
@@ -2177,6 +2235,52 @@ private:
         auto *obj_ptr =
             static_cast<ValueT *>(cmd->CreateObject(nullptr).release());
         return {std::unique_ptr<ValueT>(obj_ptr), RecordStatus::Normal};
+    }
+
+    void CreateDirtyPayloadFromPendingCommand(CcEntry<KeyT, ValueT> *cce)
+    {
+        assert(cce->DirtyPayloadStatus() == RecordStatus::Uncreated);
+        auto var_cmd = cce->PendingCmd();
+        TxCommand *pending_cmd = nullptr;
+        if (std::holds_alternative<TxCommand *>(var_cmd))
+        {
+            pending_cmd = std::get<TxCommand *>(var_cmd);
+        }
+        else
+        {
+            pending_cmd = std::get<std::unique_ptr<TxCommand>>(var_cmd).get();
+        }
+
+        std::unique_ptr<ValueT> dirty_payload = cce->DirtyPayload();
+        RecordStatus dirty_payload_status;
+        // Since pending_cmd_ exists, the payload must also exist.
+        // Otherwise, the dirty payload should have already been
+        // created by the last command.
+        assert(pending_cmd != nullptr);
+        assert(cce->PayloadStatus() == RecordStatus::Normal &&
+               cce->payload_ != nullptr);
+
+        // If the pending cmd is DEL command, just create Deleted dirty
+        // payload.
+        if (pending_cmd->IsDelete())
+        {
+            cce->SetDirtyPayload(nullptr);
+            cce->SetDirtyPayloadStatus(RecordStatus::Deleted);
+            cce->SetPendingCmd(nullptr);
+        }
+        else
+        {
+            std::tie(dirty_payload, dirty_payload_status) =
+                CreateDirtyPayloadFromExistingPayload(cce->payload_.get());
+            assert(dirty_payload_status == RecordStatus::Normal);
+
+            // Commit the pending command.
+            CommitCommandOnDirtyPayload(
+                dirty_payload, dirty_payload_status, *pending_cmd);
+            cce->SetDirtyPayload(std::move(dirty_payload));
+            cce->SetDirtyPayloadStatus(dirty_payload_status);
+            cce->SetPendingCmd(nullptr);
+        }
     }
 
     void CommitCommandOnPayload(std::unique_ptr<ValueT> &payload,

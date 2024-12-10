@@ -426,6 +426,23 @@ public:
         return std::move(pending_cmd_);
     }
 
+    TxCommand *GetPendingCmd() const
+    {
+        TxCommand *pending_cmd = nullptr;
+        if (std::holds_alternative<TxCommand *>(pending_cmd_))
+        {
+            pending_cmd = std::get<TxCommand *>(pending_cmd_);
+        }
+        else
+        {
+            assert(std::holds_alternative<std::unique_ptr<TxCommand>>(
+                pending_cmd_));
+            pending_cmd =
+                std::get<std::unique_ptr<TxCommand>>(pending_cmd_).get();
+        }
+        return pending_cmd;
+    }
+
     void SetPendingCmd(
         std::variant<TxCommand *, std::unique_ptr<TxCommand>> cmd)
     {

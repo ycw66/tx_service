@@ -670,6 +670,15 @@ public:
         return cc_lock_and_extra_->PendingCmd();
     }
 
+    TxCommand *GetPendingCommand() const
+    {
+        if (cc_lock_and_extra_ == nullptr)
+        {
+            return nullptr;
+        }
+        return cc_lock_and_extra_->GetPendingCmd();
+    }
+
     void SetPendingCmd(
         std::variant<TxCommand *, std::unique_ptr<TxCommand>> cmd)
     {
