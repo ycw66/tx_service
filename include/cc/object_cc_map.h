@@ -1746,6 +1746,15 @@ public:
                 size_t offset = 0;
                 std::unique_ptr<TxRecord> rec =
                     val.DeserializeObject(val_str.data(), offset);
+                if (data_item.is_deleted_ ||
+                    (rec->HasTTL() &&
+                     rec->GetTTL() < shard_->NowInMilliseconds()))
+                {
+                    // skip expired keys.
+                    index++;
+                    continue;
+                }
+
                 req.DecodedDataItem(core_id,
                                     std::move(tx_key),
                                     std::move(rec),

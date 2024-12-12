@@ -5197,7 +5197,7 @@ public:
             {
                 // If no kv is attached, we can evict this entry as long as
                 // there's no one trying to access it.
-                return !entry->IsReferenced();
+                return entry->GetKeyLock() == nullptr;
             }
             else
             {
