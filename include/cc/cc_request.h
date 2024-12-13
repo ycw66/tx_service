@@ -4835,7 +4835,7 @@ public:
         table_name_ = &table_name;
         node_group_id_ = ng_id;
         res_ = res;
-        unfinished_cnt_ = core_cnt;
+        unfinished_cnt_.store(core_cnt, std::memory_order_release);
         err_code_ = CcErrorCode::NO_ERROR;
         bucket_ids_ = bucket_ids;
         clean_type_ = clean_type;
@@ -4874,7 +4874,7 @@ public:
         table_name_ = &table_name;
         node_group_id_ = ng_id;
         res_ = res;
-        unfinished_cnt_ = core_cnt;
+        unfinished_cnt_.store(core_cnt, std::memory_order_release);
         err_code_ = CcErrorCode::NO_ERROR;
         bucket_ids_ = bucket_ids;
         clean_type_ = clean_type;

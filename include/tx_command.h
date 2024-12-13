@@ -406,8 +406,7 @@ void EmplaceAndCommitBufferedTxnCommand(std::unique_ptr<T> &payload,
                                         uint64_t &cur_ver,
                                         RecordStatus &status)
 {
-    bool waiting_for_fetch =
-        status == RecordStatus::Unknown && !buffered_cmd_list.IsNull();
+    bool waiting_for_fetch = status == RecordStatus::Unknown;
     if (buffered_cmd_list.IsNull())
     {
         buffered_cmd_list.cur_version_ = cur_ver;

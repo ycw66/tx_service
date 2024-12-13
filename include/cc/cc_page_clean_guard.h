@@ -48,10 +48,26 @@ public:
         // those keys/entries now.
         auto key_insert_it = page_->keys_.begin();
         auto entry_insert_it = page_->entries_.begin();
+        uint64_t smallest_ttl = UINT64_MAX;
         for (size_t idx = 0; idx < page_->Size(); ++idx)
         {
             if (page_->entries_[idx])
             {
+                if (page_->entries_[idx]->PayloadStatus() ==
+                    RecordStatus::Normal)
+                {
+                    if (page_->entries_[idx]->payload_ &&
+                        page_->entries_[idx]->payload_->HasTTL())
+                    {
+                        uint64_t ttl = page_->entries_[idx]->payload_->GetTTL();
+                        smallest_ttl = ttl < smallest_ttl ? ttl : smallest_ttl;
+                    }
+                }
+                else if (page_->entries_[idx]->PayloadStatus() ==
+                         RecordStatus::Deleted)
+                {
+                    smallest_ttl = 0;
+                }
                 *key_insert_it = std::move(page_->keys_[idx]);
                 *entry_insert_it = std::move(page_->entries_[idx]);
                 ++key_insert_it;
@@ -60,6 +76,7 @@ public:
         }
         page_->keys_.erase(key_insert_it, page_->keys_.end());
         page_->entries_.erase(entry_insert_it, page_->entries_.end());
+        page_->smallest_ttl_ = smallest_ttl;
         assert(std::all_of(page_->entries_.begin(),
                            page_->entries_.end(),
                            [](const std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)

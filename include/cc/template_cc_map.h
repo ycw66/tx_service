@@ -5,6 +5,7 @@
 
 #include <algorithm>  // std::max
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -7322,9 +7323,16 @@ public:
         while (scan_page_cnt < KickoutCcEntryCc::KickoutPageBatchSize &&
                ccp->FirstKey() < *end_key && ccp != &pos_inf_page_)
         {
+            ++scan_page_cnt;
+            if (req.GetCleanType() == CleanType::CleanDeletedData &&
+                ccp->smallest_ttl_ > shard_->NowInMilliseconds())
+            {
+                // Skip pages that does not have expired keys
+                ccp = ccp->next_page_;
+                continue;
+            }
             auto [freed_cnt, next_page] =
                 CleanPageAndReBalance(ccp, &req, &is_success);
-            ++scan_page_cnt;
             // Move to next page
             ccp = static_cast<CcPage<KeyT, ValueT> *>(next_page);
             if (!is_success &&
@@ -9138,7 +9146,8 @@ protected:
                 target_page->Entry(key_idx_in_page)
                     ->UpdateCcEntry(slice_items[item_idx],
                                     shard_->EnableMvcc(),
-                                    normal_rec_change);
+                                    normal_rec_change,
+                                    target_page);
                 item_idx++;
                 key_idx_in_page++;
             }
@@ -9324,8 +9333,11 @@ protected:
             std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
                 new_page_entries;
             uint64_t new_last_commit_ts = 0;
-            target_page->Split(
-                new_page_keys, new_page_entries, new_last_commit_ts);
+            uint64_t new_smallest_ttl = UINT64_MAX;
+            target_page->Split(new_page_keys,
+                               new_page_entries,
+                               new_last_commit_ts,
+                               new_smallest_ttl);
 
             const KeyT &key_of_new_page = *new_page_keys.begin();
 
@@ -9341,6 +9353,7 @@ protected:
             CcPage<KeyT, ValueT> *new_page = new_page_it->second.get();
             assert(new_page_it->first == new_page->FirstKey());
             new_page->last_dirty_commit_ts_ = new_last_commit_ts;
+            new_page->smallest_ttl_ = new_smallest_ttl;
 
             for (auto &cce : new_page->entries_)
             {
@@ -10612,6 +10625,9 @@ protected:
         merged_page->last_dirty_commit_ts_ =
             std::max(merged_page->last_dirty_commit_ts_,
                      discarded_page->last_dirty_commit_ts_);
+
+        merged_page->smallest_ttl_ =
+            std::min(merged_page->smallest_ttl_, discarded_page->smallest_ttl_);
 
         // remove discarded page from the map
         // note that all iterators are invalid after the erasion

@@ -21,7 +21,6 @@
 #include "rpc_closure.h"
 #include "sharder.h"  // Sharder
 #include "store/data_store_handler.h"
-#include "tx_service.h"
 #include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
@@ -2631,7 +2630,7 @@ void CcShard::UpdateBufferedCommandCnt(int64_t delta)
 
 void CcShard::CheckLagAndResubscribe() const
 {
-    if (buffered_cmd_cnt_ >= txservice_max_standby_lag)
+    if (buffered_cmd_cnt_ >= (int64_t) txservice_max_standby_lag)
     {
         // Resubscribe to the leader.
         NodeGroupId native_ng = Sharder::Instance().NativeNodeGroup();

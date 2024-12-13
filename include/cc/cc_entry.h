@@ -1403,7 +1403,8 @@ public:
 
     void UpdateCcEntry(SliceDataItem &data_item,
                        bool enable_mvcc,
-                       int32_t &normal_rec_change)
+                       int32_t &normal_rec_change,
+                       CcPage<KeyT, ValueT> *ccp)
     {
 #ifdef RANGE_PARTITION_ENABLED
         // Initialize the data store size if it is unspecified
@@ -1475,16 +1476,20 @@ public:
                 {
                     normal_rec_change--;
                 }
+                ccp->smallest_ttl_ = 0;
             }
             else
             {
-                // TxRecord::Uptr rec_clone = record->Clone();
-                // payload_.reset(static_cast<ValueT *>(rec_clone.release()));
                 payload_.reset(
                     static_cast<ValueT *>(data_item.record_.release()));
                 if (!obj_already_exist)
                 {
                     normal_rec_change++;
+                }
+                if (ccp->smallest_ttl_ != 0 && payload_->HasTTL())
+                {
+                    uint64_t ttl = payload_->GetTTL();
+                    ccp->smallest_ttl_ = std::min(ccp->smallest_ttl_, ttl);
                 }
             }
             RecordStatus status = data_item.is_deleted_ ? RecordStatus::Deleted
@@ -1536,6 +1541,16 @@ struct LruPage
     CcMap *parent_map_{nullptr};
 
     uint64_t last_access_ts_{0};
+
+    // The largest commit ts of dirty cc entries on this page. This value might
+    // be larger than the actual max commit ts of cc entries. Currently used to
+    // decide if this page has dirty data after a given ts.
+    uint64_t last_dirty_commit_ts_{0};
+
+    // The smallest ttl on this page. TTL for deleted key is 0, for normal keys
+    // without TTL set is UINT64_MAX. This value is used to decide if this page
+    // needs to be scanned when purging deleted entries in memory.
+    uint64_t smallest_ttl_{UINT64_MAX};
 };
 
 template <typename KeyT, typename ValueT>
@@ -1778,11 +1793,13 @@ struct CcPage : public LruPage
     void Split(
         std::vector<KeyT> &new_page_keys,
         std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &new_page_entries,
-        uint64_t &new_last_commit_ts)
+        uint64_t &new_last_commit_ts,
+        uint64_t &new_smallest_ttl)
     {
         new_page_keys.reserve(split_threshold_);
         new_page_entries.reserve(split_threshold_);
         new_last_commit_ts = 0;
+        new_smallest_ttl = UINT64_MAX;
         size_t split_pos = keys_.size() / 2;
         new_page_keys.insert(new_page_keys.end(),
                              std::make_move_iterator(keys_.begin() + split_pos),
@@ -1791,6 +1808,21 @@ struct CcPage : public LruPage
         {
             new_last_commit_ts =
                 std::max(new_last_commit_ts, entries_[idx]->CommitTs());
+            if (new_smallest_ttl != 0)
+            {
+                if (entries_[idx]->PayloadStatus() == RecordStatus::Deleted)
+                {
+                    new_smallest_ttl = 0;
+                }
+                else if (entries_[idx]->PayloadStatus() ==
+                             RecordStatus::Normal &&
+                         entries_[idx]->payload_ &&
+                         entries_[idx]->payload_->HasTTL())
+                {
+                    uint64_t ttl = entries_[idx]->payload_->GetTTL();
+                    new_smallest_ttl = std::min(new_smallest_ttl, ttl);
+                }
+            }
             new_page_entries.push_back(std::move(entries_[idx]));
         }
         keys_.erase(keys_.begin() + split_pos, keys_.end());
@@ -1825,7 +1857,8 @@ struct CcPage : public LruPage
                 auto new_cc_entry = std::make_unique<CcEntry<KeyT, ValueT>>();
                 new_cc_entry->UpdateCcEntry(slice_items[location_info.first],
                                             enable_mvcc,
-                                            normal_rec_change);
+                                            normal_rec_change,
+                                            this);
 
                 // emplace new key into page
                 const KeyT *item_key =
@@ -2015,11 +2048,6 @@ struct CcPage : public LruPage
 
     CcPage<KeyT, ValueT> *prev_page_{nullptr};
     CcPage<KeyT, ValueT> *next_page_{nullptr};
-
-    // The largest commit ts of dirty cc entries on this page. This value might
-    // be larger than the actual max commit ts of cc entries. Currently used to
-    // decide if this page has dirty data after a given ts.
-    uint64_t last_dirty_commit_ts_{0};
 
     // CcPage is contained in std::_Rb_tree_node with node key and RBT node
     // pointers (32 bytes)

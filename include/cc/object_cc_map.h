@@ -1046,6 +1046,23 @@ public:
                 {
                     ccp->last_dirty_commit_ts_ = commit_ts;
                 }
+
+                if (ccp->smallest_ttl_ != 0)
+                {
+                    if (status == RecordStatus::Normal)
+                    {
+                        if (cce->payload_ && cce->payload_->HasTTL() &&
+                            ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                        {
+                            ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                        }
+                    }
+                    else
+                    {
+                        assert(cce->PayloadStatus() == RecordStatus::Deleted);
+                        ccp->smallest_ttl_ = 0;
+                    }
+                }
             }
             else
             {
@@ -1201,6 +1218,23 @@ public:
             if (commit_ts > ccp->last_dirty_commit_ts_)
             {
                 ccp->last_dirty_commit_ts_ = commit_ts;
+            }
+
+            if (ccp->smallest_ttl_ != 0)
+            {
+                if (payload_status == RecordStatus::Normal)
+                {
+                    if (cce->payload_ && cce->payload_->HasTTL() &&
+                        ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                    {
+                        ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                    }
+                }
+                else
+                {
+                    assert(cce->PayloadStatus() == RecordStatus::Deleted);
+                    ccp->smallest_ttl_ = 0;
+                }
             }
         }
         else if (forward_entry)
@@ -1359,11 +1393,16 @@ public:
                 continue;
             }
 
+            uint64_t ttl = UINT64_MAX;
             if (rec_status == RecordStatus::Normal)
             {
                 if (cce->PayloadStatus() != RecordStatus::Normal)
                 {
                     TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                }
+                if (object_uptr->HasTTL())
+                {
+                    ttl = object_uptr->GetTTL();
                 }
                 cce->payload_.reset(
                     static_cast<ValueT *>(object_uptr.release()));
@@ -1376,6 +1415,7 @@ public:
                     TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
                 }
                 cce->payload_ = nullptr;
+                ttl = 0;
             }
 
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
@@ -1427,6 +1467,10 @@ public:
             if (commit_ts > cc_page->last_dirty_commit_ts_)
             {
                 cc_page->last_dirty_commit_ts_ = commit_ts;
+            }
+            if (ttl < cc_page->smallest_ttl_)
+            {
+                cc_page->smallest_ttl_ = ttl;
             }
 
             // update the key offset
@@ -1538,6 +1582,21 @@ public:
             if (commit_ts > ccp->last_dirty_commit_ts_)
             {
                 ccp->last_dirty_commit_ts_ = commit_ts;
+            }
+            if (ccp->smallest_ttl_ != 0)
+            {
+                if (payload_status == RecordStatus::Normal)
+                {
+                    if (cce->payload_ && cce->payload_->HasTTL())
+                    {
+                        ccp->smallest_ttl_ = std::min(cce->payload_->GetTTL(),
+                                                      ccp->smallest_ttl_);
+                    }
+                }
+                else if (payload_status == RecordStatus::Deleted)
+                {
+                    ccp->smallest_ttl_ = 0;
+                }
             }
         }
 
@@ -1718,6 +1777,22 @@ public:
         if (commit_ts > ccp->last_dirty_commit_ts_)
         {
             ccp->last_dirty_commit_ts_ = commit_ts;
+        }
+
+        if (ccp->smallest_ttl_ != 0)
+        {
+            if (cce->PayloadStatus() == RecordStatus::Normal)
+            {
+                if (cce->payload_ && cce->payload_->HasTTL() &&
+                    ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                {
+                    ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                }
+            }
+            else
+            {
+                ccp->smallest_ttl_ = 0;
+            }
         }
 
         req.SetFinish();
@@ -2041,6 +2116,22 @@ public:
                 ccp->last_dirty_commit_ts_ = commit_ts;
             }
 
+            if (ccp->smallest_ttl_ != 0)
+            {
+                if (payload_status == RecordStatus::Normal)
+                {
+                    if (cce->payload_ && cce->payload_->HasTTL() &&
+                        ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                    {
+                        ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                    }
+                }
+                else if (payload_status == RecordStatus::Deleted)
+                {
+                    ccp->smallest_ttl_ = 0;
+                }
+            }
+
             NonBlockingLock *lk = cce->GetKeyLock();
             if (lk != nullptr && lk->HasWriteLock())
             {
@@ -2162,6 +2253,8 @@ public:
                                                  : RecordStatus::Normal;
                 cce->SetCommitTsPayloadStatus(commit_version, commit_status);
 
+                // todo: UPDATE LAST COMMIT TS AND SMALLEST TTL
+
                 if (buffered_cmd_list.IsNull())
                 {
                     // Recycles the lock if all the replay commands have been
@@ -2205,9 +2298,35 @@ public:
                 }
             }
 
-            if (cce->PayloadStatus() == RecordStatus::Normal)
+            if (cce->CommitTs() > commit_ts)
             {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                // cce is on a newer version after buffered cmds are applied.
+                // Update last dirty commit ts.
+                if (last_dirty_commit_ts_ < cce->CommitTs())
+                {
+                    last_dirty_commit_ts_ = cce->CommitTs();
+                }
+                if (cce->CommitTs() > ccp->last_dirty_commit_ts_)
+                {
+                    ccp->last_dirty_commit_ts_ = cce->CommitTs();
+                }
+            }
+            if (ccp->smallest_ttl_ != 0)
+            {
+                if (cce->PayloadStatus() == RecordStatus::Normal)
+                {
+                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                    if (cce->payload_ && cce->payload_->HasTTL() &&
+                        ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                    {
+                        ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                    }
+                }
+                else
+                {
+                    assert(cce->PayloadStatus() == RecordStatus::Deleted);
+                    ccp->smallest_ttl_ = 0;
+                }
             }
         }
 
@@ -2381,32 +2500,5 @@ private:
 
         return true;
     }
-
-    void SetExpire(LruEntry *cce, uint64_t expire_ts)
-    {
-        auto it = expires_.emplace(cce, expire_ts);
-        if (!it.second)
-        {
-            it.first->second = expire_ts;
-        }
-    }
-
-    bool IsExpired(LruEntry *cce, uint64_t now_ts) const
-    {
-        auto it = expires_.find(cce);
-        if (it != expires_.end() && it->second <= now_ts)
-        {
-            return true;
-        }
-        return false;
-    }
-
-    void RemoveExpire(LruEntry *cce)
-    {
-        expires_.erase(cce);
-    }
-
-    // Expire timestamp of keys with expire_ts set.
-    std::unordered_map<LruEntry *, uint64_t> expires_;
 };
 }  // namespace txservice
