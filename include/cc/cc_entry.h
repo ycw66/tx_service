@@ -1031,7 +1031,7 @@ public:
      * ckpt_ts to ckpt_vec. Note: This flag only used for RangePartition.
      * @param export_base_table_item_only - True means only need to export the
      * base data. This is used for scan during add index txm.
-     * @param export_persisted_item_key_only - True means if no larger version
+     * @param export_persisted_key_only - True means if no larger version
      * exists, need to export the key which commit_ts same as ckpt_ts to
      * ckpt_vec. This is happen when the slice need to split, and we need the
      * key to calculate the subslice key. Note: This flag only used for
@@ -1106,6 +1106,7 @@ public:
 
                 exported_count++;
             }
+#ifdef RANGE_PARTITION_ENABLED
             else if (export_persisted_key_only && commit_ts != 1 &&
                      commit_ts <= to_ts &&
                      (rec_status == RecordStatus::Normal ||
@@ -1132,6 +1133,7 @@ public:
 
                 ++exported_count;
             }
+#endif
 
             return exported_count;
         }

@@ -5465,7 +5465,7 @@ struct UpdateKeyCacheCc : public CcRequestBase
                CcHandlerResult<Void> *res)
 
     {
-        assert(table_name_->Type() == TableType::Primary);
+        assert(tbl_name.Type() == TableType::Primary);
         table_name_ = &tbl_name;
         ng_term_ = ng_term;
         node_group_id_ = ng_id;
@@ -5474,8 +5474,8 @@ struct UpdateKeyCacheCc : public CcRequestBase
         store_range_ = range;
         unfinished_core_ = core_cnt;
         hd_res_ = res;
-        pause_idx_.clear();
-        pause_idx_.resize(core_cnt, 0);
+        paused_pos_.clear();
+        paused_pos_.resize(core_cnt);
     }
 
     bool Execute(CcShard &ccs) override
@@ -5508,11 +5508,9 @@ struct UpdateKeyCacheCc : public CcRequestBase
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
     StoreRange *store_range_{nullptr};
-    std::vector<size_t> pause_idx_;
+    std::vector<TxKey> paused_pos_;
     std::atomic<size_t> unfinished_core_;
     CcHandlerResult<Void> *hd_res_{nullptr};
-    // TODO(ysw): for compile
-    std::vector<std::vector<FlushRecord *>> key_vecs_;
 };
 
 struct GetTableLastCommitTsCc : public CcRequestBase

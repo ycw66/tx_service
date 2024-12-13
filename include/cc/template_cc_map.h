@@ -1590,9 +1590,7 @@ public:
                             }
                             // Inserting a new key to ccm, add to key cache too
                             if (txservice_enable_key_cache &&
-                                table_name_.IsBase() &&
-                                (cce == nullptr ||
-                                 cce->PayloadStatus() == RecordStatus::Unknown))
+                                table_name_.IsBase())
                             {
                                 TemplateStoreRange<KeyT> *range =
                                     static_cast<TemplateStoreRange<KeyT> *>(
@@ -1642,6 +1640,7 @@ public:
                             cce->SetCommitTsPayloadStatus(
                                 1U, RecordStatus::Deleted);
                             cce->SetCkptTs(1U);
+                            cce->data_store_size_ = 0;
 
                             if (pin_status == RangeSliceOpStatus::Successful)
                             {
@@ -5347,11 +5346,10 @@ public:
                               ->EndTxKey()
                               .GetKey<KeyT>();
         }
-        Iterator req_end_it = deduce_iterator(*req_end_key);
 
         auto find_slice = [this,
                            &req,
-                           &req_end_it,
+                           req_end_key,
                            &deduce_iterator,
                            &check_split_slice,
                            &pin_range_slice](
@@ -5410,7 +5408,7 @@ public:
                 const KeyT *slice_end_key = typed_slice->EndKey();
                 Iterator end_it = deduce_iterator(*slice_end_key);
 
-                if (it == end_it && it != req_end_it)
+                if (it == end_it && !(*slice_end_key == *req_end_key))
                 {
                     // The current slice is empty, and it is not the last slice
                     // of the request. Try to pin next slice if need. Unpin and
@@ -5529,7 +5527,7 @@ public:
         // blocking other transaction for a long time, we only process
         // CkptScanBatch number of pages in each round.
         for (size_t scan_cnt = 0;
-             key_it != req_end_it &&
+             key_it != slice_end_it &&
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_.at(shard_->core_id_) <
                  req.scan_batch_size_;
@@ -5588,11 +5586,12 @@ public:
                     slice_pinned = false;
                 }
 
-                // If key_it is equal to req_end_it, it means that reach the end
-                // of this request, no need to find the next slice.
-                if (key_it != req_end_it)
+                // If slice_end_key is equal to req_end_key, it means that reach
+                // to the end of this request, no need to find the next slice.
+                if (!(*slice_end_key == *req_end_key))
                 {
-                    // Reach the end of current slice, and find the next slice.
+                    // Reach to the end of current slice, and find the next
+                    // slice.
                     search_start_key = slice_end_key;
                     std::tie(slice, slice_pinned, succ) =
                         find_slice(*search_start_key);
@@ -5618,7 +5617,7 @@ public:
 
         // 4. Check whether the request is finished.
         TxKey next_pause_key;
-        bool no_more_data = (key_it == req_end_it);
+        bool no_more_data = (key_it == slice_end_it);
         if (!no_more_data)
         {
             next_pause_key = key_it->first->CloneTxKey();
@@ -7228,29 +7227,111 @@ public:
 
     bool Execute(UpdateKeyCacheCc &req) override
     {
+        const KeyT *const req_end_key = req.end_key_ != nullptr
+                                            ? req.end_key_->GetKey<KeyT>()
+                                            : KeyT::PositiveInfinity();
+
+        const KeyT *start_key =
+            req.paused_pos_[shard_->core_id_].KeyPtr() != nullptr
+                ? req.paused_pos_[shard_->core_id_].GetKey<KeyT>()
+                : (req.end_key_ != nullptr ? req.start_key_->GetKey<KeyT>()
+                                           : KeyT::NegativeInfinity());
+
+        auto deduce_iterator = [this](const KeyT &search_key) -> Iterator
+        {
+            Iterator res_it;
+            std::pair<Iterator, ScanType> search_pair =
+                ForwardScanStart(search_key, true);
+            res_it = search_pair.first;
+            if (search_pair.second == ScanType::ScanGap)
+            {
+                ++res_it;
+            }
+            return res_it;
+        };
+
+        // The end iterator of this request.
+        Iterator req_end_it = deduce_iterator(*req_end_key);
+
         TemplateStoreRange<KeyT> *range =
             static_cast<TemplateStoreRange<KeyT> *>(req.store_range_);
         assert(range != nullptr);
-        const std::vector<FlushRecord *> &keys =
-            req.key_vecs_[shard_->core_id_];
-        size_t &key_idx = req.pause_idx_[shard_->core_id_];
-        assert(key_idx < keys.size());
-        size_t end_idx =
-            std::min(key_idx + UpdateKeyCacheCc::BatchSize, keys.size());
 
-        range->DeleteKeysInRange(keys, key_idx, end_idx, shard_->core_id_);
-
-        key_idx = end_idx;
-        if (key_idx == keys.size())
+        TemplateStoreSlice<KeyT> *curr_slice = nullptr;
+        auto find_valid_slice =
+            [this, &req_end_it, range, &curr_slice, &deduce_iterator](
+                const KeyT &search_key) -> std::pair<Iterator, Iterator>
         {
-            req.SetFinish();
+            Iterator it;
+            Iterator end_it;
+            const KeyT *key = &search_key;
+            while (!curr_slice)
+            {
+                curr_slice = range->FindSlice(*key);
+                it = deduce_iterator(*key);
+                end_it = deduce_iterator(*(curr_slice->EndKey()));
+                if ((!curr_slice->IsValidInKeyCache(shard_->core_id_) ||
+                     it == end_it) &&
+                    end_it != req_end_it)
+                {
+                    // The slice is empty or the slice is invalid in key cache,
+                    // and the slice is not the last one of this request.
+                    // Forward to the next slice.
+                    key = curr_slice->EndKey();
+                    curr_slice = nullptr;
+                }
+                else if (!curr_slice->IsValidInKeyCache(shard_->core_id_) &&
+                         end_it == req_end_it)
+                {
+                    // Reach to the last slice, and the slice is invalid in key
+                    // cache. Forward the key iteraror to the slice end
+                    // iterator and stop loop.
+                    it = end_it;
+                }
+            }
+
+            return {it, end_it};
+        };
+
+        Iterator key_it;
+        Iterator slice_end_it;
+        std::tie(key_it, slice_end_it) = find_valid_slice(*start_key);
+
+        for (size_t scan_cnt = 0;
+             scan_cnt < UpdateKeyCacheCc::BatchSize && key_it != slice_end_it;
+             ++scan_cnt)
+        {
+            const KeyT *cce_key = key_it->first;
+            CcEntry<KeyT, ValueT> *cce = key_it->second;
+            if (cce->PayloadStatus() != RecordStatus::Unknown)
+            {
+                assert(cce->PayloadStatus() == RecordStatus::Normal ||
+                       cce->PayloadStatus() == RecordStatus::Deleted);
+                range->DeleteKey(*cce_key, shard_->core_id_);
+            }
+
+            // Forward the iterator.
+            ++key_it;
+
+            if (key_it == slice_end_it && slice_end_it != req_end_it)
+            {
+                // Forward to the next slice.
+                start_key = curr_slice->EndKey();
+                std::tie(key_it, slice_end_it) = find_valid_slice(*start_key);
+            }
+        }
+
+        if (key_it == slice_end_it)
+        {
+            req.paused_pos_[shard_->core_id_] = TxKey();
+            return req.SetFinish();
         }
         else
         {
+            req.paused_pos_[shard_->core_id_] = key_it->first->CloneTxKey();
             shard_->Enqueue(&req);
+            return false;
         }
-
-        return false;
     }
 
     bool Execute(UploadBatchCc &req) override

@@ -611,7 +611,6 @@ public:
                             int64_t ng_term,
                             uint64_t data_sync_ts,
                             size_t key_cnt,
-                            size_t first_idx,
                             std::vector<TxKey> &new_range_keys);
 
     void UpdateSliceSpec(StoreSlice *slice,
@@ -1417,13 +1416,12 @@ public:
     {
         uint32_t slice_idx = 0;
         uint32_t subrange_slice_idx = 0;
-        uint32_t subrange_key_cnt = 0;
         size_t subrange_cnt =
             std::ceil(post_ckpt_size / (StoreRange::range_max_size *
                                         StoreRange::new_range_load_factor));
         size_t avg_subrange_size = post_ckpt_size / subrange_cnt;
 
-        new_range_keys.resize(subrange_cnt - 1);
+        new_range_keys.reserve(subrange_cnt);
 
         while (slice_idx < slices_.size())
         {
@@ -1478,22 +1476,22 @@ public:
                     const KeyT *slice_start =
                         slices_[subrange_slice_idx]->StartKey();
                     assert(slice_start->Type() == KeyType::Normal);
-                    new_range_keys.at(subrange_key_cnt) =
-                        TxKey(std::make_unique<KeyT>(*slice_start));
-                    ++subrange_key_cnt;
+                    new_range_keys.emplace_back(
+                        std::make_unique<KeyT>(*slice_start));
                 }
 
+                size_t first_key_idx = new_range_keys.size();
                 if (!SampleSubRangeKeys(curr_slice,
                                         table_name,
                                         ng_id,
                                         ng_term,
                                         data_sync_ts,
                                         (slice_subranges_cnt - 1),
-                                        subrange_key_cnt,
                                         new_range_keys))
                 {
                     return false;
                 }
+                assert(first_key_idx < new_range_keys.size());
 
                 // Update the current slice into multiple slices. To avoid more
                 // than one subrange task access one slice simultaneously during
@@ -1503,10 +1501,8 @@ public:
                 // which the new subslice belong to.
                 UpdateSliceSpec(curr_slice,
                                 new_range_keys,
-                                subrange_key_cnt,
+                                first_key_idx,
                                 slice_subranges_cnt);
-
-                subrange_key_cnt += (slice_subranges_cnt - 1);
 
                 // Update the slice index:
                 slice_idx += slice_subranges_cnt;
@@ -1518,17 +1514,12 @@ public:
                 const KeyT *slice_start =
                     slices_[subrange_slice_idx]->StartKey();
                 assert(slice_start->Type() == KeyType::Normal);
-                new_range_keys.at(subrange_key_cnt) =
-                    TxKey(std::make_unique<KeyT>(*slice_start));
-                ++subrange_key_cnt;
+                new_range_keys.emplace_back(
+                    std::make_unique<KeyT>(*slice_start));
             }
 
             subrange_slice_idx = slice_idx;
         }
-
-        assert(new_range_keys.size() >= subrange_key_cnt);
-        new_range_keys.erase(new_range_keys.begin() + subrange_key_cnt,
-                             new_range_keys.end());
         return true;
     }
 
@@ -1552,6 +1543,18 @@ public:
         }
         // Delete key is not going to be called if slice is being loaded, so
         // we don't need to worry about concurrent key cache initialization.
+    }
+
+    // NOTE: The slice to which the @@key belong must be valid in key cache.
+    void DeleteKey(const KeyT &key, uint16_t core_id)
+    {
+        cuckoofilter::Status status = key_cache_[core_id]->Delete(key.Hash());
+        // We should not try to delete a non-existing key.
+        if (status == cuckoofilter::Status::NotFound)
+        {
+            LOG(ERROR) << "Deleting a non-existing key from key cache.";
+        }
+        assert(status != cuckoofilter::Status::NotFound);
     }
 
     RangeSliceOpStatus AddKey(const KeyT &key,
@@ -1666,48 +1669,6 @@ public:
         }
 
         return updated;
-    }
-
-    void DeleteKeysInRange(const std::vector<FlushRecord *> &keys,
-                           size_t start_idx,
-                           size_t end_idx,
-                           uint16_t core_id)
-    {
-        std::shared_lock<std::shared_mutex> s_lk(mux_);
-        assert(end_idx <= keys.size());
-        const KeyT *typed_key = keys[start_idx]->Key().GetKey<KeyT>();
-        size_t slice_idx = SearchSlice(*typed_key, true);
-        TemplateStoreSlice<KeyT> *slice = slices_[slice_idx].get();
-        auto lower_bound_cmp = [](const FlushRecord *rec, const TxKey &key)
-        { return rec->Key() < key; };
-        auto key_it = keys.begin() + start_idx;
-        auto slice_end_it =
-            slice->EndTxKey().KeyPtr() == RangeEndTxKey().KeyPtr()
-                ? keys.end()
-                : std::lower_bound(
-                      key_it, keys.end(), slice->EndTxKey(), lower_bound_cmp);
-        while (start_idx < end_idx)
-        {
-            while (key_it == slice_end_it)
-            {
-                // We should not enter here if the slice is already the last
-                // slice.
-                assert(slice_idx < slices_.size() - 1);
-                slice = slices_[++slice_idx].get();
-                // Find the next slice to update.
-                slice_end_it =
-                    slice->EndTxKey().KeyPtr() == RangeEndTxKey().KeyPtr()
-                        ? keys.end()
-                        : std::lower_bound(key_it,
-                                           keys.end(),
-                                           slice->EndTxKey(),
-                                           lower_bound_cmp);
-            }
-
-            DeleteKey(*(*key_it)->Key().GetKey<KeyT>(), core_id, slice);
-            key_it++;
-            start_idx++;
-        }
     }
 
 private:

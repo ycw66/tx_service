@@ -1901,7 +1901,7 @@ private:
         {
             paused_slice_ = nullptr;
             paused_slice_rec_cnt_ = 0;
-            paused_split_keys.clear();
+            paused_split_keys_.clear();
         }
 
         void SetPausedPos(StoreSlice *slice,
@@ -1910,12 +1910,12 @@ private:
         {
             paused_slice_ = slice;
             paused_slice_rec_cnt_ = record_cnt;
-            paused_split_keys = std::move(split_keys);
+            paused_split_keys_ = std::move(split_keys);
         }
 
         StoreSlice *paused_slice_{nullptr};
         size_t paused_slice_rec_cnt_{0};
-        std::vector<SliceChangeInfo> paused_split_keys;
+        std::vector<SliceChangeInfo> paused_split_keys_;
     };
 #endif
 

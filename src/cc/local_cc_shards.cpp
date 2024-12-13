@@ -828,7 +828,50 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             }
 
             // Update slice spec in memory for subranges.
-            //
+            // Because the DataSync tasks for each subrange during a split range
+            // transaction are executed in parallel, in oder to reduce conflicts
+            // and contention, when calculate the subrange keys, if the post
+            // ckpt size of a slice is larger than the average subrange size, we
+            // split the slice into multiple subslices in memory, and each
+            // subslice belongs to one subrange.
+            if (ds_split_range_op_msg.stage() ==
+                ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
+            {
+                for (size_t idx = 0; idx < new_range_keys.size();)
+                {
+                    auto slice = store_range->FindSlice(new_range_keys[idx]);
+                    if (!(new_range_keys[idx] == slice->StartTxKey()))
+                    {
+                        assert(slice->StartTxKey() < new_range_keys[idx]);
+                        auto it = std::lower_bound(
+                            new_range_keys.begin() + idx,
+                            new_range_keys.end(),
+                            slice->EndTxKey(),
+                            [](const TxKey &new_key, const TxKey &end_key)
+                            { return new_key < end_key; });
+
+                        size_t subkeys_cnt =
+                            it - (new_range_keys.begin() + idx);
+                        // Update the current slice into multiple slices.
+                        store_range->UpdateSliceSpec(
+                            slice, new_range_keys, idx, (subkeys_cnt + 1));
+
+                        idx += subkeys_cnt;
+                    }
+                    else
+                    {
+                        ++idx;
+                        if (idx < new_range_keys.size() &&
+                            new_range_keys[idx] == slice->EndTxKey())
+                        {
+                            // The new range key equal the next slice's start
+                            // key, move to next key.
+                            ++idx;
+                        }
+                    }
+                }
+            }
+
             RangeSplitRecoveryTxRequest recover_req(
                 ds_split_range_op_msg,
                 std::move(table_schema),
@@ -4429,12 +4472,10 @@ void LocalCcShards::UpdateSlices(
 
             // The paused slice in the last round has already finished. Just
             // update the slice.
-            if (status.paused_split_keys.size() > 1)
-            {
-                // Update the current slice
-                store_range->UpdateSliceSpec(status.paused_slice_,
-                                             status.paused_split_keys);
-            }
+            assert(status.paused_split_keys_.size() > 1);
+            // Update the current slice
+            store_range->UpdateSliceSpec(status.paused_slice_,
+                                         status.paused_split_keys_);
             status.Reset();
         }
         else if (status.paused_slice_)
@@ -4495,7 +4536,7 @@ void LocalCcShards::UpdateSlices(
         size_t record_cnt = status.paused_slice_rec_cnt_;
         uint32_t subslice_post_ckpt_size = 0;
         std::vector<SliceChangeInfo> slice_split_keys =
-            std::move(status.paused_split_keys);
+            std::move(status.paused_split_keys_);
         if (status.paused_slice_)
         {
             assert(!slice_split_keys.empty());
@@ -4591,6 +4632,8 @@ void LocalCcShards::UpdateSlices(
 
             // Update the current slice spec if all the slice data have been
             // exported.
+            // In some case, the size of a flush record is larger than the slice
+            // upper bound.
             if (slice_split_keys.size() > 1)
             {
                 // Split StoreSlice in memory. Slice info in KV store will be

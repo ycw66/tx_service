@@ -344,9 +344,9 @@ void StoreRange::UnpinSlice(StoreSlice *slice, bool need_lock_range)
         pins_.fetch_sub(1, std::memory_order_release);
     }
 
-    // The slice is unpinned. If the update slice spec worker has requested to
-    // alter the slice, wakes up the worker thread.
-    if (slice->pins_ == 1 && slice->to_alter_)
+    // The slice is unpinned. If the data sync worker has requested to alter the
+    // slice, wakes up the worker thread.
+    if (slice->pins_ == 0 && slice->to_alter_)
     {
         // Wake up all waiting threads since there could be multiple slices
         // waiting on the same range wait_cv_.
@@ -394,7 +394,6 @@ bool StoreRange::SampleSubRangeKeys(StoreSlice *slice,
                                     int64_t ng_term,
                                     uint64_t data_sync_ts,
                                     size_t key_cnt,
-                                    size_t first_idx,
                                     std::vector<TxKey> &new_range_keys)
 {
     TxKey start_key = slice->StartTxKey();
@@ -428,9 +427,10 @@ bool StoreRange::SampleSubRangeKeys(StoreSlice *slice,
         // Get sub-range keys.
         std::vector<TxKey> &target_keys = sample_keys_cc.TargetTxKeys();
         assert(target_keys.size() == key_cnt);
-        for (size_t i = 0; i < target_keys.size(); ++i)
+        // The Txkey in the target_keys vector is just the key pointer.
+        for (auto &key : target_keys)
         {
-            new_range_keys[first_idx + i] = target_keys[i].Clone();
+            new_range_keys.emplace_back(key.Clone());
         }
     }
 
@@ -458,7 +458,7 @@ void StoreRange::UpdateSliceSpec(StoreSlice *slice,
     }
 
     // Split this StoreSlice in memory.
-    UpdateSlice(slice, split_keys);
+    UpdateSliceSpec(slice, split_keys);
 }
 
 void StoreRange::UpdateSliceSpec(StoreSlice *slice,

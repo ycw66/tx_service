@@ -4105,20 +4105,35 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 int64_t tx_term = txm->TxTerm();
                 LocalCcShards *local_shards =
                     Sharder::Instance().GetLocalCcShards();
-                uint32_t ref_cnt = 0;
-                std::for_each(
-                    new_ranges.begin(),
-                    new_ranges.end(),
-                    [local_shards, node_group, &ref_cnt](
-                        const decltype(*new_ranges.begin()) &iter)
+                // The new ranges that still lands to the same ng after split.
+                std::vector<std::pair<const TxKey *, const TxKey *>> ranges;
+                ranges.reserve(new_ranges.size());
+                for (auto iter = new_ranges.begin(); iter != new_ranges.end();
+                     ++iter)
+                {
+                    if (local_shards->GetRangeOwner(iter->second, node_group)
+                            ->BucketOwner() == node_group)
                     {
-                        if (local_shards->GetRangeOwner(iter.second, node_group)
-                                ->BucketOwner() == node_group)
-                        {
-                            ++ref_cnt;
-                        }
-                    });
-                hd_result.SetRefCnt(ref_cnt);
+                        const TxKey *start_key = &(iter->first);
+                        const TxKey *end_key =
+                            std::next(iter) == new_ranges.end()
+                                ? &old_end_key
+                                : &(std::next(iter)->first);
+                        ranges.push_back({start_key, end_key});
+                    }
+                    else
+                    {
+                        // Will be kicked out.
+                    }
+                }
+
+                if (ranges.size() == 0)
+                {
+                    hd_result.SetFinished();
+                    return;
+                }
+
+                hd_result.SetRefCnt(ranges.size());
 
                 // For keys that are splitted to another ng, they will be
                 // removed from key cache when they are eviceted from ccm. But
@@ -4126,27 +4141,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 // to delete them from key cache to avoid an ever increasing key
                 // cache load factor.
                 assert(table_name_.Type() == TableType::Primary);
-                for (auto iter = new_ranges.cbegin(); iter != new_ranges.cend();
-                     ++iter)
+                for (auto &key_pair : ranges)
                 {
-                    if (local_shards->GetRangeOwner(iter->second, node_group)
-                            ->BucketOwner() != node_group)
-                    {
-                        // Will be kicked out.
-                        continue;
-                    }
-
-                    const TxKey &start_key = iter->first;
-                    const TxKey &end_key = std::next(iter) == new_ranges.cend()
-                                               ? old_end_key
-                                               : std::next(iter)->first;
-
                     txm->cc_handler_->UpdateKeyCache(
                         table_name_,
                         node_group,
                         tx_term,
-                        start_key,
-                        end_key,
+                        *key_pair.first,
+                        *key_pair.second,
                         range_entry_->RangeSlices(),
                         hd_result);
                 }
