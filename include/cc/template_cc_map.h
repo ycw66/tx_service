@@ -36,6 +36,7 @@
 #include "table_statistics.h"
 #include "tx_id.h"
 #include "tx_key.h"
+#include "tx_object.h"
 #include "tx_record.h"
 #include "tx_service.h"
 #include "tx_service_common.h"
@@ -1330,7 +1331,6 @@ public:
             // transactions' commit timestamps larger than the largest commit
             // timestamp of all read transactions that have released the read
             // lock on the key.
-
             PostProcessResult &conflicting_txs = hd_res->Value();
 
             if (gap_ts > 0)
@@ -2158,6 +2158,7 @@ public:
                       ScanType scan_type,
                       uint32_t ng_id,
                       int64_t ng_term,
+                      TxNumber txn,
                       uint64_t read_ts,
                       bool is_read_snapshot,
                       bool keep_deleted = true,
@@ -2184,6 +2185,7 @@ public:
                 true,
                 ng_id,
                 ng_term,
+                txn,
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
@@ -2199,6 +2201,7 @@ public:
                 false,
                 ng_id,
                 ng_term,
+                txn,
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
@@ -2333,6 +2336,7 @@ public:
                          scan_type,
                          ng_id,
                          ng_term,
+                         req.Txn(),
                          req.ReadTimestamp(),
                          is_read_snapshot);
 
@@ -2414,6 +2418,7 @@ public:
                              scan_type,
                              ng_id,
                              ng_term,
+                             req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot);
 #ifdef ON_KEY_OBJECT
@@ -2487,6 +2492,7 @@ public:
                              ScanType::ScanBoth,
                              ng_id,
                              ng_term,
+                             req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
                              true,
@@ -2560,6 +2566,7 @@ public:
                              ScanType::ScanBoth,
                              ng_id,
                              ng_term,
+                             req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
                              true,
@@ -2701,6 +2708,7 @@ public:
                          scan_type,
                          ng_id,
                          ng_term,
+                         req.Txn(),
                          req.ReadTimestamp(),
                          is_read_snapshot,
                          true,
@@ -2806,6 +2814,7 @@ public:
                              ScanType::ScanBoth,
                              ng_id,
                              ng_term,
+                             req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
                              true,
@@ -2836,6 +2845,7 @@ public:
                                  ScanType::ScanGap,
                                  ng_id,
                                  ng_term,
+                                 req.Txn(),
                                  req.ReadTimestamp(),
                                  is_read_snapshot,
                                  true,
@@ -2897,6 +2907,7 @@ public:
                                  ScanType::ScanBoth,
                                  ng_id,
                                  ng_term,
+                                 req.Txn(),
                                  req.ReadTimestamp(),
                                  is_read_snapshot,
                                  true,
@@ -2934,6 +2945,7 @@ public:
                          RemoteScanCache *remote_cache,
                          ScanType scan_type,
                          int64_t ng_term,
+                         TxNumber txn,
                          uint64_t read_ts,
                          bool is_read_snapshot,
                          bool keep_deleted = true,
@@ -2958,6 +2970,7 @@ public:
                 remote_cache,
                 true,
                 ng_term,
+                txn,
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
@@ -2970,6 +2983,7 @@ public:
                 remote_cache,
                 false,
                 ng_term,
+                txn,
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
@@ -3158,6 +3172,7 @@ public:
                             &scan_cache,
                             scan_type,
                             ng_term,
+                            req.Txn(),
                             req.ReadTimestamp(),
                             is_read_snapshot,
                             req.is_ckpt_delta_);
@@ -3235,6 +3250,7 @@ public:
                                 &scan_cache,
                                 scan_type,
                                 ng_term,
+                                req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
@@ -3317,6 +3333,7 @@ public:
                                 &scan_cache,
                                 ScanType::ScanBoth,
                                 ng_term,
+                                req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
@@ -3397,6 +3414,7 @@ public:
                                 &scan_cache,
                                 ScanType::ScanBoth,
                                 ng_term,
+                                req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
@@ -3522,6 +3540,7 @@ public:
                             &req.scan_cache_,
                             scan_type,
                             ng_term,
+                            req.Txn(),
                             req.ReadTimestamp(),
                             is_read_snapshot,
                             req.is_ckpt_delta_);
@@ -3622,6 +3641,7 @@ public:
                                 &req.scan_cache_,
                                 ScanType::ScanBoth,
                                 ng_term,
+                                req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
@@ -3652,6 +3672,7 @@ public:
                                     &req.scan_cache_,
                                     ScanType::ScanGap,
                                     ng_term,
+                                    req.Txn(),
                                     req.ReadTimestamp(),
                                     is_read_snapshot,
                                     req.is_ckpt_delta_);
@@ -3713,6 +3734,7 @@ public:
                                     &req.scan_cache_,
                                     ScanType::ScanBoth,
                                     ng_term,
+                                    req.Txn(),
                                     req.ReadTimestamp(),
                                     is_read_snapshot,
                                     req.is_ckpt_delta_);
@@ -4039,6 +4061,7 @@ public:
                              scan_type,
                              ng_id,
                              ng_term,
+                             req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
                              is_locked,
@@ -4150,6 +4173,7 @@ public:
                                  scan_type,
                                  ng_id,
                                  ng_term,
+                                 req.Txn(),
                                  req.ReadTimestamp(),
                                  is_read_snapshot,
                                  is_locked,
@@ -9821,6 +9845,7 @@ protected:
                  bool include_gap,
                  uint32_t ng_id,
                  int64_t ng_term,
+                 TxNumber txn,
                  uint64_t read_ts,
                  bool is_read_snapshot,
                  bool keep_deleted,
@@ -9884,49 +9909,97 @@ protected:
         }
         else
         {
-            const RecordStatus rec_status = cce->PayloadStatus();
-#ifdef RANGE_PARTITION_ENABLED
-            if (rec_status == RecordStatus::Normal ||
-                (rec_status == RecordStatus::Deleted && keep_deleted))
+#ifdef ON_KEY_OBJECT
+            NonBlockingLock *lk = cce->GetKeyLock();
+            bool check_dirty_status =
+                lk != nullptr && lk->HasWriteLock(txn) &&
+                cce->DirtyPayloadStatus() != RecordStatus::NonExistent;
+
+            if (check_dirty_status)
             {
                 tuple = typed_cache->AddScanTuple();
+
+                if (is_require_keys)
+                {
+                    tuple->KeyObj().Copy(*key);
+                    tuple_size += key->Size();
+                }
+                const RecordStatus rec_dirty_status = cce->DirtyPayloadStatus();
+                if (rec_dirty_status == RecordStatus::Normal)
+                {
+                    tuple->rec_status_ = RecordStatus::Normal;
+                }
+                else if (rec_dirty_status == RecordStatus::Deleted)
+                {
+                    tuple->rec_status_ = RecordStatus::Deleted;
+                }
+                else if (rec_dirty_status == RecordStatus::Uncreated)
+                {
+                    CreateDirtyPayloadFromPendingCommand(cce);
+
+                    assert(cce->DirtyPayloadStatus() !=
+                               RecordStatus::NonExistent &&
+                           cce->DirtyPayloadStatus() !=
+                               RecordStatus::Uncreated);
+
+                    tuple->rec_status_ = cce->DirtyPayloadStatus();
+                }
+                else
+                {
+                    assert(false && "Unknown dirty record status");
+                }
+
+                tuple->key_ts_ = cce->CommitTs() + 1;
             }
             else
             {
-                return;
-            }
+#endif
+                const RecordStatus rec_status = cce->PayloadStatus();
+#ifdef RANGE_PARTITION_ENABLED
+                if (rec_status == RecordStatus::Normal ||
+                    (rec_status == RecordStatus::Deleted && keep_deleted))
+                {
+                    tuple = typed_cache->AddScanTuple();
+                }
+                else
+                {
+                    return;
+                }
 #else
             tuple = typed_cache->AddScanTuple();
 #endif
-            if (is_require_keys)
-            {
-                tuple->KeyObj().Copy(*key);
-                tuple_size += key->Size();
-            }
-
-            if (is_require_recs)
-            {
-                if (rec_status == RecordStatus::Normal ||
-                    (is_ckpt_delta && rec_status == RecordStatus::Deleted))
+                if (is_require_keys)
                 {
-                    if (cce->payload_ != nullptr)
+                    tuple->KeyObj().Copy(*key);
+                    tuple_size += key->Size();
+                }
+
+                if (is_require_recs)
+                {
+                    if (rec_status == RecordStatus::Normal ||
+                        (is_ckpt_delta && rec_status == RecordStatus::Deleted))
                     {
+                        if (cce->payload_ != nullptr)
+                        {
 #ifndef ON_KEY_OBJECT
-                        tuple->SetRecord(cce->payload_);
+                            tuple->SetRecord(cce->payload_);
 #else
                         // Redis KEYS command doesn't need value. But
                         // ObjectCcMap doesn't override ScanKey() on local
                         // ccmap. Thus, TemplateCcMap::ScanKey() on local
                         // ccmp may be called, and it need not set record.
 #endif
-                        // We're only copying the shared_ptr here so we
-                        // exclude the actual payload size.
+                            // We're only copying the shared_ptr here so we
+                            // exclude the actual payload size.
+                        }
                     }
                 }
-            }
 
-            tuple->rec_status_ = rec_status;
-            tuple->key_ts_ = cce->CommitTs();
+                tuple->rec_status_ = rec_status;
+                tuple->key_ts_ = cce->CommitTs();
+#ifdef ON_KEY_OBJECT
+            }
+#endif
         }
 
         tuple->gap_ts_ = 0;
@@ -9948,7 +10021,7 @@ protected:
                  bool keep_deleted,
                  bool is_ckpt_delta = false,
                  bool is_require_keys = true,
-                 bool is_require_recs = true) const
+                 bool is_require_recs = true)
     {
         // Skip key and/or payload whenever unnecessary by filling an
         // empty key/payload, so the receiver doesn't have to care about whether
@@ -10080,10 +10153,11 @@ protected:
                  RemoteScanCache *remote_cache,
                  bool include_gap,
                  int64_t ng_term,
+                 TxNumber txn,
                  uint64_t read_ts,
                  bool is_read_snapshot,
                  bool keep_deleted,
-                 bool is_ckpt_delta = false) const
+                 bool is_ckpt_delta = false)
     {
         static ValueT empty_val;
 #ifndef ON_KEY_OBJECT
@@ -10141,36 +10215,85 @@ protected:
         }
         else
         {
-            const RecordStatus rec_status = cce->PayloadStatus();
-#ifdef RANGE_PARTITION_ENABLED
-            if (rec_status == RecordStatus::Normal ||
-                (rec_status == RecordStatus::Deleted && keep_deleted))
+#ifdef ON_KEY_OBJECT
+            NonBlockingLock *lk = cce->GetKeyLock();
+            bool check_dirty_status =
+                lk != nullptr && lk->HasWriteLock(txn) &&
+                cce->DirtyPayloadStatus() != RecordStatus::NonExistent;
+
+            if (check_dirty_status)
             {
                 tuple = remote_cache->cache_msg_->add_scan_tuple();
+
+                key->Serialize(*tuple->mutable_key());
+                tuple_size += key->Size();
+
+                const RecordStatus rec_dirty_status = cce->DirtyPayloadStatus();
+                if (rec_dirty_status == RecordStatus::Normal)
+                {
+                    tuple->set_rec_status(
+                        remote::ToRemoteType::ConvertRecordStatus(
+                            RecordStatus::Normal));
+                }
+                else if (rec_dirty_status == RecordStatus::Deleted)
+                {
+                    tuple->set_rec_status(
+                        remote::ToRemoteType::ConvertRecordStatus(
+                            RecordStatus::Deleted));
+                }
+                else if (rec_dirty_status == RecordStatus::Uncreated)
+                {
+                    CreateDirtyPayloadFromPendingCommand(cce);
+
+                    assert(cce->DirtyPayloadStatus() !=
+                               RecordStatus::NonExistent &&
+                           cce->DirtyPayloadStatus() !=
+                               RecordStatus::Uncreated);
+
+                    tuple->set_rec_status(
+                        remote::ToRemoteType::ConvertRecordStatus(
+                            cce->DirtyPayloadStatus()));
+                }
+                else
+                {
+                    assert(false && "Unknown dirty record status");
+                }
+
+                tuple->set_key_ts(cce->CommitTs() + 1);
             }
             else
             {
-                return;
-            }
+#endif
+                const RecordStatus rec_status = cce->PayloadStatus();
+#ifdef RANGE_PARTITION_ENABLED
+                if (rec_status == RecordStatus::Normal ||
+                    (rec_status == RecordStatus::Deleted && keep_deleted))
+                {
+                    tuple = remote_cache->cache_msg_->add_scan_tuple();
+                }
+                else
+                {
+                    return;
+                }
 #else
             tuple = remote_cache->cache_msg_->add_scan_tuple();
 #endif
-            key->Serialize(*tuple->mutable_key());
-            tuple_size += key->Size();
+                key->Serialize(*tuple->mutable_key());
+                tuple_size += key->Size();
 
 #ifndef ON_KEY_OBJECT
-            if (rec_status == RecordStatus::Normal ||
-                (is_ckpt_delta && rec_status == RecordStatus::Deleted))
-            {
-                if (cce->payload_ != nullptr)
+                if (rec_status == RecordStatus::Normal ||
+                    (is_ckpt_delta && rec_status == RecordStatus::Deleted))
                 {
-                    payload = cce->payload_.get();
+                    if (cce->payload_ != nullptr)
+                    {
+                        payload = cce->payload_.get();
+                    }
                 }
-            }
 
-            tuple->clear_record();
-            payload->Serialize(*tuple->mutable_record());
-            tuple_size += payload->Size();
+                tuple->clear_record();
+                payload->Serialize(*tuple->mutable_record());
+                tuple_size += payload->Size();
 #else
             // Redis KEYS command doesn't need value. But
             // ObjectCcMap doesn't override ScanKey() on local
@@ -10178,10 +10301,13 @@ protected:
             // may be called, and it need not set record.
 #endif
 
-            tuple->set_rec_status(
-                remote::ToRemoteType::ConvertRecordStatus(rec_status));
-            tuple->set_key_ts(cce->CommitTs());
+                tuple->set_rec_status(
+                    remote::ToRemoteType::ConvertRecordStatus(rec_status));
+                tuple->set_key_ts(cce->CommitTs());
+            }
+#ifdef ON_KEY_OBJECT
         }
+#endif
 
         if (include_gap)
         {
@@ -10288,6 +10414,14 @@ protected:
     {
         return true;
     }
+
+#ifdef ON_KEY_OBJECT
+    virtual void CreateDirtyPayloadFromPendingCommand(
+        CcEntry<KeyT, ValueT> *cce)
+    {
+        assert(false);
+    }
+#endif
 
     void TryUpdatePageKey(BtreeMapIterator &page_it)
     {

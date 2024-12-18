@@ -702,7 +702,7 @@ public:
         cc_lock_and_extra_->SetDirtyPayload(std::move(tx_obj_uptr));
     }
 
-    RecordStatus DirtyPayloadStatus()
+    RecordStatus DirtyPayloadStatus() const
     {
         assert(cc_lock_and_extra_ != nullptr);
         return cc_lock_and_extra_->DirtyPayloadStatus();

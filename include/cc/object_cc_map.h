@@ -2365,7 +2365,8 @@ private:
         return {std::unique_ptr<ValueT>(obj_ptr), RecordStatus::Normal};
     }
 
-    void CreateDirtyPayloadFromPendingCommand(CcEntry<KeyT, ValueT> *cce)
+    void CreateDirtyPayloadFromPendingCommand(
+        CcEntry<KeyT, ValueT> *cce) override
     {
         assert(cce->DirtyPayloadStatus() == RecordStatus::Uncreated);
         auto var_cmd = cce->PendingCmd();
@@ -2472,7 +2473,9 @@ private:
                       const std::string_view &scan_pattern) override
     {
         if (cce->PayloadStatus() == RecordStatus::Deleted &&
-            (!cce->NeedCkpt() || txservice_skip_kv))
+            (!cce->NeedCkpt() || txservice_skip_kv) &&
+            (cce->GetKeyLock() == nullptr ||
+             cce->DirtyPayloadStatus() == RecordStatus::NonExistent))
         {
             return false;
         }

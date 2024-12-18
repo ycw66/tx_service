@@ -15,6 +15,7 @@
 #include "scan.h"
 #include "sharder.h"
 #include "statistics.h"
+#include "tx_command.h"
 #include "tx_key.h"
 #include "tx_operation.h"
 #include "tx_operation_result.h"
@@ -3225,7 +3226,12 @@ void TransactionExecution::ScanClose(
         {
             LockType lk_type =
                 scanner->DeduceScanTupleLockType(last_tuple->rec_status_);
-            if (lk_type == LockType::NoLock)
+
+            if (lk_type == LockType::NoLock
+#ifdef ON_KEY_OBJECT
+                && !rw_set_.FindObjectCommand(table_name, last_tuple->cce_addr_)
+#endif
+            )
             {
                 drain_batch_.emplace_back(last_tuple->cce_addr_,
                                           last_tuple->key_ts_);

@@ -465,7 +465,7 @@ public:
         dirty_payload_ = std::move(dirty_payload);
     }
 
-    RecordStatus DirtyPayloadStatus()
+    RecordStatus DirtyPayloadStatus() const
     {
         return dirty_payload_status_;
     }
