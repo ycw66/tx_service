@@ -1847,7 +1847,7 @@ void txservice::LocalCcHandler::ObjectCommand(
         hres.Value().cmd_result_ = obj_cmd.GetResult();
         hres.Value().is_local_ = false;
         remote_hd_.ObjectCommand(cc_shards_.node_id_,
-                                 dest_node_id,
+                                 ng_id,
                                  table_name,
                                  key,
                                  key_shard_code,
