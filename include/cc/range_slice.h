@@ -653,6 +653,17 @@ public:
 
     virtual std::vector<const StoreSlice *> Slices() const = 0;
 
+    /**
+     * @brief Get the StoreSlice between the @@start_key and @@end_key.
+     *
+     * @param inclusive - True if need return the slice to which the @@end_key
+     * belong.
+     */
+    virtual std::vector<const StoreSlice *> SubSlices(
+        const TxKey &start_key,
+        const TxKey &end_key,
+        bool inclusive = false) = 0;
+
     virtual size_t PostCkptSize() = 0;
 
     virtual size_t SlicesCount() const = 0;
@@ -968,6 +979,34 @@ public:
         for (const auto &slice : slices_)
         {
             slice_vec.emplace_back(slice.get());
+        }
+
+        return slice_vec;
+    }
+
+    /**
+     * @brief Get the StoreSlice between the @@start_key and @@end_key.
+     *
+     * @param inclusive - True if need return the slice to which the @@end_key
+     * belong.
+     */
+    std::vector<const StoreSlice *> SubSlices(const TxKey &start_key,
+                                              const TxKey &end_key,
+                                              bool inclusive = false) override
+    {
+        std::shared_lock<std::shared_mutex> s_lk(mux_);
+        std::vector<const StoreSlice *> slice_vec;
+
+        const KeyT *typed_key = start_key.GetKey<KeyT>();
+        size_t start_slice_idx = SearchSlice(*typed_key, true);
+
+        typed_key = end_key.GetKey<KeyT>();
+        size_t end_slice_idx = SearchSlice(*typed_key, inclusive);
+
+        slice_vec.reserve(end_slice_idx - start_slice_idx + 1);
+        for (size_t idx = start_slice_idx; idx <= end_slice_idx; ++idx)
+        {
+            slice_vec.emplace_back(slices_[idx].get());
         }
 
         return slice_vec;

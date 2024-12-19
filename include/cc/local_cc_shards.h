@@ -51,6 +51,7 @@ struct ClusterScaleOp;
 struct DataMigrationOp;
 struct InvalidateTableCacheCompositeOp;
 class SkGenerator;
+class UploadBatchSlicesClosure;
 
 struct DataMigrationStatus
 {
@@ -1916,6 +1917,101 @@ private:
         StoreSlice *paused_slice_{nullptr};
         size_t paused_slice_rec_cnt_{0};
         std::vector<SliceChangeInfo> paused_split_keys_;
+    };
+
+    struct RangeCacheSender
+    {
+        static constexpr uint32_t BATCH_BYTES_SIZE = 0x100000;
+        RangeCacheSender(const TableName &table_name,
+                         const TxKey &range_start_key,
+                         NodeGroupId ng_id,
+                         TableRangeEntry *range_entry)
+            : table_name_(table_name), ng_id_(ng_id)
+        {
+            assert(range_entry);
+            new_range_id_ =
+                range_entry->GetRangeInfo()->GetKeyNewRangeId(range_start_key);
+            old_range_id_ = range_entry->GetRangeInfo()->PartitionId();
+            version_ts_ = range_entry->GetRangeInfo()->DirtyTs();
+            assert(version_ts_ > 0);
+            new_range_owner_ = Sharder::Instance()
+                                   .GetLocalCcShards()
+                                   ->GetRangeOwner(new_range_id_, ng_id_)
+                                   ->BucketOwner();
+            assert(new_range_owner_ != ng_id_);
+
+            dest_node_id_ = Sharder::Instance().LeaderNodeId(new_range_owner_);
+            channel_ =
+                Sharder::Instance().GetCcNodeServiceChannel(dest_node_id_);
+            store_range_ = range_entry->RangeSlices();
+        }
+
+        /**
+         * @brief Find the (sub)slice keys for this batch flush records.
+         *
+         * @param update_slice_status - If the content of this value is not
+         * null, is means that the slice to which the last part of this batch
+         * records belong need to be split.
+         */
+        void FindSliceKeys(const std::vector<FlushRecord> &batch_records,
+                           const UpdateSliceStatus &update_slice_status);
+
+        /**
+         * @brief Encode the FlushRecord for this batch into an UploadBatchSlice
+         * request. The records within a slice (the slice is the new slice, that
+         * is, if the old slice needs to be split, the slice is a subslice) are
+         * always encoded into one request. Therefore, regardless of whether the
+         * slice corresponding to the last part of the batch of records needs to
+         * be split, the information of this slice needs to be stored in the
+         * paused_pos_, unless the value of @@all_data_exported is true.
+         *
+         */
+        void AppendSliceDataRequest(
+            const std::vector<FlushRecord> &batch_records,
+            bool all_data_exported);
+
+        void SendRangeCacheRequest(const TxKey &start_key,
+                                   const TxKey &end_key);
+
+        struct PausedPosition
+        {
+            void SetPausedPos(uint32_t batch_size, TxKey &&start_key)
+            {
+                paused_batch_size_ = batch_size;
+                paused_slice_start_key_ = std::move(start_key);
+            }
+
+            void Reset()
+            {
+                paused_batch_size_ = 0;
+                paused_slice_start_key_ = TxKey();
+            }
+
+            uint32_t paused_batch_size_{0};
+            // The start key of the paused slice which is the new slice (i.e.
+            // the slice before it was split).
+            TxKey paused_slice_start_key_;
+        };
+
+        const TableName &table_name_;
+        NodeGroupId ng_id_;
+        int32_t new_range_id_;
+        int32_t old_range_id_;
+        uint64_t version_ts_;
+        NodeGroupId new_range_owner_;
+        uint32_t dest_node_id_;
+        StoreRange *store_range_{nullptr};
+        std::shared_ptr<brpc::Channel> channel_{nullptr};
+        // Slices index in new range.
+        uint32_t slice_idx_{0};
+        // Because we don't know whether the slice to which the last part of the
+        // current batch of data is located has been completely scanned, we need
+        // to save the information of this slice using this variable.
+        PausedPosition paused_pos_;
+        std::vector<TxKey> batch_slice_key_vec_;
+        std::vector<const StoreSlice *> slices_vec_;
+        std::shared_ptr<std::vector<UploadBatchSlicesClosure *>> closure_vec_{
+            nullptr};
     };
 #endif
 

@@ -5389,7 +5389,13 @@ public:
             while (pin_next_slice)
             {
                 // Execute the pinslice operation, and return the RangeSliceId
-                auto [new_slice_id, succ] = pin_range_slice(*start_key, 32);
+                // If the value of export_base_table_item_ is false, it means
+                // that the pin slice operation is required due to slice
+                // splitting, then, only need pin the current slice that needs
+                // to be split.
+                uint32_t prefetch_size = req.export_base_table_item_ ? 32 : 0;
+                auto [new_slice_id, succ] =
+                    pin_range_slice(*start_key, prefetch_size);
                 if (!succ)
                 {
                     return {nullptr, false, false};

@@ -7546,15 +7546,13 @@ struct ScanSliceDeltaSizeCc : public CcRequestBase
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            const CatalogEntry *catalog_entry = ccs.InitCcm(
-                table_name_, node_group_id_, node_group_term_, this);
+            ccs.InitCcm(table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
             // data sync txm.
-            assert(catalog_entry && catalog_entry->schema_);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
+            assert(ccm != nullptr);
         }
-        assert(ccm != nullptr);
         ccm->Execute(*this);
 
         // return false since ScanSliceDeltaSizeCc is not re-used and does not

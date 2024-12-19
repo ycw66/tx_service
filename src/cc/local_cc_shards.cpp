@@ -3376,6 +3376,25 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // Scan the FlushRecords.
     // Paused position
     UpdateSliceStatus update_slice_status;
+    std::unique_ptr<RangeCacheSender> range_cache_sender = nullptr;
+    bool need_send_range_cache = false;
+    if (during_split_range)
+    {
+        int32_t old_range_id = range_entry->GetRangeInfo()->PartitionId();
+        NodeGroupId old_range_owner =
+            GetRangeOwner(old_range_id, ng_id)->BucketOwner();
+        NodeGroupId new_range_owner =
+            GetRangeOwner(range_id, ng_id)->BucketOwner();
+
+        need_send_range_cache = new_range_owner != old_range_owner;
+        if (need_send_range_cache)
+        {
+            range_cache_sender = std::make_unique<RangeCacheSender>(
+                table_name, start_tx_key, ng_id, range_entry);
+            range_cache_sender->closure_vec_ =
+                std::make_shared<std::vector<UploadBatchSlicesClosure *>>();
+        }
+    }
 
     bool scan_data_drained = false;
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
@@ -3444,12 +3463,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
                        << " of range: " << range_id
                        << " for table: " << table_name.StringView();
-            std::unique_ptr<std::vector<FlushRecord>> data_sync_vec =
-                std::make_unique<std::vector<FlushRecord>>();
-            std::unique_ptr<std::vector<FlushRecord>> archive_vec =
-                std::make_unique<std::vector<FlushRecord>>();
-            std::unique_ptr<std::vector<TxKey>> mv_base_vec =
-                std::make_unique<std::vector<TxKey>>();
 
             // The minimum end key of this batch data between all the cores.
             TxKey min_scanned_end_key = catalog_factory_->PositiveInfKey();
@@ -3488,6 +3501,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
                 scan_data_drained = scan_cc.IsDrained(i) && scan_data_drained;
             }
+
+            std::unique_ptr<std::vector<FlushRecord>> data_sync_vec =
+                std::make_unique<std::vector<FlushRecord>>();
+            std::unique_ptr<std::vector<FlushRecord>> archive_vec =
+                std::make_unique<std::vector<FlushRecord>>();
+            std::unique_ptr<std::vector<TxKey>> mv_base_vec =
+                std::make_unique<std::vector<TxKey>>();
 
             MergeSortedVectors(
                 std::move(mv_base_vecs), *mv_base_vec, key_greater, false);
@@ -3534,6 +3554,16 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                          *data_sync_vec,
                          slices_delta_size,
                          update_slice_status);
+
+            if (need_send_range_cache)
+            {
+                range_cache_sender->FindSliceKeys(*data_sync_vec,
+                                                  update_slice_status);
+                // Upload this batch records of split out ranges to their future
+                // owner for caching.
+                range_cache_sender->AppendSliceDataRequest(*data_sync_vec,
+                                                           scan_data_drained);
+            }
 
             // Remove the keys that no need to be flush. This is the case that
             // the slice need to split, and we just use those keys to calculate
@@ -3594,6 +3624,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 mv_base_vecs.at(i).clear();
             }
         }
+    }
+
+    if (need_send_range_cache)
+    {
+        assert(range_cache_sender);
+        // Send the cache sending request.
+        range_cache_sender->SendRangeCacheRequest(start_tx_key, end_tx_key);
     }
 
     // Release scan heap memory after scan finish.
@@ -4472,10 +4509,12 @@ void LocalCcShards::UpdateSlices(
 
             // The paused slice in the last round has already finished. Just
             // update the slice.
-            assert(status.paused_split_keys_.size() > 1);
-            // Update the current slice
-            store_range->UpdateSliceSpec(status.paused_slice_,
-                                         status.paused_split_keys_);
+            if (status.paused_split_keys_.size() > 1)
+            {
+                // Update the current slice
+                store_range->UpdateSliceSpec(status.paused_slice_,
+                                             status.paused_split_keys_);
+            }
             status.Reset();
         }
         else if (status.paused_slice_)
@@ -5588,5 +5627,398 @@ void LocalCcShards::PurgeDeletedData()
         }
     }
 }
+
+#ifdef RANGE_PARTITION_ENABLED
+void LocalCcShards::RangeCacheSender::FindSliceKeys(
+    const std::vector<FlushRecord> &batch_records,
+    const UpdateSliceStatus &update_slice_status)
+{
+    if (channel_ == nullptr)
+    {
+        // Fail to establish the channel to the tx node. Just skip the cache
+        // sending.
+        LOG(WARNING) << "FindSliceKeys: Failed to init the channel of ng#"
+                     << new_range_owner_ << ". Skip sending cache.";
+        return;
+    }
+
+    TxKey first_key = batch_records[0].Key();
+    TxKey last_key = batch_records.at(batch_records.size() - 1).Key();
+    std::vector<const StoreSlice *> batch_slices =
+        store_range_->SubSlices(first_key, last_key, true);
+
+    batch_slice_key_vec_.clear();
+    batch_slice_key_vec_.reserve(batch_slices.size());
+
+    for (size_t i = 0; i < batch_slices.size() - 1; ++i)
+    {
+        batch_slice_key_vec_.emplace_back(batch_slices[i]->StartTxKey());
+    }
+
+    if (!update_slice_status.paused_slice_)
+    {
+        batch_slice_key_vec_.emplace_back(batch_slices.back()->StartTxKey());
+    }
+    else
+    {
+        // The slice corresponding to the last part of this batch items need to
+        // be split, but because it is not sure whether all the data has been
+        // scanned, the slice spec in memory has not been actually updated.
+        // Therefore, we cannot use FindSlice to find a sub-slice spec, but use
+        // update_slice_status.paused_split_keys_ to determine the boundaries of
+        // each sub-slice.
+        auto &dirty_slices = update_slice_status.paused_split_keys_;
+        auto first_it =
+            std::lower_bound(dirty_slices.begin(),
+                             dirty_slices.end(),
+                             first_key,
+                             [](const SliceChangeInfo &slice, const TxKey &key)
+                             { return slice.key_ < key; });
+        assert(first_it != dirty_slices.end());
+        if (first_it != dirty_slices.begin())
+        {
+            --first_it;
+        }
+
+        while (first_it != dirty_slices.end())
+        {
+            batch_slice_key_vec_.emplace_back(first_it->key_.GetShallowCopy());
+            ++first_it;
+        }
+    }
+}
+
+void LocalCcShards::RangeCacheSender::AppendSliceDataRequest(
+    const std::vector<FlushRecord> &batch_records, bool all_data_exported)
+{
+    if (channel_ == nullptr)
+    {
+        // Fail to establish the channel to the tx node. Just skip the cache
+        // sending.
+        LOG(WARNING) << "AppendSliceRequest: Failed to init the channel of ng#"
+                     << new_range_owner_ << ". Skip sending cache.";
+        return;
+    }
+
+    // Encode this batch FlushRecord into rpc request.
+    UploadBatchSlicesClosure *upload_batch_closure = nullptr;
+    remote::UploadBatchSlicesRequest *batch_req_ptr = nullptr;
+    std::string *keys_str = nullptr;
+    std::string *recs_str = nullptr;
+    std::string *rec_status_str = nullptr;
+    std::string *commit_ts_str = nullptr;
+    uint32_t batch_size = 0;
+
+    assert(batch_slice_key_vec_.size() > 0);
+    if (paused_pos_.paused_batch_size_ != 0)
+    {
+        assert(!closure_vec_->empty());
+        upload_batch_closure = closure_vec_->back();
+        batch_req_ptr = upload_batch_closure->UploadBatchRequest();
+        assert(upload_batch_closure);
+        keys_str = batch_req_ptr->mutable_keys();
+        recs_str = batch_req_ptr->mutable_records();
+        rec_status_str = batch_req_ptr->mutable_rec_status();
+        commit_ts_str = batch_req_ptr->mutable_commit_ts();
+
+        batch_size = paused_pos_.paused_batch_size_;
+
+        if (!(paused_pos_.paused_slice_start_key_ == batch_slice_key_vec_[0]))
+        {
+            assert(paused_pos_.paused_slice_start_key_ <
+                   batch_slice_key_vec_[0]);
+            // The paused (sub)slice has already finished.
+            batch_req_ptr->set_batch_size(batch_size);
+            batch_req_ptr->add_slices_idxs(slice_idx_++);
+
+            paused_pos_.Reset();
+
+            upload_batch_closure =
+                batch_req_ptr->ByteSizeLong() > BATCH_BYTES_SIZE
+                    ? nullptr
+                    : closure_vec_->back();
+        }
+        // else: Continue to encoding the items of the paused (sub)slice.
+    }
+    // else: The first batch flush records of this range.
+
+    auto slice_key_it = batch_slice_key_vec_.begin();
+    auto slice_data_it = batch_records.begin();
+    while (slice_data_it != batch_records.end())
+    {
+        assert(*slice_key_it <= slice_data_it->Key());
+        // Find the final slice boundary.
+        TxKey subslice_end_key =
+            std::next(slice_key_it) != batch_slice_key_vec_.end()
+                ? std::next(slice_key_it)->GetShallowCopy()
+                : store_range_->RangeEndTxKey();
+
+        auto slice_end_it =
+            std::lower_bound(slice_data_it,
+                             batch_records.end(),
+                             subslice_end_key,
+                             [](const FlushRecord &rec, const TxKey &key)
+                             { return rec.Key() < key; });
+
+        if (upload_batch_closure == nullptr ||
+            (batch_req_ptr->ByteSizeLong() > BATCH_BYTES_SIZE &&
+             paused_pos_.paused_batch_size_ == 0))
+        {
+            // New batch
+            upload_batch_closure =
+                new UploadBatchSlicesClosure(nullptr, 10000, false);
+            closure_vec_->push_back(upload_batch_closure);
+            upload_batch_closure->SetChannel(dest_node_id_, channel_);
+            batch_req_ptr = upload_batch_closure->UploadBatchRequest();
+
+            // Init this request
+            batch_req_ptr->set_table_name_str(table_name_.String());
+            batch_req_ptr->set_table_type(
+                remote::ToRemoteType::ConvertTableType(table_name_.Type()));
+            batch_req_ptr->set_node_group_id(new_range_owner_);
+            // The term will be fixed when send the request.
+            batch_req_ptr->set_node_group_term(INIT_TERM);
+
+            // range, dirty range, dirty version
+            batch_req_ptr->set_partition_id(old_range_id_);
+            batch_req_ptr->set_new_partition_id(new_range_id_);
+            batch_req_ptr->set_version_ts(version_ts_);
+
+            batch_req_ptr->clear_keys();
+            batch_req_ptr->clear_rec_status();
+            batch_req_ptr->clear_commit_ts();
+            batch_req_ptr->clear_records();
+
+            keys_str = batch_req_ptr->mutable_keys();
+            recs_str = batch_req_ptr->mutable_records();
+            rec_status_str = batch_req_ptr->mutable_rec_status();
+            commit_ts_str = batch_req_ptr->mutable_commit_ts();
+
+            batch_size = 0;
+        }
+
+        // The slice (the slice is the final slice, that is to say, if one old
+        // slice need to be split, the slice is a sub-slice) data.
+        for (; slice_data_it != slice_end_it; ++slice_data_it)
+        {
+            slice_data_it->Key().Serialize(*keys_str);
+            if (slice_data_it->payload_status_ == RecordStatus::Normal)
+            {
+                slice_data_it->Payload()->Serialize(*recs_str);
+            }
+            size_t len_sizeof = sizeof(RecordStatus);
+            const char *val_ptr =
+                reinterpret_cast<const char *>(&slice_data_it->payload_status_);
+            rec_status_str->append(val_ptr, len_sizeof);
+            len_sizeof = sizeof(uint64_t);
+            val_ptr =
+                reinterpret_cast<const char *>(&slice_data_it->commit_ts_);
+            commit_ts_str->append(val_ptr, len_sizeof);
+
+            ++batch_size;
+        }
+
+        // Reset the paused position
+        paused_pos_.Reset();
+
+        if (slice_end_it != batch_records.end() || all_data_exported)
+        {
+            // All items of this slice (the new slice) have been exported.
+            batch_req_ptr->set_batch_size(batch_size);
+            batch_req_ptr->add_slices_idxs(slice_idx_++);
+
+            // Forward the slice key iterator
+            ++slice_key_it;
+        }
+        else
+        {
+            assert(slice_data_it == batch_records.end() &&
+                   std::next(slice_key_it) == batch_slice_key_vec_.end());
+            // The pause slice start key, the slice is the one to which the last
+            // part of this batch items belong to.
+            paused_pos_.SetPausedPos(batch_size, std::move(*slice_key_it));
+        }
+    }
+}
+
+void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
+    const TxKey &start_key, const TxKey &end_key)
+{
+    if (channel_ == nullptr)
+    {
+        // Fail to establish the channel to the tx node. Just skip the cache
+        // sending.
+        LOG(WARNING)
+            << "SendRangeCacheRequest: Failed to init the channel of ng#"
+            << new_range_owner_ << ". Skip sending cache.";
+        return;
+    }
+
+    slices_vec_ = store_range_->SubSlices(start_key, end_key);
+    assert(slices_vec_.size() == slice_idx_);
+
+    LOG(INFO)
+        << "Begin upload new range slices and records to future owner, range#"
+        << old_range_id_ << ", new_range#" << new_range_id_
+        << ", new_range_owner:" << new_range_owner_;
+
+    // 1- upload dirty range slices info (with PartiallyCached)
+    int64_t ng_term = INIT_TERM;
+    remote::CcRpcService_Stub stub(channel_.get());
+
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(10000);
+    cntl.set_write_to_socket_in_background(true);
+    // cntl.ignore_eovercrowded(true);
+    remote::UploadRangeSlicesRequest req;
+    remote::UploadRangeSlicesResponse resp;
+
+    req.set_node_group_id(new_range_owner_);
+    req.set_ng_term(ng_term);
+    req.set_table_name_str(table_name_.String());
+    req.set_old_partition_id(old_range_id_);
+    req.set_version_ts(version_ts_);
+    req.set_new_partition_id(new_range_id_);
+    req.set_new_slices_num(slices_vec_.size());
+    std::string *keys_str = req.mutable_new_slices_keys();
+    std::string *sizes_str = req.mutable_new_slices_sizes();
+    std::string *status_str = req.mutable_new_slices_status();
+    for (const StoreSlice *slice : slices_vec_)
+    {
+        // key
+        TxKey slice_key = slice->StartTxKey();
+        slice_key.Serialize(*keys_str);
+        // size
+        // If post ckpt size of the slice is UINT64_MAX, it means that there is
+        // no item need to be ckpt in this slice, so should use the current size
+        // of the slice.
+        uint32_t slice_size =
+            (slice->PostCkptSize() == UINT64_MAX ? slice->Size()
+                                                 : slice->PostCkptSize());
+        const char *slice_size_ptr =
+            reinterpret_cast<const char *>(&slice_size);
+        sizes_str->append(slice_size_ptr, sizeof(slice_size));
+        // status
+        int8_t slice_status = static_cast<int8_t>(SliceStatus::PartiallyCached);
+        const char *slice_status_ptr =
+            reinterpret_cast<const char *>(&slice_status);
+        status_str->append(slice_status_ptr, sizeof(slice_status));
+    }
+    stub.UploadRangeSlices(&cntl, &req, &resp, nullptr);
+
+    if (cntl.Failed())
+    {
+        LOG(WARNING) << "SendRangeCacheRequest: Fail to upload dirty range "
+                        "slices RPC ng#"
+                     << new_range_owner_ << ". Error code: " << cntl.ErrorCode()
+                     << ". Msg: " << cntl.ErrorText();
+        return;
+    }
+
+    if (remote::ToLocalType::ConvertCcErrorCode(resp.error_code()) !=
+        CcErrorCode::NO_ERROR)
+    {
+        LOG(WARNING) << "SendRangeCacheRequest: New owner ng#"
+                     << new_range_owner_
+                     << " reject to receive dirty range data";
+        return;
+    }
+
+    ng_term = resp.ng_term();
+    LOG(INFO) << "SendRangeCacheRequest: Uploaded new range slices info to "
+                 "future owner, range#"
+              << old_range_id_ << ", new_range#" << new_range_id_;
+
+    // 2- upload records belongs to dirty range
+    assert(closure_vec_->size() > 0);
+    LOG(INFO) << "SendRangeCacheRequest: Sending range data, old_range_id: "
+              << old_range_id_ << ", to upload " << closure_vec_->size()
+              << " batches to ng#" << new_range_owner_;
+
+    uint32_t sender_cnt = 5;
+    auto closures_idx = std::make_shared<std::atomic_uint64_t>(sender_cnt);
+    for (size_t i = 0; i < sender_cnt && i < closure_vec_->size(); ++i)
+    {
+        UploadBatchSlicesClosure *head = closure_vec_->at(i);
+        if (sender_cnt < closure_vec_->size())
+        {
+            head->SetPostLambda(
+                [range_id = old_range_id_,
+                 closures_idx,
+                 vec_sptr = closure_vec_,
+                 ng_term](CcErrorCode res_code, int32_t dest_ng_term)
+                {
+                    auto &vec = *vec_sptr;
+                    size_t begin_idx = closures_idx->fetch_add(5);
+                    size_t vec_size = vec.size();
+                    size_t end_idx = std::min(begin_idx + 5, vec_size);
+                    bool rejected = false;
+                    while (begin_idx < end_idx)
+                    {
+                        std::unique_ptr<UploadBatchSlicesClosure> closure(
+                            vec[begin_idx]);
+                        begin_idx++;
+
+                        if (begin_idx == end_idx && begin_idx < vec_size)
+                        {
+                            begin_idx = closures_idx->fetch_add(5);
+                            end_idx = std::min(begin_idx + 5, vec_size);
+                        }
+
+                        if (rejected)
+                        {
+                            // Must continue to delete left closures in
+                            // closures_sptr.
+                            continue;
+                        }
+
+                        remote::CcRpcService_Stub stub(closure->Channel());
+                        brpc::Controller *cntl_ptr = closure->Controller();
+                        cntl_ptr->Reset();
+                        cntl_ptr->set_max_retry(3);
+                        cntl_ptr->set_timeout_ms(closure->TimeoutValue());
+                        // Fix the term
+                        closure->UploadBatchRequest()->set_node_group_term(
+                            ng_term);
+                        stub.UploadBatchSlices(cntl_ptr,
+                                               closure->UploadBatchRequest(),
+                                               closure->UploadBatchResponse(),
+                                               nullptr);
+
+                        auto *resp = closure->UploadBatchResponse();
+                        if (cntl_ptr->Failed())
+                        {
+                            DLOG(INFO) << "UploadBatch rpc to node#"
+                                       << closure->NodeId() << " failed.";
+                        }
+                        else if (resp->error_code() ==
+                                 static_cast<uint32_t>(
+                                     CcErrorCode::UPLOAD_BATCH_REJECTED))
+                        {
+                            rejected = true;
+                            DLOG(INFO) << "UploadBatch rpc to node#"
+                                       << closure->NodeId()
+                                       << " is reject for no free memory";
+                        }
+                    }
+
+                    LOG(INFO) << "Old_Range#" << range_id
+                              << " finished upload_batch_closure (" << begin_idx
+                              << ", all_rpc_cnt" << vec_size << ").";
+                });
+        }
+
+        remote::CcRpcService_Stub stub(head->Channel());
+        brpc::Controller *cntl_ptr = head->Controller();
+        cntl_ptr->set_timeout_ms(head->TimeoutValue());
+        // Fix the term
+        head->UploadBatchRequest()->set_node_group_term(ng_term);
+        stub.UploadBatchSlices(cntl_ptr,
+                               head->UploadBatchRequest(),
+                               head->UploadBatchResponse(),
+                               head);
+    }
+}
+#endif
 
 }  // namespace txservice
