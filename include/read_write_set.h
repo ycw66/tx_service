@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "cc_entry.h"
 #include "read_write_entry.h"
 #include "tx_command.h"
@@ -44,6 +45,7 @@ public:
         wset_cnt_ = 0;
         wset_.clear();
         rset_.clear();
+        read_lock_ng_terms_.clear();
         wset_bytes_cnt_ = 0;
         data_rset_cnt_ = 0;
         forward_write_cnt_ = 0;
@@ -101,6 +103,11 @@ public:
         &ReadSet() const
     {
         return rset_;
+    }
+
+    const absl::flat_hash_map<uint32_t, int64_t> &ReadLockNgTerms() const
+    {
+        return read_lock_ng_terms_;
     }
 
     /**
@@ -463,6 +470,23 @@ public:
             else
             {
                 data_rset_cnt_ -= tbl_it->second.size();
+                // Keep the read lock terms to check them when writing log.
+                for (const auto &[cce_addr, read_entry] : tbl_it->second)
+                {
+                    uint32_t ng_id = cce_addr.NodeGroupId();
+                    int64_t ng_term = cce_addr.Term();
+                    auto [it, success] =
+                        read_lock_ng_terms_.try_emplace(ng_id, ng_term);
+                    if (!success && it->second != ng_term)
+                    {
+                        LOG(ERROR) << "two reads on the same node group have "
+                                      "different terms, ng: "
+                                   << ng_id << ", terms: " << it->second << ", "
+                                   << ng_term;
+                        // TODO(zkl): abort txn and return error
+                        assert(false);
+                    }
+                }
                 tbl_it = rset_.erase(tbl_it);
             }
         }
@@ -706,6 +730,8 @@ private:
     // rset_, wset_cnt_, read_cache_ are not string owner.
     std::unordered_map<TableName, std::unordered_map<CcEntryAddr, ReadSetEntry>>
         rset_;
+    // the terms of read locks, for write log term check
+    absl::flat_hash_map<uint32_t, int64_t> read_lock_ng_terms_;
     std::unordered_map<TableName, TableWriteSet> wset_;
     size_t wset_cnt_;
     size_t data_rset_cnt_;

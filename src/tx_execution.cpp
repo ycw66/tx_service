@@ -3881,13 +3881,24 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
                 !txservice_skip_wal && rw_set_.ObjectModified();
             if (txlog_ != nullptr && needs_write_log)
             {
+                bool prepare_log_success = false;
 #ifdef ON_KEY_OBJECT
-                FillCommandLogRequest(write_log_);
+                prepare_log_success = FillCommandLogRequest(write_log_);
 #else
-                FillDataLogRequest(write_log_);
+                prepare_log_success = FillDataLogRequest(write_log_);
 #endif
                 PushOperation(&write_log_);
-                Process(write_log_);
+                if (prepare_log_success)
+                {
+                    Process(write_log_);
+                }
+                else
+                {
+                    // node group terms not consistent, hd_res is set to error.
+                    // skip writing log
+                    assert(write_log_.hd_result_.IsError());
+                    PostProcess(write_log_);
+                }
             }
             else
             {
@@ -4060,13 +4071,24 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
         bool needs_write_log = !txservice_skip_wal && rw_set_.ObjectModified();
         if (txlog_ != nullptr && needs_write_log)
         {
+            bool prepare_log_success = false;
 #ifdef ON_KEY_OBJECT
-            FillCommandLogRequest(write_log_);
+            prepare_log_success = FillCommandLogRequest(write_log_);
 #else
-            FillDataLogRequest(write_log_);
+            prepare_log_success = FillDataLogRequest(write_log_);
 #endif
             PushOperation(&write_log_);
-            Process(write_log_);
+            if (prepare_log_success)
+            {
+                Process(write_log_);
+            }
+            else
+            {
+                // node group terms not consistent, hd_res is set to error. skip
+                // writing log
+                assert(write_log_.hd_result_.IsError());
+                PostProcess(write_log_);
+            }
         }
         else
         {
@@ -4100,7 +4122,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     }
 }
 
-void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
+bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 {
     write_log.log_type_ = TxLogType::DATA;
     ACTION_FAULT_INJECTOR("before_write_log");
@@ -4141,13 +4163,13 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
         for (const auto &[write_key, wset_entry] : table_write_set)
         {
             const CcEntryAddr &addr = wset_entry.cce_addr_;
-            uint32_t cc_node_id = addr.NodeGroupId();
+            uint32_t ng_id = addr.NodeGroupId();
 
             // Only fills WriteLogRequest::node_terms for base table.
-            auto shard_term_it = shard_terms->find(cc_node_id);
+            auto shard_term_it = shard_terms->find(ng_id);
             if (shard_term_it == shard_terms->end())
             {
-                (*shard_terms)[cc_node_id] = addr.Term();
+                (*shard_terms)[ng_id] = addr.Term();
             }
             else if (shard_term_it->second != addr.Term())
             {
@@ -4158,10 +4180,10 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 // because the write intention obtained  the failure have been
                 // invalidated.
                 write_log.hd_result_.SetError(CcErrorCode::NG_TERM_CHANGED);
-                return;
+                return false;
             }
 
-            auto table_rec_it = ng_table_rec_set.try_emplace(cc_node_id);
+            auto table_rec_it = ng_table_rec_set.try_emplace(ng_id);
             std::unordered_map<
                 TableName,
                 std::vector<std::pair<const TxKey *, const WriteSetEntry *>>>
@@ -4270,9 +4292,29 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 kv_len_start, sizeof(uint32_t), ptr, sizeof(uint32_t));
         }
     }
+
+    // fill read set entry term
+    for (const auto [ng_id, ng_term] : rw_set_.ReadLockNgTerms())
+    {
+        // Only fills WriteLogRequest::node_terms for base table.
+        auto shard_term_it = shard_terms->find(ng_id);
+        if (shard_term_it == shard_terms->end())
+        {
+            (*shard_terms)[ng_id] = ng_term;
+        }
+        else if (shard_term_it->second != ng_term)
+        {
+            // Two keys in the tx's read/write set refer to the same cc node
+            // group, but have different terms.
+            write_log.hd_result_.SetError(CcErrorCode::NG_TERM_CHANGED);
+            return false;
+        }
+    }
+
+    return true;
 }
 
-void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
+bool TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
 {
 #ifdef ON_KEY_OBJECT
     write_log.log_type_ = TxLogType::DATA;
@@ -4323,8 +4365,11 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
             else if (shard_term_it->second != cce_addr.Term())
             {
                 // Two keys in the tx's write set refer to the same cc node
-                // group, but have different terms.
-                // TODO(zkl): remote data
+                // group, but have different terms. It means that the cc node
+                // must have failed over at least once and the tx have obtained
+                // a write lock before the failure.
+                write_log.hd_result_.SetError(CcErrorCode::NG_TERM_CHANGED);
+                return false;
             }
 
             auto &table_cmds = ng_obj_cmds.try_emplace(ng_id).first->second;
@@ -4348,8 +4393,11 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
                 else if (shard_term_it->second != f_cce_addr.Term())
                 {
                     // Two keys in the tx's write set refer to the same cc node
-                    // group, but have different terms.
-                    // TODO(zkl): remote data
+                    // group, but have different terms. It means that the cc
+                    // node must have failed over at least once and the tx have
+                    // obtained a write lock before the failure.
+                    write_log.hd_result_.SetError(CcErrorCode::NG_TERM_CHANGED);
+                    return false;
                 }
 
                 auto &f_table_cmds =
@@ -4435,7 +4483,27 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
                 key_cmd_len_start, sizeof(uint32_t), ptr, sizeof(uint32_t));
         }
     }
+
+    // fill read set entry ng term
+    for (const auto [ng_id, ng_term] : rw_set_.ReadLockNgTerms())
+    {
+        // Only fills WriteLogRequest::node_terms for base table.
+        auto shard_term_it = shard_terms->find(ng_id);
+        if (shard_term_it == shard_terms->end())
+        {
+            (*shard_terms)[ng_id] = ng_term;
+        }
+        else if (shard_term_it->second != ng_term)
+        {
+            // Two keys in the tx's read/write set refer to the same cc node
+            // group, but have different terms.
+            write_log.hd_result_.SetError(CcErrorCode::NG_TERM_CHANGED);
+            return false;
+        }
+    }
+
 #endif
+    return true;
 }
 
 void TransactionExecution::Process(WriteToLogOp &write_log)
@@ -4567,7 +4635,8 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
             }
             else
             {
-                DLOG(ERROR) << "WriteToLogOp failed for cc error:"
+                DLOG(ERROR) << "txn: " << TxNumber()
+                            << " WriteToLogOp failed for cc error:"
                             << log_op->hd_result_.ErrorMsg();
                 if (bool_resp_ != nullptr)
                 {
@@ -4579,13 +4648,13 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                 else if (rec_resp_ != nullptr)
                 {
                     // auto committed ObjectCommandTxRequest
-                    rec_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
+                    rec_resp_->FinishError(TxErrorCode::WRITE_LOG_FAIL);
                     rec_resp_ = nullptr;
                 }
                 else if (vct_rec_resp_ != nullptr)
                 {
                     // auto committed MultiObjectCommandTxRequest
-                    vct_rec_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
+                    vct_rec_resp_->FinishError(TxErrorCode::WRITE_LOG_FAIL);
                     vct_rec_resp_ = nullptr;
                 }
 #endif

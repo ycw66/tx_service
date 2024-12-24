@@ -391,9 +391,9 @@ private:
     void Commit();
     void Abort();
 
-    void FillDataLogRequest(WriteToLogOp &write_log);
+    bool FillDataLogRequest(WriteToLogOp &write_log);
 
-    void FillCommandLogRequest(WriteToLogOp &write_log);
+    bool FillCommandLogRequest(WriteToLogOp &write_log);
 
     bool IsTimeOut(int wait_secs = 10);
     void StartTiming();
