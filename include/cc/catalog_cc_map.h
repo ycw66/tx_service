@@ -1636,13 +1636,16 @@ public:
                 const std::string_view payload_sv = req.CommandList()->front();
                 size_t offset = 0;
                 tmp_rec.Deserialize(payload_sv.data(), offset);
-                auto res = shard_->CreateCatalog(table_key->Name(),
-                                                 cc_ng_id_,
-                                                 tmp_rec.SchemaImage(),
-                                                 commit_ts);
-                const CatalogEntry *catalog_entry = res.second;
+                auto res = shard_->CreateDirtyCatalog(table_key->Name(),
+                                                      cc_ng_id_,
+                                                      tmp_rec.SchemaImage(),
+                                                      commit_ts);
+                const CatalogEntry *catalog_entry = res;
+                // If dirty schema is created successfully, it means that the
+                // schema needs to be updated in kv store.
                 if (!txservice_skip_kv &&
-                    !shard_->local_shards_.store_hd_->IsSharedStorage())
+                    !shard_->local_shards_.store_hd_->IsSharedStorage() &&
+                    catalog_entry->dirty_schema_)
                 {
                     // If using non-shared kv, we need to perform kv op on
                     // standby node as well.
@@ -1722,8 +1725,10 @@ public:
             {
                 cce->payload_ = std::make_unique<CatalogRecord>();
             }
-            const CatalogEntry *catalog_entry =
+            CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+            catalog_entry->CommitDirtySchema();
+
             cce->payload_->Set(catalog_entry->schema_, nullptr, commit_ts);
             cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Normal);
             // clean up data in ccm

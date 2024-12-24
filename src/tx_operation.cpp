@@ -2819,6 +2819,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ACTION_FAULT_INJECTOR("upsert_table_post_all_lock");
                 assert(post_all_lock_op_.write_type_ ==
                        PostWriteType::PostCommit);
+                catalog_rec_.SetSchemaImage(catalog_rec_.DirtySchemaImage());
+                catalog_rec_.ClearDirtySchema();
                 op_ = &post_all_lock_op_;
                 txm->PushOperation(&post_all_lock_op_);
                 txm->Process(post_all_lock_op_);
@@ -2855,6 +2857,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         // Clear write set before commit dirty schema.
         txm->rw_set_.ClearTable(table_key_.Name());
         txm->rw_set_.ClearReadSet(table_key_.Name());
+
+        // Update catalog record to the latest schema.
+        catalog_rec_.SetSchemaImage(catalog_rec_.DirtySchemaImage());
+        catalog_rec_.ClearDirtySchema();
 
         // For DROP TABLE and TRUNCATE TABLE, the data store operation
         // happens after all write locks are acquired and commit log is
