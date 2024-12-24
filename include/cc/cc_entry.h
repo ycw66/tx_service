@@ -8,7 +8,8 @@
 #include <cstdint>
 #include <deque>
 #include <list>
-#include <memory>   // std::make_unique, make_shared, shared_ptr
+#include <memory>  // std::make_unique, make_shared, shared_ptr
+#include <string>
 #include <utility>  // std::move
 #include <vector>
 
@@ -634,6 +635,17 @@ public:
         mem_usage += GetArchiveMemUsage();
 #endif
         return mem_usage;
+    }
+
+    std::string KeyString() const
+    {
+        if (GetCcPage() == nullptr)
+        {
+            return "no lock, no key";
+        }
+        return reinterpret_cast<CcPage<KeyT, ValueT> *>(GetCcPage())
+            ->KeyOfEntry(this)
+            ->ToString();
     }
 
     size_t PayloadMemUsage() const

@@ -1080,7 +1080,6 @@ public:
         commit_ts_ = commit_ts;
         key_ts_ = key_ts;
         gap_ts_ = gap_ts;
-        res->Value().Clear();
         ccm_ = nullptr;
     }
 

@@ -1310,6 +1310,11 @@ public:
                            LockType::NoLock,
                            recycle_lock);
             // broken repeatable read, set error.
+            DLOG(INFO) << "txn: " << req.Txn()
+                       << " validate fail on key: " << cc_entry.KeyString()
+                       << ", key_ts: " << key_ts
+                       << ", cce commit ts: " << cc_entry.CommitTs()
+                       << ", table: " << table_name_.String();
             hd_res->SetError(
                 CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH);
             DLOG_IF(INFO, TRACE_OCC_ERR)
@@ -1347,6 +1352,12 @@ public:
                 if (key_lock != nullptr && key_lock->HasWriteLock() &&
                     key_lock->WriteLockTx() != txn)
                 {
+                    DLOG(INFO)
+                        << "txn: " << req.Txn()
+                        << " validate fail on key: " << cc_entry.KeyString()
+                        << ", conflicting write lock txn: "
+                        << key_lock->WriteLockTx()
+                        << ", table: " << table_name_.String();
                     int64_t ng_term =
                         Sharder::Instance().LeaderTerm(req.NodeGroupId());
                     shard_->CheckRecoverTx(

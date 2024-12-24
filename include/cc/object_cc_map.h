@@ -2311,22 +2311,19 @@ public:
                     ccp->last_dirty_commit_ts_ = cce->CommitTs();
                 }
             }
-            if (ccp->smallest_ttl_ != 0)
+            if (cce->PayloadStatus() == RecordStatus::Normal)
             {
-                if (cce->PayloadStatus() == RecordStatus::Normal)
+                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                if (cce->payload_ && cce->payload_->HasTTL() &&
+                    ccp->smallest_ttl_ > cce->payload_->GetTTL())
                 {
-                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
-                    if (cce->payload_ && cce->payload_->HasTTL() &&
-                        ccp->smallest_ttl_ > cce->payload_->GetTTL())
-                    {
-                        ccp->smallest_ttl_ = cce->payload_->GetTTL();
-                    }
+                    ccp->smallest_ttl_ = cce->payload_->GetTTL();
                 }
-                else
-                {
-                    assert(cce->PayloadStatus() == RecordStatus::Deleted);
-                    ccp->smallest_ttl_ = 0;
-                }
+            }
+            else
+            {
+                assert(cce->PayloadStatus() == RecordStatus::Deleted);
+                ccp->smallest_ttl_ = 0;
             }
         }
 
