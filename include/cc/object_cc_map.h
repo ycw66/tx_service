@@ -2082,6 +2082,7 @@ public:
             {
                 DLOG(INFO)
                     << "discard TxnCmd with a version smaller than cur_ver";
+                continue;
             }
             if (buffered_cmd_list.IsNull())
             {
@@ -2147,6 +2148,17 @@ public:
                 cce->SetDirtyPayload(nullptr);
                 cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
                 cce->SetPendingCmd(nullptr);
+
+                // Forward the update to standby node.
+                if (!shard_->GetSubscribedStandbys().empty() &&
+                    cce->ForwardEntry())
+                {
+                    auto forward_entry = cce->ForwardEntry();
+                    forward_entry->Request().set_commit_ts(commit_ts);
+                    forward_entry->Request().set_schema_version(schema_ts_);
+                    cce->SetForwardEntry(nullptr);
+                    shard_->ForwardStandbyMessage(forward_entry);
+                }
 
                 TxNumber txn = lk->WriteLockTx();
                 ReleaseCceLock(

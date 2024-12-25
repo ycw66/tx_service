@@ -4064,6 +4064,10 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
         }
 #endif
 
+        // Clear read set so that Abort won't try to release the read locks
+        // again.
+        rw_set_.ClearReadSet();
+
         Abort();
     }
     else
