@@ -12,7 +12,7 @@ using namespace std::chrono_literals;
 namespace txservice
 {
 DeadLockCheck *DeadLockCheck::inst_ = nullptr;
-uint64_t DeadLockCheck::time_interval_ = 60 * 1000000;
+uint64_t DeadLockCheck::time_interval_ = 5 * 1000000;
 CcRequestPool<AbortTransactionCc> abort_tran_pool;
 
 DeadLockCheck::DeadLockCheck(LocalCcShards &local_shards)
@@ -190,12 +190,9 @@ void DeadLockCheck::GatherLockDependancy()
     // of interval time, this time for dead lock will be neglect
     con_var_.wait_for(lk,
                       std::chrono::microseconds(time_interval_ / 2),
-                      [this]() {
-                          return node_unfinished_ == 0 ||
-                                 stop_.load(std::memory_order_acquire);
-                      });
+                      [this]() { return node_unfinished_ == 0 || stop_; });
 
-    if (stop_.load(std::memory_order_acquire))
+    if (stop_)
     {
         return;
     }
@@ -477,13 +474,10 @@ void DeadLockCheck::Run()
     while (LocalCcShards::ClockTs() < last_check_time_)
     {
         std::unique_lock<std::mutex> lk(mutex_);
-        con_var_.wait_for(lk,
-                          10s,
-                          [this]()
-                          { return stop_.load(std::memory_order_acquire); });
+        con_var_.wait_for(lk, 10s, [this]() { return stop_; });
     }
 
-    while (!stop_.load(std::memory_order_acquire))
+    while (!stop_)
     {
         CODE_FAULT_INJECTOR("dead_lock_check", {
             FaultInject::Instance().InjectFault("dead_lock_check", "remove");
@@ -492,11 +486,11 @@ void DeadLockCheck::Run()
 
         std::unique_lock<std::mutex> lk(mutex_);
         con_var_.wait_for(
-            lk, 1s, [this]() { return stop_.load(std::memory_order_acquire); });
+            lk, 1s, [this]() { return stop_ || requested_check_; });
         // If the time is in interval time since previous check, it will sleep
         // again.
         uint64_t ival = LocalCcShards::ClockTs() - last_check_time_;
-        if (stop_.load(std::memory_order_acquire) || ival < time_interval_)
+        if (stop_ || ival < time_interval_ || !requested_check_)
         {
             continue;
         }
@@ -514,13 +508,13 @@ void DeadLockCheck::Run()
         // avoid multi nodes rise the check at the same time, here add
         // local_shards_.NodeId() * MICRO_SECOND to make more waitting seconds
         // according the node id.
-        if (stop_.load(std::memory_order_acquire) ||
-            ival < time_interval_ * 2 + local_shards_.NodeId() * MICRO_SECOND &&
-                check_node_id_ != local_shards_.NodeId())
+        if (ival < time_interval_ * 2 + local_shards_.NodeId() * MICRO_SECOND &&
+            check_node_id_ != local_shards_.NodeId())
         {
             continue;
         }
 
+        requested_check_ = false;
         lk.unlock();
         GatherLockDependancy();
     }

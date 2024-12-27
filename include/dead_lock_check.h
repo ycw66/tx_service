@@ -143,7 +143,7 @@ public:
         {
             {
                 std::unique_lock<std::mutex> lk(inst_->mutex_);
-                inst_->stop_.store(true, std::memory_order_release);
+                inst_->stop_ = true;
                 inst_->con_var_.notify_one();
             }
             if (inst_->thd_.joinable())
@@ -166,6 +166,16 @@ public:
         time_interval_ = itval * MICRO_SECOND;
     }
     static void UpdateCheckNodeId(uint32_t node_id);
+
+    static void RequestCheck()
+    {
+        if (inst_)
+        {
+            std::unique_lock<std::mutex> lk(inst_->mutex_);
+            inst_->requested_check_ = true;
+            inst_->con_var_.notify_one();
+        }
+    }
 
 protected:
     void Run();
@@ -194,7 +204,7 @@ protected:
 
     std::thread thd_;
     // If process has been closed and this thread need to stop;
-    std::atomic<bool> stop_;
+    bool stop_;
 
     // mutex_ and con_var_ are used to wait local node and remote nodes to
     // finish dead lock check and return the related cc entrys and tx ids.
@@ -207,5 +217,7 @@ protected:
     uint64_t last_check_time_;
     // The node to rise dead lock check.
     uint32_t check_node_id_;
+
+    bool requested_check_;
 };
 }  // namespace txservice

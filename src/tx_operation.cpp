@@ -567,9 +567,6 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
             // FIXME(lzx): Is it more appropriate to retry if
             // remote_ack_cnt_>0 ? If the tx node fails, force the tx to
             // abort instantly.
-            // TODO: for 2PL, the tx may be blocked arbitrarily long, even
-            // after all acquire requests are acknowledged. We still need to
-            // periodically check liveness of the remote node.
             bool success = hd_result_.ForceError();
             if (success)
             {
@@ -587,6 +584,10 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
             // response.
             hd_result_.UnsetByTimeoutThread();
 
+            // Trigger deadlock check.
+            DeadLockCheck::RequestCheck();
+
+            // Check if the blocked keys are still blocked in the lock queue.
             std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
             for (size_t i = 0; i < vct_akr.size(); i++)
             {
@@ -6254,6 +6255,8 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
                 // response.
                 hd_result_.UnsetByTimeoutThread();
 
+                // Check if the blocked keys are still blocked in the lock
+                // queue.
                 txm->cc_handler_->BlockCcReqCheck(
                     txm->TxNumber(),
                     txm->TxTerm(),
@@ -6509,7 +6512,6 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 txm->PostProcess(*this);
             }
 
-            DLOG(INFO) << "ForwardResult";
             return;
         }
 
@@ -6568,7 +6570,6 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             atm_local_cnt_.fetch_add(local_cnt, std::memory_order_relaxed);
             atm_cnt_.fetch_add(local_cnt, std::memory_order_release);
         }
-        LOG(INFO) << "Send Discard";
     }
     else if (atm_cnt_.load(std::memory_order_acquire) == 0)
     {
@@ -6584,6 +6585,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             return;
         }
 
+        bool force_error = false;
         for (auto &hd_result : vct_hd_result_)
         {
             if (hd_result.IsFinished())
@@ -6591,7 +6593,13 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 continue;
             }
 
-            // TO DO
+            if (hd_result.Value().is_local_)
+            {
+                // If there's pending local request, keep waiting. We never
+                // timeout local requests.
+                break;
+            }
+
             // Here should consider 2 cases, 1. cce_addr.Term() < 0 does
             // not receiver the response from server. 2. cce_addr.Term() > 0 the
             // ccentry has been blocked by other transaction.
@@ -6617,10 +6625,46 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 // term is not set, the tx has not received any response or
                 // acknowledgement from the key's cc node group. The request is
                 // forced to be errored upon timeout.
-                // TODO(zkl): ForceError, delete ccrequest
-                //        hd_result_.ForceError();
-                //        txm->PostProcess(*this);
+                force_error = true;
+                break;
             }
+            else
+            {
+                // Received an ack message that the ApplyCc was received but
+                // was blockedd by lock. We need to check if the remote node
+                // is still alive.
+                txm->cc_handler_->BlockCcReqCheck(
+                    txm->TxNumber(),
+                    txm->TxTerm(),
+                    txm->CommandId(),
+                    cce_addr,
+                    &hd_result,
+                    ResultTemplateType::ReadKeyResult);
+            }
+        }
+
+        if (force_error)
+        {
+            CcErrorCode expected = CcErrorCode::NO_ERROR;
+            if (atm_err_code_.compare_exchange_strong(
+                    expected,
+                    CcErrorCode::FORCE_FAIL,
+                    std::memory_order_acq_rel))
+            {
+                for (auto &hd_result : vct_hd_result_)
+                {
+                    if (hd_result.IsFinished() || hd_result.Value().is_local_)
+                    {
+                        continue;
+                    }
+                    hd_result.ForceError();
+                }
+            }
+            txm->PostProcess(*this);
+        }
+        else
+        {
+            DeadLockCheck::RequestCheck();
         }
     }
 }
@@ -6720,6 +6764,8 @@ void CmdForwardAcquireWriteOp::Forward(TransactionExecution *txm)
             // Unset timeout status. So the cc_stream_reciver can handle
             // response.
             hd_result_.UnsetByTimeoutThread();
+
+            DeadLockCheck::RequestCheck();
 
             std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
             for (size_t i = 0; i < vct_akr.size(); i++)
