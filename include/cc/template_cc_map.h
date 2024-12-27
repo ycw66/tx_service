@@ -6032,6 +6032,13 @@ public:
                     }
                     else
                     {
+                        LOG(ERROR)
+                            << "ERROR! The data log all processed, but there "
+                               "are still some commands in buffered cmd list.\n"
+                            << "cce payload status: "
+                            << int(cce->PayloadStatus())
+                            << ", cce CommitTs: " << cce->CommitTs() << "\n"
+                            << buffered_cmds;
                         assert(false);
                     }
                 }

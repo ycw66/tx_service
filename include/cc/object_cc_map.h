@@ -1428,19 +1428,16 @@ public:
             {
                 BufferedTxnCmdList &buffered_cmd_list =
                     cce->BufferedCommandList();
+                auto &cmd_list = buffered_cmd_list.txn_cmd_list_;
                 int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
-                // Clear cmds with smaller version than uploaded version.
-                for (auto it = buffered_cmd_list.txn_cmd_list_.begin();
-                     it != buffered_cmd_list.txn_cmd_list_.end();)
+                // Clear cmds with smaller commit_ts than uploaded version.
+                auto it = cmd_list.begin();
+                while (it != cmd_list.end() && it->new_version_ <= commit_ts)
                 {
-                    if (it->obj_version_ >= commit_ts)
-                    {
-                        break;
-                    }
-                    it = buffered_cmd_list.txn_cmd_list_.erase(it);
+                    ++it;
                 }
+                cmd_list.erase(cmd_list.begin(), it);
 
-                buffered_cmd_list.cur_version_ = commit_ts;
                 TryCommitBufferedCommands(
                     cce->payload_, buffered_cmd_list, commit_ts);
                 int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
@@ -1543,19 +1540,17 @@ public:
             RecordStatus payload_status = cce->PayloadStatus();
             bool s_obj_exist = (payload_status == RecordStatus::Normal);
 
-            if (txn_cmd.obj_version_ >= commit_version)
-            {
-                int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
-                EmplaceAndCommitBufferedTxnCommand(cce->payload_,
-                                                   buffered_cmd_list,
-                                                   txn_cmd,
-                                                   commit_version,
-                                                   payload_status);
-                int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
-                shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
-                                                 buffered_cmd_cnt_old);
-                cce->SetCommitTsPayloadStatus(commit_version, payload_status);
-            }
+            assert(txn_cmd.new_version_ > commit_version);
+            int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
+            EmplaceAndCommitBufferedTxnCommand(cce->payload_,
+                                               buffered_cmd_list,
+                                               txn_cmd,
+                                               commit_version,
+                                               payload_status);
+            int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
+            shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
+                                             buffered_cmd_cnt_old);
+            cce->SetCommitTsPayloadStatus(commit_version, payload_status);
 
             if (s_obj_exist && payload_status != RecordStatus::Normal)
             {
@@ -2065,7 +2060,7 @@ public:
                            ignore_previous_version,
                            std::move(cmd_list));
 
-            if (txn_cmd.obj_version_ >= current_version)
+            if (txn_cmd.new_version_ > current_version)
             {
                 int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                 EmplaceAndCommitBufferedTxnCommand(cce->payload_,
@@ -2080,8 +2075,15 @@ public:
             }
             else
             {
-                DLOG(INFO)
-                    << "discard TxnCmd with a version smaller than cur_ver";
+                DLOG(INFO) << "discard replayed TxnCmd with a commit ts "
+                              "smaller than or equal to cur_ver, key: "
+                           << cce->KeyString()
+                           << ", cce->cur_ver: " << current_version
+                           << ", TxnCmd: " << txn_cmd;
+                if (txn_cmd.new_version_ == current_version)
+                {
+                    DLOG(WARNING) << "same txn log replayed again";
+                }
                 continue;
             }
             if (buffered_cmd_list.IsNull())
@@ -2252,8 +2254,6 @@ public:
                     it = buffered_cmd_list.txn_cmd_list_.erase(it);
                 }
 
-                buffered_cmd_list.cur_version_ = commit_ts;
-
                 uint64_t commit_version = commit_ts;
                 TryCommitBufferedCommands(
                     cce->payload_, buffered_cmd_list, commit_version);
@@ -2301,6 +2301,13 @@ public:
                     }
                     else
                     {
+                        LOG(ERROR)
+                            << "ERROR! The data log all processed, but there "
+                               "are still some commands in buffered cmd list.\n"
+                            << "cce payload status: "
+                            << int(cce->PayloadStatus())
+                            << ", cce CommitTs: " << cce->CommitTs() << "\n"
+                            << buffered_cmd_list;
                         assert(false);
                     }
                     int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();

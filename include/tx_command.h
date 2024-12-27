@@ -246,6 +246,21 @@ struct TxnCmd
     {
     }
 
+    friend std::ostream &operator<<(std::ostream &os, const TxnCmd &txn)
+    {
+        os << "TxnCmd object version: " << txn.obj_version_
+           << ", new version: " << txn.new_version_
+           << ", ignore previous version: " << txn.ignore_previous_version_
+           << "\n commands:";
+
+        for (const auto &cmd : txn.cmd_list_)
+        {
+            os << typeid(*cmd).name() << ", ";
+        }
+
+        return os;
+    }
+
     // the commit_ts of the object when commands of this txn applies to
     // it
     uint64_t obj_version_{};
@@ -259,11 +274,6 @@ struct TxnCmd
 
 struct BufferedTxnCmdList
 {
-    // TODO(zkl): set cur_version_ to the object's version when load object
-    //  from kv
-    // commit_ts of the last applied transaction, commands must be
-    // applied in transactions' commit order
-    uint64_t cur_version_{1};
     std::deque<TxnCmd> txn_cmd_list_;
 
     bool IsNull() const
@@ -282,32 +292,51 @@ struct BufferedTxnCmdList
         return txn_cmd_list_.size();
     }
 
+    friend std::ostream &operator<<(std::ostream &os,
+                                    const BufferedTxnCmdList &txn_cmd_list)
+    {
+        os << "BufferedTxnCmdList size: " << txn_cmd_list.Size()
+           << ", detailed TxnCmds: ";
+        for (const auto &txn_cmd : txn_cmd_list.txn_cmd_list_)
+        {
+            os << txn_cmd << " ";
+        }
+
+        return os;
+    }
+
     void EmplaceTxnCmd(TxnCmd &txn_cmd)
     {
         auto cmp = [](const TxnCmd &lhs, const TxnCmd &rhs) -> bool
-        { return lhs.obj_version_ < rhs.obj_version_; };
+        { return lhs.new_version_ < rhs.new_version_; };
 
         std::deque<TxnCmd> &txn_cmd_list = txn_cmd_list_;
 
         auto lb_it = std::lower_bound(
             txn_cmd_list.begin(), txn_cmd_list.end(), txn_cmd, cmp);
         if (lb_it != txn_cmd_list.end() &&
-            lb_it->obj_version_ == txn_cmd.obj_version_)
+            lb_it->new_version_ == txn_cmd.new_version_)
         {
-            assert(lb_it->new_version_ == txn_cmd.new_version_);
+            if (lb_it->obj_version_ != txn_cmd.obj_version_)
+            {
+                LOG(ERROR)
+                    << "Two TxnCmds with the same commit ts have different "
+                       "object old version, should never happen.\nCurrent "
+                       "TxnCmd: "
+                    << txn_cmd << "\n"
+                    << *this;
+                assert(false);
+            }
             // same txn cmd already exists, discard duplicate cmd
+            DLOG(INFO) << "TxnCmd: " << txn_cmd
+                       << " emplace into command list again, skip";
             return;
         }
 
         if (txn_cmd.ignore_previous_version_)
         {
-            // For Del command, remove the txn commands before this txn since
-            // the old object was deleted.
-            if (txn_cmd.obj_version_ > cur_version_)
-            {
-                cur_version_ = txn_cmd.obj_version_;
-            }
-
+            // For commands that overwrite objects or commit on deleted objects,
+            // remove the txn commands before this txn.
             lb_it = txn_cmd_list.erase(txn_cmd_list.begin(), lb_it);
         }
         txn_cmd_list.insert(lb_it, std::move(txn_cmd));
@@ -329,10 +358,16 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
 {
     std::deque<TxnCmd> &txn_cmd_list = buffered_cmd_list.txn_cmd_list_;
     // iterate the list and apply the commands in version order
-    for (auto it = txn_cmd_list.begin(); it != txn_cmd_list.end();)
+    auto it = txn_cmd_list.begin();
+    while (it != txn_cmd_list.end())
     {
-        if (it->ignore_previous_version_ && it->obj_version_ >= cur_ver)
+        if (it->ignore_previous_version_)
         {
+            // If a TxnCmd ignores previous version, the TxnCmds before it must
+            // have been discarded in EmplaceTxnCmd.
+            assert(it == txn_cmd_list.begin());
+
+            assert(it->obj_version_ >= cur_ver || it->obj_version_ == 1);
             cur_ver = it->obj_version_;
         }
 
@@ -346,14 +381,13 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
         {
             auto &first_cmd = it->cmd_list_.front();
 
-            // If a commnd was applied on deleted record, we set `has_overwrite`
-            // flag to true in the log. If the first command doesn't have an
-            // overwrite property, we need to create an empty object.
+            // If a command was applied on deleted record, we set
+            // `has_overwrite` flag to true in the log. If the first command
+            // doesn't have an overwrite property, we need to create an empty
+            // object.
             if (it->ignore_previous_version_ && !first_cmd->IsOverwrite())
             {
-                std::unique_ptr<TxRecord> obj_ptr =
-                    first_cmd->CreateObject(nullptr);
-                payload.reset(static_cast<T *>(obj_ptr.release()));
+                payload.reset(nullptr);
             }
         }
 
@@ -374,10 +408,9 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
             }
         }
         cur_ver = it->new_version_;
-        DLOG(INFO) << "commit buffered txn cmds, obj ver: " << it->obj_version_
-                   << ", new ver: " << it->new_version_;
-        it = txn_cmd_list.erase(it);
+        ++it;
     }
+    txn_cmd_list.erase(txn_cmd_list.begin(), it);
 
     if (txn_cmd_list.empty())
     {
@@ -387,7 +420,8 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
     else
     {
         DLOG(INFO) << "replay not finished, current ver: " << cur_ver
-                   << ", msg expect ver: " << txn_cmd_list.front().obj_version_;
+                   << ", msg expect ver: " << txn_cmd_list.front().obj_version_
+                   << ", msg commit ts: " << txn_cmd_list.front().new_version_;
     }
 }
 
@@ -407,14 +441,11 @@ void EmplaceAndCommitBufferedTxnCommand(std::unique_ptr<T> &payload,
                                         RecordStatus &status)
 {
     bool waiting_for_fetch = status == RecordStatus::Unknown;
-    if (buffered_cmd_list.IsNull())
-    {
-        buffered_cmd_list.cur_version_ = cur_ver;
-    }
+    bool try_commit = txn_cmd.ignore_previous_version_ || !waiting_for_fetch;
 
     buffered_cmd_list.EmplaceTxnCmd(txn_cmd);
 
-    if (!waiting_for_fetch || txn_cmd.ignore_previous_version_)
+    if (try_commit)
     {
         TryCommitBufferedCommands(payload, buffered_cmd_list, cur_ver);
         status =

@@ -637,6 +637,7 @@ public:
         return mem_usage;
     }
 
+    // For debug log use only.
     std::string KeyString() const
     {
         if (GetCcPage() == nullptr)

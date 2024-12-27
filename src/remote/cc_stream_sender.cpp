@@ -823,7 +823,8 @@ void CcStreamSender::ConnectStreams()
             }
             else
             {
-                LOG(ERROR) << "Failed to connect the cc stream to node " << nid;
+                LOG_EVERY_SECOND(ERROR)
+                    << "Failed to connect the cc stream to node " << nid;
             }
         }
 
@@ -863,7 +864,7 @@ void CcStreamSender::ConnectStreams()
             }
             else
             {
-                LOG(ERROR)
+                LOG_EVERY_SECOND(ERROR)
                     << "Failed to connect the long msg cc stream to node "
                     << nid;
             }
@@ -975,10 +976,10 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     stub.Connect(&cntl, &request, &response, nullptr);
     if (cntl.Failed())
     {
-        LOG(ERROR) << "Failed to connect to node " << node_id
-                   << ", ip: " << ip_addr
-                   << ", connect error: " << cntl.ErrorCode() << ", "
-                   << cntl.ErrorText();
+        LOG_EVERY_SECOND(ERROR)
+            << "Failed to connect to node " << node_id << ", ip: " << ip_addr
+            << ", connect error: " << cntl.ErrorCode() << ", "
+            << cntl.ErrorText();
         return cntl.ErrorCode();
     }
     stream_version.store(version, std::memory_order_release);
@@ -1045,10 +1046,11 @@ int CcStreamSender::ConnectLongMsgStream(uint32_t node_id, int64_t version)
         &long_msg_cntl, &long_msg_request, &long_msg_response, nullptr);
     if (long_msg_cntl.Failed())
     {
-        LOG(ERROR) << "Failed the connect rpc to node " << node_id
-                   << ", ip: " << ip_addr
-                   << ", connect error: " << long_msg_cntl.ErrorCode() << ", "
-                   << long_msg_cntl.ErrorText();
+        LOG_EVERY_SECOND(ERROR)
+            << "Failed the connect rpc to node " << node_id
+            << ", ip: " << ip_addr
+            << ", connect error: " << long_msg_cntl.ErrorCode() << ", "
+            << long_msg_cntl.ErrorText();
         return long_msg_cntl.ErrorCode();
     }
     long_msg_stream_version.store(version, std::memory_order_release);
