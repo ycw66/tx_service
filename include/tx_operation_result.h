@@ -32,6 +32,15 @@ enum class ResultTemplateType
 
 struct AcquireKeyResult
 {
+    void Reset()
+    {
+        last_vali_ts_ = 0;
+        commit_ts_ = 0;
+        cce_addr_ = {};
+        remote_ack_cnt_ = nullptr;
+        remote_hd_result_is_set_ = nullptr;
+    }
+
     uint64_t last_vali_ts_{0};
     uint64_t commit_ts_{0};
     CcEntryAddr cce_addr_;
@@ -50,6 +59,16 @@ struct AcquireKeyResult
 
 struct AcquireAllResult
 {
+    void Reset()
+    {
+        last_vali_ts_ = 1;
+        commit_ts_ = 1;
+        node_term_ = -1;
+        local_cce_addr_ = {};
+        blocked_remote_cce_addr_.clear();
+        remote_ack_cnt_ = nullptr;
+    }
+
     uint64_t last_vali_ts_{1};
     uint64_t commit_ts_{1};
     int64_t node_term_{-1};

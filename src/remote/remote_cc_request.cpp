@@ -78,7 +78,7 @@ void txservice::remote::RemoteAcquire::Reset(
 
     cc_res_.Reset();
     cc_res_.Value().resize(1);
-    cc_res_.Value()[0].cce_addr_.SetCce(0, -1, 0);
+    cc_res_.Value()[0].Reset();
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
@@ -184,6 +184,7 @@ void txservice::remote::RemoteAcquireAll::Reset(
 
     core_cnt_ = Sharder::Instance().GetLocalCcShardsCount();
     cc_res_.Reset();
+    cc_res_.Value().Reset();
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
@@ -304,6 +305,7 @@ void txservice::remote::RemotePostRead::Reset(
     assert(input_msg->has_validate_req());
 
     cc_res_.Reset();
+    cc_res_.Value().Clear();
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
@@ -537,6 +539,7 @@ void txservice::remote::RemotePostWrite::Reset(
            input_msg->has_forward_post_commit_req());
 
     cc_res_.Reset();
+    cc_res_.Value().Clear();
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
@@ -639,6 +642,7 @@ void txservice::remote::RemotePostWriteAll::Reset(
     assert(input_msg->has_post_write_all_req());
 
     cc_res_.Reset();
+    cc_res_.Value().Clear();
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
@@ -1953,6 +1957,7 @@ void txservice::remote::RemoteUploadTxCommandsCc::Reset(
     assert(input_msg->has_upload_cmds_req());
 
     cc_res_.Reset();
+    cc_res_.Value().Clear();
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();

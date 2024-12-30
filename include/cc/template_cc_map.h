@@ -1381,6 +1381,10 @@ public:
             if (conflicting_txs.Size() > 0)
             {
                 // Does not perform tx negotiations so far.
+                DLOG(INFO)
+                    << "Set CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS "
+                       "to PostRead sent from txn: "
+                    << req.Txn();
                 hd_res->SetError(
                     CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS);
             }
