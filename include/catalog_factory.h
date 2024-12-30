@@ -46,6 +46,41 @@ struct KVCatalogInfo
 
 class Statistics;
 
+struct WriteEntry
+{
+    WriteEntry() = delete;
+    WriteEntry(TxKey key, TxRecord::Uptr rec, uint64_t commit_ts)
+        : key_(std::move(key)), rec_(std::move(rec)), commit_ts_(commit_ts)
+    {
+    }
+
+    WriteEntry(const WriteEntry &rhs) = delete;
+    WriteEntry(WriteEntry &&rhs)
+    {
+        key_ = std::move(rhs.key_);
+        rec_ = std::move(rhs.rec_);
+        commit_ts_ = rhs.commit_ts_;
+    }
+
+    WriteEntry &operator=(WriteEntry &&rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        key_ = std::move(rhs.key_);
+        rec_ = std::move(rhs.rec_);
+        commit_ts_ = rhs.commit_ts_;
+
+        return *this;
+    }
+
+    TxKey key_;
+    TxRecord::Uptr rec_;
+    uint64_t commit_ts_;
+};
+
 struct SkEncoder
 {
     using uptr = std::unique_ptr<SkEncoder>;
@@ -57,8 +92,10 @@ struct SkEncoder
      * @param sk_idx Secondary key index of this table excluding the primary
      * key.
      */
-    virtual std::pair<TxKey, TxRecord::Uptr> GeneratePackedSk(
-        const TxKey *pk, const TxRecord *record) const = 0;
+    virtual bool AppendPackedSk(const TxKey *pk,
+                                const TxRecord *record,
+                                uint64_t version_ts,
+                                std::vector<WriteEntry> &dest_vec) const = 0;
     virtual void Reset()
     {
     }

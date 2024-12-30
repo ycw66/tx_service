@@ -162,39 +162,4 @@ struct CmdSetEntry
     std::unique_ptr<CmdForwardEntry> forward_entry_{nullptr};
 };
 
-struct WriteEntry
-{
-    WriteEntry() = delete;
-    WriteEntry(TxKey key, TxRecord::Uptr rec, uint64_t commit_ts)
-        : key_(std::move(key)), rec_(std::move(rec)), commit_ts_(commit_ts)
-    {
-    }
-
-    WriteEntry(const WriteEntry &rhs) = delete;
-    WriteEntry(WriteEntry &&rhs)
-    {
-        key_ = std::move(rhs.key_);
-        rec_ = std::move(rhs.rec_);
-        commit_ts_ = rhs.commit_ts_;
-    }
-
-    WriteEntry &operator=(WriteEntry &&rhs)
-    {
-        if (this == &rhs)
-        {
-            return *this;
-        }
-
-        key_ = std::move(rhs.key_);
-        rec_ = std::move(rhs.rec_);
-        commit_ts_ = rhs.commit_ts_;
-
-        return *this;
-    }
-
-    TxKey key_;
-    TxRecord::Uptr rec_;
-    uint64_t commit_ts_;
-};
-
 }  // namespace txservice

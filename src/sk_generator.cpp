@@ -423,10 +423,8 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                     assert(target_key.KeyPtr() != nullptr &&
                            target_rec != nullptr);
 
-                    auto packed_sk =
-                        sk_encoder->GeneratePackedSk(&target_key, target_rec);
-
-                    if (packed_sk.first.KeyPtr() == nullptr)
+                    if (!sk_encoder->AppendPackedSk(
+                            &target_key, target_rec, version_ts, index_set))
                     {
                         LOG(ERROR)
                             << "ScanAndEncodeIndex: Failed to encode "
@@ -437,9 +435,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                         return;
                     }
 
-                    index_set.emplace_back(std::move(packed_sk.first),
-                                           std::move(packed_sk.second),
-                                           version_ts);
                 } /* End of each key */
 
                 if (tbl_name_it == new_indexes_name_->cbegin())
