@@ -189,6 +189,18 @@ public:
     {
         return KeyType::Normal;
     }
+
+    void SetPackedKey(const char *data, size_t size)
+    {
+        assert(false);
+    }
+
+    const char *Data() const
+    {
+        assert(false);
+        return nullptr;
+    }
+
     size_t Size() const
     {
         return sizeof(bucket_id_);

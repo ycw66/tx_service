@@ -75,6 +75,17 @@ public:
     const TableName &Name() const;
     TableName &Name();
 
+    void SetPackedKey(const char *data, size_t size)
+    {
+        assert(false);
+    }
+
+    const char *Data() const
+    {
+        assert(false);
+        return nullptr;
+    }
+
     size_t Size() const
     {
         return table_name_.StringView().size();

@@ -95,6 +95,18 @@ public:
                   const T *key = static_cast<const T *>(this_obj);
                   return key->MemUsage();
               }),
+          set_packed_key_func_(
+              [](void *this_obj, const char *data, size_t size)
+              {
+                  T *key = static_cast<T *>(this_obj);
+                  return key->SetPackedKey(data, size);
+              }),
+          data_func_(
+              [](const void *this_obj)
+              {
+                  const T *key = static_cast<const T *>(this_obj);
+                  return key->Data();
+              }),
           size_func_(
               [](const void *this_obj)
               {
@@ -173,6 +185,16 @@ public:
         return mem_usage_func_(this_obj);
     }
 
+    void SetPackedKey(void *this_obj, const char *data, size_t size) const
+    {
+        set_packed_key_func_(this_obj, data, size);
+    }
+
+    const char *Data(const void *this_obj) const
+    {
+        return data_func_(this_obj);
+    }
+
     size_t Size(const void *this_obj) const
     {
         return size_func_(this_obj);
@@ -227,6 +249,14 @@ protected:
 
     typedef size_t (*MemUsageFunc)(const void *this_obj);
     MemUsageFunc const mem_usage_func_;
+
+    typedef void (*SetPackedKeyFunc)(void *this_obj,
+                                     const char *data,
+                                     size_t size);
+    SetPackedKeyFunc const set_packed_key_func_;
+
+    typedef const char *(*DataFunc)(const void *this_obj);
+    DataFunc const data_func_;
 
     typedef size_t (*SizeFunc)(const void *this_obj);
     SizeFunc const size_func_;
@@ -421,6 +451,17 @@ public:
     size_t MemUsage() const
     {
         return interface_->MemUsage(GetConstPtr());
+    }
+
+    void SetPackedKey(const char *data, size_t size)
+    {
+        interface_->SetPackedKey(GetPtr(), data, size);
+    }
+
+    const char *Data() const
+    {
+        const void *ptr = GetConstPtr();
+        return ptr == nullptr ? nullptr : interface_->Data(GetConstPtr());
     }
 
     size_t Size() const
@@ -722,6 +763,11 @@ public:
         field_cnt_ = rhs.field_cnt_;
     }
 
+    void SetPackedKey(const char *data, size_t len)
+    {
+        assert(false);
+    }
+
     const std::tuple<Types...> &Tuple() const
     {
         return fields_;
@@ -745,6 +791,11 @@ public:
     KeyType Type() const
     {
         return KeyType::Normal;
+    }
+
+    const char *Data() const
+    {
+        return nullptr;
     }
 
     size_t Size() const
@@ -928,6 +979,15 @@ struct VoidKey
         return 0;
     }
 
+    void SetPackedKey(const char *data, size_t size)
+    {
+    }
+
+    const char *Data() const
+    {
+        return nullptr;
+    }
+
     size_t Size() const
     {
         return 0;
@@ -988,6 +1048,74 @@ struct VoidKey
         static const TxKeyInterface tx_key_impl{*VoidKey::NegativeInfinity()};
         return &tx_key_impl;
     }
+};
+
+class TxKeyFactory
+{
+    using CreateTxKeyFunc = TxKey (*)(const char *, size_t);
+
+public:
+    static void RegisterNegInfTxKey(const TxKey *neg_inf_tx_key)
+    {
+        assert(Instance().neg_inf_tx_key_ == nullptr);
+        Instance().neg_inf_tx_key_ = neg_inf_tx_key;
+    }
+
+    static const TxKey *NegInfTxKey()
+    {
+        assert(Instance().neg_inf_tx_key_ != nullptr);
+        return Instance().neg_inf_tx_key_;
+    }
+
+    static void RegisterPosInfTxKey(const TxKey *pos_inf_tx_key)
+    {
+        assert(Instance().pos_inf_tx_key_ == nullptr);
+        Instance().pos_inf_tx_key_ = pos_inf_tx_key;
+    }
+
+    static const TxKey *PosInfTxKey()
+    {
+        assert(Instance().pos_inf_tx_key_ != nullptr);
+        return Instance().pos_inf_tx_key_;
+    }
+
+    static void RegisterPackedNegativeInfinity(
+        const TxKey *packed_negative_infinity_key)
+    {
+        assert(Instance().packed_negative_infinity_key_ == nullptr);
+        Instance().packed_negative_infinity_key_ = packed_negative_infinity_key;
+    }
+
+    static const TxKey *PackedNegativeInfinity()
+    {
+        assert(Instance().packed_negative_infinity_key_ != nullptr);
+        return Instance().packed_negative_infinity_key_;
+    }
+
+    static void RegisterCreateTxKeyFunc(CreateTxKeyFunc create_tx_key_func)
+    {
+        assert(Instance().create_tx_key_func_ == nullptr);
+        Instance().create_tx_key_func_ = create_tx_key_func;
+    }
+
+    static TxKey CreateTxKey(const char *data, size_t size)
+    {
+        assert(Instance().create_tx_key_func_ != nullptr);
+        return Instance().create_tx_key_func_(data, size);
+    }
+
+private:
+    static TxKeyFactory &Instance()
+    {
+        static TxKeyFactory tx_key_factory_;
+        return tx_key_factory_;
+    }
+
+    CreateTxKeyFunc create_tx_key_func_{nullptr};
+
+    const TxKey *neg_inf_tx_key_{nullptr};
+    const TxKey *pos_inf_tx_key_{nullptr};
+    const TxKey *packed_negative_infinity_key_{nullptr};
 };
 
 }  // namespace txservice

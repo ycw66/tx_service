@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <memory>  //unique_ptr
 #include <unordered_map>
 #include <utility>  //pair
@@ -94,6 +95,15 @@ public:
     const std::string &SchemaImage() const override
     {
         return schema_image_;
+    }
+
+    const std::unordered_map<
+        uint,
+        std::pair<txservice::TableName, txservice::SecondaryKeySchema>>
+        *GetIndexes() const override
+    {
+        assert(false);
+        return nullptr;
     }
 
     void BindStatistics(

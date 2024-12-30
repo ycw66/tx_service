@@ -110,6 +110,10 @@ struct TableSchema
     virtual const txservice::KeySchema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
     virtual const std::string &SchemaImage() const = 0;
+    virtual const std::unordered_map<
+        uint,
+        std::pair<txservice::TableName, txservice::SecondaryKeySchema>>
+        *GetIndexes() const = 0;
     virtual KVCatalogInfo *GetKVCatalogInfo() const = 0;
     virtual void SetKVCatalogInfo(const std::string &kv_info_str) = 0;
     virtual uint64_t Version() const = 0;
