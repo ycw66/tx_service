@@ -625,6 +625,16 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         return true;
     }
 
+#ifdef ON_KEY_OBJECT
+    // Standby transaction only execute local request.
+    if (IsStandbyTx(tx_term) && is_for_write)
+    {
+        // redis smart client needs to resend this command to primary node
+        hres.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
+        return true;
+    }
+#endif
+
     ReadCc *read_req = read_pool.NextRequest();
     read_req->Reset(&table_name,
                     &key,

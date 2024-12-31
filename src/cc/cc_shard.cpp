@@ -2405,114 +2405,23 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
     seq_grp_info.last_consistent_standby_sequence_id_ =
         std::max(seq_id, seq_grp_info.last_consistent_standby_sequence_id_);
 
+    // Update last consistent ts
+    while (!seq_grp_info.pending_standby_consistent_ts_.empty() &&
+           seq_grp_info.pending_standby_consistent_ts_.front().first <=
+               seq_grp_info.last_consistent_standby_sequence_id_)
+    {
+        DLOG(INFO)
+            << "Update last consistent ts for seq grp " << sequence_grp_id
+            << ", old ts " << seq_grp_info.last_standby_consistent_ts_
+            << ", new ts "
+            << seq_grp_info.pending_standby_consistent_ts_.front().second;
+        seq_grp_info.last_standby_consistent_ts_ = std::max(
+            seq_grp_info.last_standby_consistent_ts_,
+            seq_grp_info.pending_standby_consistent_ts_.front().second);
+        seq_grp_info.pending_standby_consistent_ts_.pop();
+    }
+
     return true;
-    // if (seq_id <= seq_grp_info.last_consistent_standby_sequence_id_)
-    // {
-    //     assert(seq_grp_info.missing_standby_seqeunce_ids_.find(seq_id) ==
-    //            seq_grp_info.missing_standby_seqeunce_ids_.end());
-    //     // discard msg since we've already applied it
-    //     return false;
-    // }
-
-    // assert(seq_grp_info.last_consistent_standby_sequence_id_ <=
-    //        seq_grp_info.next_expecting_standby_sequence_id_ - 1);
-    // if (seq_id - seq_grp_info.last_consistent_standby_sequence_id_ >
-    //     txservice_max_standby_lag)
-    // {
-    //     // standby has fallen behind too much. Resubscribe to primary node.
-    //     LOG(WARNING) << "Sequence group " << sequence_grp_id
-    //                  << " has fallen behind primary too much. Trying to "
-    //                     "resubscribe. Last consistent seq id is "
-    //                  << seq_grp_info.last_consistent_standby_sequence_id_
-    //                  << ", latest seq id is " << seq_id;
-    //     int64_t cur_prim_term = Sharder::Instance().PrimaryNodeTerm();
-    //     if (cur_prim_term > 0)
-    //     {
-    //         NodeGroupId native_ng = Sharder::Instance().NativeNodeGroup();
-    //         Sharder::Instance().OnStartFollowing(
-    //             native_ng,
-    //             cur_prim_term,
-    //             Sharder::Instance().LeaderNodeId(native_ng),
-    //             true);
-    //     }
-    //     // remove this seq grp from subscribed seq grps
-    //     seq_grp_info.Unsubscribe();
-    //     return false;
-    // }
-
-    // if (seq_grp_info.next_expecting_standby_sequence_id_ > seq_id)
-    // {
-    //     // should be one of the previous missing msgs
-    //     if (seq_grp_info.missing_standby_seqeunce_ids_.find(seq_id) !=
-    //         seq_grp_info.missing_standby_seqeunce_ids_.end())
-    //     {
-    //         seq_grp_info.missing_standby_seqeunce_ids_.erase(seq_id);
-    //         // update last consistent standby seq id
-    //         // there must be missed msgs
-    //         while (seq_grp_info.last_consistent_standby_sequence_id_ <
-    //                    seq_grp_info.next_expecting_standby_sequence_id_ - 1
-    //                    &&
-    //                seq_grp_info.missing_standby_seqeunce_ids_.find(
-    //                    seq_grp_info.last_consistent_standby_sequence_id_ + 1)
-    //                    == seq_grp_info.missing_standby_seqeunce_ids_.end())
-    //         {
-    //             if (seq_grp_info.missing_standby_seqeunce_ids_.empty())
-    //             {
-    //                 // all missing msgs were received, fill the gap between
-    //                 // last consistent SN and next SN.
-    //                 seq_grp_info.last_consistent_standby_sequence_id_ =
-    //                     seq_grp_info.next_expecting_standby_sequence_id_ - 1;
-    //                 break;
-    //             }
-    //             // If we cannot find the seq id in missing id set, bump up
-    //             // the last consistent SN.
-    //             seq_grp_info.last_consistent_standby_sequence_id_++;
-    //         }
-    //     }
-    //     else
-    //     {
-    //         // duplicate msg
-    //         return false;
-    //     }
-    // }
-    // else if (seq_grp_info.next_expecting_standby_sequence_id_ == seq_id)
-    // {
-    //     if (seq_grp_info.last_consistent_standby_sequence_id_ == seq_id - 1)
-    //     {
-    //         seq_grp_info.last_consistent_standby_sequence_id_++;
-    //     }
-    //     seq_grp_info.next_expecting_standby_sequence_id_++;
-    // }
-    // else
-    // {
-    //     // There are missing msgs before this msg. Add them to missing seq
-    //     id. for (; seq_grp_info.next_expecting_standby_sequence_id_ < seq_id;
-    //          seq_grp_info.next_expecting_standby_sequence_id_++)
-    //     {
-    //         seq_grp_info.missing_standby_seqeunce_ids_.insert(
-    //             seq_grp_info.next_expecting_standby_sequence_id_);
-    //     }
-    //     seq_grp_info.next_expecting_standby_sequence_id_ = seq_id + 1;
-    // }
-
-    // while (!seq_grp_info.pending_standby_consistent_ts_.empty())
-    // {
-    //     // Try to bump up last matched ckpt ts.
-    //     if (seq_grp_info.pending_standby_consistent_ts_.front().first <=
-    //         seq_grp_info.last_consistent_standby_sequence_id_)
-    //     {
-    //         seq_grp_info.last_standby_consistent_ts_ = std::max(
-    //             seq_grp_info.pending_standby_consistent_ts_.front().second,
-    //             seq_grp_info.last_standby_consistent_ts_);
-    //         seq_grp_info.pending_standby_consistent_ts_.pop();
-    //     }
-    //     else
-    //     {
-    //         break;
-    //     }
-    // }
-
-    // return true;
 }
 
 void CcShard::ResetStandbySequence()
@@ -2553,41 +2462,22 @@ void CcShard::UpdateStandbyConsistentTs(uint32_t seq_grp,
         return;
     }
 
-    // TODO(liunyl): comment out for now since we do not track last consistent
-    // seq id anymore. maybe we can use the largest received seq id instead
-
     // data before the follower subscribed to primary is always
     // consistent.
     if (seq_grp_info.last_consistent_standby_sequence_id_ >= seq_id)
     {
         // Update ts if seq id is already consistent
+        DLOG(INFO) << "Update last consistent ts for seq grp " << seq_grp
+                   << ", old ts " << seq_grp_info.last_standby_consistent_ts_
+                   << ", new ts " << consistent_ts;
         seq_grp_info.last_standby_consistent_ts_ =
             std::max(seq_grp_info.last_standby_consistent_ts_, consistent_ts);
     }
     else
     {
-        // if (seq_id - seq_grp_info.last_consistent_standby_sequence_id_ >
-        //     txservice_max_standby_lag)
-        // {
-        //     // standby has fallen behind too much. Resubscribe to primary
-        //     node. LOG(WARNING) << "Sequence group " << seq_grp
-        //                  << " has fallen behind primary too much. Trying to "
-        //                     "resubscribe.";
-        //     int64_t cur_prim_term = Sharder::Instance().PrimaryNodeTerm();
-        //     if (cur_prim_term > 0)
-        //     {
-        //         NodeGroupId native_ng =
-        //         Sharder::Instance().NativeNodeGroup();
-        //         Sharder::Instance().OnStartFollowing(
-        //             native_ng,
-        //             cur_prim_term,
-        //             Sharder::Instance().LeaderNodeId(native_ng),
-        //             true);
-        //     }
-        //     // remove this seq grp from subscribed seq grps
-        //     seq_grp_info.Unsubscribe();
-        //     return;
-        // }
+        DLOG(INFO) << "Have not received the consistent sequence id " << seq_id
+                   << " for seq grp " << seq_grp << ", current seq id "
+                   << seq_grp_info.last_consistent_standby_sequence_id_;
         seq_grp_info.pending_standby_consistent_ts_.emplace(seq_id,
                                                             consistent_ts);
     }
