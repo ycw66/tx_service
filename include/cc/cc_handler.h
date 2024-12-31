@@ -45,6 +45,7 @@ public:
      */
     virtual void AcquireWrite(
         const TableName &table_name,
+        const uint64_t schema_version,
         const TxKey &key,
         uint32_t key_shard_code,
         TxNumber tx_number,
@@ -204,6 +205,7 @@ public:
      * @param proto Concurrency control (cc) protocol
      */
     virtual void Read(const TableName &table_name,
+                      const uint64_t schema_version,
                       const TxKey &key,
                       uint32_t key_shard_code,
                       TxRecord &rec,
@@ -293,6 +295,7 @@ public:
 
     virtual void ScanOpen(
         const TableName &table_name,
+        const uint64_t schema_version,
         ScanIndexType index_type,
         const TxKey &start_key,
         bool inclusive,
@@ -484,6 +487,7 @@ public:
      * but also commit it on the object
      */
     virtual void ObjectCommand(const TableName &table_name,
+                               const uint64_t schema_version,
                                const TxKey &key,
                                uint32_t key_shard_code,
                                TxCommand &obj_cmd,

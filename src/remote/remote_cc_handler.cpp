@@ -17,6 +17,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     uint32_t src_id,
     NodeGroupId dest_ng_id,
     const TableName &table_name,
+    uint64_t schema_version,
     const TxKey &key,
     uint32_t key_shard_code,
     TxNumber txn,
@@ -58,6 +59,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
 
     acq->set_vec_idx(hd_res_idx);
     acq->set_ts(ts);
+    acq->set_schema_version(schema_version);
     acq->set_insert(is_insert);
     acq->set_key_shard_code(key_shard_code);
     acq->set_protocol(ToRemoteType::ConvertProtocol(proto));
@@ -329,6 +331,7 @@ void txservice::remote::RemoteCcHandler::Read(
     uint32_t src_node_id,
     NodeGroupId dest_ng_id,
     const TableName &table_name,
+    const uint64_t schema_version,
     const TxKey &key,
     uint32_t key_shard_code,
     const TxRecord &record,
@@ -389,6 +392,7 @@ void txservice::remote::RemoteCcHandler::Read(
     }
 
     read->set_ts(ts);
+    read->set_schema_version(schema_version);
 
     stream_sender_.SendMessageToNg(dest_ng_id, send_msg, &hres);
 }
@@ -452,6 +456,7 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
 void txservice::remote::RemoteCcHandler::ScanOpen(
     uint32_t src_node_id,
     const TableName &table_name,
+    const uint64_t schema_version,
     ScanIndexType index_type,
     uint32_t node_group_id,
     const TxKey &start_key,
@@ -515,6 +520,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
 #ifdef ON_KEY_OBJECT
     scan_open->set_obj_type(obj_type);
     scan_open->set_scan_pattern(std::string(scan_pattern));
+    scan_open->set_schema_version(schema_version);
 #endif
 
     stream_sender_.SendMessageToNg(node_group_id, send_msg, &hd_res);
@@ -960,6 +966,7 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
     uint32_t src_node_id,
     NodeGroupId dest_ng_id,
     const TableName &table_name,
+    uint64_t schema_version,
     const TxKey &key,
     uint32_t key_shard_code,
     TxCommand &obj_cmd,
@@ -993,6 +1000,7 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
     apply_req->set_protocol(ToRemoteType::ConvertProtocol(proto));
     apply_req->set_tx_ts(tx_ts);
     apply_req->set_apply_and_commit(commit);
+    apply_req->set_schema_version(schema_version);
 
     apply_req->clear_cmd();
     std::string *cmd_str = apply_req->mutable_cmd();

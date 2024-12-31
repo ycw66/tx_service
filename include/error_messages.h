@@ -135,6 +135,7 @@ enum struct CcErrorCode : uint8_t
     // TemplatedCcRequest Common
     REQUESTED_TABLE_NOT_EXISTS,
     REQUESTED_INDEX_TABLE_NOT_EXISTS,
+    REQUESTED_TABLE_SCHEMA_MISMATCH,
 
     // TransactionExecution::FillDataLogRequest
     NG_TERM_CHANGED,
@@ -235,6 +236,8 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::REQUESTED_TABLE_NOT_EXISTS, "REQUESTED_TABLE_NOT_EXISTS"},
     {CcErrorCode::REQUESTED_INDEX_TABLE_NOT_EXISTS,
      "REQUESTED_INDEX_TABLE_NOT_EXISTS"},
+    {CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH,
+     "REQUESTED_TABLE_SCHEMA_MISMATCH"},
     {CcErrorCode::CRATE_CCM_SCANNER_FAILED, "CRATE_CCM_SCANNER_FAILED"},
 
     {CcErrorCode::DUPLICATE_INSERT_ERR, "DUPLICATE_INSERT_ERR"},

@@ -181,6 +181,7 @@ void SkGenerator::ProcessTask()
         {
             range_start_key = cc_shards->GetCatalogFactory()->NegativeInfKey();
             read_range_req.Set(&range_table_name,
+                               0,
                                &range_start_key,
                                &range_rec,
                                false,
@@ -190,6 +191,7 @@ void SkGenerator::ProcessTask()
         else
         {
             read_range_req.Set(&range_table_name,
+                               0,
                                start_key_str_,
                                &range_rec,
                                false,
@@ -200,7 +202,7 @@ void SkGenerator::ProcessTask()
     else
     {
         read_range_req.Set(
-            &range_table_name, start_key_, &range_rec, false, false, true);
+            &range_table_name, 0, start_key_, &range_rec, false, false, true);
     }
     read_range_req.Reset();
     acq_range_lock_txm->Execute(&read_range_req);
@@ -910,8 +912,13 @@ CcErrorCode UploadIndexContext::AcquireRangeReadLocks(
             write_key = &write_entry_it->key_;
 
             RangeRecord range_rec;
-            ReadTxRequest read_range_req(
-                &range_table_name, write_key, &range_rec, false, false, true);
+            ReadTxRequest read_range_req(&range_table_name,
+                                         0,
+                                         write_key,
+                                         &range_rec,
+                                         false,
+                                         false,
+                                         true);
             acq_lock_txm->Execute(&read_range_req);
             read_range_req.Wait();
             TxErrorCode tx_res = read_range_req.ErrorCode();

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <tuple>
 
 #include "catalog_cc_map.h"
 #include "cc_map.h"
@@ -31,6 +32,7 @@ txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
 
 void txservice::LocalCcHandler::AcquireWrite(
     const TableName &table_name,
+    const uint64_t schema_version,
     const TxKey &key,
     uint32_t key_shard_code,
     TxNumber tx_number,
@@ -61,6 +63,7 @@ void txservice::LocalCcHandler::AcquireWrite(
             true, std::memory_order_relaxed);
         AcquireCc *req = acquire_pool.NextRequest();
         req->Reset(&table_name,
+                   schema_version,
                    &key,
                    key_shard_code,
                    tx_number,
@@ -84,6 +87,7 @@ void txservice::LocalCcHandler::AcquireWrite(
         remote_hd_.AcquireWrite(cc_shards_.node_id_,
                                 ng_id,
                                 table_name,
+                                schema_version,
                                 key,
                                 key_shard_code,
                                 tx_number,
@@ -420,6 +424,7 @@ void txservice::LocalCcHandler::PostRead(
 }
 
 void txservice::LocalCcHandler::Read(const TableName &table_name,
+                                     const uint64_t schema_version,
                                      const TxKey &key,
                                      uint32_t key_shard_code,
                                      TxRecord &record,
@@ -452,6 +457,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
 
         ReadCc *req = read_pool.NextRequest();
         req->Reset(&table_name,
+                   schema_version,
                    &key,
                    key_shard_code,
                    &record,
@@ -478,6 +484,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
         remote_hd_.Read(cc_shards_.node_id_,
                         cc_ng_id,
                         table_name,
+                        schema_version,
                         key,
                         key_shard_code,
                         record,
@@ -534,6 +541,7 @@ void txservice::LocalCcHandler::ReadOutside(
         // isolation level is set to read committed, so that the request leaves
         // no read intention or lock on the cc entry.
         req->Reset(nullptr,
+                   0,
                    nullptr,
                    ng_id << 10,
                    &rec,
@@ -637,6 +645,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
 
     ReadCc *read_req = read_pool.NextRequest();
     read_req->Reset(&table_name,
+                    0,
                     &key,
                     shard_code,
                     &record,
@@ -684,7 +693,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     return finished;
 }
 
-std::pair<txservice::CcErrorCode, txservice::NonBlockingLock *>
+std::tuple<txservice::CcErrorCode, txservice::NonBlockingLock *, uint64_t>
 txservice::LocalCcHandler::ReadCatalog(const TableName &table_name,
                                        uint32_t ng_id,
                                        int64_t ng_term,
@@ -767,6 +776,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
 
     ReadCc *read_req = read_pool.NextRequest();
     read_req->Reset(&table_name,
+                    0,
                     key_str,
                     shard_code,
                     &record,
@@ -815,6 +825,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
 
 void txservice::LocalCcHandler::ScanOpen(
     const TableName &table_name,
+    const uint64_t schema_version,
     ScanIndexType index_type,
     const TxKey &start_key,
     bool inclusive,
@@ -1024,6 +1035,7 @@ void txservice::LocalCcHandler::ScanOpen(
                 ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
                 ScanOpenBatchCc *req = scan_open_pool.NextRequest();
                 req->Reset(&table_name,
+                           schema_version,
                            index_type,
                            ng_id,
                            &start_key,
@@ -1067,6 +1079,7 @@ void txservice::LocalCcHandler::ScanOpen(
 #endif
             remote_hd_.ScanOpen(cc_shards_.node_id_,
                                 table_name,
+                                schema_version,
                                 index_type,
                                 ng_id,
                                 start_key,
@@ -1192,6 +1205,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 
     ScanOpenBatchCc *scan_open_cc_req = scan_open_pool.NextRequest();
     scan_open_cc_req->Reset(&table_name,
+                            0,
                             index_type,
                             cc_ng_id,
                             &start_key,
@@ -1768,6 +1782,7 @@ void txservice::LocalCcHandler::BroadcastStatistics(
 
 void txservice::LocalCcHandler::ObjectCommand(
     const txservice::TableName &table_name,
+    const uint64_t schema_version,
     const txservice::TxKey &key,
     uint32_t key_shard_code,
     txservice::TxCommand &obj_cmd,
@@ -1808,6 +1823,7 @@ void txservice::LocalCcHandler::ObjectCommand(
 
         ApplyCc *req = apply_pool.NextRequest();
         req->Reset(&table_name,
+                   schema_version,
                    &key,
                    key_shard_code,
                    &obj_cmd,
@@ -1828,6 +1844,7 @@ void txservice::LocalCcHandler::ObjectCommand(
     {
         ApplyCc *req = apply_pool.NextRequest();
         req->Reset(&table_name,
+                   schema_version,
                    &key,
                    key_shard_code,
                    &obj_cmd,
@@ -1859,6 +1876,7 @@ void txservice::LocalCcHandler::ObjectCommand(
         remote_hd_.ObjectCommand(cc_shards_.node_id_,
                                  ng_id,
                                  table_name,
+                                 schema_version,
                                  key,
                                  key_shard_code,
                                  obj_cmd,

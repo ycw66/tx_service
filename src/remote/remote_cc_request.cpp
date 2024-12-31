@@ -92,6 +92,7 @@ void txservice::remote::RemoteAcquire::Reset(
         table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
 
     AcquireCc::Reset(&remote_table_name_,
+                     req.schema_version(),
                      &req.key(),
                      req.key_shard_code(),
                      input_msg->tx_number(),
@@ -422,6 +423,7 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
     if (read_type == ReadType::Inside)
     {
         ReadCc::Reset(&remote_table_name_,
+                      req.schema_version(),
                       &req.key(),
                       req.key_shard_code(),
                       resp->mutable_record(),
@@ -446,6 +448,7 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
         *out_record = req.record();
 
         ReadCc::Reset(&remote_table_name_,
+                      req.schema_version(),
                       &req.key(),
                       req.key_shard_code(),
                       out_record,
@@ -796,6 +799,7 @@ void txservice::remote::RemoteScanOpen::Reset(
 #ifdef ON_KEY_OBJECT
     obj_type_ = scan_open.obj_type();
     scan_pattern_ = scan_open.scan_pattern();
+    schema_version_ = scan_open.schema_version();
 #endif
 
     ccm_ = nullptr;
@@ -1877,6 +1881,7 @@ void txservice::remote::RemoteApplyCc::Reset(
     ApplyResponse *resp = output_msg_.mutable_apply_cc_resp();
     resp->clear_cmd_result();
     ApplyCc::Reset(&remote_table_name_,
+                   req.schema_version(),
                    &req.key(),
                    req.key_shard_code(),
                    &req.cmd(),

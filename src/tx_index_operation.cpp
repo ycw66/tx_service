@@ -1534,6 +1534,7 @@ void UpsertTableIndexOp::DispatchRangeTask(
             if (!is_last_scanned_key_str)
             {
                 read_range_req.Set(&range_table_name,
+                                   0,
                                    &curr_range_start_key,
                                    &range_rec,
                                    false,
@@ -1543,6 +1544,7 @@ void UpsertTableIndexOp::DispatchRangeTask(
             else
             {
                 read_range_req.Set(&range_table_name,
+                                   0,
                                    batch_range_start_key_str,
                                    &range_rec,
                                    false,

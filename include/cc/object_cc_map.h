@@ -99,6 +99,13 @@ public:
         TX_TRACE_DUMP(&req);
 
         CcHandlerResult<ObjectCommandResult> *hd_res = req.Result();
+
+        if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
+        {
+            hd_res->SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            return true;
+        }
+
         ObjectCommandResult &obj_result = hd_res->Value();
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
         bool &object_modified = obj_result.object_modified_;

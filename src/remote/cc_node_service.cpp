@@ -753,6 +753,7 @@ void CcNodeService::GetClusterNodes(
     ReadTxRequest read_req;
     ClusterConfigRecord rec;
     read_req.Set(&cluster_config_ccm_name,
+                 0,
                  VoidKey::NegInfTxKey(),
                  &rec,
                  false,
@@ -1234,6 +1235,7 @@ void CcNodeService::FetchPayload(
     // The first 32bits of standby term is the primary node ng term.
     read_cc->Reset(
         &table_name,
+        0,
         &request->key_str(),
         request->key_shard_code(),
         response->mutable_payload(),
@@ -1322,6 +1324,7 @@ void CcNodeService::FetchCatalog(
     // The first 32bits of standby term is the primary node ng term.
     read_cc->Reset(
         &table_name,
+        0,
         &tx_key,
         request->key_shard_code(),
         &catalog_rec,

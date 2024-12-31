@@ -280,6 +280,7 @@ public:
 
     template <typename T>
     TxErrorCode AddWrite(const TableName &table_name,
+                         uint64_t schema_version,
                          std::unique_ptr<T> key,
                          TxRecord::Uptr rec,
                          OperationType op_type,
@@ -296,17 +297,17 @@ public:
         auto iter = wset_.find(table_name);
         if (iter == wset_.end())
         {
-            auto insert_it =
-                wset_.emplace(std::piecewise_construct,
-                              std::forward_as_tuple(table_name.StringView(),
-                                                    table_name.Type()),
-                              std::forward_as_tuple(TableWriteSet()));
+            auto insert_it = wset_.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(table_name.StringView(),
+                                      table_name.Type()),
+                std::forward_as_tuple(schema_version, TableWriteSet()));
             iter = insert_it.first;
         }
 
         assert(!iter->first.IsStringOwner());
 
-        TableWriteSet &tws = iter->second;
+        TableWriteSet &tws = iter->second.second;
 
         WriteSetEntry wset_entry;
         wset_entry.rec_ = std::move(rec);
@@ -332,6 +333,7 @@ public:
     }
 
     TxErrorCode AddWrite(const TableName &table_name,
+                         uint64_t schema_version,
                          TxKey tx_key,
                          TxRecord::Uptr rec,
                          OperationType op_type,
@@ -348,17 +350,17 @@ public:
         auto iter = wset_.find(table_name);
         if (iter == wset_.end())
         {
-            auto insert_it =
-                wset_.emplace(std::piecewise_construct,
-                              std::forward_as_tuple(table_name.StringView(),
-                                                    table_name.Type()),
-                              std::forward_as_tuple(TableWriteSet()));
+            auto insert_it = wset_.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(table_name.StringView(),
+                                      table_name.Type()),
+                std::forward_as_tuple(schema_version, TableWriteSet()));
             iter = insert_it.first;
         }
 
         assert(!iter->first.IsStringOwner());
 
-        TableWriteSet &tws = iter->second;
+        TableWriteSet &tws = iter->second.second;
 
         WriteSetEntry wset_entry;
         wset_entry.rec_ = std::move(rec);
@@ -389,8 +391,9 @@ public:
         auto tab_it = wset_.find(table_name);
         if (tab_it != wset_.end())
         {
-            auto key_it = tab_it->second.find(key);
-            if (key_it != tab_it->second.end())
+            auto &tws = tab_it->second.second;
+            auto key_it = tws.find(key);
+            if (key_it != tws.end())
             {
                 return &key_it->second;
             }
@@ -404,14 +407,16 @@ public:
         auto tab_it = wset_.find(table_name);
         assert(tab_it != wset_.end());
 
-        auto key_it = tab_it->second.find(key);
-        assert(key_it != tab_it->second.end());
+        auto &tws = tab_it->second.second;
+
+        auto key_it = tws.find(key);
+        assert(key_it != tws.end());
 
         wset_bytes_cnt_ -= (key_it->first.SerializedLength() +
                             key_it->second.rec_->SerializedLength());
 
-        tab_it->second.erase(key_it);
-        if (tab_it->second.size() == 0)
+        tws.erase(key_it);
+        if (tws.size() == 0)
         {
             wset_.erase(tab_it);
         }
@@ -513,7 +518,7 @@ public:
         auto tab_it = wset_.find(table_name);
         if (tab_it != wset_.end())
         {
-            const TableWriteSet &tab_wset = tab_it->second;
+            const TableWriteSet &tab_wset = tab_it->second.second;
             assert(wset_cnt_ >= tab_wset.size());
             wset_cnt_ -= tab_wset.size();
             for (auto &key_it : tab_wset)
@@ -528,7 +533,8 @@ public:
         }
     }
 
-    std::unordered_map<TableName, TableWriteSet> &WriteSet()
+    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>
+        &WriteSet()
     {
         return wset_;
     }
@@ -732,7 +738,7 @@ private:
         rset_;
     // the terms of read locks, for write log term check
     absl::flat_hash_map<uint32_t, int64_t> read_lock_ng_terms_;
-    std::unordered_map<TableName, TableWriteSet> wset_;
+    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>> wset_;
     size_t wset_cnt_;
     size_t data_rset_cnt_;
     size_t wset_bytes_cnt_;

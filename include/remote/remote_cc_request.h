@@ -366,6 +366,11 @@ public:
         return is_wait_for_post_write_[core_id];
     }
 
+    uint64_t GetSchemaVersion() const
+    {
+        return schema_version_;
+    }
+
 #ifdef ON_KEY_OBJECT
     int32_t GetRedisObjectType() const
     {
@@ -375,6 +380,7 @@ public:
     {
         return scan_pattern_;
     }
+
 #endif
 
 private:
@@ -405,6 +411,7 @@ private:
     std::vector<LruEntry *> cce_ptr_;
     // scan type for above cce_ptr_
     std::vector<ScanType> cce_ptr_scan_type_;
+    uint64_t schema_version_{0};
 
 #ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};

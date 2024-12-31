@@ -5,7 +5,6 @@
 #include "tx_execution.h"
 #include "tx_request.h"
 #include "tx_service.h"
-#include "util.h"
 
 namespace txservice
 {
@@ -93,6 +92,18 @@ static inline TxErrorCode TxReadCatalog(TransactionExecution *txm,
             return TxErrorCode::UNDEFINED_ERR;
         }
     }
+}
+
+static inline int GetDbIndex(const TableName *table_name)
+{
+    std::string_view table_name_sv = table_name->StringView();
+    int db_idx = table_name_sv.back() - '0';
+    if (table_name_sv[table_name_sv.size() - 2] != '_')
+    {
+        db_idx = (table_name_sv[table_name_sv.size() - 2] - '0') * 10 + db_idx;
+    }
+    assert(db_idx >= 0 && db_idx < RedisDBCnt);
+    return db_idx;
 }
 
 class BackupUtil

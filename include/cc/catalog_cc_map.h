@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>  // make_shared
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -768,6 +769,10 @@ public:
                     }
                 }  // End of alter table index
             }
+
+            UpdateTableLocks(table_key->Name().StringView(),
+                             catalog_entry->DirtyVersion(),
+                             cce_ptr->GetKeyLock());
         }
         else if (req.CommitType() == PostWriteType::PrepareCommit &&
                  catalog_entry->DirtyVersion() > 0)
@@ -1745,6 +1750,11 @@ public:
                            cc_ng_id_,
                            LockType::WriteLock,
                            false);
+
+            UpdateTableLocks(table_key->Name().StringView(),
+                             catalog_entry->Version(),
+                             cce->GetKeyLock());
+
             if (shard_->core_id_ == (shard_->core_cnt_ - 1))
             {
                 req.SetFinish();
@@ -1848,13 +1858,16 @@ public:
         return TableType::Catalog;
     }
 
-    std::pair<CcErrorCode, NonBlockingLock *> ReadTable(
+    std::tuple<CcErrorCode, NonBlockingLock *, uint64_t> ReadTable(
         const TableName &table_name,
         uint32_t node_group_id,
         int64_t ng_term,
         TxNumber tx_number)
     {
         bool read_success = false;
+        uint64_t schema_version = 0;
+        NonBlockingLock *lock_ptr = nullptr;
+
         auto lock_it = table_locks_.find(table_name.StringView());
         if (lock_it == table_locks_.end())
         {
@@ -1875,48 +1888,80 @@ public:
                 // from data store.
                 shard_->FetchCatalog(
                     table_name, node_group_id, ng_term, nullptr);
-                return {CcErrorCode::READ_CATALOG_FAIL, nullptr};
+                return {CcErrorCode::READ_CATALOG_FAIL, nullptr, 0};
             }
 
             assert(catalog_entry != nullptr && catalog_entry->Version() > 0);
             assert(catalog_entry->schema_ != nullptr);
 
-            NonBlockingLock *lock =
+            schema_version = catalog_entry->Version();
+
+            lock_ptr =
                 &catalog_cce->GetOrCreateKeyLock(shard_, this, catalog_ccp);
-            auto res = table_locks_.try_emplace(table_name.StringView(), lock);
-            lock_it = res.first;
-            read_success = lock_it->second->AcquireReadLockFast(tx_number);
+            auto [new_lock_it, _] = table_locks_.try_emplace(
+                table_name.StringView(), lock_ptr, schema_version);
+            read_success =
+                new_lock_it->second.first->AcquireReadLockFast(tx_number);
+
             if (read_success &&
                 catalog_cce->PayloadStatus() == RecordStatus::Unknown)
             {
+                assert(schema_version == new_lock_it->second.second);
                 // upload catalog record
                 catalog_cce->payload_ = std::make_unique<CatalogRecord>();
                 catalog_cce->payload_->Set(catalog_entry->schema_,
                                            catalog_entry->dirty_schema_,
-                                           catalog_entry->Version());
-                catalog_cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
+                                           schema_version);
+                catalog_cce->SetCommitTsPayloadStatus(schema_version,
                                                       RecordStatus::Normal);
             }
         }
         else
         {
-            read_success = lock_it->second->AcquireReadLockFast(tx_number);
+            read_success =
+                lock_it->second.first->AcquireReadLockFast(tx_number);
+            lock_ptr = lock_it->second.first;
+            schema_version = lock_it->second.second;
         }
 
-        return read_success
-                   ? std::pair<CcErrorCode,
-                               NonBlockingLock *>{CcErrorCode::NO_ERROR,
-                                                  lock_it->second}
-                   : std::pair<CcErrorCode, NonBlockingLock *>{
-                         CcErrorCode::READ_CATALOG_CONFLICT, nullptr};
+        if (read_success)
+        {
+            assert(lock_ptr != nullptr);
+            assert(schema_version > 0);
+            return {CcErrorCode::NO_ERROR, lock_ptr, schema_version};
+        }
+        else
+        {
+            return {CcErrorCode::READ_CATALOG_CONFLICT, nullptr, 0};
+        }
     }
 
 private:
+    void UpdateTableLocks(std::string_view table_name_sv,
+                          uint64_t schema_version,
+                          NonBlockingLock *lock_ptr)
+    {
+        auto table_locks_iter = table_locks_.find(table_name_sv);
+        if (table_locks_iter != table_locks_.end())
+        {
+            table_locks_iter->second.second = schema_version;
+        }
+        else
+        {
+            table_locks_.try_emplace(table_name_sv, lock_ptr, schema_version);
+        }
+    }
+
     // An index structure to directly get the lock via table name.
     // WARNING: This is based on the assumption that the locks for catalog cc
     // entryies are never recycled. If the assumption is violated, this
     // structured should not be used.
     // TODO: Better separate lock of catalog ccmap from CcShard locks
-    absl::flat_hash_map<std::string, NonBlockingLock *> table_locks_;
+    //
+    // The uint64_t represents the table schema version and it is only used in
+    // eloqkv, the schema version in eloqsql will be passed via ha_monograph
+    // handler.
+    absl::flat_hash_map<std::string, std::pair<NonBlockingLock *, uint64_t>>
+        table_locks_;
 };
 }  // namespace txservice

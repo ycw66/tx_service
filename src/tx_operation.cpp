@@ -29,9 +29,9 @@
 #include "tx_service.h"
 #include "tx_service_common.h"
 #include "tx_trace.h"
+#include "tx_util.h"
 #include "tx_worker_pool.h"
 #include "type.h"
-#include "util.h"
 
 #ifdef ON_KEY_OBJECT
 DECLARE_bool(cmd_read_catalog);
@@ -675,7 +675,7 @@ void LockWriteRangesOp::Advance(TransactionExecution *txm)
     }
     else
     {
-        TableWriteSet &table_write_set = table_it_->second;
+        TableWriteSet &table_write_set = table_it_->second.second;
         next_range_start = table_write_set.lower_bound(range_end_key);
     }
 
@@ -746,8 +746,8 @@ void LockWriteRangesOp::Advance(TransactionExecution *txm)
         ++table_it_;
         if (table_it_ != table_end_)
         {
-            write_key_it_ = table_it_->second.begin();
-            write_key_end_ = table_it_->second.end();
+            write_key_it_ = table_it_->second.second.begin();
+            write_key_end_ = table_it_->second.second.end();
         }
     }
 #endif
@@ -833,8 +833,8 @@ void LockWriteBucketsOp::Advance(TransactionExecution *txm,
         ++table_it_;
         if (table_it_ != table_end_)
         {
-            write_key_it_ = table_it_->second.begin();
-            write_key_end_ = table_it_->second.end();
+            write_key_it_ = table_it_->second.second.begin();
+            write_key_end_ = table_it_->second.second.end();
         }
     }
 }
@@ -2539,14 +2539,15 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             // Upsert sequence record of this table in the sequence ccmap.
             txm->rw_set_.AddWrite(*seq_table_name,
+                                  0,
                                   std::move(seq_key_rec.first),
                                   std::move(seq_key_rec.second),
                                   OperationType::Update);
 
-            std::unordered_map<TableName, TableWriteSet> &wset =
-                txm->rw_set_.WriteSet();
+            std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>
+                &wset = txm->rw_set_.WriteSet();
             auto wset_it = wset.find(*seq_table_name);
-            TableWriteSet &table_write_set = wset_it->second;
+            TableWriteSet &table_write_set = wset_it->second.second;
             assert(table_write_set.size() == 1);
             auto write_entry_it = table_write_set.begin();
             const TxKey &write_key = write_entry_it->first;
@@ -2632,10 +2633,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             const TableName *seq_table_name =
                 catalog_rec_.DirtySchema()->GetSequenceTableName();
-            std::unordered_map<TableName, TableWriteSet> &wset =
-                txm->rw_set_.WriteSet();
+            std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>
+                &wset = txm->rw_set_.WriteSet();
             auto wset_it = wset.find(*seq_table_name);
-            TableWriteSet &table_write_set = wset_it->second;
+            TableWriteSet &table_write_set = wset_it->second.second;
             assert(table_write_set.size() == 1);
             auto write_entry_it = table_write_set.begin();
             auto &write_entry = write_entry_it->second;
@@ -6543,8 +6544,13 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             key_shard_code = vct_key_shard_code_[i].first;
 #endif
             bool commit = false;
+
+            int db_idx = GetDbIndex(tx_req_->table_name_);
+            assert(txm->locked_db_[db_idx].first != nullptr);
+
             txm->cc_handler_->ObjectCommand(
                 *tx_req_->table_name_,
+                txm->locked_db_[db_idx].second,
                 key,
                 key_shard_code,
                 *cmd,

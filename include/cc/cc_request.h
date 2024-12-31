@@ -295,7 +295,7 @@ protected:
     int64_t ng_term_{-1};
 
     // The term of which the request comes from. We have a cache of the largest
-    // invalid term on each node group. If the term is samller than the invalid
+    // invalid term on each node group. If the term is smaller than the invalid
     // term, we reject the request directly since the tx coordinate node is no
     // longer the leader of ng.
     int64_t tx_term_{-1};
@@ -315,6 +315,7 @@ public:
           key_str_(nullptr),
           key_shard_code_(0),
           ts_(0),
+          schema_version_(0),
           is_insert_(false)
     {
     }
@@ -325,6 +326,7 @@ public:
     AcquireCc(AcquireCc &&rhs) = delete;
 
     void Reset(const TableName *tname,
+               const uint64_t schema_version,
                const TxKey *key,
                const uint32_t key_shard_code,
                TxNumber txn,
@@ -344,6 +346,7 @@ public:
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
         ts_ = ts;
+        schema_version_ = schema_version;
         is_insert_ = is_insert;
         cce_ptr_ = nullptr;
         hd_result_idx_ = hd_res_idx;
@@ -352,6 +355,7 @@ public:
     }
 
     void Reset(const TableName *tname,
+               uint64_t schema_version,
                const std::string *key_str,
                const uint32_t key_shard_code,
                TxNumber txn,
@@ -371,6 +375,7 @@ public:
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
         ts_ = ts;
+        schema_version_ = schema_version;
         is_insert_ = is_insert;
         cce_ptr_ = nullptr;
         hd_result_idx_ = hd_res_idx;
@@ -391,6 +396,11 @@ public:
     uint64_t Ts() const
     {
         return ts_;
+    }
+
+    uint64_t SchemaVersion() const
+    {
+        return schema_version_;
     }
 
     bool IsInsert() const
@@ -438,6 +448,7 @@ private:
     const std::string *key_str_;
     uint32_t key_shard_code_;
     uint64_t ts_;
+    uint64_t schema_version_;
     bool is_insert_;
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
@@ -1195,6 +1206,7 @@ public:
     }
 
     void Reset(const TableName *tn,
+               const uint64_t schema_version,
                const TxKey *key,
                uint32_t key_shard_code,
                TxRecord *rec,
@@ -1221,6 +1233,7 @@ public:
         rec_ = rec;
         rec_str_ = nullptr;
         ts_ = ts;
+        schema_version_ = schema_version;
         type_ = read_type;
         is_for_write_ = is_for_write;
         cce_ptr_ = nullptr;
@@ -1243,6 +1256,7 @@ public:
     }
 
     void Reset(const TableName *tn,
+               const uint64_t schema_version,
                const std::string *key_str,
                uint32_t key_shard_code,
                std::string *rec_str,
@@ -1268,6 +1282,7 @@ public:
         rec_ = nullptr;
         rec_str_ = rec_str;
         ts_ = ts;
+        schema_version_ = schema_version;
         type_ = read_type;
         is_for_write_ = is_for_write;
         cce_ptr_ = nullptr;
@@ -1290,6 +1305,7 @@ public:
     }
 
     void Reset(const TableName *tn,
+               const uint64_t schema_version,
                const std::string &key_str,
                uint32_t key_shard_code,
                TxRecord *rec,
@@ -1315,6 +1331,7 @@ public:
         rec_ = rec;
         rec_str_ = nullptr;
         ts_ = ts;
+        schema_version_ = schema_version;
         type_ = read_type;
         is_for_write_ = is_for_write;
         cce_ptr_ = nullptr;
@@ -1436,6 +1453,11 @@ public:
         blk_type_ = blk;
     }
 
+    uint64_t SchemaVersion() const
+    {
+        return schema_version_;
+    }
+
 private:
     const void *key_ptr_;
     const std::string *key_str_;
@@ -1454,6 +1476,7 @@ private:
     TxRecord *rec_;
     std::string *rec_str_;
     uint64_t ts_;
+    uint64_t schema_version_;
     ReadType type_;
     bool is_for_write_;
     // The pointer of the cc entry to which this request is directed. The
@@ -1481,13 +1504,14 @@ public:
     ScanOpenBatchCc() = default;
 
     void Reset(const TableName *tn,
+               const uint64_t schema_version,
                ScanIndexType type,
                uint32_t ng_id,
                const TxKey *start_key,
                bool inclusive,
                ScanDirection direction,
                uint64_t tx_number,
-               const uint64_t &ts,
+               const uint64_t ts,
                ScanCache *cache,
                int64_t term,
                CcHandlerResult<ScanOpenResult> *res,
@@ -1512,6 +1536,7 @@ public:
         inclusive_ = inclusive;
         direct_ = direction;
         ts_ = ts;
+        schema_version_ = schema_version;
         scan_cache_ = cache;
         is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
@@ -1574,6 +1599,11 @@ public:
         return ts_;
     }
 
+    uint64_t SchemaVersion() const
+    {
+        return schema_version_;
+    }
+
     void SetCcePtr(LruEntry *ptr)
     {
         cce_ptr_ = ptr;
@@ -1620,6 +1650,7 @@ private:
     bool inclusive_{false};
     ScanDirection direct_{ScanDirection::Forward};
     uint64_t ts_{0};
+    uint64_t schema_version_{0};
     ScanCache *scan_cache_{nullptr};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
@@ -5722,6 +5753,7 @@ public:
     }
 
     void Reset(const TableName *table_name,
+               const uint64_t schema_version,
                const TxKey *key,
                const uint32_t key_shard_code,
                TxCommand *cmd,
@@ -5758,6 +5790,7 @@ public:
 
         key_shard_code_ = key_shard_code;
         tx_ts_ = tx_ts;
+        schema_version_ = schema_version;
         cce_ptr_ = nullptr;
         apply_and_commit_ = commit;
         block_type_ = ApplyBlockType::NoBlocking;
@@ -5765,6 +5798,7 @@ public:
 
     // for remote
     void Reset(const TableName *table_name,
+               const uint64_t schema_version,
                const std::string *key_str,
                const uint32_t key_shard_code,
                const std::string *cmd_str,
@@ -5802,6 +5836,7 @@ public:
 
         key_shard_code_ = key_shard_code;
         tx_ts_ = tx_ts;
+        schema_version_ = schema_version;
         cce_ptr_ = nullptr;
         block_type_ = ApplyBlockType::NoBlocking;
         apply_and_commit_ = commit;
@@ -5899,6 +5934,11 @@ public:
         return tx_ts_;
     }
 
+    uint64_t SchemaVersion() const
+    {
+        return schema_version_;
+    }
+
     union
     {
         LocalTuple local_input_;
@@ -5908,6 +5948,17 @@ public:
     bool is_local_{};
     uint32_t key_shard_code_{};
     uint64_t tx_ts_{1};
+
+    /**
+     * Check whether the schema version of the sender node matches the version
+     * of the receiver node. Mismatch could happen if a participant node fails
+     * after commit_log_op_operation, it may restart and finish its own DDL
+     * job(PostWriteAllOp) before other nodes. If a request is then sent from
+     * this node to read data in a remote node that has not yet finished its DDL
+     * job(PostWriteAllOp), the request could be processed prematurely(because
+     * we only check catalog lock in local node), leading to inconsistencies.
+     */
+    uint64_t schema_version_{0};
 
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is blocked

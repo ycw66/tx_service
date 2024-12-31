@@ -720,6 +720,7 @@ message AcquireRequest {
     bool insert = 8;
     CcProtocolType protocol = 9;
     IsolationType iso_level = 10;
+    uint64 schema_version = 11;
 }
 
 message AcquireResponse {
@@ -736,12 +737,12 @@ message AcquireAllRequest {
     uint32 src_node_id = 1;
     string table_name_str = 2;
     CcTableType table_type = 3;
-  oneof acq_all_key
-  {
-      bytes key = 4;
-    bool neg_inf = 5;
-    bool pos_inf = 6;
-  }
+    oneof acq_all_key
+    {
+        bytes key = 4;
+        bool neg_inf = 5;
+        bool pos_inf = 6;
+    }
     uint32 node_group_id = 7;
     bool insert = 8;
     CcProtocolType protocol = 9;
@@ -803,6 +804,7 @@ message ReadRequest {
     bool is_for_write = 11;
     bool is_covering_keys = 12;
     bool point_read_on_miss = 13;
+    uint64 schema_version = 14;
 }
 
 message ReadResponse {
@@ -853,12 +855,12 @@ message PostWriteAllRequest {
     string table_name_str = 2;
     CcTableType table_type = 3;
     uint32 node_group_id = 4;
-  oneof post_write_key
-  {
-      bytes key = 5;
-    bool neg_inf = 6;
-    bool pos_inf = 7;
-  }
+    oneof post_write_key
+    {
+        bytes key = 5;
+        bool neg_inf = 6;
+        bool pos_inf = 7;
+    }
     uint64 commit_ts = 8;
     bytes record = 9;
     uint32 operation_type = 10;
@@ -894,6 +896,7 @@ message ScanOpenRequest {
     bool is_covering_keys = 15;
     int32 obj_type = 16; // Only used for redis scan command
     string scan_pattern = 17; // Only used for redis scan command
+    uint64 schema_version = 18;
 }
 
 message ScanCache_msg {
@@ -1172,6 +1175,7 @@ message ApplyRequest {
     IsolationType iso_level = 8;
     CcProtocolType protocol = 9;
     bool apply_and_commit = 10;
+    uint64 schema_version = 11;
 }
 
 message ApplyResponse {
@@ -1281,7 +1285,7 @@ message CcMessage {
     uint64 tx_number = 2;
     uint64 handler_addr = 3;
     int64 tx_term = 4;
-    uint32 command_id=5;
+    uint32 command_id = 5;
 
     oneof content {
         AcquireRequest acquire_req = 10;

@@ -254,8 +254,10 @@ public:
     // RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
 
-    std::unordered_map<TableName, TableWriteSet>::iterator table_it_;
-    std::unordered_map<TableName, TableWriteSet>::iterator table_end_;
+    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>::iterator
+        table_it_;
+    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>::iterator
+        table_end_;
     TableWriteSet::iterator write_key_it_;
     TableWriteSet::iterator write_key_end_;
     bool init_;
@@ -291,8 +293,10 @@ public:
     // RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> *lock_bucket_result_{nullptr};
 
-    std::unordered_map<TableName, TableWriteSet>::iterator table_it_;
-    std::unordered_map<TableName, TableWriteSet>::iterator table_end_;
+    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>::iterator
+        table_it_;
+    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>::iterator
+        table_end_;
     TableWriteSet::iterator write_key_it_;
     TableWriteSet::iterator write_key_end_;
     bool init_;

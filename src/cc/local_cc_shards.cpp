@@ -586,6 +586,7 @@ void LocalCcShards::CreateSchemaRecoveryTx(
             ClusterConfigRecord rec;
             txm->SetRecoverTxState(txn, tx_term, commit_ts);
             ReadTxRequest read_req(&cluster_config_ccm_name,
+                                   0,
                                    VoidKey::NegInfTxKey(),
                                    &rec,
                                    false,
@@ -685,6 +686,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             ClusterConfigRecord rec;
             txm->SetRecoverTxState(txn, tx_term, commit_ts);
             ReadTxRequest read_req(&cluster_config_ccm_name,
+                                   0,
                                    VoidKey::NegInfTxKey(),
                                    &rec,
                                    false,
@@ -709,6 +711,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
 
                 read_req.Reset();
                 read_req.Set(&catalog_ccm_name,
+                             0,
                              &tbl_tx_key,
                              &catalog_rec,
                              false,
@@ -732,6 +735,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                 TxKey bucket_tx_key{&bucket_key};
                 read_req.Reset();
                 read_req.Set(&range_bucket_ccm_name,
+                             0,
                              &bucket_tx_key,
                              &bucket_rec,
                              false,
@@ -2738,7 +2742,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
     ReadTxRequest read_req;
     read_req.Set(
-        &catalog_ccm_name, &tbl_tx_key, &catalog_rec, false, false, true);
+        &catalog_ccm_name, 0, &tbl_tx_key, &catalog_rec, false, false, true);
     data_sync_txm->Execute(&read_req);
     read_req.Wait();
 
@@ -2814,6 +2818,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     TxKey bucket_tx_key{&bucket_key};
     read_req.Reset();
     read_req.Set(&range_bucket_ccm_name,
+                 0,
                  &bucket_tx_key,
                  &bucket_rec,
                  false,
@@ -3398,7 +3403,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
     ReadTxRequest read_req;
     read_req.Set(
-        &catalog_ccm_name, &tbl_tx_key, &catalog_rec, false, false, true);
+        &catalog_ccm_name, 0, &tbl_tx_key, &catalog_rec, false, false, true);
     data_sync_txm->Execute(&read_req);
     read_req.Wait();
 
@@ -4772,6 +4777,7 @@ void LocalCcShards::SyncTableStatisticsWorker()
 
                     ReadTxRequest read_req;
                     read_req.Set(&catalog_ccm_name,
+                                 0,
                                  &tbl_tx_key,
                                  &catalog_rec,
                                  false,

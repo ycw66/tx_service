@@ -167,6 +167,12 @@ public:
             return true;
         }
 
+        if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
+        {
+            hd_res->SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            return true;
+        }
+
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
         if (req.CcePtr() != nullptr)
@@ -1464,6 +1470,12 @@ public:
             return true;
         }
 
+        if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
+        {
+            hd_res->SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            return true;
+        }
+
         IsolationLevel iso_lvl = req.Isolation();
         CcProtocol cc_proto = req.Protocol();
         bool is_read_snapshot;
@@ -2275,6 +2287,13 @@ public:
             return true;
         }
 
+        if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
+        {
+            req.Result()->SetError(
+                CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            return true;
+        }
+
         const KeyT *look_key = static_cast<const KeyT *>(req.start_key_);
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
@@ -3078,6 +3097,13 @@ public:
                     .append(std::to_string(req.TxTerm()));
             });
         TX_TRACE_DUMP(&req);
+
+        if (req.GetSchemaVersion() != 0 && req.GetSchemaVersion() != schema_ts_)
+        {
+            req.Result()->SetError(
+                CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            return true;
+        }
 
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);

@@ -58,6 +58,8 @@ enum struct TxmStatus
     Finished
 };
 
+static const uint64_t RedisDBCnt = 16;
+
 class TransactionExecution
 {
 public:
@@ -164,16 +166,22 @@ public:
 
     template <typename KeyT>
     TxErrorCode TxUpsert(const TableName &table_name,
+                         uint64_t schema_version,
                          std::unique_ptr<KeyT> key,
                          TxRecord::Uptr rec,
                          OperationType op,
                          bool check_unqiue = false)
     {
-        return rw_set_.AddWrite(
-            table_name, std::move(key), std::move(rec), op, check_unqiue);
+        return rw_set_.AddWrite(table_name,
+                                schema_version,
+                                std::move(key),
+                                std::move(rec),
+                                op,
+                                check_unqiue);
     }
 
     TxErrorCode TxUpsert(const TableName &table_name,
+                         uint64_t schema_version,
                          TxKey key,
                          TxRecord::Uptr rec,
                          OperationType op,
@@ -384,6 +392,7 @@ private:
                    const TableName &table_name);
 
     void Upsert(const TableName &table_name,
+                uint64_t schema_version,
                 TxKey key,
                 TxRecord::Uptr rec,
                 OperationType op);
@@ -617,8 +626,9 @@ private:
         scan_close_req_pool_{nullptr};
 
     // The dbs (for EloqKV) this txm has read.
+    // All elements are value-initialized to {nullptr,0(schema_version)}
     // TODO: accommodate for MonographDB
-    std::array<NonBlockingLock *, 16> locked_db_{nullptr};
+    std::array<std::pair<NonBlockingLock *, uint64_t>, RedisDBCnt> locked_db_{};
 
     // TODO(zkl): allocate these fields on heap since they are rarely used.
     ReadLocalOperation read_catalog_op_;

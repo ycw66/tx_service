@@ -189,6 +189,7 @@ struct ReadTxRequest
 {
 public:
     ReadTxRequest(const TableName *tab_name = nullptr,
+                  uint64_t schema_version = 0,
                   const TxKey *key = nullptr,
                   TxRecord *rec = nullptr,
                   bool is_for_write = false,
@@ -210,6 +211,7 @@ public:
           is_for_share_(is_for_share),
           read_local_(read_local),
           ts_(ts),
+          schema_version_(schema_version),
           is_covering_keys_(is_covering_keys),
           is_recovering_(is_recovering),
           point_read_on_cache_miss_(point_read_on_cache_miss)
@@ -217,6 +219,7 @@ public:
     }
 
     void Set(const TableName *tab_name,
+             uint64_t schema_version,
              const TxKey *key,
              TxRecord *rec,
              bool is_for_write = false,
@@ -235,12 +238,14 @@ public:
         is_for_share_ = is_for_share;
         read_local_ = read_local;
         ts_ = ts;
+        schema_version_ = schema_version;
         is_covering_keys_ = is_covering_keys;
         is_recovering_ = is_recovering;
         point_read_on_cache_miss_ = point_read_on_cache_miss;
     }
 
     void Set(const TableName *tab_name,
+             uint64_t schema_version,
              const std::string *key_str,
              TxRecord *rec,
              bool is_for_write = false,
@@ -259,6 +264,7 @@ public:
         is_for_share_ = is_for_share;
         read_local_ = read_local;
         ts_ = ts;
+        schema_version_ = schema_version;
         is_covering_keys_ = is_covering_keys;
         is_recovering_ = is_recovering;
         point_read_on_cache_miss_ = point_read_on_cache_miss;
@@ -296,6 +302,7 @@ public:
 
     */
     uint64_t ts_;
+    uint64_t schema_version_;
 
     // For unique_sk point query
     bool is_covering_keys_;
@@ -362,6 +369,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     }
 
     ScanOpenTxRequest(const TableName *tabname,
+                      uint64_t schema_version,
                       ScanIndexType index_type,
                       const TxKey *start_key,
                       bool start_inclusive = true,
@@ -401,7 +409,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           is_require_recs_(is_require_recs),
           is_require_sort_(is_require_sort),
           read_local_(is_read_local),
-          scan_alias_(UINT64_MAX)
+          scan_alias_(UINT64_MAX),
+          schema_version_(schema_version)
 #ifdef ON_KEY_OBJECT
           ,
           obj_type_(obj_type),
@@ -411,6 +420,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     }
 
     void Reset(const TableName *tabname,
+               uint64_t schema_version,
                ScanIndexType index_type,
                const TxKey *start_key,
                bool start_inclusive = true,
@@ -453,6 +463,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         is_require_sort_ = is_require_sort;
         read_local_ = is_read_local;
         scan_alias_ = UINT64_MAX;
+        schema_version_ = schema_version;
 #ifdef ON_KEY_OBJECT
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
@@ -485,6 +496,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     bool is_require_sort_{true};
     bool read_local_{false};
     uint64_t scan_alias_{UINT64_MAX};
+    uint64_t schema_version_{0};
 
 #ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
@@ -1190,6 +1202,7 @@ struct BatchReadTxRequest : public TemplateTxRequest<BatchReadTxRequest, Void>
 {
 public:
     BatchReadTxRequest(const TableName *tab_name,
+                       uint64_t schema_version,
                        std::vector<ScanBatchTuple> &tuple_batch,
                        bool is_for_write = false,
                        bool is_for_share = false,
@@ -1206,11 +1219,13 @@ public:
           is_for_share_(is_for_share),
           read_local_(read_local),
           corresponding_sk_commit_ts_(corresponding_sk_commit_ts),
+          schema_version_(schema_version),
           local_cache_checked_(local_cache_checked)
     {
     }
 
     void Set(const TableName *tab_name,
+             uint64_t schema_version,
              std::vector<ScanBatchTuple> &batch_read_pri,
              bool is_for_write = false,
              bool is_for_share = false,
@@ -1223,6 +1238,7 @@ public:
         is_for_share_ = is_for_share;
         read_local_ = read_local;
         corresponding_sk_commit_ts_ = corresponding_sk_commit_ts;
+        schema_version_ = schema_version;
         local_cache_checked_ = false;
     }
 
@@ -1232,6 +1248,7 @@ public:
     bool is_for_share_;  // used for "select ... lock in share mode".
     bool read_local_;
     uint64_t corresponding_sk_commit_ts_;
+    uint64_t schema_version_;
     bool local_cache_checked_;
 };
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>  // std::unique_ptr
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -20,6 +21,7 @@ public:
     LocalCcHandler(uint32_t thd_id, LocalCcShards &shards);
 
     void AcquireWrite(const TableName &table_name,
+                      const uint64_t schema_version,
                       const TxKey &key,
                       uint32_t key_shard_code,
                       TxNumber tx_number,
@@ -140,6 +142,7 @@ public:
     /// <param name="hres"></param>
     /// <param name="proto"></param>
     void Read(const TableName &table_name,
+              const uint64_t schema_version,
               const TxKey &key,
               uint32_t key_shard_code,
               TxRecord &record,
@@ -179,11 +182,11 @@ public:
                    bool is_recovering = false,
                    bool execute_immediately = true) override;
 
-    std::pair<txservice::CcErrorCode, txservice::NonBlockingLock *> ReadCatalog(
-        const TableName &table_name,
-        uint32_t ng_id,
-        int64_t ng_term,
-        TxNumber tx_number) const;
+    std::tuple<txservice::CcErrorCode, txservice::NonBlockingLock *, uint64_t>
+    ReadCatalog(const TableName &table_name,
+                uint32_t ng_id,
+                int64_t ng_term,
+                TxNumber tx_number) const;
 
     bool ReleaseCatalogRead(NonBlockingLock *lock) const;
 
@@ -202,6 +205,7 @@ public:
                    bool is_recovring = false) override;
 
     void ScanOpen(const TableName &table_name,
+                  const uint64_t schema_version,
                   ScanIndexType index_type,
                   const TxKey &start_key,
                   bool inclusive,
@@ -370,6 +374,7 @@ public:
                              CcHandlerResult<Void> &hres) override;
 
     void ObjectCommand(const TableName &table_name,
+                       const uint64_t schema_version,
                        const TxKey &key,
                        uint32_t key_shard_code,
                        TxCommand &obj_cmd,
