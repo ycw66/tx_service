@@ -4769,7 +4769,7 @@ protected:
 struct KickoutCcEntryCc : public TemplatedCcRequest<KickoutCcEntryCc, Void>
 {
 public:
-    static constexpr size_t KickoutPageBatchSize = 8;
+    static constexpr size_t KickoutPageBatchSize = 32;
 
     enum struct KickoutStatus
     {

@@ -5921,12 +5921,27 @@ public:
 #ifdef ON_KEY_OBJECT
         bool replay_cmds_notnull = false;
 #endif
+
+        size_t export_data_cnt = 0;
+        auto l_start = std::chrono::high_resolution_clock::now();
+
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_ &&
              it != end_it && it != end_it_next_page_it;
              scan_cnt++)
         {
+            if (export_data_cnt > 0 && export_data_cnt % 4 == 0)
+            {
+                auto l_now = std::chrono::high_resolution_clock::now();
+                if (std::chrono::duration_cast<std::chrono::microseconds>(
+                        l_now - l_start)
+                        .count() >= std::chrono::microseconds(50).count())
+                {
+                    break;
+                }
+            }
+
             const KeyT *key = it->first;
             CcEntry<KeyT, ValueT> *cce = it->second;
             CcPage<KeyT, ValueT> *ccp = it.GetPage();
@@ -6070,6 +6085,8 @@ public:
                         is_scan_mem_full = true;
                         break;
                     }
+
+                    export_data_cnt++;
                 }
             }
 #endif
@@ -6169,11 +6186,25 @@ public:
                 }
             }
 
+            size_t current_defrag_cnt = 0;
+            auto l_start = std::chrono::high_resolution_clock::now();
+
             // defrag ccmap key
             for (size_t scan_cnt = 0;
                  scan_cnt < req.scan_batch_size_ && it != ccmp_.end();
                  scan_cnt++)
             {
+                if (current_defrag_cnt > 0 && current_defrag_cnt % 4 == 0)
+                {
+                    auto l_now = std::chrono::high_resolution_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::microseconds>(
+                            l_now - l_start)
+                            .count() >= std::chrono::microseconds(50).count())
+                    {
+                        break;
+                    }
+                }
+
                 const KeyT &key = it->first;
                 TxKey tx_key(&key);
                 if (tx_key.NeedsDefrag(heap))
@@ -6234,6 +6265,8 @@ public:
                             cce->UpdateCcPage(new_cc_page_ptr);
                         }
                     }
+
+                    current_defrag_cnt++;
                 }
                 it++;
             }
@@ -6276,14 +6309,28 @@ public:
                 }
             }
 
+            size_t current_defrag_cnt = 0;
+            auto l_start = std::chrono::high_resolution_clock::now();
+
             for (size_t scan_cnt = 0;
                  scan_cnt < req.scan_batch_size_ && it != end_it;
                  scan_cnt++)
             {
+                if (current_defrag_cnt > 0 && current_defrag_cnt % 4 == 0)
+                {
+                    auto l_now = std::chrono::high_resolution_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::microseconds>(
+                            l_now - l_start)
+                            .count() >= std::chrono::microseconds(50).count())
+                    {
+                        break;
+                    }
+                }
+
+                bool defraged = false;
                 // defrag the keys_ and entries_ when enter a new page
                 if (it != end_it && it.GetIdxInPage() == 0)
                 {
-                    bool defraged = false;
                     auto current_page = it.GetPage();
                     float keys_utilization = mi_heap_page_utilization(
                         heap, current_page->keys_.data());
@@ -6337,10 +6384,16 @@ public:
                 else if (rs == DefragResult::DEFRAGED)
                 {
                     defrag_cnt++;
+                    defraged = true;
                 }
                 else if (rs == DefragResult::NOFRAGED)
                 {
                     no_frag_cnt++;
+                }
+
+                if (defraged)
+                {
+                    current_defrag_cnt++;
                 }
 
                 total_cnt++;
@@ -7362,13 +7415,27 @@ public:
         CcPage<KeyT, ValueT> *ccp =
             static_cast<CcPage<KeyT, ValueT> *>(lru_page);
 
+        auto l_start = std::chrono::high_resolution_clock::now();
+
         // To avoid occupy the TxProcessor thread for a long time, only
         // process KickoutPageBatchSize number of pages in each round.
         size_t scan_page_cnt = 0;
+        size_t clean_page_cnt = 0;
         bool is_success = true;
         while (scan_page_cnt < KickoutCcEntryCc::KickoutPageBatchSize &&
                ccp->FirstKey() < *end_key && ccp != &pos_inf_page_)
         {
+            if (clean_page_cnt > 0 && clean_page_cnt % 2 == 0)
+            {
+                auto l_now = std::chrono::high_resolution_clock::now();
+                if (std::chrono::duration_cast<std::chrono::microseconds>(
+                        l_now - l_start)
+                        .count() >= std::chrono::microseconds(50).count())
+                {
+                    break;
+                }
+            }
+
             ++scan_page_cnt;
             if (req.GetCleanType() == CleanType::CleanDeletedData &&
                 ccp->smallest_ttl_ > shard_->NowInMilliseconds())
@@ -7388,6 +7455,11 @@ public:
                 LOG(ERROR) << "Failed to clean all target ccentries on core: "
                            << shard_->core_id_;
                 break;
+            }
+
+            if (freed_cnt > 0)
+            {
+                clean_page_cnt++;
             }
         }
 
