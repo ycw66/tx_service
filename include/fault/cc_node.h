@@ -80,7 +80,7 @@ public:
 private:
     void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);
     void SubscribePrimaryNode(uint32_t node_id, int64_t term, bool resubscribe);
-    void CheckAndBecomeReady(bool is_primary);
+    void ClearCcNodeGroupData();
 
     //  CcNode belongs to node group: ng_id_.
     const uint32_t ng_id_;

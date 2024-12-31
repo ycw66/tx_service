@@ -304,10 +304,12 @@ bool CcNode::OnLeaderStart(int64_t term,
     else if (prev_candidate_standby_term > 0)
     {
         // no longer subscribed to previous term
-        // Sharder::Instance().SetStandbyNodeTerm(-1);
         assert(prev_standby_term < 0);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
         LOG(INFO) << "Candidate standby cannot escalate to leader";
+        // A new leader has been elected. The cache needs to be cleared since
+        // it is no longer valid.
+        ClearCcNodeGroupData();
 
         // transfer leader to next node
         retry = false;
@@ -381,13 +383,7 @@ bool CcNode::OnLeaderStart(int64_t term,
         if (!cache_survivied)
         {
             //  if cache does not survive to the next term, clear ccm.
-            uint16_t core_cnt = local_cc_shards_.Count();
-            ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
-            for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
-            {
-                local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
-            }
-            clear_ccm_req.Wait();
+            ClearCcNodeGroupData();
             replay_start_ts = 0;
         }
         else if (!txservice_skip_kv &&
@@ -518,14 +514,7 @@ bool CcNode::OnLeaderStop(int64_t term)
         std::unique_lock lk(pinning_threads_mux_);
         pinning_threads_cv_.wait(lk, [this] { return pinning_threads_ == 0; });
     }
-    uint16_t core_cnt = local_cc_shards_.Count();
-    ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
-    for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
-    {
-        local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
-    }
-    clear_ccm_req.Wait();
-
+    ClearCcNodeGroupData();
     return true;
 }
 
@@ -601,6 +590,17 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
     return succ;
 }
 
+void CcNode::ClearCcNodeGroupData()
+{
+    uint16_t core_cnt = local_cc_shards_.Count();
+    ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
+    for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+    {
+        local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
+    }
+    clear_ccm_req.Wait();
+}
+
 void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
                                   int64_t primary_term,
                                   bool resubscribe)
@@ -640,7 +640,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
 
     int64_t prev_primary_term = Sharder::Instance().PrimaryNodeTerm();
 
-    bool need_clear_ccm = false;
+    bool delay_clear_ccm = false;
     if (prev_primary_term > 0)
     {
         if ((prev_primary_term > primary_term && resubscribe) ||
@@ -663,7 +663,25 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
             // older term
             Sharder::Instance().SetStandbyNodeTerm(-1);
             Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
-            need_clear_ccm = true;
+
+            if (resubscribe)
+            {
+                // If resubscribe, we need to clear ccmap immediately since we
+                // have reset standby term and candidate standby term. If on
+                // leader start is called before the ccmap is cleared, we will
+                // have a outdated cache. We do not need delay the clear ccmap
+                // since the ccmap is already outdated and needs to be cleared
+                // anyway.
+                ClearCcNodeGroupData();
+            }
+            else
+            {
+                // If not resubscribe, we need to delay the clear ccmap until we
+                // make sure that the new leader is qualified to become the
+                // leader of the ng. Otherwise we might loose the valid cache on
+                // this node if we cleared too early.
+                delay_clear_ccm = true;
+            }
         }
     }
 
@@ -697,7 +715,8 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         channel = Sharder::Instance().GetCcNodeServiceChannel(leader_node_id);
     }
 
-    remote::CcRpcService_Stub stub(channel.get());
+    std::unique_ptr<remote::CcRpcService_Stub> stub =
+        std::make_unique<remote::CcRpcService_Stub>(channel.get());
     brpc::Controller cntl;
     cntl.set_timeout_ms(5000);
 
@@ -709,7 +728,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     start_follow_req.set_node_id(node_id_);
     start_follow_req.set_ng_term(primary_term);
 
-    stub.StandbyStartFollowing(
+    stub->StandbyStartFollowing(
         &cntl, &start_follow_req, &start_follow_resp, nullptr);
 
     while (cntl.Failed() || start_follow_resp.error())
@@ -732,11 +751,28 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
             return;
         }
 
+        if (cntl.Failed() && cntl.ErrorCode() != EAGAIN &&
+            cntl.ErrorCode() != brpc::EOVERCROWDED &&
+            cntl.ErrorCode() != brpc::ERPCTIMEDOUT)
+        {
+            // Refresh channel
+            do
+            {
+                channel = Sharder::Instance().UpdateCcNodeServiceChannel(
+                    leader_node_id, channel);
+                if (channel == nullptr)
+                {
+                    bthread_usleep(1000);
+                }
+            } while (channel == nullptr);
+
+            stub = std::make_unique<remote::CcRpcService_Stub>(channel.get());
+        }
         cntl.Reset();
         cntl.set_timeout_ms(5000);
         start_follow_resp.Clear();
         bthread_usleep(1000);
-        stub.StandbyStartFollowing(
+        stub->StandbyStartFollowing(
             &cntl, &start_follow_req, &start_follow_resp, nullptr);
     }
 
@@ -763,15 +799,9 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
 
     // Do not clear ccm until we're sure that the new elected leader is
     // qualified to become the leader of the ng.
-    if (need_clear_ccm)
+    if (delay_clear_ccm)
     {
-        uint16_t core_cnt = local_cc_shards_.Count();
-        ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
-        for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
-        {
-            local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
-        }
-        clear_ccm_req.Wait();
+        ClearCcNodeGroupData();
     }
 
     if (!txservice_skip_kv)
@@ -860,6 +890,9 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
                   << " is caught up with primary node in ng#" << ng_id_;
     }
 
+    LOG(INFO) << "subscribed to primary node at term " << primary_term;
+
+    is_processing_.store(false, std::memory_order_release);
     // Ask primary to resend msg from the given seq id since some of the
     // messages sent before starting seq id is set on standby node might have
     // been dropped.
@@ -875,11 +908,44 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     }
 
     cntl.Reset();
-    stub.ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
+    stub->ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
 
-    LOG(INFO) << "subscribed to primary node at term " << primary_term;
+    // Check rpc result
+    while (cntl.Failed())
+    {
+        // We only need to retry if the message is not delivered.
+        if (Sharder::Instance().LeaderTerm(ng_id_) > 0 ||
+            Sharder::Instance().CandidateLeaderTerm(ng_id_) > 0 ||
+            (Sharder::Instance().StandbyNodeTerm() != standby_term &&
+             Sharder::Instance().CandidateStandbyNodeTerm() != standby_term))
+        {
+            // Stop retrying if the node has become a leader or the standby term
+            // has changed.
+            return;
+        }
+        if (cntl.Failed() && cntl.ErrorCode() != EAGAIN &&
+            cntl.ErrorCode() != brpc::EOVERCROWDED &&
+            cntl.ErrorCode() != brpc::ERPCTIMEDOUT)
+        {
+            // Refresh channel
+            do
+            {
+                channel = Sharder::Instance().UpdateCcNodeServiceChannel(
+                    leader_node_id, channel);
+                if (channel == nullptr)
+                {
+                    bthread_usleep(1000);
+                }
+            } while (channel == nullptr);
 
-    is_processing_.store(false, std::memory_order_release);
+            stub = std::make_unique<remote::CcRpcService_Stub>(channel.get());
+        }
+        cntl.Reset();
+        cntl.set_timeout_ms(5000);
+        reset_resp.Clear();
+        bthread_usleep(1000);
+        stub->ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
+    }
 
     // If the data store is not shared between standby and primary, ask primary
     // to send a snapshot of previous data
@@ -907,11 +973,13 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         }
         pclose(output_stream);
 
+        // Checkpointer will retry if snapshot sync failed. Do not retry here
+        // too frequently since it might overwhelm the primary node.
         snapshot_req.set_dest_path(store_hd->SnapshotSyncDestPath());
         snapshot_req.set_user(username);
         cntl.Reset();
         cntl.set_timeout_ms(10000);
-        stub.RequestStorageSnapshotSync(
+        stub->RequestStorageSnapshotSync(
             &cntl, &snapshot_req, &snapshot_resp, nullptr);
         if (snapshot_resp.error())
         {
