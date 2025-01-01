@@ -976,7 +976,6 @@ public:
                 CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireAllCc", {
                     LOG(INFO) << "FaultInject  "
                                  "term_TemplateCcMap_Execute_AcquireAllCc";
-
                     return hd_res->SetError(
                         CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 });
@@ -1752,7 +1751,7 @@ public:
                             cce->GetOrCreateKeyLock(shard_, this, ccp)
                                 .AcquireReadIntent(
                                     FetchRecordCc::GetFetchRecordTxNumber(
-                                        Sharder::Instance().NodeId()));
+                                        cc_ng_id_));
 
                             return false;
                         }
@@ -1829,8 +1828,7 @@ public:
                     // fetch record returns.
                     cce->GetOrCreateKeyLock(shard_, this, ccp)
                         .AcquireReadIntent(
-                            FetchRecordCc::GetFetchRecordTxNumber(
-                                Sharder::Instance().NodeId()));
+                            FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
                     return false;
                 }
 #endif
@@ -9563,8 +9561,7 @@ protected:
             // fetch record fails. Remove the read intent
             ReleaseCceLock(cce->GetKeyLock(),
                            cce,
-                           FetchRecordCc::GetFetchRecordTxNumber(
-                               Sharder::Instance().NodeId()),
+                           FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_),
                            cc_ng_id_,
                            LockType::ReadIntent);
             if (cce->IsFree())
@@ -9648,12 +9645,11 @@ protected:
         }
 #endif
 
-        ReleaseCceLock(
-            cce->GetKeyLock(),
-            cce,
-            FetchRecordCc::GetFetchRecordTxNumber(Sharder::Instance().NodeId()),
-            cc_ng_id_,
-            LockType::ReadIntent);
+        ReleaseCceLock(cce->GetKeyLock(),
+                       cce,
+                       FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_),
+                       cc_ng_id_,
+                       LockType::ReadIntent);
 
         return true;
     }

@@ -174,7 +174,6 @@ public:
         SystemHandler *system_handler,    // = nullptr,
         std::unordered_map<uint32_t, std::vector<NodeConfig>>
             *ng_configs,                    // = nullptr,
-        int32_t range_bucket_seed,          // = -1,
         uint64_t cluster_config_version,    // = 0,
         store::DataStoreHandler *store_hd,  // = nullptr,
         TxService *tx_service,              // = nullptr,
@@ -1574,9 +1573,8 @@ public:
     void DropBucketInfo(NodeGroupId ng_id);
 
     void InitRangeBuckets(NodeGroupId ng_id,
-                          uint32_t ng_cnt,
-                          uint64_t version,
-                          int32_t seed);
+                          const std::set<NodeGroupId> &node_groups,
+                          uint64_t version);
 
     bool IsRangeBucketsInitialized(NodeGroupId ng_id);
 
@@ -1637,7 +1635,8 @@ public:
      * @brief Generate bucket migration plan based on the new node group config.
      */
     std::unordered_map<NodeGroupId, BucketMigrateInfo>
-    GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed);
+    GenerateBucketMigrationPlan(const std::set<NodeGroupId> &new_node_groups);
+
     // Memory limit of heap memory allocated by range slices info.
     // 5% of the total memory limit.
     const uint64_t range_slice_memory_limit_;

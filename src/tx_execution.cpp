@@ -975,11 +975,11 @@ void TransactionExecution::ProcessTxRequest(MultiObjectCommandTxRequest &req)
 
 void TransactionExecution::ProcessTxRequest(PublishTxRequest &req)
 {
-    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
 
-    for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
+    for (uint32_t ng_id : *all_node_groups)
     {
-        cc_handler_->PublishMessage(nid, tx_term_, req.chan_, req.message_);
+        cc_handler_->PublishMessage(ng_id, tx_term_, req.chan_, req.message_);
     }
 
     req.tx_result_.Finish({});
@@ -1219,12 +1219,13 @@ void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
     std::unordered_map<NodeGroupId, std::vector<NodeConfig>> new_ng_config;
     if (req.scale_type_ == ClusterScaleOpType::AddNode)
     {
-        new_ng_config = Sharder::Instance().AddNodeToCluster(*req.new_nodes_);
+        new_ng_config = Sharder::Instance().AddNodeToCluster(*req.delta_nodes_);
     }
     else if (req.scale_type_ == ClusterScaleOpType::RemoveNode)
     {
+        assert(req.delta_nodes_ != nullptr && !req.delta_nodes_->empty());
         new_ng_config =
-            Sharder::Instance().RemoveNodeFromCluster(*req.remove_node_count_);
+            Sharder::Instance().RemoveNodeFromCluster(*req.delta_nodes_);
     }
     else
     {
@@ -5166,12 +5167,13 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
-    acq_all_op.Reset(node_group_cnt);
+
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
+    acq_all_op.Reset(all_node_groups->size());
     acq_all_op.is_running_ = true;
     size_t hd_idx = 0;
 
-    for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
+    for (uint32_t ng_id : *all_node_groups)
     {
         for (uint32_t key_idx = 0; key_idx < acq_all_op.keys_.size(); key_idx++)
         {
@@ -5182,7 +5184,7 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
             cc_handler_->AcquireWriteAll(
                 *acq_all_op.table_name_,
                 acq_all_op.keys_[key_idx],
-                nid,
+                ng_id,
                 tx_number_.load(std::memory_order_relaxed),
                 tx_term_,
                 command_id_.load(std::memory_order_relaxed),
@@ -5222,11 +5224,12 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
-    post_write_all_op.Reset(node_group_cnt);
+
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
+    post_write_all_op.Reset(all_node_groups->size());
     post_write_all_op.is_running_ = true;
 
-    for (uint32_t ngid = 0; ngid < node_group_cnt; ++ngid)
+    for (uint32_t ngid : *all_node_groups)
     {
         if (TxCcNodeId() == ngid)
         {
@@ -5446,9 +5449,9 @@ void TransactionExecution::Process(ReloadCacheOperation &reload_cache_op)
 
     reload_cache_op_.is_running_ = true;
 
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
 
-    for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    for (NodeGroupId ng_id : *all_node_groups)
     {
         cc_handler_->ReloadCache(ng_id,
                                  TxNumber(),
@@ -5618,9 +5621,9 @@ void TransactionExecution::Process(AnalyzeTableAllOp &analyze_table_all_op)
 
     analyze_table_all_op.is_running_ = true;
 
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
 
-    for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    for (NodeGroupId ng_id : *all_node_groups)
     {
         cc_handler_->AnalyzeTableAll(
             *analyze_table_all_op.analyze_tx_req_->table_name_,
@@ -5680,11 +5683,11 @@ void TransactionExecution::Process(BroadcastStatisticsOp &broadcast_stat_op)
 
     broadcast_stat_op.is_running_ = true;
 
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
 
     const BroadcastStatisticsTxRequest *req =
         broadcast_stat_op.broadcast_tx_req_;
-    for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    for (NodeGroupId ng_id : *all_node_groups)
     {
         if (ng_id != req->sample_pool_->ng_id())
         {
@@ -6967,12 +6970,13 @@ void TransactionExecution::Process(KickoutDataAllOp &kickout_data_all_op)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
     size_t table_cnt = kickout_data_all_op.table_names_.size();
-    kickout_data_all_op.Reset(ng_cnt, table_cnt);
+    kickout_data_all_op.Reset(all_node_groups->size(), table_cnt);
     kickout_data_all_op.is_running_ = true;
 
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    for (uint32_t ng_id : *all_node_groups)
     {
         for (size_t table_idx = 0; table_idx < table_cnt; ++table_idx)
         {
@@ -7348,10 +7352,11 @@ void TransactionExecution::Process(
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
-    invalidate_table_cache_op.Reset(node_group_cnt);
+
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
+    invalidate_table_cache_op.Reset(all_node_groups->size());
     invalidate_table_cache_op.is_running_ = true;
-    for (uint32_t ng_id = 0; ng_id < node_group_cnt; ++ng_id)
+    for (uint32_t ng_id : *all_node_groups)
     {
         cc_handler_->InvalidateTableCache(
             *invalidate_table_cache_op.table_name_,

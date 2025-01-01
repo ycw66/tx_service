@@ -1017,11 +1017,19 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 // the read set to the cc entry of the schema, removes it from
                 // the read set. As a result, the tx will not try to release the
                 // read lock of the schema when committing.
-                const CcEntryAddr &schema_entry_addr =
-                    acquire_all_lock_op_.hd_results_[txm->TxCcNodeId()]
-                        .Value()
-                        .local_cce_addr_;
-                txm->rw_set_.DedupRead(schema_entry_addr);
+
+                for (size_t idx = 0; idx < acquire_all_lock_op_.upload_cnt_;
+                     ++idx)
+                {
+                    const CcEntryAddr &schema_entry_addr =
+                        acquire_all_lock_op_.hd_results_[idx]
+                            .Value()
+                            .local_cce_addr_;
+                    if (schema_entry_addr.NodeGroupId() == txm->TxCcNodeId())
+                    {
+                        txm->rw_set_.DedupRead(schema_entry_addr);
+                    }
+                }
             }
             else
             {
@@ -1254,11 +1262,14 @@ void UpsertTableIndexOp::FillPrepareLogRequest(TransactionExecution *txm)
 
     auto &node_terms = *prepare_log_rec->mutable_node_terms();
     node_terms.clear();
-    for (uint32_t nid = 0; nid < upgrade_all_intent_to_lock_op_.upload_cnt_;
-         ++nid)
+    size_t key_cnt = upgrade_all_intent_to_lock_op_.keys_.size();
+    for (size_t idx = 0; idx < upgrade_all_intent_to_lock_op_.upload_cnt_;
+         ++idx)
     {
-        node_terms[nid] =
-            upgrade_all_intent_to_lock_op_.hd_results_[nid].Value().node_term_;
+        const AcquireAllResult &hres_val =
+            upgrade_all_intent_to_lock_op_.hd_results_[idx].Value();
+        uint32_t ng_id = hres_val.local_cce_addr_.NodeGroupId();
+        node_terms[ng_id] = hres_val.node_term_;
     }
 }
 
@@ -1435,7 +1446,7 @@ void UpsertTableIndexOp::DispatchRangeTask(
     const TableName &base_table_name = table_key_.Name();
     const TableName &range_table_name =
         TableName(base_table_name.StringView(), TableType::RangePartition);
-    uint32_t local_ng_id = Sharder::Instance().NodeId();
+    uint32_t local_ng_id = Sharder::Instance().NativeNodeGroup();
     uint64_t tx_number = upsert_index_txm->TxNumber();
     int64_t tx_term = upsert_index_txm->TxTerm();
     TxKey target_range_end_key =

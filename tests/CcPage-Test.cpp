@@ -59,19 +59,8 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
                                            {"checkpointer_interval", 10},
                                            {"enable_shard_heap_defragment", 0},
                                            {"node_log_limit_mb", 1000}};
-    LocalCcShards local_cc_shards(0,
-                                  0,
-
-                                  tx_cnf,
-
-                                  nullptr,
-                                  nullptr,
-                                  &ng_configs,
-                                  9001,
-                                  2,
-                                  nullptr,
-                                  nullptr,
-                                  true);
+    LocalCcShards local_cc_shards(
+        0, 0, tx_cnf, nullptr, nullptr, &ng_configs, 2, nullptr, nullptr, true);
     CcShard shard(0,
                   1,
                   10000,

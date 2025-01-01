@@ -128,6 +128,10 @@ struct ClusterConfig
     std::unordered_map<NodeGroupId, std::vector<NodeConfig>> ng_configs_;
     std::unordered_map<NodeGroupId, std::shared_ptr<fault::CcNode>> cc_nodes_;
     uint64_t version_{0};
+    // These two variables is used frequently, so we copy shared pointer
+    // instead of copying objects.
+    std::shared_ptr<std::set<NodeGroupId>> ng_ids_;
+    std::shared_ptr<std::unordered_map<NodeId, NodeConfig>> nodes_configs_;
 };
 
 /**
@@ -192,6 +196,8 @@ public:
 #elif defined(RANGE_PARTITION_ENABLED)
         uint32_t node_group_id = hash_code >> 10;
 #else
+        assert(false);
+        // This calculation is wrong. NodeGroupId should be fetched from bucket.
         uint32_t node_group_id = (hash_code >> 10) % NodeGroupCount();
 #endif
 
@@ -231,10 +237,45 @@ public:
 #endif
     }
 
+    uint32_t NativeNodeGroup() const
+    {
+        return native_ng_;
+    }
+
     uint32_t NodeGroupCount()
     {
         std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
         return cluster_config_.ng_configs_.size();
+    }
+
+    std::shared_ptr<std::set<uint32_t>> AllNodeGroups()
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        return cluster_config_.ng_ids_;
+    }
+
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> GetNodeGroupConfigs()
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        return cluster_config_.ng_configs_;
+    }
+
+    uint32_t NodeId() const
+    {
+        return node_id_;
+    }
+
+    uint32_t GetNodeCount()
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        return cluster_config_.nodes_configs_->size();
+    }
+
+    std::shared_ptr<std::unordered_map<uint32_t, NodeConfig>>
+    GetAllNodesConfigs()
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        return cluster_config_.nodes_configs_;
     }
 
     /**
@@ -299,29 +340,6 @@ public:
     int64_t LeaderTerm(uint32_t ng_id) const;
 
     int64_t CandidateLeaderTerm(uint32_t ng_id) const;
-
-    int64_t InvalidLeaderTerm(uint32_t ng_id) const
-    {
-        if (!cc_nodes_init_.load(std::memory_order_acquire))
-        {
-            return -1;
-        }
-        return invalid_leader_term_cache_[ng_id].load(
-            std::memory_order_acquire);
-    }
-
-    void SetInvalidLeaderTerm(NodeGroupId ng_id, int64_t term)
-    {
-        int64_t cur_term = -1;
-        while (!invalid_leader_term_cache_[ng_id].compare_exchange_strong(
-            cur_term, term, std::memory_order_acq_rel))
-        {
-            if (cur_term >= term)
-            {
-                return;
-            }
-        }
-    }
 
     /**
      * @brief Updates the leader cache of all cc node groups.
@@ -452,22 +470,6 @@ public:
         return cc_stream_sender_ != nullptr ? cc_stream_sender_.get() : nullptr;
     }
 
-    uint32_t GetNodeCount()
-    {
-        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
-        return node_cnt_;
-    }
-
-    uint32_t NodeId() const
-    {
-        return node_id_;
-    }
-
-    std::unordered_map<uint32_t, std::vector<NodeConfig>> GetNodeGroupConfigs()
-    {
-        return cluster_config_.ng_configs_;
-    }
-
     void NodeGroupFinishRecovery(uint32_t ng_id)
     {
         std::lock_guard<std::mutex> lk(recovery_state_mux_);
@@ -525,7 +527,7 @@ public:
      * @return New cluster node group configs.
      */
     std::unordered_map<uint32_t, std::vector<NodeConfig>> AddNodeToCluster(
-        std::vector<std::pair<std::string, uint16_t>> &new_nodes);
+        const std::vector<std::pair<std::string, uint16_t>> &new_nodes);
 
     /**
      * @brief Calculate new node group config after removing nodes from current
@@ -533,12 +535,12 @@ public:
      * @return New cluster node group configs.
      */
     std::unordered_map<uint32_t, std::vector<NodeConfig>> RemoveNodeFromCluster(
-        uint16_t removed_node_count);
+        const std::vector<std::pair<std::string, uint16_t>> &removed_nodes);
 
     /**
-     * @brief Update current cluster config to the new_ng_configs. The config
-     * will only be updated if current config version is older than given
-     * version.
+     * @brief Update current cluster config to the new_ng_configs. The
+     * config will only be updated if current config version is older than
+     * given version.
      */
     void UpdateClusterConfig(
         const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
@@ -649,11 +651,6 @@ public:
         return subscribe_counter_.load(std::memory_order_acquire);
     }
 
-    uint32_t NativeNodeGroup() const
-    {
-        return native_ng_;
-    }
-
     bool NotifyShutdown()
     {
         bool expect = false;
@@ -674,6 +671,9 @@ private:
 
     void SetCommandLineOptions();
 
+    inline void RebalanceNgMembers(
+        std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs);
+
 private:
     uint32_t node_id_;
     uint32_t native_ng_;
@@ -689,16 +689,12 @@ private:
     ClusterConfig cluster_config_;
     // The replicate number of node group.
     uint16_t rep_group_cnt_;
-    uint32_t node_cnt_;
 
     // Ng leader cache. We preallocate it to the max cluster size so that we
     // don't need to modify the size of it.
     std::atomic<uint32_t> ng_leader_cache_[1000];
     std::atomic<int64_t> leader_term_cache_[1000];
     std::atomic<int64_t> candidate_leader_term_cache_[1000];
-    // cache of the largest invalid term of each ng. Requests from nodes
-    // with invalid term will be rejected.
-    std::atomic<int64_t> invalid_leader_term_cache_[1000];
 
     // The term that standby is subsribed to. Only used on standby node.
     std::atomic<int64_t> candidate_standby_node_term_cache_;

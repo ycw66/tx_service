@@ -67,8 +67,8 @@ public:
     }
 
     bool InitializeClusterConfig(
-        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
-        int32_t &seed) override
+        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs)
+        override
     {
         assert(false);
         return false;
@@ -77,7 +77,6 @@ public:
     bool ReadClusterConfig(
         std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         uint64_t &version,
-        int32_t &seed,
         bool &uninitialized) override
     {
         assert(false);

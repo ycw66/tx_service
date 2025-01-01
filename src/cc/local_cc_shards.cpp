@@ -46,7 +46,6 @@ LocalCcShards::LocalCcShards(
     CatalogFactory *catalog_factory,
     SystemHandler *system_handler,
     std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
-    int32_t range_bucket_seed,
     uint64_t cluster_config_version,
     store::DataStoreHandler *store_hd,
     TxService *tx_service,
@@ -135,8 +134,12 @@ LocalCcShards::LocalCcShards(
     // For mariadb, this thread is the main thread of the mariadb process.
     InitializeTableRangesHeap();
 
-    InitRangeBuckets(
-        ng_id_, ng_configs->size(), cluster_config_version, range_bucket_seed);
+    std::set<NodeGroupId> ng_ids;
+    for (auto &[ng_id, _] : *ng_configs)
+    {
+        ng_ids.emplace(ng_id);
+    }
+    InitRangeBuckets(ng_id_, ng_ids, cluster_config_version);
 
     if (prebuilt_tables)
     {
@@ -1762,11 +1765,11 @@ bool LocalCcShards::IsRangeBucketsInitialized(NodeGroupId ng_id)
 }
 
 void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
-                                     uint32_t ng_cnt,
-                                     uint64_t version,
-                                     int32_t seed)
+                                     const std::set<NodeGroupId> &node_groups,
+                                     uint64_t version)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    size_t ng_cnt = node_groups.size();
     if (bucket_infos_.size() != ng_cnt)
     {
         // Init bucket_info container for all node groups.
@@ -1779,7 +1782,7 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
         // Then, the buckte_infos_ never be modified if there is no cluster
         // scaling. So, we can safely read buckte_infos_ without locking
         // meta_data_mux_ when cluster is not migrating.
-        for (uint32_t ng = 0; ng < ng_cnt; ng++)
+        for (auto &ng : node_groups)
         {
             bucket_infos_.try_emplace(ng);
         }
@@ -1793,9 +1796,10 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
         bucket_infos_.at(ng_id);
     ng_bucket_infos.clear();
     std::map<uint16_t, NodeGroupId> rand_num_to_ng;
-    srand(seed);
-    for (uint32_t ng = 0; ng < ng_cnt; ng++)
+    // use ng id as seed to generate random numbers
+    for (auto ng : node_groups)
     {
+        srand(ng);
         size_t generated = 0;
         while (generated < 64)
         {
@@ -1804,6 +1808,13 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
             {
                 generated++;
                 rand_num_to_ng.emplace(rand_num, ng);
+            }
+            if (rand_num_to_ng.size() >= total_range_buckets)
+            {
+                LOG(WARNING)
+                    << "Cluster has too many node groups, need to reduce the "
+                       "number of buckets held by each node group";
+                break;
             }
         }
     }
@@ -1945,16 +1956,18 @@ const BucketInfo *LocalCcShards::CommitDirtyBucketInfo(NodeGroupId ng_id,
 }
 
 std::unordered_map<NodeGroupId, BucketMigrateInfo>
-LocalCcShards::GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed)
+LocalCcShards::GenerateBucketMigrationPlan(
+    const std::set<NodeGroupId> &new_node_groups)
 {
     // Construct bucket info map on startup
     // Generate 64 random numbers for each node group as virtual nodes on
     // hashing ring. Each bucket id belongs to the first virtual node that is
     // larger than the bucket id.
     std::map<uint16_t, NodeGroupId> rand_num_to_ng;
-    std::srand(seed);
-    for (uint32_t ng = 0; ng < new_ng_count; ng++)
+    // use ng id as seed to generate random numbers
+    for (auto ng : new_node_groups)
     {
+        srand(ng);
         size_t generated = 0;
         while (generated < 64)
         {
@@ -1963,6 +1976,13 @@ LocalCcShards::GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed)
             {
                 generated++;
                 rand_num_to_ng.emplace(rand_num, ng);
+            }
+            if (rand_num_to_ng.size() >= total_range_buckets)
+            {
+                LOG(WARNING)
+                    << "Cluster has too many node groups, need to reduce the "
+                       "number of buckets held by each node group";
+                break;
             }
         }
     }
@@ -1985,7 +2005,8 @@ LocalCcShards::GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed)
         // This function should only be called as preferred leader of node
         // group.
         NodeGroupId cur_owner =
-            GetBucketInfoInternal(bucket_id, Sharder::Instance().NodeId())
+            GetBucketInfoInternal(bucket_id,
+                                  Sharder::Instance().NativeNodeGroup())
                 ->BucketOwner();
         if (cur_owner != ng_id)
         {

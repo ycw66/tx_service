@@ -117,8 +117,8 @@ void txservice::LocalCcHandler::AcquireWriteAll(
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
 #endif
-
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    hres.Value().local_cce_addr_.SetNodeGroupId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
         hres.Value().remote_ack_cnt_ = nullptr;
@@ -967,8 +967,8 @@ void txservice::LocalCcHandler::ScanOpen(
 #ifdef RANGE_PARTITION_ENABLED
     hd_res.SetFinished();
 #else
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-    open_result.Reset(ng_cnt);
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
+    open_result.Reset(*all_node_groups);
     size_t core_cnt = cc_shards_.Count();
 
     // A scan sends requests to local cores and remote cc nodes.
@@ -979,7 +979,7 @@ void txservice::LocalCcHandler::ScanOpen(
     }
     else
     {
-        for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+        for (uint32_t ng_id : *all_node_groups)
         {
             uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
             if (node_id == cc_shards_.node_id_)
@@ -996,7 +996,7 @@ void txservice::LocalCcHandler::ScanOpen(
 
     hd_res.SetRefCnt(dependent_cnt);
 
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    for (uint32_t ng_id : *all_node_groups)
     {
         uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
         if (node_id == cc_shards_.node_id_ || is_standby_tx)
@@ -1188,7 +1188,9 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     }
 
     ScanOpenResult &open_result = hd_res.Value();
-    open_result.Reset(1);
+    std::set<NodeGroupId> node_groups;
+    node_groups.emplace(Sharder::Instance().NativeNodeGroup());
+    open_result.Reset(node_groups);
 
     open_result.scanner_ = std::move(ccm_scanner);
     CcScanner *scanner_ptr = open_result.scanner_.get();
@@ -1638,9 +1640,10 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
     else if (vct_node_id[0] == -1)
     {
         vct_node_id.clear();
-        for (int i = 0; i < (int) Sharder::Instance().GetNodeCount(); i++)
+        auto all_nodes_sptr = Sharder::Instance().GetAllNodesConfigs();
+        for (auto &[nid, _] : *all_nodes_sptr)
         {
-            vct_node_id.push_back(i);
+            vct_node_id.push_back(nid);
         }
     }
 

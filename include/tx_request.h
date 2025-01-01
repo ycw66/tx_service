@@ -1079,23 +1079,20 @@ struct ClusterScaleTxRequest
     ClusterScaleTxRequest(
         const std::string &id,
         ClusterScaleOpType scale_type,
-        std::vector<std::pair<std::string, uint16_t>> *new_nodes,
-        uint16_t *remove_node_count)
+        const std::vector<std::pair<std::string, uint16_t>> *delta_nodes)
         : TemplateTxRequest(nullptr, nullptr),
           id_(id),
           scale_type_(scale_type),
-          new_nodes_(new_nodes),
-          remove_node_count_(remove_node_count)
+          delta_nodes_(delta_nodes)
     {
     }
 
     std::string id_;
 
     ClusterScaleOpType scale_type_;
-    // Used when adding node, to indicate added node info
-    std::vector<std::pair<std::string, uint16_t>> *new_nodes_;
-    // Used when removing node, to indicate how many nodes to be removed
-    uint16_t *remove_node_count_;
+    // Case adding node, to indicate added node info;
+    // Case removing node, to indicate removed node info;
+    const std::vector<std::pair<std::string, uint16_t>> *delta_nodes_;
 };
 
 struct SchemaRecoveryTxRequest

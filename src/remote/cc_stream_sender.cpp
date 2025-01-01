@@ -652,10 +652,10 @@ void CcStreamSender::ResendMessageToNode()
             continue;
         }
 
-        auto node_cnt = Sharder::Instance().GetNodeCount();
         no_message_round_cnt = 0;
+        auto all_nodes_sptr = Sharder::Instance().GetAllNodesConfigs();
 
-        for (size_t nid = 0; nid < node_cnt; ++nid)
+        for (auto &[nid, _] : *all_nodes_sptr)
         {
             if (eagain_resend_message_cnt_ == 0)
             {
@@ -702,7 +702,7 @@ void CcStreamSender::ResendMessageToNode()
             }
         }
 
-        for (size_t nid = 0; nid < node_cnt; ++nid)
+        for (auto &[nid, _] : *all_nodes_sptr)
         {
             if (eagain_resend_long_message_cnt_ == 0)
             {

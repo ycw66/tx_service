@@ -138,14 +138,15 @@ struct ScanOpenResult
         return *this;
     }
 
-    void Reset(size_t cc_node_cnt)
+    void Reset(const std::set<NodeGroupId> &cc_node_groups)
     {
-        cc_node_terms_.resize(cc_node_cnt);
-        cc_node_returned_.resize(cc_node_cnt);
+        cc_node_terms_.clear();
+        cc_node_returned_.clear();
 
-        for (size_t nid = 0; nid < cc_node_cnt; ++nid)
+        for (NodeGroupId ng_id : cc_node_groups)
         {
-            cc_node_terms_[nid] = -1;
+            cc_node_terms_.try_emplace(ng_id, -1);
+            cc_node_returned_.try_emplace(ng_id, 0);
         }
     }
 
@@ -157,13 +158,13 @@ struct ScanOpenResult
     // blocked, which sends an acknowledgement to the request's issuer notifying
     // the cc node's term. This vector bookkeeps which cc node groups have sent
     // acknowledgement.
-    std::vector<int64_t> cc_node_terms_;
+    std::unordered_map<NodeGroupId, int64_t> cc_node_terms_;
     // std::vector<bool> is discouraged. We use one byte to denote if the scan
     // response toward a cc node has returned or not. We do not designate a
     // separate vector to bookkeep error codes of individual requests. This is
     // because if a scan request toward a cc node finishes with an error, the
     // error code is recorded in the cc handler result.
-    std::vector<uint8_t> cc_node_returned_;
+    std::unordered_map<NodeGroupId, uint8_t> cc_node_returned_;
 };
 
 struct RemoteScanCache

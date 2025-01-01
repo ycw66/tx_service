@@ -810,7 +810,8 @@ void RecoveryService::ProcessRecoverTxTask(RecoverTxTask &task)
     uint32_t tx_ng = (task.tx_number_ >> 32L) >> 10;
     uint32_t tx_leader = Sharder::Instance().LeaderNodeId(tx_ng);
     remote::CheckTxStatusResponse_TxStatus tx_status;
-    if (tx_ng >= Sharder::Instance().NodeGroupCount())
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
+    if (all_node_groups->find(tx_ng) == all_node_groups->end())
     {
         // Node group is already removed from cluster. Need to ask log for
         // tx status.

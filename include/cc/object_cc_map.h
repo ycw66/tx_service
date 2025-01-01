@@ -1674,7 +1674,7 @@ public:
                         cce->GetOrCreateKeyLock(shard_, this, ccp)
                             .AcquireReadIntent(
                                 FetchRecordCc::GetFetchRecordTxNumber(
-                                    Sharder::Instance().NodeId()));
+                                    cc_ng_id_));
                     }
                 }
                 else
@@ -2030,8 +2030,8 @@ public:
                 // fetch record
                 //
                 cce->GetOrCreateKeyLock(shard_, this, ccp)
-                    .AcquireReadIntent(FetchRecordCc::GetFetchRecordTxNumber(
-                        Sharder::Instance().NodeId()));
+                    .AcquireReadIntent(
+                        FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
             }
             // extract command list
             const uint16_t cmd_cnt = *reinterpret_cast<decltype(cmd_cnt) *>(
@@ -2206,12 +2206,11 @@ public:
         // Release the
         // FetchRecordCc::GetFetchRecordTxNumber(Sharder::Instance().NodeId())
         // ried by fetch record.
-        ReleaseCceLock(
-            cce->GetKeyLock(),
-            cce,
-            FetchRecordCc::GetFetchRecordTxNumber(Sharder::Instance().NodeId()),
-            cc_ng_id_,
-            LockType::ReadIntent);
+        ReleaseCceLock(cce->GetKeyLock(),
+                       cce,
+                       FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_),
+                       cc_ng_id_,
+                       LockType::ReadIntent);
 
         if (status == RecordStatus::Unknown)
         {

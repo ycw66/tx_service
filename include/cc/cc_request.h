@@ -87,11 +87,6 @@ public:
 
     virtual bool ValidTermCheck()
     {
-        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
-        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
-        {
-            return false;
-        }
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
 
         if (ng_term_ < 0)
@@ -626,11 +621,6 @@ public:
 
     bool ValidTermCheck() override
     {
-        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
-        if (tx_term_ <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
-        {
-            return false;
-        }
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         if (cce_addr_ != nullptr)
         {
@@ -1059,12 +1049,6 @@ public:
             return false;
         }
 
-        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
-        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
-        {
-            return false;
-        }
-
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
         if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
@@ -1150,11 +1134,6 @@ public:
 
     bool ValidTermCheck() override
     {
-        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
-        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
-        {
-            return false;
-        }
         int64_t cc_ng_term = -1;
         if (is_in_recovering_)
         {
@@ -1551,12 +1530,6 @@ public:
     }
     bool ValidTermCheck() override
     {
-        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
-        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
-        {
-            return false;
-        }
-
         bool is_standby_tx = IsStandbyTx(TxTerm());
         int64_t cc_ng_term = -1;
         if (is_standby_tx)
@@ -1696,11 +1669,6 @@ public:
 
     bool ValidTermCheck() override
     {
-        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
-        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
-        {
-            return false;
-        }
         bool is_standby_tx = IsStandbyTx(TxTerm());
         int64_t cc_ng_term = -1;
         if (is_standby_tx)
@@ -5704,12 +5672,6 @@ public:
 
     bool ValidTermCheck() override
     {
-        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
-        if (TxTerm() <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
-        {
-            return false;
-        }
-
         bool is_standby_tx = IsStandbyTx(TxTerm());
         int64_t cc_ng_term = -1;
         if (is_standby_tx)
@@ -6002,12 +5964,6 @@ public:
 
     bool ValidTermCheck() override
     {
-        uint32_t src_ng_id = (tx_number_ >> 32L) >> 10;
-        if (tx_term_ <= Sharder::Instance().InvalidLeaderTerm(src_ng_id))
-        {
-            return false;
-        }
-
         assert(cce_addr_ != nullptr && cce_addr_->CcePtr() != 0 &&
                cce_addr_->Term() > 0);
 

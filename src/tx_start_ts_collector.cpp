@@ -19,8 +19,8 @@ void TxStartTsCollector::Init(LocalCcShards *shards, uint32_t delay_seconds)
     min_start_ts_ = 1UL;
     local_shards_ = shards;
     delay_seconds_ = std::max(1U, delay_seconds);
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
+    for (uint32_t ng_id : *all_node_groups)
     {
         min_start_ts_map_.emplace(ng_id, 1U);
     }
@@ -74,16 +74,10 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
     // collect recyle ts from all ccshards in all cc_node_group
     uint64_t min_start_ts = UINT64_MAX;
 
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
+    for (uint32_t ng_id : *all_node_groups)
     {
         uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
-
-        if (dest_node_id != ng_id)
-        {
-            continue;  // ng leader changed
-        }
 
         if (dest_node_id == local_shards_->NodeId())
         {
@@ -122,7 +116,8 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
         {
             if (!res.error() && res.term() > 0)
             {
-                min_start_ts_map_[ng_id] = res.ts();
+                auto ins_pair = min_start_ts_map_.try_emplace(ng_id);
+                ins_pair.first->second = res.ts();
             }
         }
     }

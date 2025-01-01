@@ -1011,7 +1011,6 @@ public:
         schema_op_msg.ParseFromArray(content.data(), content.length());
 
         const CatalogEntry *catalog_entry = nullptr;
-        uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
 
         // Need to parse the string if not include table type in protobuf
         TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(

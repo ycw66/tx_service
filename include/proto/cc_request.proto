@@ -63,8 +63,12 @@ message ClusterAddNodeRequest {
 
 message ClusterRemoveNodeRequest
 {
-    int32 remove_node_count = 1;
-    string id = 2;
+    string id = 1;
+    // case removing nodes from tail, please set "remove_node_count".
+    int32 remove_node_count = 2;
+    // case removing any nodes, please set "host_list" and "port_list".
+    repeated string host_list = 3;
+    repeated int32 port_list = 4;
 }
 
 enum ClusterScaleWriteLogResult

@@ -82,8 +82,8 @@ public:
      * should only be called during bootstrap.
      */
     virtual bool InitializeClusterConfig(
-        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
-        int32_t &seed) = 0;
+        const std::unordered_map<uint32_t, std::vector<NodeConfig>>
+            &ng_configs) = 0;
 
     /**
      * Read cluster config from kv store cluster config table.
@@ -91,7 +91,6 @@ public:
     virtual bool ReadClusterConfig(
         std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         uint64_t &version,
-        int32_t &seed,
         bool &uninitialized) = 0;
 
     /**

@@ -186,24 +186,13 @@ bool CcNode::UpdateCkptTs(uint64_t new_ckpt_ts)
 void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
                                   uint32_t leader_node_id)
 {
-    uint32_t node_id;
-    std::string node_ip;
-    uint16_t node_port;
+    auto all_nodes = Sharder::Instance().GetAllNodesConfigs();
 
-    uint32_t node_count = Sharder::Instance().GetNodeCount();
-
-    for (node_id = 0; node_id < node_count; node_id++)
+    for (auto &[node_id, _] : *all_nodes)
     {
         if (node_id == leader_node_id)
         {
             Sharder::Instance().UpdateLeader(leader_ng_id, leader_node_id);
-            continue;
-        }
-
-        Sharder::Instance().GetNodeAddress(node_id, node_ip, node_port);
-        if (node_ip.empty())
-        {
-            // node is already removed from cluster.
             continue;
         }
 
@@ -265,21 +254,12 @@ bool CcNode::OnLeaderStart(int64_t term,
         [this](void *)
         { is_processing_.store(false, std::memory_order_release); });
 
-    if (Sharder::Instance().InvalidLeaderTerm(ng_id_) >= term)
-    {
-        // outdate request. This ccnode is not leader anymore.
-        return true;
-    }
-
     if (Sharder::Instance().CandidateLeaderTerm(ng_id_) >= term ||
         Sharder::Instance().LeaderTerm(ng_id_) >= term)
     {
         // This ccnode has become a candidate leader or leader
         return true;
     }
-
-    // Invalidate terms smaller than the new term on this ng.
-    Sharder::Instance().SetInvalidLeaderTerm(ng_id_, term - 1);
 
     int64_t prev_standby_term = Sharder::Instance().StandbyNodeTerm();
     int64_t prev_candidate_standby_term =
@@ -410,11 +390,9 @@ bool CcNode::OnLeaderStart(int64_t term,
         {
             // TODO: HARDCORE SEED
             // If kv is not enabled, just copy bucket info from preferred ng.
+            auto ng_ids = Sharder::Instance().AllNodeGroups();
             local_cc_shards_.InitRangeBuckets(
-                ng_id_,
-                Sharder::Instance().NodeGroupCount(),
-                Sharder::Instance().ClusterConfigVersion(),
-                9001);
+                ng_id_, *ng_ids, Sharder::Instance().ClusterConfigVersion());
         }
         else
         {
@@ -422,17 +400,20 @@ bool CcNode::OnLeaderStart(int64_t term,
             // before replaying.
             std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
             uint64_t version;
-            int32_t seed;
             bool uninitialized;
             // read ng config from kv store
             while (!local_cc_shards_.store_hd_->ReadClusterConfig(
-                ng_configs, version, seed, uninitialized))
+                ng_configs, version, uninitialized))
             {
                 ng_configs.clear();
                 assert(!uninitialized);
             }
-            local_cc_shards_.InitRangeBuckets(
-                ng_id_, ng_configs.size(), version, seed);
+            std::set<NodeGroupId> ng_ids;
+            for (auto &[ng_id, _] : ng_configs)
+            {
+                ng_ids.emplace(ng_id);
+            }
+            local_cc_shards_.InitRangeBuckets(ng_id_, ng_ids, version);
             if (Sharder::Instance().ClusterConfigVersion() < version)
             {
                 // Use a dummy cc request that returns once it's put into cc
@@ -488,14 +469,6 @@ bool CcNode::OnLeaderStop(int64_t term)
         nullptr,
         [this](void *)
         { is_processing_.store(false, std::memory_order_release); });
-
-    if (Sharder::Instance().InvalidLeaderTerm(ng_id_) >= term)
-    {
-        // This ccnode has already call `OnLeaderStop` at `term`
-        return true;
-    }
-
-    Sharder::Instance().SetInvalidLeaderTerm(ng_id_, term);
 
     {
         // replay thread and leader election thread may update
@@ -845,27 +818,29 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     {
         // Cluster scale is not enabled in this case and the bucket slots are
         // static.
+        auto ng_ids = Sharder::Instance().AllNodeGroups();
+
         local_cc_shards_.InitRangeBuckets(
-            ng_id_,
-            Sharder::Instance().NodeGroupCount(),
-            Sharder::Instance().ClusterConfigVersion(),
-            9001);
+            ng_id_, *ng_ids, Sharder::Instance().ClusterConfigVersion());
     }
     else
     {
         std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
         uint64_t version;
-        int32_t seed;
         bool uninitialized;
         // read ng config from kv store
         while (!local_cc_shards_.store_hd_->ReadClusterConfig(
-            ng_configs, version, seed, uninitialized))
+            ng_configs, version, uninitialized))
         {
             ng_configs.clear();
             assert(!uninitialized);
         }
-        local_cc_shards_.InitRangeBuckets(
-            ng_id_, ng_configs.size(), version, seed);
+        std::set<NodeGroupId> ng_ids;
+        for (auto &[ng_id, _] : ng_configs)
+        {
+            ng_ids.emplace(ng_id);
+        }
+        local_cc_shards_.InitRangeBuckets(ng_id_, ng_ids, version);
         if (Sharder::Instance().ClusterConfigVersion() < version)
         {
             // Use a dummy cc request that returns once it's put into cc

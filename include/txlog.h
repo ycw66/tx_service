@@ -56,6 +56,10 @@ public:
                                     int64_t term,
                                     uint64_t checkpoint_timestamp) = 0;
 
+    // Invoked by a cc node group's leader to remove cc node group in all log
+    // groups on cluster scaling down.
+    virtual void RemoveCcNodeGroup(uint32_t cc_node_group_id, int64_t term) = 0;
+
     // Invoked by a failing over cc node group to replay log and notify all log
     // groups the raft term of the group's new leader.
     // If log_group >= 0, send ReplayLogRequest to specified log_group, else

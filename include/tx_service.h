@@ -1012,7 +1012,6 @@ public:
         uint32_t ng_id,    // = 0,
         std::unordered_map<uint32_t, std::vector<NodeConfig>>
             *ng_configs,                    // = nullptr,
-        int32_t range_bucket_seed,          // = -1,
         uint64_t cluster_config_version,    // = 0,
         store::DataStoreHandler *store_hd,  // = nullptr,
         TxLog *log_hd,                      // = nullptr,
@@ -1035,7 +1034,6 @@ public:
                            catalog_factory,
                            system_handler,
                            ng_configs,  // here only need ng_configs.size()
-                           range_bucket_seed,
                            cluster_config_version,
                            store_hd,
                            this,

@@ -137,16 +137,17 @@ void DeadLockCheck::GatherLockDependancy()
     std::unique_lock<std::mutex> lk(mutex_);
     UpdateCheckNodeId(Sharder::Instance().NodeId());
     reply_map_.clear();
-    const uint32_t ng_count = Sharder::Instance().NodeGroupCount();
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
+
     node_unfinished_ = 0;
     entry_locked_txid_map_.clear();
     txid_waited_entry_map_.clear();
     txid_ety_count_map_.clear();
 
     // Send dead lock request to local and remote nodes
-    for (uint32_t i = 0; i < ng_count; i++)
+    for (uint32_t ng_id : *all_node_groups)
     {
-        uint32_t node_id = Sharder::Instance().LeaderNodeId(i);
+        uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
         // If this node is leader of multiple ngs and we've already asked it,
         // no need to visit this node again.
         if (reply_map_.find(node_id) != reply_map_.end())

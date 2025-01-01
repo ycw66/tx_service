@@ -99,23 +99,17 @@ void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
 {
     std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
 
-    // TODO(lzx): use another arg to manage all nodes infos.
-    for (const auto &pair : cluster_config_.ng_configs_)
+    auto it = cluster_config_.nodes_configs_->find(node_id);
+    if (it != cluster_config_.nodes_configs_->end())
     {
-        for (const auto &config : pair.second)
-        {
-            if (config.node_id_ == node_id)
-            {
-                ip = config.host_name_;
-                port = config.port_;
-                return;
-            }
-        }
+        ip = it->second.host_name_;
+        port = it->second.port_;
     }
-
-    ip = "";
-    port = 0;
-    return;
+    else
+    {
+        ip = "";
+        port = 0;
+    }
 }
 
 int Sharder::Init(
@@ -139,7 +133,12 @@ int Sharder::Init(
     local_shards_ = local_shards;
     rep_group_cnt_ = rep_group_cnt;
     log_agent_ = std::move(log_agent);
-    std::unordered_map<uint32_t, NodeConfig> nodes_configs;
+
+    cluster_config_.nodes_configs_ =
+        std::make_shared<std::unordered_map<uint32_t, NodeConfig>>();
+    cluster_config_.ng_ids_ = std::make_shared<std::set<uint32_t>>();
+    std::unordered_map<uint32_t, NodeConfig> &nodes_configs =
+        *cluster_config_.nodes_configs_;
 
     {
         std::lock_guard<std::shared_mutex> lk(cluster_cnf_mux_);
@@ -148,7 +147,6 @@ int Sharder::Init(
             ng_leader_cache_[nid].store(nid);
             leader_term_cache_[nid].store(-1);
             candidate_leader_term_cache_[nid].store(-1);
-            invalid_leader_term_cache_[nid].store(-1);
         }
 
         standby_node_term_cache_.store(-1, std::memory_order_relaxed);
@@ -165,17 +163,18 @@ int Sharder::Init(
                 }
                 cluster_config_.ng_configs_.try_emplace(
                     pair.first, std::move(group_config));
+                cluster_config_.ng_ids_->emplace(pair.first);
             }
             cluster_config_.version_ = config_version;
         }
         else
         {
             cluster_config_.ng_configs_.try_emplace(0);
+            cluster_config_.ng_ids_->emplace(0);
             cluster_config_.version_ = config_version;
         }
 
         ExtractNodesConfigs(cluster_config_.ng_configs_, nodes_configs);
-        node_cnt_ = nodes_configs.size();
 
         if (txlog_ips != nullptr)
         {
@@ -690,7 +689,12 @@ void Sharder::WaitClusterReady()
                     recover_req->set_src_node_id(node_id_);
                     recover_req->set_node_group_id(ng_id);
 
-                    cc_stream_sender_->SendMessageToNg(ng_id, send_msg);
+                    bool res =
+                        cc_stream_sender_->SendMessageToNg(ng_id, send_msg);
+                    if (!res)
+                    {
+                        UpdateLeaders();
+                    }
                 }
             }
         }
@@ -890,112 +894,99 @@ size_t Sharder::GetLocalCcShardsCount()
 }
 
 std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
-    std::vector<std::pair<std::string, uint16_t>> &new_nodes)
+    const std::vector<std::pair<std::string, uint16_t>> &new_nodes)
 {
     std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
     // Make a copy of the current ng configs.
     std::unordered_map<uint32_t, std::vector<NodeConfig>> new_ng_configs(
         cluster_config_.ng_configs_);
 
-    uint32_t rep_group_cnt =
-        rep_group_cnt_ < new_nodes.size() + cluster_config_.ng_configs_.size()
-            ? rep_group_cnt_
-            : new_nodes.size() + cluster_config_.ng_configs_.size();
+    uint32_t new_node_id = 0;
+    if (cluster_config_.nodes_configs_ != nullptr)
+    {
+        for (auto &[nid, _] : *cluster_config_.nodes_configs_)
+        {
+            new_node_id = std::max(new_node_id, nid);
+        }
+        new_node_id++;
+    }
+
     // Add a new node group for each new added node, and assign the nodes
     // that are in least number of node groups as the member of new node
     // groups.
+    NodeGroupId new_ng_id = 0;
     for (auto &node : new_nodes)
     {
-        NodeGroupId new_ng_id = new_ng_configs.size();
+        // For ng_id in ng_configs may be not continuous, try to fill the gaps.
+        while (new_ng_configs.find(new_ng_id) != new_ng_configs.end())
+        {
+            new_ng_id++;
+        }
+        while (cluster_config_.nodes_configs_->find(new_node_id) !=
+               cluster_config_.nodes_configs_->end())
+        {
+            new_node_id += 1;
+        }
+
         // Add this node to the new node group as the preferred leader.
         std::vector<NodeConfig> members{
-            NodeConfig(new_ng_id, node.first, node.second, true)};
+            NodeConfig(new_node_id, node.first, node.second, true)};
+        new_node_id += 1;
         new_ng_configs.try_emplace(new_ng_id, std::move(members));
+        new_ng_id += 1;
     }
 
-    // Loop over current ng configs, and build a map from node id
-    // to the number of node groups this node is in.
-    std::unordered_map<uint32_t, int> node_ng_count;
-    for (auto &pair : new_ng_configs)
-    {
-        for (auto &node : pair.second)
-        {
-            auto res_pair = node_ng_count.try_emplace(node.node_id_, 0);
-            res_pair.first->second++;
-        }
-    }
-
-    // Rebalance the members in each node groups.
-    // Make sure each ng has at least rep_group_cnt members.
-    for (auto &config_pair : new_ng_configs)
-    {
-        // Find members for this new node group.
-        std::vector<NodeConfig> &members = config_pair.second;
-        while (members.size() < rep_group_cnt)
-        {
-            int least_node_id = -1;
-            int least_node_ng_count = INT32_MAX;
-            // Find the node with the least number of node groups.
-            for (auto &[node_id, ng_count] : node_ng_count)
-            {
-                if (ng_count < least_node_ng_count)
-                {
-                    // check if this node is already in this node group.
-                    bool skip = false;
-                    for (auto &node : members)
-                    {
-                        if (node.node_id_ == node_id)
-                        {
-                            skip = true;
-                            break;
-                        }
-                    }
-                    if (!skip)
-                    {
-                        least_node_id = node_id;
-                        least_node_ng_count = ng_count;
-                    }
-                }
-            }
-            assert(least_node_id != -1);
-            members.emplace_back(new_ng_configs[least_node_id].front());
-            // the filled member should not be preferred leader.
-            members.back().is_candidate_ = false;
-            node_ng_count[least_node_id]++;
-        }
-    }
+    RebalanceNgMembers(new_ng_configs);
 
     return new_ng_configs;
 }
 
 std::unordered_map<uint32_t, std::vector<NodeConfig>>
-Sharder::RemoveNodeFromCluster(uint16_t removed_node_count)
+Sharder::RemoveNodeFromCluster(
+    const std::vector<std::pair<std::string, uint16_t>> &removed_nodes)
 {
     std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
     // Make a copy of the current ng configs.
     std::unordered_map<uint32_t, std::vector<NodeConfig>> new_ng_configs(
         cluster_config_.ng_configs_);
 
-    uint32_t rep_group_cnt =
-        rep_group_cnt_ < cluster_config_.ng_configs_.size() - removed_node_count
-            ? rep_group_cnt_
-            : cluster_config_.ng_configs_.size() - removed_node_count;
-    assert(rep_group_cnt > 0);
-    // Remove the nodes with greatest node id.
-    NodeGroupId largest_node_id = new_ng_configs.size() - 1;
-    for (int i = 0; i < removed_node_count; i++)
+    std::unordered_set<uint32_t> removed_ng_ids;
+    std::unordered_set<uint32_t> removed_node_ids;
+    for (auto &it : new_ng_configs)
+    {
+        for (const NodeConfig &member : it.second)
+        {
+            if (member.is_candidate_)
+            {
+                for (const auto &rm_node : removed_nodes)
+                {
+                    if (rm_node.first == member.host_name_ &&
+                        rm_node.second == member.port_)
+                    {
+                        removed_ng_ids.emplace(it.first);
+                        removed_node_ids.emplace(member.node_id_);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove the nodes groups from ng_configs
+    for (uint32_t ng_id : removed_ng_ids)
     {
         // Remove the node groups where these nodes are preferred leader.
-        new_ng_configs.erase(largest_node_id);
-        largest_node_id--;
+        new_ng_configs.erase(ng_id);
     }
+
     for (auto &ng_config : new_ng_configs)
     {
         // Remove these nodes from other node groups where they are members.
         for (auto member_it = std::next(ng_config.second.begin());
              member_it != ng_config.second.end();)
         {
-            if (member_it->node_id_ > largest_node_id)
+            if (removed_node_ids.find(member_it->node_id_) !=
+                removed_node_ids.end())
             {
                 member_it = ng_config.second.erase(member_it);
             }
@@ -1005,15 +996,34 @@ Sharder::RemoveNodeFromCluster(uint16_t removed_node_count)
             }
         }
     }
+
+    RebalanceNgMembers(new_ng_configs);
+
+    return new_ng_configs;
+}
+
+void Sharder::RebalanceNgMembers(
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_ng_configs)
+{
+    uint32_t rep_group_cnt = rep_group_cnt_ < new_ng_configs.size()
+                                 ? rep_group_cnt_
+                                 : new_ng_configs.size();
+    assert(rep_group_cnt > 0);
+
     // Loop over current ng configs, and build a map from node id
     // to the number of node groups this node is in.
     std::unordered_map<uint32_t, int> node_ng_count;
-    for (auto &pair : new_ng_configs)
+    std::unordered_map<uint32_t, NodeConfig> nodes_configs;
+    for (auto &[ng, members] : new_ng_configs)
     {
-        for (auto &node : pair.second)
+        for (auto &node : members)
         {
             auto res_pair = node_ng_count.try_emplace(node.node_id_, 0);
             res_pair.first->second++;
+            if (res_pair.second)
+            {
+                nodes_configs.try_emplace(node.node_id_, node);
+            }
         }
     }
 
@@ -1050,13 +1060,12 @@ Sharder::RemoveNodeFromCluster(uint16_t removed_node_count)
                 }
             }
             assert(least_node_id != -1);
-            members.emplace_back(new_ng_configs[least_node_id].front());
+            members.emplace_back(nodes_configs[least_node_id]);
+            // the filled member should not be preferred leader.
             members.back().is_candidate_ = false;
             node_ng_count[least_node_id]++;
         }
     }
-
-    return new_ng_configs;
 }
 
 void Sharder::UpdateClusterConfig(
@@ -1098,7 +1107,9 @@ void Sharder::UpdateClusterConfig(
             }
 
             // nodes
-            std::unordered_map<uint32_t, NodeConfig> new_nodes_configs;
+            auto new_nodes_sptr =
+                std::make_shared<std::unordered_map<uint32_t, NodeConfig>>();
+            auto &new_nodes_configs = *new_nodes_sptr;
             ExtractNodesConfigs(new_ng_configs, new_nodes_configs);
             for (const auto &[nid, node_config] : new_nodes_configs)
             {
@@ -1108,9 +1119,11 @@ void Sharder::UpdateClusterConfig(
                 node_buf->set_port(GET_CCNODE_RPC_PORT(node_config.port_));
             }
 
-            auto last_term = LeaderTerm(node_id_);
-            assert(node_id_ == native_ng_);
-            req.set_ng_id(node_id_);
+            // auto last_term = LeaderTerm(node_id_);
+            // assert(node_id_ == native_ng_);
+            // req.set_ng_id(node_id_);
+            auto last_term = LeaderTerm(native_ng_);
+            req.set_ng_id(native_ng_);
             req.set_config_version(version);
             cntl.set_timeout_ms(10000);
             stub.UpdateNodeGroupConfigs(&cntl, &req, &resp, nullptr);
@@ -1134,30 +1147,30 @@ void Sharder::UpdateClusterConfig(
                 std::unique_lock<std::shared_mutex> lk(cluster_cnf_mux_);
                 bool truncate_log = false;
                 // First remove node groups that are removed from the cluster.
-                size_t cur_ngs = cluster_config_.ng_configs_.size();
-                for (size_t deleted_ng = new_ng_configs.size();
-                     deleted_ng < cur_ngs;
-                     deleted_ng++)
+                std::unordered_set<uint32_t> removed_ngs;
+                for (const auto &[ng_id, _] : cluster_config_.ng_configs_)
                 {
-                    if (deleted_ng == node_id_)
+                    if (new_ng_configs.find(ng_id) == new_ng_configs.end())
                     {
-                        // Truncate previous log if this ng is also removed.
-                        truncate_log = true;
+                        // This ng is removed from new cluster configs
+                        if (ng_id == native_ng_)
+                        {
+                            // Truncate previous log if this ng is also removed.
+                            truncate_log = true;
+                        }
+                        removed_ngs.emplace(ng_id);
                     }
-                    cluster_config_.ng_configs_.erase(deleted_ng);
-                    cluster_config_.ng_configs_.erase(deleted_ng);
+                }
+                for (auto ng_id : removed_ngs)
+                {
+                    cluster_config_.ng_configs_.erase(ng_id);
                 }
 
                 if (truncate_log)
                 {
-                    auto [last_ckpt_ts, mem_usage] =
-                        Sharder::Instance()
-                            .GetLocalCcShards()
-                            ->GetTxService()
-                            ->ckpt_.GetNewCheckpointTs(node_id_, true);
-                    log_agent_->UpdateCheckpointTs(
-                        node_id_, last_term, last_ckpt_ts);
+                    log_agent_->RemoveCcNodeGroup(native_ng_, last_term);
                 }
+
                 for (auto &ng_pair : new_ng_configs)
                 {
                     bool is_member = false;
@@ -1193,6 +1206,20 @@ void Sharder::UpdateClusterConfig(
                     ng_cnf_it.first->second = ng_pair.second;
                 }
                 cluster_config_.version_ = version;
+                cluster_config_.nodes_configs_ = std::move(new_nodes_sptr);
+                if (cluster_config_.ng_ids_.use_count() == 1)
+                {
+                    cluster_config_.ng_ids_->clear();
+                }
+                else
+                {
+                    cluster_config_.ng_ids_ =
+                        std::make_shared<std::set<NodeGroupId>>();
+                }
+                for (auto &[ng_id, _] : cluster_config_.ng_configs_)
+                {
+                    cluster_config_.ng_ids_->emplace(ng_id);
+                }
             }
 
             cc_stream_sender_->UpdateRemoteNodes(new_nodes_configs);

@@ -420,8 +420,10 @@ public:
         {
             // Read new cluster config from log
             int ng_cnt = scale_op_msg.new_ng_configs_size();
+            auto new_ng_configs_uptr = std::make_unique<
+                std::unordered_map<NodeGroupId, std::vector<NodeConfig>>>();
             std::unordered_map<uint32_t, std::vector<NodeConfig>>
-                new_ng_configs;
+                &new_ng_configs = *new_ng_configs_uptr;
             std::unordered_map<uint32_t, NodeConfig> node_configs;
             for (int idx = 0; idx < scale_op_msg.node_configs_size(); idx++)
             {
@@ -451,6 +453,9 @@ public:
                 new_ng_configs.try_emplace(ng_id, std::move(ng_nodes));
             }
             // This will update cluster config in sharder asynchronouslly
+            // Temporarily cache the new_ng_configs in neg_inf_.payload_
+            ClusterConfigRecord *config_rec = neg_inf_.payload_.get();
+            config_rec->SetNodeGroupConfigs(std::move(new_ng_configs_uptr));
             Sharder::Instance().UpdateClusterConfig(
                 new_ng_configs, req.CommitTs(), &req, shard_);
             return false;

@@ -124,8 +124,7 @@ public:
         std::unordered_map<NodeGroupId, txservice::remote::BackupTaskStatus>
             &ng_backup_result)
     {
-        uint32_t node_group_cnt =
-            txservice::Sharder::Instance().NodeGroupCount();
+        auto all_node_groups = Sharder::Instance().AllNodeGroups();
 
         std::vector<std::unique_ptr<txservice::remote::CreateBackupRequest>>
             req_vec;
@@ -134,10 +133,9 @@ public:
         std::vector<std::unique_ptr<brpc::Controller>> cntl_vec;
         std::unordered_map<uint32_t, uint32_t> sent_nodes;
         bool failed = false;
-        for (uint32_t ng_id = 0; ng_id < node_group_cnt; ng_id++)
+        for (uint32_t ng_id : *all_node_groups)
         {
-            auto leader_node =
-                txservice::Sharder::Instance().LeaderNodeId(ng_id);
+            auto leader_node = Sharder::Instance().LeaderNodeId(ng_id);
             std::shared_ptr<brpc::Channel> channel =
                 Sharder::Instance().GetCcNodeServiceChannel(leader_node);
             if (channel == nullptr)
@@ -221,8 +219,7 @@ public:
         std::unordered_map<NodeGroupId, txservice::remote::BackupTaskStatus>
             &backup_status)
     {
-        uint32_t node_group_cnt =
-            txservice::Sharder::Instance().NodeGroupCount();
+        auto all_node_groups = Sharder::Instance().AllNodeGroups();
 
         std::vector<std::unique_ptr<txservice::remote::FetchBackupRequest>>
             req_vec;
@@ -231,12 +228,11 @@ public:
         std::vector<std::unique_ptr<brpc::Controller>> cntl_vec;
 
         bool failed = false;
-        for (uint32_t ng_id = 0; ng_id < node_group_cnt; ng_id++)
+        for (uint32_t ng_id : *all_node_groups)
         {
             backup_status.try_emplace(
                 ng_id, txservice::remote::BackupTaskStatus::Unknown);
-            auto leader_node =
-                txservice::Sharder::Instance().LeaderNodeId(ng_id);
+            auto leader_node = Sharder::Instance().LeaderNodeId(ng_id);
             std::shared_ptr<brpc::Channel> channel =
                 Sharder::Instance().GetCcNodeServiceChannel(leader_node);
             if (channel == nullptr)

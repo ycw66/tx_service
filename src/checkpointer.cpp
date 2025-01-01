@@ -511,7 +511,7 @@ bool Checkpointer::CkptEntryForTest(const TableName &tbl_name,
                                     std::vector<FlushRecord> &ckpt_vec)
 {
     bool ckpt_ret = false;
-    uint32_t ng = Sharder::Instance().NodeId();
+    uint32_t ng = Sharder::Instance().NativeNodeGroup();
     ckpt_ret = store_hd_->PutAll(ckpt_vec, tbl_name, tbl_schema, ng);
 
     return ckpt_ret;
@@ -522,7 +522,7 @@ bool Checkpointer::FlushArchiveForTest(const TableName &tbl_name,
                                        std::vector<FlushRecord> &archives)
 {
     bool ckpt_ret = false;
-    uint32_t ng = Sharder::Instance().NodeId();
+    uint32_t ng = Sharder::Instance().NativeNodeGroup();
     ckpt_ret = store_hd_->PutArchivesAll(
         ng, tbl_name, tbl_schema->GetKVCatalogInfo(), archives);
     return ckpt_ret;

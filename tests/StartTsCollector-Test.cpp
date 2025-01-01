@@ -22,7 +22,6 @@ static std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs{
 static std::vector<uint16_t> ports{8600};
 static std::vector<uint16_t> tx_ports{8602};
 
-int32_t range_bucket_seed = 9001;
 uint64_t cluster_config_version = 2;
 
 TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
@@ -71,7 +70,6 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
                                     node_id,
                                     ng_id,
                                     &ng_configs,
-                                    range_bucket_seed,
                                     cluster_config_version,
                                     store_hd.get(),
                                     nullptr,

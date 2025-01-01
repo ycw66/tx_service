@@ -1601,6 +1601,7 @@ void AcquireAllOp::Resize(size_t new_size)
                         remote_ack_cnt_.fetch_sub(1, std::memory_order_relaxed);
                     }
                 }
+
                 finish_cnt_.fetch_add(1, std::memory_order_relaxed);
             };
         }
@@ -1639,7 +1640,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
 {
     if (!txm->CheckLeaderTerm())
     {
-        for (size_t hd_idx = 0; hd_idx < hd_results_.size(); ++hd_idx)
+        for (size_t hd_idx = 0; hd_idx < upload_cnt_; ++hd_idx)
         {
             auto &hd_res = hd_results_[hd_idx];
             if (hd_res.IsFinished())
@@ -1723,7 +1724,9 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                     else if (hd_result.ErrorCode() ==
                              CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                     {
-                        Sharder::Instance().UpdateLeader(idx / keys_.size());
+                        uint32_t ng_id =
+                            acquire_res.local_cce_addr_.NodeGroupId();
+                        Sharder::Instance().UpdateLeader(ng_id);
                         if (retry_num_ > 0)
                         {
                             ReRunOp(txm);
@@ -1784,7 +1787,9 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                     if (hd_result.ErrorCode() ==
                         CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                     {
-                        Sharder::Instance().UpdateLeader(idx / keys_.size());
+                        uint32_t ng_id =
+                            hd_result.Value().local_cce_addr_.NodeGroupId();
+                        Sharder::Instance().UpdateLeader(ng_id);
                         if (retry_num_ > 0)
                         {
                             ReRunOp(txm);
@@ -1822,7 +1827,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
         // For non-blocking concurrency control protocols, the AcquireAllOp is
         // expected to return instantly. For 2PL, if the request is blocked, the
         // cc node will send an acknowledgement to update the node term.
-        for (size_t hd_idx = 0; hd_idx < hd_results_.size(); ++hd_idx)
+        for (size_t hd_idx = 0; hd_idx < upload_cnt_; ++hd_idx)
         {
             auto &hd_res = hd_results_[hd_idx];
             if (hd_res.IsFinished())
@@ -1845,7 +1850,8 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
 
             if (ac_res.node_term_ > 0 && has_blocked_remote_cce)
             {
-                uint32_t node_group_id = hd_idx / keys_.size();
+                uint32_t node_group_id = ac_res.local_cce_addr_.NodeGroupId();
+
                 // Check the liveness of remote node
                 txm->cc_handler_->BlockAcquireAllCcReqCheck(
                     node_group_id,
@@ -2888,11 +2894,15 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         // to the cc entry of the schema, removes it from the read set. As a
         // result, the tx will not try to release the read lock of the schema
         // when committing.
-        const CcEntryAddr &schema_entry_addr =
-            acquire_all_intent_op_.hd_results_[txm->TxCcNodeId()]
-                .Value()
-                .local_cce_addr_;
-        txm->rw_set_.DedupRead(schema_entry_addr);
+        for (size_t idx = 0; idx < acquire_all_intent_op_.upload_cnt_; ++idx)
+        {
+            const CcEntryAddr &schema_entry_addr =
+                acquire_all_intent_op_.hd_results_[idx].Value().local_cce_addr_;
+            if (schema_entry_addr.NodeGroupId() == txm->TxCcNodeId())
+            {
+                txm->rw_set_.DedupRead(schema_entry_addr);
+            }
+        }
 
         if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
             0)
@@ -3123,10 +3133,12 @@ void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
 
     auto &node_terms = *prepare_log_rec->mutable_node_terms();
     node_terms.clear();
-    for (uint32_t nid = 0; nid < acquire_all_intent_op_.upload_cnt_; ++nid)
+    for (size_t idx = 0; idx < acquire_all_intent_op_.upload_cnt_; ++idx)
     {
-        node_terms[nid] =
-            acquire_all_intent_op_.hd_results_[nid].Value().node_term_;
+        const AcquireAllResult &hres_val =
+            acquire_all_intent_op_.hd_results_[idx].Value();
+        uint32_t ng_id = hres_val.local_cce_addr_.NodeGroupId();
+        node_terms[ng_id] = hres_val.node_term_;
     }
 }
 
@@ -5721,11 +5733,12 @@ void SplitFlushRangeOp::FillPrepareLogRequest(TransactionExecution *txm)
     prepare_log_rec->set_commit_timestamp(txm->commit_ts_);
     prepare_log_rec->clear_node_terms();
     auto &node_terms = *prepare_log_rec->mutable_node_terms();
-    for (uint32_t nid = 0; nid < prepare_acquire_all_write_op_.upload_cnt_;
-         ++nid)
+    for (size_t idx = 0; idx < prepare_acquire_all_write_op_.upload_cnt_; ++idx)
     {
-        node_terms[nid] =
-            prepare_acquire_all_write_op_.hd_results_[nid].Value().node_term_;
+        const AcquireAllResult &hres_val =
+            prepare_acquire_all_write_op_.hd_results_[idx].Value();
+        uint32_t ng_id = hres_val.local_cce_addr_.NodeGroupId();
+        node_terms[ng_id] = hres_val.node_term_;
     }
 
     // Set split-flush tx information
@@ -6206,6 +6219,12 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
         // retry, because we cannot know if the command has executed or not,
         // some commands will lead to unpredictable result, for example lpop
         // rpush.
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+        {
+            // Only update leader but not retry.
+            Sharder::Instance().UpdateLeader(
+                hd_result_.Value().cce_addr_.NodeGroupId());
+        }
         txm->PostProcess(*this);
         return;
     }
@@ -6906,9 +6925,14 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                   << txm->TxNumber();
 
         txm->commit_ts_ = txm->commit_ts_bound_ + 1;
+        std::set<NodeGroupId> new_ng_set;
+        for (const auto &it : new_ng_config_)
+        {
+            new_ng_set.emplace(it.first);
+        }
         bucket_migrate_infos_ =
             Sharder::Instance().GetLocalCcShards()->GenerateBucketMigrationPlan(
-                new_ng_config_.size(), 9001);
+                new_ng_set);
 
         FillPrepareLogRequest(txm);
         LOG(INFO) << "Cluster scale transaction write prepare log, txn: "
@@ -7593,7 +7617,8 @@ void ClusterScaleOp::SendBucketsMigratingRpc(bool is_migrating,
                                              bool &result,
                                              bool &rpc_error)
 {
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    auto all_node_groups = Sharder::Instance().AllNodeGroups();
+    auto ng_cnt = all_node_groups->size();
     std::vector<remote::PubBucketsMigratingRequest> req_vec;
     std::vector<remote::PubBucketsMigratingResponse> resp_vec;
     std::vector<std::unique_ptr<brpc::Controller>> cntl_vec;
@@ -7601,7 +7626,8 @@ void ClusterScaleOp::SendBucketsMigratingRpc(bool is_migrating,
     resp_vec.resize(ng_cnt);
     cntl_vec.resize(ng_cnt);
     //  rpc to all nodes
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    size_t idx = 0;
+    for (uint32_t ng_id : *all_node_groups)
     {
         uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
 
@@ -7611,16 +7637,17 @@ void ClusterScaleOp::SendBucketsMigratingRpc(bool is_migrating,
         assert(channel != nullptr);
         remote::CcRpcService_Stub stub(channel.get());
 
-        auto &req = req_vec.at(ng_id);
+        auto &req = req_vec.at(idx);
         req.set_node_group_id(ng_id);
         req.set_is_migrating(is_migrating);
 
-        auto &resp = resp_vec.at(ng_id);
-        cntl_vec[ng_id] = std::make_unique<brpc::Controller>();
-        cntl_vec[ng_id]->set_timeout_ms(5000);
-        cntl_vec[ng_id]->set_max_retry(3);
+        auto &resp = resp_vec.at(idx);
+        cntl_vec[idx] = std::make_unique<brpc::Controller>();
+        cntl_vec[idx]->set_timeout_ms(5000);
+        cntl_vec[idx]->set_max_retry(3);
         stub.PublishBucketsMigrating(
-            cntl_vec[ng_id].get(), &req, &resp, brpc::DoNothing());
+            cntl_vec[idx].get(), &req, &resp, brpc::DoNothing());
+        idx++;
     }
 
     for (auto &cntl : cntl_vec)
@@ -7630,18 +7657,20 @@ void ClusterScaleOp::SendBucketsMigratingRpc(bool is_migrating,
 
     result = true;
     rpc_error = false;
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    idx = 0;
+    for (uint32_t ng_id : *all_node_groups)
     {
-        if (cntl_vec.at(ng_id)->Failed())
+        if (cntl_vec.at(idx)->Failed())
         {
             LOG(INFO) << "SendBucketsMigratingRpc rpc call error, ng#" << ng_id;
             rpc_error = true;
         }
-        else if (!resp_vec.at(ng_id).success())
+        else if (!resp_vec.at(idx).success())
         {
             LOG(INFO) << "SendBucketsMigratingRpc failed, ng#" << ng_id;
             result = false;
         }
+        idx++;
     }
     DLOG(INFO) << "SendBucketsMigratingRpc ,ng_cnt:" << ng_cnt
                << ",res:" << static_cast<int>(result)

@@ -205,7 +205,8 @@ void CcNodeService::ClusterAddNode(
     brpc::ClosureGuard done_guard(done);
     using namespace txservice;
 
-    if (Sharder::Instance().LeaderTerm(local_shards_.NodeId()) <= 0)
+    if (Sharder::Instance().LeaderTerm(Sharder::Instance().NativeNodeGroup()) <=
+        0)
     {
         // Node is not preferred leader of node group.
         response->set_result(
@@ -246,7 +247,7 @@ void CcNodeService::ClusterAddNode(
     }
 
     ClusterScaleTxRequest scale_req(
-        request->id(), ClusterScaleOpType::AddNode, &delta_nodes, nullptr);
+        request->id(), ClusterScaleOpType::AddNode, &delta_nodes);
     txm->Execute(&scale_req);
     scale_req.Wait();
 
@@ -297,7 +298,6 @@ void CcNodeService::ClusterRemoveNode(
         return;
     }
 
-    std::vector<std::pair<std::string, uint16_t>> delta_nodes;
     // Start cluster scale tx and wait for the log is written before
     // returning.
     TxService *tx_service =
@@ -326,10 +326,52 @@ void CcNodeService::ClusterRemoveNode(
     }
 
     uint16_t remove_node_count = request->remove_node_count();
-    ClusterScaleTxRequest scale_req(request->id(),
-                                    ClusterScaleOpType::RemoveNode,
-                                    nullptr,
-                                    &remove_node_count);
+    std::vector<std::pair<std::string, uint16_t>> delta_nodes;
+    for (int i = 0; i < request->host_list_size(); i++)
+    {
+        delta_nodes.emplace_back(request->host_list(i), request->port_list(i));
+    }
+
+    if (remove_node_count > 0 && delta_nodes.empty())
+    {
+        // remove specified count of node groups from tail
+        std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs =
+            Sharder::Instance().GetNodeGroupConfigs();
+
+        uint32_t largest_ng_id = 0;
+        for (auto &[ng_id, _] : ng_configs)
+        {
+            largest_ng_id = std::max(ng_id, largest_ng_id);
+        }
+
+        while (remove_node_count > 0 && delta_nodes.size() < ng_configs.size())
+        {
+            auto it = ng_configs.find(largest_ng_id);
+            if (it != ng_configs.end())
+            {
+                for (auto &member : it->second)
+                {
+                    if (member.is_candidate_)
+                    {
+                        delta_nodes.emplace_back(member.host_name_,
+                                                 member.port_);
+                    }
+                }
+                remove_node_count--;
+            }
+            largest_ng_id--;
+        }
+    }
+
+    if (delta_nodes.empty())
+    {
+        response->set_result(
+            ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        return;
+    }
+
+    ClusterScaleTxRequest scale_req(
+        request->id(), ClusterScaleOpType::RemoveNode, &delta_nodes);
     txm->Execute(&scale_req);
     scale_req.Wait();
 
@@ -699,9 +741,8 @@ void CcNodeService::CheckClusterConfigIsUpdated(
     auto *store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
     std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
     uint64_t version;
-    int32_t seed;
     bool uninitialized = false;
-    if (!store_hd->ReadClusterConfig(ng_configs, version, seed, uninitialized))
+    if (!store_hd->ReadClusterConfig(ng_configs, version, uninitialized))
     {
         assert(uninitialized == false);
         // cannot read cluster config. just set `finished` to false. cp will
@@ -772,17 +813,14 @@ void CcNodeService::GetClusterNodes(
     }
 
     // Now read node list from sharder
-    std::string ip;
-    uint16_t port;
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-    for (uint32_t i = 0; i < ng_cnt; i++)
+    auto ng_configs = Sharder::Instance().GetNodeGroupConfigs();
+    std::vector<NodeConfig> all_nodes;
+    ExtractNodesConfigs(ng_configs, all_nodes);
+    for (const auto &node : all_nodes)
     {
-        Sharder::Instance().GetNodeAddress(i, ip, port);
-        if (!ip.empty())
-        {
-            response->add_host_list(ip);
-            response->add_port_list(port);
-        }
+        assert(node.node_id_ != UINT32_MAX && !node.host_name_.empty());
+        response->add_host_list(node.host_name_);
+        response->add_port_list(node.port_);
     }
     CommitTxRequest commit_req;
     txm->Execute(&commit_req);
@@ -991,7 +1029,7 @@ void CcNodeService::UploadBatch(
         return;
     });
 
-    DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+    DLOG(INFO) << "CcNodeService Received UploadBatch RPC of #ng" << ng_id
                << " for table:" << table_name.Trace();
 
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();

@@ -61,7 +61,7 @@ public:
     {
         uint32_t shard_code =
             ShardCode(table_or_index_name.GetBaseTableNameSV());
-        return shard_code % Sharder::Instance().NodeGroupCount();
+        return Sharder::Instance().ShardToCcNodeGroup(shard_code);
     }
 
 public:
