@@ -2482,11 +2482,10 @@ public:
         : ckpt_ts_(UINT64_MAX),
           mux_(),
           cv_(),
-          finish_cnt_(0),
-          shard_cnt_(shard_cnt),
+          unfinish_cnt_(shard_cnt),
           cc_ng_id_(ng_id)
     {
-        for (size_t i = 0; i < shard_cnt_; i++)
+        for (size_t i = 0; i < unfinish_cnt_; i++)
         {
             memory_allocated_vec_.emplace_back(0);
             memory_committed_vec_.emplace_back(0);
@@ -2531,10 +2530,10 @@ public:
         memory_allocated_vec_[ccs.LocalCoreId()] = allocated;
         memory_committed_vec_[ccs.LocalCoreId()] = committed;
         heap_full_vec_[ccs.LocalCoreId()] = full;
-        uint64_t finished = finish_cnt_.fetch_add(1, std::memory_order_acquire);
-        if (finished == shard_cnt_ - 1)
+
+        std::unique_lock lk(mux_);
+        if (--unfinish_cnt_ == 0)
         {
-            std::unique_lock lk(mux_);
             cv_.notify_one();
         }
 
@@ -2546,7 +2545,7 @@ public:
     void Wait()
     {
         std::unique_lock lk(mux_);
-        while (finish_cnt_.load(std::memory_order_relaxed) != shard_cnt_)
+        while (unfinish_cnt_ > 0)
         {
             cv_.wait(lk);
         }
@@ -2642,8 +2641,7 @@ private:
     std::atomic<uint64_t> ckpt_ts_;
     bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
-    std::atomic<size_t> finish_cnt_;
-    size_t shard_cnt_;
+    size_t unfinish_cnt_;
     std::vector<uint64_t> memory_allocated_vec_;
     std::vector<uint64_t> memory_committed_vec_;
     std::vector<uint64_t> standby_msg_seq_id_vec_;
@@ -7009,8 +7007,8 @@ public:
         entry_tuples_ = &entry_tuple;
         slices_info_ = slice_info;
 
-        unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
-        err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        unfinished_cnt_ = core_cnt;
+        err_code_ = CcErrorCode::NO_ERROR;
     }
 
     bool ValidTermCheck()
@@ -7074,12 +7072,10 @@ public:
 
     std::pair<bool, std::shared_ptr<SliceUpdation>> SetFinish()
     {
-        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        std::unique_lock<bthread::Mutex> req_lk(req_mux_);
+        if (--unfinished_cnt_ == 0)
         {
-            std::unique_lock<bthread::Mutex> req_lk(req_mux_);
-
             req_cv_.notify_one();
-
             return {true, slices_info_};
         }
         return {false, nullptr};
@@ -7087,13 +7083,13 @@ public:
 
     bool SetError(CcErrorCode err_code)
     {
-        CcErrorCode no_error = CcErrorCode::NO_ERROR;
-        err_code_.compare_exchange_strong(
-            no_error, err_code, std::memory_order_acq_rel);
-        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        std::unique_lock<bthread::Mutex> req_lk(req_mux_);
+        if (err_code_ == CcErrorCode::NO_ERROR)
         {
-            std::unique_lock<bthread::Mutex> req_lk(req_mux_);
-
+            err_code_ = err_code;
+        }
+        if (--unfinished_cnt_ == 0)
+        {
             req_cv_.notify_one();
 
             return true;
@@ -7133,7 +7129,7 @@ public:
 
     CcErrorCode ErrorCode() const
     {
-        return err_code_.load(std::memory_order_relaxed);
+        return err_code_;
     }
 
     const WriteEntryTuple *EntryTuple() const
@@ -7239,11 +7235,9 @@ private:
 
     bthread::Mutex req_mux_{};
     bthread::ConditionVariable req_cv_{};
-    // size_t finished_req_cnt_{nullptr};
-    // CcErrorCode req_result_{nullptr};
     // This two variables may be accessed by multi-cores.
-    std::atomic<size_t> unfinished_cnt_{0};
-    std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
+    size_t unfinished_cnt_{0};
+    CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 };
 
 struct DbSizeCc : public CcRequestBase
@@ -7286,26 +7280,13 @@ public:
             }
         }
 
-        size_t ref_cnt = total_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
-        if (ref_cnt == 1)
+        std::unique_lock lk(mux_);
+        if (--total_ref_cnt_ == 0)
         {
-            std::unique_lock lk(mux_);
             cv_.notify_one();
         }
 
         return false;
-    }
-
-    size_t LocalRefCnt()
-    {
-        size_t total = total_ref_cnt_.load(std::memory_order_relaxed);
-        size_t remote = remote_ref_cnt_.load(std::memory_order_relaxed);
-        return total - remote > 0 ? total - remote : 0;
-    }
-
-    size_t TotalRefCnt()
-    {
-        return total_ref_cnt_.load(std::memory_order_relaxed);
     }
 
     std::vector<int64_t> GetTotalObjSizes()
@@ -7339,11 +7320,11 @@ public:
                                              std::memory_order_relaxed);
         }
 
-        remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
-        size_t ref_cnt = total_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
-        if (ref_cnt == 1)
+        std::unique_lock lk(mux_);
+        --remote_ref_cnt_;
+        --total_ref_cnt_;
+        if (total_ref_cnt_ == 0)
         {
-            std::unique_lock lk(mux_);
             cv_.notify_one();
         }
     }
@@ -7362,8 +7343,8 @@ public:
         total_obj_sizes_.clear();
         total_obj_sizes_.shrink_to_fit();
 
-        total_ref_cnt_.store(0, std::memory_order_relaxed);
-        remote_ref_cnt_.store(0, std::memory_order_relaxed);
+        total_ref_cnt_ = 0;
+        remote_ref_cnt_ = 0;
         table_names_ = nullptr;
         vct_ng_id_.clear();
     }
@@ -7373,10 +7354,10 @@ public:
         const uint64_t MAX_WAIT_TS = 2000000;
         std::unique_lock lk(mux_);
 
-        while (TotalRefCnt() > 0)
+        while (total_ref_cnt_ > 0)
         {
             int wait_res = cv_.wait_for(lk, MAX_WAIT_TS);
-            if (wait_res == ETIMEDOUT && LocalRefCnt() == 0)
+            if (wait_res == ETIMEDOUT && total_ref_cnt_ <= remote_ref_cnt_)
             {
                 LOG(WARNING) << "Waitting timeout for dbsize";
                 break;
@@ -7389,8 +7370,8 @@ public:
 
 protected:
     std::vector<std::unique_ptr<std::atomic<int64_t>>> total_obj_sizes_;
-    std::atomic<size_t> total_ref_cnt_{0};
-    std::atomic<size_t> remote_ref_cnt_{0};
+    size_t total_ref_cnt_{0};
+    size_t remote_ref_cnt_{0};
     int32_t term_{0};
     std::vector<uint32_t> vct_ng_id_;
     std::vector<TableName> *table_names_{nullptr};

@@ -2055,8 +2055,8 @@ void txservice::remote::RemoteDbSizeCc::Reset(
 
     DbSizeCc::Reset(&redis_table_names_, core_cnt, 0);
     assert(table_names_ == &redis_table_names_);
-    assert(total_ref_cnt_.load(std::memory_order_relaxed) == core_cnt);
-    assert(remote_ref_cnt_.load(std::memory_order_relaxed) == 0);
+    assert(total_ref_cnt_ == core_cnt);
+    assert(remote_ref_cnt_ == 0);
 
     AddLocalNodeGroupId(cmds_req.node_group_id());
 
@@ -2081,9 +2081,10 @@ bool txservice::remote::RemoteDbSizeCc::Execute(CcShard &ccs)
         }
     }
 
-    assert(remote_ref_cnt_.load(std::memory_order_relaxed) == 0);
-    int32_t cnt = total_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
-    if (cnt == 1)
+    std::unique_lock lk(mux_);
+    assert(remote_ref_cnt_ == 0);
+    --total_ref_cnt_;
+    if (total_ref_cnt_ == 0)
     {
         table_names_ = nullptr;
         redis_table_names_.clear();

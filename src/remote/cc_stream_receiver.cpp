@@ -1509,6 +1509,10 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            DLOG(INFO) << "RecoverStateCheckRequest, node "
+                       << Sharder::Instance().NodeId()
+                       << " is not leader of node group "
+                       << req.node_group_id();
             recover_resp->set_error_code(-1);
         }
 
@@ -1528,6 +1532,13 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (resp.error_code() == 0)
         {
             Sharder::Instance().NodeGroupFinishRecovery(resp.node_group_id());
+        }
+        else
+        {
+            DLOG(INFO) << "RecoverStateCheckResponse with error, node_group: "
+                       << resp.node_group_id()
+                       << ", error_code:" << resp.error_code();
+            Sharder::Instance().UpdateLeader(resp.node_group_id());
         }
         msg_pool_.enqueue(std::move(msg));
         break;
