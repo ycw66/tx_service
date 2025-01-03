@@ -2560,6 +2560,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             WriteSetEntry &write_entry = write_entry_it->second;
 
             size_t hash = write_key.Hash();
+            NodeGroupId ng_id;
 #ifdef RANGE_PARTITION_ENABLED
             // Make sure current node is still ng leader before visiting range
             // and bucket meta data.
@@ -2577,14 +2578,17 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             auto bucket_info =
                 Sharder::Instance().GetLocalCcShards()->GetRangeOwner(range_id,
                                                                       tx_ng_id);
-            NodeGroupId range_ng = bucket_info->BucketOwner();
-            write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
+            ng_id = bucket_info->BucketOwner();
+            write_entry.key_shard_code_ = (ng_id << 10) | (hash & 0x3FF);
 #else
-            write_entry.key_shard_code_ = Sharder::Instance().ShardCode(hash);
+            auto bucket_id = Sharder::Instance().MapKeyHashToBucketId(hash);
+            auto *bucket_info = txm->FastToGetBucket(bucket_id);
+            // ClusterScaling and UpsertTable never be executed at same time,
+            // bucket_info never be nullptr.
+            assert(bucket_info != nullptr);
+            ng_id = bucket_info->BucketOwner();
+            write_entry.key_shard_code_ = (ng_id << 10) | (hash & 0x3FF);
 #endif
-
-            NodeGroupId ng_id = Sharder::Instance().ShardToCcNodeGroup(
-                write_entry.key_shard_code_);
 
             write_entry.cce_addr_.SetNodeGroupId(ng_id);
             // There are no concurrent transactions to access this table, so

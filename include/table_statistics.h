@@ -1143,7 +1143,7 @@ private:
             NodeGroupId dest_ng_id =
                 RouteKeyByRange(*ccs, table_or_index_name, cc_ng_id, *key);
 #else
-            NodeGroupId dest_ng_id = RouteKeyByHash(*key);
+            NodeGroupId dest_ng_id = RouteKeyByHash(*ccs, cc_ng_id, *key);
 #endif
             sample_pool_vec[dest_ng_id].emplace_back(std::move(*key));
         }
@@ -1334,10 +1334,10 @@ private:
     // Deliver task to tx_processor to avoid lock contention.
     void RunOnBindingCcShard(Task task) const
     {
-        uint32_t shard_code = ShardCode(base_table_name_.StringView());
+        auto core_idx = LeaderCore(base_table_name_);
 
         WaitableCc cc_req(std::move(task));
-        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(shard_code,
+        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(core_idx,
                                                                  &cc_req);
         cc_req.Wait();
     }
@@ -1375,11 +1375,15 @@ private:
         }
     }
 
-    NodeGroupId RouteKeyByHash(const KeyT &key) const
+    NodeGroupId RouteKeyByHash(CcShard &ccs,
+                               NodeGroupId cc_ng_id,
+                               const KeyT &key) const
     {
-        uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
-        NodeGroupId ng_id = Sharder::Instance().ShardToCcNodeGroup(shard_code);
-        return ng_id;
+        uint16_t bucket_id =
+            Sharder::Instance().MapKeyHashToBucketId(key.Hash());
+        auto *bucket_info =
+            ccs.local_shards_.GetBucketInfo(bucket_id, cc_ng_id);
+        return bucket_info->BucketOwner();
     }
 
     NodeGroupId RouteKeyByRange(CcShard &ccs,

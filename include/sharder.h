@@ -178,45 +178,11 @@ public:
         return ng_leader_cache_[cc_ng_id].load(std::memory_order_relaxed);
     }
 
-    // TODO(lzx): delete this function. Because we fetch node group through
-    // bucket instead of calculation based on hash_code.
-    uint32_t ShardCode(uint64_t hash_code)
-    {
-        // Uses the lower 10 bits to shard the key across CPU cores in a node.
-        uint32_t residual = hash_code & 0x3FF;
-        // Uses the higher bits to shard across nodes.
-
-#ifdef ON_KEY_OBJECT
-        // Redis use the slot id as shard code mapping to node group.
-        uint16_t slot_id = hash_code & 0x3FFF;
-        auto ng_count = NodeGroupCount();
-        uint16_t slot_count_per_ng = (16384 + ng_count - 1) / ng_count;
-        uint32_t node_group_id = slot_id / slot_count_per_ng;
-
-#elif defined(RANGE_PARTITION_ENABLED)
-        uint32_t node_group_id = hash_code >> 10;
-#else
-        assert(false);
-        // This calculation is wrong. NodeGroupId should be fetched from bucket.
-        uint32_t node_group_id = (hash_code >> 10) % NodeGroupCount();
-#endif
-
-        return (node_group_id << 10) | residual;
-    }
-
     uint16_t ShardBucketIdToCoreIdx(uint16_t bucket_id);
 
     uint32_t ShardToCcNodeGroup(uint32_t sharding_code)
     {
-#ifdef ON_KEY_OBJECT
         return sharding_code >> 10;
-#else
-#ifdef RANGE_PARTITION_ENABLED
-        return sharding_code >> 10;
-#else
-        return (sharding_code >> 10) % NodeGroupCount();
-#endif
-#endif
     }
 
     static inline uint16_t MapRangeIdToBucketId(int32_t range_id)

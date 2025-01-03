@@ -664,7 +664,9 @@ CcErrorCode UploadIndexContext::UploadEncodedIndex(UploadIndexTask &upload_task)
              ++item_it)
         {
             hash = item_it->key_.Hash();
-            key_shard_code = Sharder::Instance().ShardCode(hash);
+            // key_shard_code = Sharder::Instance().ShardCode(hash);
+            // TODO(lzx): read bucket to get node group.
+            assert(false);
             dest_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
             auto ng_it = ng_table_write_entrys.try_emplace(dest_ng_id);
             ng_it.first->second.push_back(&(*item_it));

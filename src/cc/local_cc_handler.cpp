@@ -1975,7 +1975,10 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
 #endif
-    uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
+    // uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
+    // TODO(lzx): Remove this function.
+    assert(false);
+    uint32_t shard_code = 0;
     uint32_t shard_id = shard_code >> 10;
 
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(shard_id);

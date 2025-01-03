@@ -470,7 +470,7 @@ private:
     }
 
 #ifndef RANGE_PARTITION_ENABLED
-    const BucketInfo *FastToGetBucket(uint32_t bucket_id);
+    const BucketInfo *FastToGetBucket(uint16_t bucket_id);
 
     void ClearCachedBucketInfos();
 #endif

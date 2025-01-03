@@ -284,7 +284,7 @@ void TransactionExecution::ExternalForward(bool enlist_txm_if_fails)
 #endif
 
 #ifndef RANGE_PARTITION_ENABLED
-const BucketInfo *TransactionExecution::FastToGetBucket(uint32_t bucket_id)
+const BucketInfo *TransactionExecution::FastToGetBucket(uint16_t bucket_id)
 {
     auto bucket_it = locked_buckets_.find(bucket_id);
     if (bucket_it != locked_buckets_.end())
@@ -3701,10 +3701,6 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
         uint64_t schema_version = pair.first;
         for (auto &[write_key, write_entry] : pair.second)
         {
-#ifndef RANGE_PARTITION_ENABLED
-            size_t hash = write_key.Hash();
-            write_entry.key_shard_code_ = Sharder::Instance().ShardCode(hash);
-#endif
             acquire_write.acquire_write_entries_[entry_idx++] = &write_entry;
 
             // TODO: enable is_insert after Serializable Isolation is
@@ -7159,7 +7155,9 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         sharding_code =
             read_batch[idx].cce_addr_.NodeGroupId() << 10 | (key_hash & 0x3FF);
 #else
-        sharding_code = Sharder::Instance().ShardCode(key_hash);
+        // sharding_code = Sharder::Instance().ShardCode(key_hash);
+        // TODO(lzx): read bucket to get node group.
+        assert(false);
 #endif
         cc_handler_->Read(table_name,
                           batch_read_op.batch_read_tx_req_->schema_version_,

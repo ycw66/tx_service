@@ -41,27 +41,36 @@ public:
 class Statistics
 {
 public:
-    static uint32_t ShardCode(std::string_view base_table_name)
-    {
-        uint32_t shard_code = Sharder::Instance().ShardCode(
-            std::hash<std::string_view>{}(base_table_name));
-        return shard_code;
-    }
-
     static uint16_t LeaderCore(const TableName &table_or_index_name)
     {
-        uint32_t shard_code =
-            ShardCode(table_or_index_name.GetBaseTableNameSV());
+        auto hash_code = std::hash<std::string_view>{}(
+            table_or_index_name.GetBaseTableNameSV());
+
+        uint32_t residual = hash_code & 0x3FF;
         uint16_t core_id =
-            (shard_code & 0x3FF) % Sharder::Instance().GetLocalCcShardsCount();
+            (residual) % Sharder::Instance().GetLocalCcShardsCount();
         return core_id;
     }
 
     static NodeGroupId LeaderNodeGroup(const TableName &table_or_index_name)
     {
-        uint32_t shard_code =
-            ShardCode(table_or_index_name.GetBaseTableNameSV());
-        return Sharder::Instance().ShardToCcNodeGroup(shard_code);
+        auto hash_code = std::hash<std::string_view>{}(
+            table_or_index_name.GetBaseTableNameSV());
+
+        // Map table statistics to some one node group.
+        auto all_ng = Sharder::Instance().AllNodeGroups();
+        uint32_t ng_idx = (hash_code >> 10) % all_ng->size();
+        uint32_t target_ng = UINT32_MAX;
+        for (auto ng_id : *all_ng)
+        {
+            if (ng_idx == 0)
+            {
+                target_ng = ng_id;
+                break;
+            }
+            ng_idx--;
+        }
+        return target_ng;
     }
 
 public:
