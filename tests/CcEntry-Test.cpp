@@ -26,16 +26,16 @@ TEST_CASE("CcEntry ArchiveBeforeUpdate", "[cc-entry]")
     entry.payload_ = std::make_unique<CompositeRecord<int>>(1);
     entry.SetCommitTsPayloadStatus(1U, RecordStatus::Unknown);
 
-    entry.ArchiveBeforeUpdate(TableType::Primary);
+    entry.ArchiveBeforeUpdate();
     REQUIRE(entry.ArchiveRecordsCount() == 0);
 
     entry.payload_ = std::make_unique<CompositeRecord<int>>(2);
     entry.SetCommitTsPayloadStatus(2U, RecordStatus::Normal);
-    entry.ArchiveBeforeUpdate(TableType::Primary);
+    entry.ArchiveBeforeUpdate();
 
     entry.payload_ = std::make_unique<CompositeRecord<int>>(3);
     entry.SetCommitTsPayloadStatus(3U, RecordStatus::Normal);
-    entry.ArchiveBeforeUpdate(TableType::Primary);
+    entry.ArchiveBeforeUpdate();
     REQUIRE(entry.ArchiveRecordsCount() == 2);
 
     REQUIRE(entry.archives_->front().commit_ts_ == 3);
@@ -311,7 +311,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
+        entry.MvccGet(ts, last_read_ts, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
     }
 
@@ -324,7 +324,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
+        entry.MvccGet(ts, last_read_ts, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
     }
 
@@ -334,7 +334,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
+        entry.MvccGet(ts, last_read_ts, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::BaseVersionMiss);
     }
 
@@ -344,7 +344,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
+        entry.MvccGet(ts, last_read_ts, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
     }
 
@@ -354,7 +354,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 12;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
+        entry.MvccGet(ts, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_ptr_ == nullptr);
         REQUIRE(rec.payload_status_ == RecordStatus::Deleted);
@@ -379,7 +379,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 1;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
+        entry.MvccGet(ts, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
     }
@@ -390,7 +390,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 2;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
+        entry.MvccGet(ts, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
                 static_cast<int>(target));
@@ -403,7 +403,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 6;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
+        entry.MvccGet(ts, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
                 static_cast<int>(target));
@@ -416,7 +416,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 12;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        entry.MvccGet(ts, TableType::Primary, last_read_ts, rec);
+        entry.MvccGet(ts, last_read_ts, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_ptr_ == nullptr);
         REQUIRE(rec.payload_status_ == RecordStatus::Deleted);

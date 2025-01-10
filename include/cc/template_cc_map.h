@@ -590,7 +590,7 @@ public:
                     // checkpoint.
                     uint64_t recycle_ts = shard_->GlobalMinSiTxStartTs();
                     cce->KickOutArchiveRecords(recycle_ts);
-                    cce->ArchiveBeforeUpdate(Type());
+                    cce->ArchiveBeforeUpdate();
                 }
 #endif
 
@@ -608,59 +608,42 @@ public:
                     return true;
                 }
 
-                // FIXME: when working with MySQL, the key contains a binary
-                // image and a sturcture for unpack info. Unfortunately, the
-                // unpack info is stored as part of the record. As a result,
-                // if we want to preserve the full encoding of the key in
-                // the data store when the row is deleted, we'd have to keep
-                // the whole record in the cc entry. This is a bad design
-                // and should be fixed: the unpack info is part of the key,
-                // not the record.
-                //
-                // Now, all versions of non-unique SecondaryIndex key shared the
-                // unpack info in current version's payload, though the unpack
-                // info will not be used for deleted key, we must not change the
-                // payload of secondary key ccentry if it is not null.
-                if (Type() != TableType::Secondary || cce->payload_ == nullptr)
+                if (is_del)
                 {
-                    if (is_del)
-                    {
-                        cce->payload_ = nullptr;
-                    }
-                    else if (payload_str == nullptr)
-                    {
+                    cce->payload_ = nullptr;
+                }
+                else if (payload_str == nullptr)
+                {
 #ifndef ON_KEY_OBJECT
-                        if (cce->payload_.use_count() == 1)
-                        {
-                            *(cce->payload_) = *commit_val;
-                        }
-                        else
-                        {
-                            cce->payload_ =
-                                std::make_shared<ValueT>(*commit_val);
-                        }
-#else
-                        assert(false);
-                        cce->payload_ = std::make_unique<ValueT>(*commit_val);
-#endif
+                    if (cce->payload_.use_count() == 1)
+                    {
+                        *(cce->payload_) = *commit_val;
                     }
                     else
                     {
-                        size_t offset = 0;
-#ifndef ON_KEY_OBJECT
-                        if (cce->payload_.use_count() != 1)
-                        {
-                            cce->payload_ = std::make_shared<ValueT>();
-                        }
-#else
-                        assert(false);
-                        if (cce->payload_ == nullptr)
-                        {
-                            cce->payload_ = std::make_unique<ValueT>();
-                        }
-#endif
-                        cce->payload_->Deserialize(payload_str->data(), offset);
+                        cce->payload_ = std::make_shared<ValueT>(*commit_val);
                     }
+#else
+                    assert(false);
+                    cce->payload_ = std::make_unique<ValueT>(*commit_val);
+#endif
+                }
+                else
+                {
+                    size_t offset = 0;
+#ifndef ON_KEY_OBJECT
+                    if (cce->payload_.use_count() != 1)
+                    {
+                        cce->payload_ = std::make_shared<ValueT>();
+                    }
+#else
+                    assert(false);
+                    if (cce->payload_ == nullptr)
+                    {
+                        cce->payload_ = std::make_unique<ValueT>();
+                    }
+#endif
+                    cce->payload_->Deserialize(payload_str->data(), offset);
                 }
 
                 RecordStatus cce_old_status = cce->PayloadStatus();
@@ -1979,8 +1962,7 @@ public:
             assert(req.Type() == ReadType::Inside);
 
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(
-                req.ReadTimestamp(), Type(), shard_->LastReadTs(), v_rec);
+            cce->MvccGet(req.ReadTimestamp(), shard_->LastReadTs(), v_rec);
             if (v_rec.payload_status_ == RecordStatus::Normal)
             {
                 if (req.Record() != nullptr)
@@ -5133,7 +5115,6 @@ public:
         uint64_t from_ts,
         uint64_t to_ts,
         uint64_t oldest_active_tx_ts,
-        TableType tbl_type,
         bool mvcc_enabled,
         size_t &ckpt_vec_size,
         bool export_base_table_record_if_need,
@@ -5163,7 +5144,6 @@ public:
                                    from_ts,
                                    to_ts,
                                    oldest_active_tx_ts,
-                                   tbl_type,
                                    mvcc_enabled,
                                    ckpt_vec_size,
                                    export_base_table_record_if_need,
@@ -5563,7 +5543,6 @@ public:
                             req.previous_scan_ts_,
                             req.data_sync_ts_,
                             recycle_ts,
-                            Type(),
                             shard_->EnableMvcc(),
                             req.accumulated_scan_cnt_[shard_->core_id_],
                             false,
@@ -5603,7 +5582,6 @@ public:
                                   req.previous_scan_ts_,
                                   req.data_sync_ts_,
                                   recycle_ts,
-                                  Type(),
                                   shard_->EnableMvcc(),
                                   req.accumulated_scan_cnt_[shard_->core_id_],
                                   true,
@@ -6006,7 +5984,6 @@ public:
                                   req.previous_scan_ts_,
                                   req.data_sync_ts_,
                                   recycle_ts,
-                                  Type(),
                                   shard_->EnableMvcc(),
                                   req.accumulated_scan_cnt_[vec_idx],
                                   req.include_persisted_data_,
@@ -6097,7 +6074,6 @@ public:
                                       req.previous_scan_ts_,
                                       req.data_sync_ts_,
                                       recycle_ts,
-                                      Type(),
                                       shard_->EnableMvcc(),
                                       req.accumulated_scan_cnt_[vec_idx],
                                       false,
@@ -6909,7 +6885,7 @@ public:
 #ifndef ON_KEY_OBJECT
                 if (shard_->EnableMvcc())
                 {
-                    cce->ArchiveBeforeUpdate(Type());
+                    cce->ArchiveBeforeUpdate();
                 }
 #endif
                 RecordStatus rec_status;
@@ -7028,7 +7004,6 @@ public:
                                   0,
                                   cce->CommitTs(),
                                   1U,
-                                  Type(),
                                   shard_->EnableMvcc(),
                                   tmp_ckpt_vec_size,
                                   false,
@@ -9976,7 +9951,7 @@ protected:
         {
 #ifndef ON_KEY_OBJECT
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, Type(), shard_->LastReadTs(), v_rec);
+            cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
 
 #ifdef RANGE_PARTITION_ENABLED
             // For snapshot reads, only if the visible version's record
@@ -10154,7 +10129,7 @@ protected:
         {
 #ifndef ON_KEY_OBJECT
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, Type(), shard_->LastReadTs(), v_rec);
+            cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
 
             // For snapshot reads, only if the visible version's record
             // status is deleted and no lock has been put on it, should
@@ -10287,7 +10262,7 @@ protected:
         {
 #ifndef ON_KEY_OBJECT
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, Type(), shard_->LastReadTs(), v_rec);
+            cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
 
 #ifdef RANGE_PARTITION_ENABLED
             // For snapshot reads, only if the visible version's record

@@ -19,7 +19,6 @@
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_record.h"
-#include "type.h"  // TableType
 
 #ifdef ON_KEY_OBJECT
 #include "tx_command.h"
@@ -776,13 +775,8 @@ public:
     /**
      * @brief Move(not copy) the current version (payload, payload_status,
      * commit_ts) to the archives_.
-     *
-     * @param move_payload true - move "payload", "payload_status" and
-     * "commit_ts" of CcEntry to "archives_"; false - not move the payload ,
-     * just copy "payload_status" and "commit_ts". For "PkIndex", we should set
-     * it to "true", for "SkIndex", we should set it to "false".
      */
-    void ArchiveBeforeUpdate(TableType tbl_type)
+    void ArchiveBeforeUpdate()
     {
         const RecordStatus rec_status = PayloadStatus();
         if (rec_status == RecordStatus::Unknown)
@@ -801,15 +795,8 @@ public:
             assert(commit_ts > archives_->front().commit_ts_);
         }
 
-        if (tbl_type != TableType::Secondary)
-        {
-            archives_->emplace_front(
-                std::move(payload_), commit_ts, rec_status);
-        }
-        else
-        {
-            archives_->emplace_front(nullptr, commit_ts, rec_status);
-        }
+        //  Handle payloads of pk and sk the same way.
+        archives_->emplace_front(std::move(payload_), commit_ts, rec_status);
     }
 
     /**
@@ -939,11 +926,9 @@ public:
      * @brief Gets the visible version according to read timestamp.
      *
      * @param ts - snapshot read timestamp
-     * @param tbl_type - type of table
      * @param rec - variable to store result
      */
     void MvccGet(uint64_t ts,
-                 TableType tbl_type,
                  uint64_t &last_read_ts,
                  VersionResultRecord<ValueT> &rec)
     {
@@ -981,14 +966,7 @@ public:
                 {
                     if (it->payload_status_ == RecordStatus::Normal)
                     {
-                        if (tbl_type == TableType::Secondary)
-                        {
-                            rec.payload_ptr_ = payload_;
-                        }
-                        else
-                        {
-                            rec.payload_ptr_ = it->payload_;
-                        }
+                        rec.payload_ptr_ = it->payload_;
                     }
                     rec.commit_ts_ = it->commit_ts_;
                     rec.payload_status_ = it->payload_status_;
@@ -1061,7 +1039,6 @@ public:
                          uint64_t from_ts,
                          uint64_t to_ts,
                          uint64_t oldest_active_tx_ts,
-                         TableType tbl_type,
                          bool mvcc_enabled,
                          size_t &ckpt_vec_size,
                          bool export_persisted_record_to_ckpt_vec,
@@ -1210,15 +1187,7 @@ public:
 
                             if (it->payload_status_ == RecordStatus::Normal)
                             {
-                                if (tbl_type != TableType::Secondary)
-                                {
-                                    ref.SetPayload(
-                                        it->payload_);  // pk, unique_sk
-                                }
-                                else
-                                {
-                                    ref.SetPayload(payload_);  // sk
-                                }
+                                ref.SetPayload(it->payload_);
                             }
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
@@ -1249,15 +1218,7 @@ public:
 
                                 if (it->payload_status_ == RecordStatus::Normal)
                                 {
-                                    if (tbl_type != TableType::Secondary)
-                                    {
-                                        ref.SetPayload(
-                                            it->payload_);  // pk, unique_sk
-                                    }
-                                    else
-                                    {
-                                        ref.SetPayload(payload_);  // sk
-                                    }
+                                    ref.SetPayload(it->payload_);
                                 }
                                 ref.payload_status_ = it->payload_status_;
                                 ref.commit_ts_ = it->commit_ts_;
@@ -1286,15 +1247,7 @@ public:
 
                             if (it->payload_status_ == RecordStatus::Normal)
                             {
-                                if (tbl_type != TableType::Secondary)
-                                {
-                                    ref.SetPayload(
-                                        it->payload_);  // pk, unique_sk
-                                }
-                                else
-                                {
-                                    ref.SetPayload(payload_);  // sk
-                                }
+                                ref.SetPayload(it->payload_);
                             }
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
@@ -1329,15 +1282,7 @@ public:
 
                             if (it->payload_status_ == RecordStatus::Normal)
                             {
-                                if (tbl_type != TableType::Secondary)
-                                {
-                                    ref.SetPayload(
-                                        it->payload_);  // pk, unique_sk
-                                }
-                                else
-                                {
-                                    ref.SetPayload(payload_);  // sk
-                                }
+                                ref.SetPayload(it->payload_);
                             }
                             mem_usage += ref.MemUsage();
                             ref.payload_status_ = it->payload_status_;
@@ -1374,15 +1319,7 @@ public:
 
                             if (it->payload_status_ == RecordStatus::Normal)
                             {
-                                if (tbl_type != TableType::Secondary)
-                                {
-                                    ref.SetPayload(
-                                        it->payload_);  // pk, unique_sk
-                                }
-                                else
-                                {
-                                    ref.SetPayload(payload_);  // sk
-                                }
+                                ref.SetPayload(it->payload_);
                             }
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
