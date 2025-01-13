@@ -175,9 +175,8 @@ CcShard::CcShard(
 
     last_read_ts_ = Now();
 
-    // init defrag heap cc
-    defrag_heap_cc_ = std::make_unique<DefragShardHeapCc>(16);
     retry_fwd_msg_cc_ = std::make_unique<RetryFailedStandbyMsgCc>();
+    shard_clean_cc_ = std::make_unique<ShardCleanCc>();
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
@@ -337,24 +336,47 @@ void CcShard::EnqueueWaitListIfMemoryFull(CcRequestBase *req)
     cc_wait_list_for_memory_.push_back(req);
 }
 
-void CcShard::DequeueWaitListAfterMemoryFree()
+bool CcShard::DequeueWaitListAfterMemoryFree(bool abort, bool deque_all)
 {
     if (cc_wait_list_for_memory_.size() == 0)
     {
-        return;
+        return true;
     }
 
-    for (auto req : cc_wait_list_for_memory_)
+    auto it = cc_wait_list_for_memory_.begin();
+    for (uint32_t dequeue_cnt = 0; it != cc_wait_list_for_memory_.end() &&
+                                   (abort || deque_all || dequeue_cnt < 20);
+         ++it)
     {
-        this->Enqueue(req);
+        if (abort)
+        {
+            (*it)->AbortCcRequest(CcErrorCode::OUT_OF_MEMORY);
+        }
+        else
+        {
+            this->Enqueue((*it));
+            ++dequeue_cnt;
+        }
     }
 
-    cc_wait_list_for_memory_.clear();
+    bool is_empty = it == cc_wait_list_for_memory_.end();
+    cc_wait_list_for_memory_.erase(cc_wait_list_for_memory_.begin(), it);
+
+    return is_empty;
 }
 
 size_t CcShard::WaitListSizeForMemory()
 {
     return cc_wait_list_for_memory_.size();
+}
+
+void CcShard::WakeUpShardCleanCc()
+{
+    if (!shard_clean_cc_->InUse())
+    {
+        shard_clean_cc_->Use();
+        Enqueue(shard_clean_cc_.get());
+    }
 }
 
 void CcShard::Enqueue(CcRequestBase *req)
@@ -837,9 +859,11 @@ void CcShard::VerifyLruList()
 /**
  * @brief Kick out freeable entries from ccmap.
  *
- * @return the number of freed entries in ccmap.
+ * @return A pair, the first of which is the number of freed entries in ccmap,
+ * and the second is a bool value that is true if should yield this shard clean
+ * operation.
  */
-size_t CcShard::Clean()
+std::pair<size_t, bool> CcShard::Clean()
 {
     // See if there's any invalid cce that we can expire
     CleanUpInvalidCce();
@@ -850,75 +874,38 @@ size_t CcShard::Clean()
     LruPage *ccp = clean_start_ccp_ ? clean_start_ccp_ : head_ccp_.lru_next_;
 #endif
     size_t free_cnt = 0;
-    bool heap_fragmented = false;
+    bool yield = false;
 
 #ifndef RUNNING_TXSERVICE_ALONE
-    assert(shard_heap_ != nullptr);
-    int64_t heap_alloc, heap_commit;
-    while ((shard_heap_->Full(&heap_alloc, &heap_commit) ||
-            free_cnt < CcShard::freeBatchSize) &&
-           ccp != &tail_ccp_)
+    size_t clean_page_cnt = 0, scan_page_cnt = 0;
+    uint64_t begin_ts =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::high_resolution_clock::now().time_since_epoch())
+            .count();
+    while (scan_page_cnt < CcShard::freeBatchSize && ccp != &tail_ccp_)
     {
-        // if heap fragmentation exceed threshold, stop clean
-        if (local_shards_.enable_shard_heap_defragment_ &&
-            ((static_cast<double>(heap_alloc) /
-              static_cast<double>(heap_commit)) < 0.8))
-        {
-            heap_fragmented = true;
-            // if heap fragmentation happen and no flying defrag heap cc,
-            // trigger defragment
-            if (!defrag_heap_cc_on_fly_)
-            {
-                defrag_heap_cc_on_fly_ = true;
-                std::vector<std::pair<uint32_t, int64_t>> node_groups_with_term;
-
-                int64_t standby_node_term =
-                    Sharder::Instance().StandbyNodeTerm();
-                if (standby_node_term < 0)
-                {
-                    std::vector<uint32_t> node_groups =
-                        Sharder::Instance().LocalNodeGroups();
-                    for (auto node_group : node_groups)
-                    {
-                        int64_t leader_term =
-                            Sharder::Instance().LeaderTerm(node_group);
-                        if (leader_term < 0)
-                        {
-                            continue;
-                        }
-                        node_groups_with_term.emplace_back(node_group,
-                                                           leader_term);
-                    }
-                }
-                else
-                {
-                    node_groups_with_term.emplace_back(
-                        Sharder::Instance().NativeNodeGroup(),
-                        standby_node_term);
-                }
-
-                defrag_heap_cc_->Reset(std::move(node_groups_with_term));
-
-                LOG(INFO) << "Found memory fragementation in ccs " << core_id_
-                          << ", total comitted memory: " << heap_commit
-                          << ", actual used memory " << heap_alloc
-                          << ", frag ratio " << std::setprecision(2)
-                          << 100 *
-                                 (static_cast<float>(heap_commit - heap_alloc) /
-                                  heap_commit)
-                          << ", start defragmentation, node groups size: "
-                          << defrag_heap_cc_->node_groups_.size();
-
-                Enqueue(defrag_heap_cc_.get());
-            }
-            break;
-        }
         // merge and removal might happen during Clean so ccp and ccp->lru_next_
         // might change
         auto [freed, next] = ccp->parent_map_->CleanPageAndReBalance(ccp);
         free_cnt += freed;
         ccp = next;
+        ++scan_page_cnt;
+        clean_page_cnt = (freed > 0 ? (clean_page_cnt + 1) : clean_page_cnt);
+        if (clean_page_cnt % 4 == 0)
+        {
+            uint64_t current_ts =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::high_resolution_clock::now()
+                        .time_since_epoch())
+                    .count();
+            if (current_ts - begin_ts >= CcShard::maxDuration)
+            {
+                break;
+            }
+        }
     }
+
+    yield = ccp != &tail_ccp_;
 #else
     ccp = head_ccp_.lru_next_;
     while (ccp != &tail_ccp_)
@@ -932,15 +919,7 @@ size_t CcShard::Clean()
 #endif
     clean_start_ccp_ = ccp;
 
-    // notify the checkpointer thread to do checkpoint if there is not freeable
-    // entries to be kicked out from ccmap.
-    if (free_cnt == 0 && !local_shards_.IsWaitingCkpt() && !heap_fragmented)
-    {
-        local_shards_.SetWaitingCkpt(true);
-        NotifyCkpt();
-    }
-
-    return free_cnt;
+    return {free_cnt, yield};
 }
 
 /**
@@ -976,6 +955,11 @@ void CcShard::NotifyCkpt(bool request_ckpt)
 void CcShard::SetWaitingCkpt(bool is_waiting)
 {
     local_shards_.SetWaitingCkpt(is_waiting);
+}
+
+bool CcShard::IsWaitingCkpt()
+{
+    return local_shards_.IsWaitingCkpt();
 }
 
 void CcShard::DispatchTask(uint16_t cc_shard_idx,
@@ -2069,10 +2053,16 @@ void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)
     }
 }
 
-CcShardHeap::CcShardHeap(CcShard *cc_shard, size_t limit) : cc_shard_(cc_shard)
+CcShardHeap::CcShardHeap(CcShard *cc_shard, size_t limit)
+    : cc_shard_(cc_shard), memory_limit_(limit)
 {
     heap_ = mi_heap_new();
-    memory_limit_ = limit;
+
+    if (cc_shard_->EnableDefragment())
+    {
+        // Init defrag heap cc
+        defrag_heap_cc_ = std::make_unique<DefragShardHeapCc>(this, 16);
+    }
 }
 
 CcShardHeap::~CcShardHeap()
@@ -2104,15 +2094,75 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
         *commit = committed;
     }
 
-    if (cc_shard_->local_shards_.enable_shard_heap_defragment_)
+    return allocated >= static_cast<int64_t>(memory_limit_) ||
+           (cc_shard_->EnableDefragment() &&
+            committed > static_cast<int64_t>(memory_limit_));
+}
+
+bool CcShardHeap::NeedCleanShard(int64_t &alloc, int64_t &commit) const
+{
+    return alloc >= static_cast<int64_t>(memory_limit_) ||
+           (cc_shard_->EnableDefragment() &&
+            alloc > (memory_limit_ * CcShardHeap::high_water));
+}
+
+bool CcShardHeap::NeedDefragment(int64_t *alloc, int64_t *commit) const
+{
+    int64_t allocated, committed;
+    mi_thread_stats(&allocated, &committed);
+    if (alloc != nullptr)
     {
-        return allocated >= (int64_t) memory_limit_ ||
-               committed > (memory_limit_ * 1.1);
+        *alloc = allocated;
     }
-    else
+
+    if (commit != nullptr)
     {
-        return allocated >= (int64_t) memory_limit_;
+        *commit = committed;
     }
+
+    return committed > (memory_limit_ * CcShardHeap::high_water) &&
+           (static_cast<double>(allocated) / static_cast<double>(committed)) <=
+               CcShardHeap::utilization;
+}
+
+bool CcShardHeap::AsyncDefragment()
+{
+    if (!defrag_heap_cc_on_fly_)
+    {
+        defrag_heap_cc_on_fly_ = true;
+        std::vector<std::pair<uint32_t, int64_t>> node_groups_with_term;
+
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        if (standby_node_term < 0)
+        {
+            std::vector<uint32_t> node_groups =
+                Sharder::Instance().LocalNodeGroups();
+            for (auto node_group : node_groups)
+            {
+                int64_t leader_term =
+                    Sharder::Instance().LeaderTerm(node_group);
+                if (leader_term < 0)
+                {
+                    continue;
+                }
+                node_groups_with_term.emplace_back(node_group, leader_term);
+            }
+        }
+        else
+        {
+            node_groups_with_term.emplace_back(
+                Sharder::Instance().NativeNodeGroup(), standby_node_term);
+        }
+
+        defrag_heap_cc_->Reset(std::move(node_groups_with_term));
+        cc_shard_->Enqueue(defrag_heap_cc_.get());
+
+        LOG(INFO) << "Start defragmentation on shard#" << cc_shard_->core_id_
+                  << ", node groups size: "
+                  << defrag_heap_cc_->node_groups_.size();
+        return true;
+    }
+    return false;
 }
 
 std::unordered_map<TableName, bool> CcShard::GetCatalogTableNameSnapshot(
@@ -2531,6 +2581,11 @@ void CcShard::CheckLagAndResubscribe() const
             Sharder::Instance().LeaderNodeId(native_ng),
             true);
     }
+}
+
+bool CcShard::EnableDefragment() const
+{
+    return local_shards_.enable_shard_heap_defragment_;
 }
 
 }  // namespace txservice

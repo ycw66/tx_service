@@ -56,6 +56,7 @@ struct StatisticsEntry;
 struct CheckDeadLockResult;
 struct DefragShardHeapCc;
 struct RetryFailedStandbyMsgCc;
+struct ShardCleanCc;
 
 namespace remote
 {
@@ -109,8 +110,11 @@ struct TxLockInfo
 
 class CcShardHeap
 {
+    static constexpr double high_water = 0.8;
+    static constexpr double utilization = 0.8;
+
 public:
-    explicit CcShardHeap(CcShard *cc_shard, size_t limit);
+    CcShardHeap(CcShard *cc_shard, size_t limit);
     ~CcShardHeap();
 
     // Set this heap_ as the default heap for the current thread.
@@ -120,10 +124,43 @@ public:
     // Check if this heap is full
     bool Full(int64_t *alloc = nullptr, int64_t *commit = nullptr) const;
 
-    CcShard *cc_shard_;
-    mi_heap_t *heap_;
-    size_t memory_limit_;
+    bool NeedCleanShard(int64_t &alloc, int64_t &commit) const;
+
+    bool NeedDefragment(int64_t *alloc, int64_t *commit) const;
+
+    mi_heap_t *Heap() const
+    {
+        return heap_;
+    }
+
+    size_t Threshold() const
+    {
+        return memory_limit_;
+    }
+
+    // Perform defragmentation asynchronously.
+    bool AsyncDefragment();
+
+    bool IsDefragHeapCcOnFly() const
+    {
+        return defrag_heap_cc_on_fly_;
+    }
+
+    void SetDefragHeapCcOnFly(bool on_fly)
+    {
+        defrag_heap_cc_on_fly_ = on_fly;
+    }
+
+private:
+    CcShard *cc_shard_{nullptr};
+    mi_heap_t *heap_{nullptr};
+    const size_t memory_limit_{0};
     size_t last_failed_collect_ts_{0};
+
+    // defrag heap cc for this shard
+    std::unique_ptr<DefragShardHeapCc> defrag_heap_cc_{nullptr};
+    // indicating the per shard defrag heap cc is on fly
+    bool defrag_heap_cc_on_fly_{false};
 };
 
 class CcShard
@@ -200,16 +237,6 @@ public:
         return shard_data_sync_scan_heap_.get();
     }
 
-    bool IsDefragHeapCcOnFly()
-    {
-        return defrag_heap_cc_on_fly_;
-    }
-
-    void SetDefragHeapCcOnFly(bool on_fly)
-    {
-        defrag_heap_cc_on_fly_ = on_fly;
-    }
-
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
      *
@@ -233,9 +260,12 @@ public:
     /**
      * @brief Dequeue cc requests from the shard's request wait list to process.
      */
-    void DequeueWaitListAfterMemoryFree();
+    bool DequeueWaitListAfterMemoryFree(bool abort = false,
+                                        bool deque_all = true);
 
     size_t WaitListSizeForMemory();
+
+    void WakeUpShardCleanCc();
 
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
@@ -329,9 +359,10 @@ public:
 
     /**
      * Clean ccentry through the lru list
-     * @return size_t clean count
+     * @return A pair, of which the first is the clean count, the second is
+     * whether reach to the end of the lru list.
      */
-    size_t Clean();
+    std::pair<size_t, bool> Clean();
 
     bool FlushEntryForTest(const TableName &tbl_name,
                            const TableSchema *tbl_schema,
@@ -342,6 +373,7 @@ public:
     void NotifyCkpt(bool request_ckpt = true);
 
     void SetWaitingCkpt(bool is_waiting);
+    bool IsWaitingCkpt();
 
     /**
      * @brief Dispatch heavy cpu-bound task, e.g. StoreRange::LoadSlice().
@@ -813,9 +845,14 @@ public:
         return lock_holding_txs_;
     }
 
-    void ResetCleanStart()
+    LruPage *CleanStart() const
     {
-        clean_start_ccp_ = nullptr;
+        return clean_start_ccp_;
+    }
+
+    void ResetCleanStart(LruPage *ccp = nullptr)
+    {
+        clean_start_ccp_ = ccp;
     }
 
     bool OutOfMemory()
@@ -928,6 +965,8 @@ public:
 
     void CheckLagAndResubscribe() const;
 
+    bool EnableDefragment() const;
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
@@ -943,8 +982,6 @@ private:
     // heap only for data sync scan
     std::unique_ptr<CcShardHeap> shard_data_sync_scan_heap_{nullptr};
     mi_threadid_t shard_heap_thread_id_{0};
-    // indicating the per shard defrag heap cc is on fly
-    bool defrag_heap_cc_on_fly_{false};
     size_t last_failed_collect_ts_{0};
 
     // all the lock acquire/release on this ccshard. It used to reduce the cost
@@ -982,7 +1019,7 @@ private:
     std::atomic<uint32_t> cc_queue_size_{0};
     CcRequestBase *req_buf_[100];
     std::vector<moodycamel::ProducerToken> thd_token_;
-    std::vector<CcRequestBase *> cc_wait_list_for_memory_;
+    std::deque<CcRequestBase *> cc_wait_list_for_memory_;
 
     // all the transactions started on this ccshard. Some txs are Ongoing while
     // others are Available, new transaction request has to traverse the array
@@ -1007,6 +1044,8 @@ private:
     std::unordered_map<uint32_t, std::pair<uint64_t, int64_t>>
         subscribed_standby_nodes_;
     std::unique_ptr<RetryFailedStandbyMsgCc> retry_fwd_msg_cc_;
+    // Shard clean cc
+    std::unique_ptr<ShardCleanCc> shard_clean_cc_;
 
     // Standby forward msg related members used on follower node
     CcRequestPool<KeyObjectStandbyForwardCc> key_obj_standby_msg_cc_pool_;
@@ -1054,8 +1093,10 @@ private:
 
     SystemHandler *const system_handler_;
 
-    // The number of cc entries to free in one invocation of Clean().
-    static constexpr uint64_t freeBatchSize = 100;
+    // The max number of cc page to scan in one invocation of Clean().
+    static constexpr uint64_t freeBatchSize = 10;
+    // The maximum allowed duration(us) of one invocation of Clean().
+    static constexpr uint64_t maxDuration = 30;
 
     // cache all tx info under SI isolation level in this shard,
     // format: {txn->start_ts}
@@ -1087,9 +1128,6 @@ private:
     // The number of active tx reading buckets without adding readlock on
     // ccentry in RangeBucketCcMap.
     uint32_t tx_cnt_reading_naked_buckets_{0};
-
-    // defrag heap cc for this shard
-    std::unique_ptr<DefragShardHeapCc> defrag_heap_cc_;
 
     std::list<std::pair<uint64_t, std::unique_ptr<LruEntry>>> invalid_cces_;
 

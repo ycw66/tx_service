@@ -287,13 +287,8 @@ public:
                 {
                     // The acquire request needs a new cc entry but the cc map
                     // has reached the maximal capacity.
-#ifdef RANGE_PARTITION_ENABLED
-                    req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
-#else
                     shard_->EnqueueWaitListIfMemoryFull(&req);
                     return false;
-#endif
                 }
 
                 assert(cce_ptr != nullptr);
@@ -526,16 +521,8 @@ public:
                         << "!!!WARNING!!! PostWriteCc have no"
                         << " enough memory. Txn: " << txn
                         << ", table name trace: " << this->table_name_.Trace();
-                    // This cc shard has reached max memory limit. We
-                    // didn't write data log for this post write req,
-                    // but we have acquired range read lock for this
-                    // key. If we do not return error and release the
-                    // range read lock, it might block range split from
-                    // finishing. We should return error here so that
-                    // coordinator can release range read lock and retry
-                    // later.
-                    req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
+                    shard_->EnqueueWaitListIfMemoryFull(&req);
+                    return false;
                 }
                 write_key = it->first;
 
@@ -865,12 +852,8 @@ public:
                     // The acquire request needs a new cc entry but the cc map
                     // has reached the maximal capacity. Blocks the request by
                     // putting it into the wait list.
-#ifdef RANGE_PARTITION_ENABLED
-                    return hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-#else
                     shard_->EnqueueWaitListIfMemoryFull(&req);
                     return false;
-#endif
                 }
 
                 req.SetCcePtr(cce_ptr, shard_->core_id_);
@@ -1093,13 +1076,8 @@ public:
 
         if (cce_ptr == nullptr)
         {
-#ifdef RANGE_PARTITION_ENABLED
-            req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-            return true;
-#else
             shard_->EnqueueWaitListIfMemoryFull(&req);
             return false;
-#endif
         }
 
         TxNumber txn = req.Txn();
@@ -1652,10 +1630,8 @@ public:
                                     {
                                         slice_id.Unpin();
                                     }
-
-                                    hd_res->SetError(
-                                        CcErrorCode::OUT_OF_MEMORY);
-                                    return true;
+                                    shard_->EnqueueWaitListIfMemoryFull(&req);
+                                    return false;
                                 }
                                 ccp = it.GetPage();
                             }
@@ -1710,9 +1686,8 @@ public:
                                 cce = it->second;
                                 if (cce == nullptr)
                                 {
-                                    hd_res->SetError(
-                                        CcErrorCode::OUT_OF_MEMORY);
-                                    return true;
+                                    shard_->EnqueueWaitListIfMemoryFull(&req);
+                                    return false;
                                 }
                                 ccp = it.GetPage();
                             }
@@ -6264,6 +6239,12 @@ public:
                         {
                             cce->UpdateCcPage(new_cc_page_ptr);
                         }
+
+                        if (shard_->CleanStart() == old_cc_page_uptr.get())
+                        {
+                            // Update the pointer of clean start ccp.
+                            shard_->ResetCleanStart(new_cc_page_ptr);
+                        }
                     }
 
                     current_defrag_cnt++;
@@ -7067,8 +7048,8 @@ public:
 
         if (!success)
         {
-            req.SetError(CcErrorCode::OUT_OF_MEMORY);
-            return true;
+            shard_->EnqueueWaitListIfMemoryFull(&req);
+            return false;
         }
 
         index = last_index;
@@ -7837,7 +7818,7 @@ public:
 
         if (!success)
         {
-            req.SetError(CcErrorCode::OUT_OF_MEMORY);
+            shard_->EnqueueWaitListIfMemoryFull(&req);
             return false;
         }
 
@@ -9043,24 +9024,35 @@ protected:
         // catalog and range ccmap bypass shard memory limit. since
         // checkpointer may emplace ccentry into ccmap.
         CcShardHeap *shard_heap = shard_->GetShardHeap();
-        if (shard_heap != nullptr && shard_heap->Full())
+        int64_t heap_alloc, heap_commit;
+        if (shard_->EnableDefragment() && shard_heap != nullptr &&
+            shard_heap->NeedDefragment(&heap_alloc, &heap_commit) &&
+            shard_heap->AsyncDefragment())
         {
-            if (txservice_enable_cache_replacement)
-            {
-                // The shard has reached the maximal capacity. Tries to
-                // clean cc entries that have been checkpointed but are not
-                // being accessed by active tx's.
-                shard_->Clean();
+            LOG(INFO) << "Found memory fragementation in ccs "
+                      << shard_->core_id_
+                      << ", total comitted memory: " << heap_commit
+                      << ", actual used memory " << heap_alloc
+                      << ", frag ratio " << std::setprecision(2)
+                      << 100 * (static_cast<float>(heap_commit - heap_alloc) /
+                                heap_commit);
+        }
 
-                if (shard_heap->Full() && !table_name_.IsMeta() &&
-                    !force_emplace)
-                {
-                    return false;
-                }
-            }
-            else
+        if (shard_heap != nullptr &&
+            shard_heap->Full(&heap_alloc, &heap_commit))
+        {
+            if (txservice_enable_cache_replacement &&
+                shard_heap->NeedCleanShard(heap_alloc, heap_commit))
             {
-                // when cache replacement is disable, we don't kickout cce
+                // The shard has reached the maximal capacity. Tries to clean cc
+                // entries that have been checkpointed but are not being
+                // accessed by active tx's.
+                shard_->WakeUpShardCleanCc();
+            }
+            // else: cache replacement is disable or no need to clean shard.
+
+            if (!force_emplace && !table_name_.IsMeta())
+            {
                 return false;
             }
         }
@@ -9333,32 +9325,39 @@ protected:
         // catalog and range ccmap bypass shard memory limit. since
         // checkpointer may emplace ccentry into ccmap.
         CcShardHeap *shard_heap = shard_->GetShardHeap();
-        if (shard_heap != nullptr && shard_heap->Full())
+        int64_t heap_alloc, heap_commit;
+        if (shard_->EnableDefragment() && shard_heap != nullptr &&
+            shard_heap->NeedDefragment(&heap_alloc, &heap_commit) &&
+            shard_heap->AsyncDefragment())
         {
-            if (txservice_enable_cache_replacement)
-            {
-                // The shard has reached the maximal capacity. Tries to
-                // clean cc entries that have been checkpointed but are not
-                // being accessed by active tx's.
-                shard_->Clean();
+            LOG(INFO) << "Found memory fragementation in ccs "
+                      << shard_->core_id_
+                      << ", total comitted memory: " << heap_commit
+                      << ", actual used memory " << heap_alloc
+                      << ", frag ratio " << std::setprecision(2)
+                      << 100 * (static_cast<float>(heap_commit - heap_alloc) /
+                                heap_commit);
+        }
 
-                if (shard_heap->Full() && !table_name_.IsMeta() &&
-                    !force_emplace)
-                {
-                    if (read_only_req)
-                    {
-                        fail_if_not_found = true;
-                    }
-                    else
-                    {
-                        return End();
-                    }
-                }
+        if (shard_heap != nullptr &&
+            shard_heap->Full(&heap_alloc, &heap_commit))
+        {
+            if (txservice_enable_cache_replacement &&
+                shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+            {
+                // The shard has reached the maximal capacity. Tries to clean cc
+                // entries that have been checkpointed but are not being
+                // accessed by active tx's.
+                shard_->WakeUpShardCleanCc();
             }
-            else if (!force_emplace && !read_only_req)
+            // else: cache replacement is disable or no need to clean shard.
+
+            if (!force_emplace && !table_name_.IsMeta() && !read_only_req)
             {
                 return End();
             }
+
+            fail_if_not_found = read_only_req;
         }
 
         if (ccmp_.begin() == ccmp_.end())
@@ -10575,8 +10574,11 @@ protected:
             const KeyT &key = page->keys_[0];
             page_it = ccmp_.find(key);
         }
-        clean_guard->Compact();
-        free_cnt += clean_guard->FreedCount();
+        if (clean_guard->FreedCount() > 0)
+        {
+            clean_guard->Compact();
+            free_cnt += clean_guard->FreedCount();
+        }
 #ifdef ON_KEY_OBJECT
         normal_obj_sz_ -= clean_guard->CleanObjectCount();
 #endif

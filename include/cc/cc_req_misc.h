@@ -508,6 +508,14 @@ public:
     void SetFinish();
     void SetError(CcErrorCode err_code);
 
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        DLOG(ERROR) << "Abort this FillStoreSliceCc request with error: "
+                    << CcErrorMessage(err_code);
+        SetError(err_code);
+    }
+
     const TableName &TblName() const
     {
         return *table_name_;

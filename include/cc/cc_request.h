@@ -2882,8 +2882,11 @@ public:
     DefragShardHeapCc() = delete;
     ~DefragShardHeapCc() = default;
 
-    explicit DefragShardHeapCc(size_t scan_batch_size)
-        : scan_batch_size_(scan_batch_size), node_groups_(), tables_()
+    DefragShardHeapCc(CcShardHeap *heap, size_t scan_batch_size)
+        : heap_(heap),
+          scan_batch_size_(scan_batch_size),
+          node_groups_(),
+          tables_()
     {
     }
 
@@ -2930,14 +2933,13 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        mi_heap_t *df = mi_heap_get_default();
-        assert(df == ccs.GetShardHeap()->heap_);
         assert(ccs.GetShardHeapThreadId() == mi_thread_id());
         run_count_++;
-        // dequeue wait list if heap is not full anymore every 20 scan batch
-        if (run_count_ % 20 == 0 && !ccs.GetShardHeap()->Full())
+        if (run_count_ % 20 == 0 && !heap_->Full())
         {
-            ccs.DequeueWaitListAfterMemoryFree();
+            // Dequeue a batch ccrequests from wait list if heap is not full
+            // anymore every 20 scan batch
+            ccs.DequeueWaitListAfterMemoryFree(false, false);
         }
 
         if (static_cast<size_t>(current_node_group_idx_) < node_groups_.size())
@@ -2981,9 +2983,8 @@ public:
         else
         {
             // this is the end of the defrag heap cc scan
-            ccs.SetDefragHeapCcOnFly(false);
-            // deque cc request in wait list after
-            // defragmentation
+            heap_->SetDefragHeapCcOnFly(false);
+            // deque cc request in wait list after defragmentation
             ccs.DequeueWaitListAfterMemoryFree();
 
             int64_t allocated, committed;
@@ -2995,7 +2996,6 @@ public:
                       << std::setprecision(2)
                       << 100 * (static_cast<float>(committed - allocated) /
                                 committed);
-            assert(df == ccs.GetShardHeap()->heap_);
             assert(ccs.GetShardHeapThreadId() == mi_thread_id());
             return false;
         }
@@ -3058,7 +3058,6 @@ public:
         if (ccm != nullptr)
         {
             ccm->Execute(*this);
-            assert(df == ccs.GetShardHeap()->heap_);
             assert(ccs.GetShardHeapThreadId() == mi_thread_id());
         }
         else
@@ -3067,7 +3066,6 @@ public:
             pause_pos_ = {TxKey(), true};
             ccs.Enqueue(this);
         }
-        (void) df;
 
         return false;
     }
@@ -3108,6 +3106,7 @@ public:
         return pause_pos_;
     }
 
+    CcShardHeap *const heap_{nullptr};
     const size_t scan_batch_size_;
 
     std::vector<std::pair<uint32_t, int64_t>> node_groups_;
@@ -5339,7 +5338,7 @@ public:
                         << "Shared scan heap is still full after release "
                         << vec_size << " allocated: " << allocated
                         << " committed: " << committed
-                        << " heap size: " << scan_heap->memory_limit_;
+                        << " heap size: " << scan_heap->Threshold();
                 }
                 mi_heap_set_default(prev_heap);
 
@@ -5374,7 +5373,7 @@ public:
                         << "Shared scan heap is still full after release "
                         << vec_size << " allocated: " << allocated
                         << " committed: " << committed
-                        << " heap size: " << scan_heap->memory_limit_;
+                        << " heap size: " << scan_heap->Threshold();
                 }
                 mi_heap_set_default(prev_heap);
 
@@ -5429,7 +5428,10 @@ public:
     bool Execute(CcShard &ccs) override
     {
         ccs.ResetCleanStart();
-        ccs.DequeueWaitListAfterMemoryFree();
+        if (ccs.WaitListSizeForMemory() > 0)
+        {
+            ccs.WakeUpShardCleanCc();
+        }
 
         {
             std::lock_guard<std::mutex> lk(mux_);
@@ -6424,7 +6426,7 @@ struct CollectMemStatsCc : public CcRequestBase
         // this cc will only execute in context of shard heap, so the stats
         // collected are shard heap stats
         //
-        assert(mi_heap_get_default() == ccs.GetShardHeap()->heap_);
+        assert(mi_heap_get_default() == ccs.GetShardHeap()->Heap());
         mi_thread_stats(&stats_->allocated_, &stats_->committed_);
         stats_->wait_list_size_ = ccs.WaitListSizeForMemory();
         std::lock_guard<std::mutex> lk(mux_);
@@ -7429,5 +7431,99 @@ private:
     bthread::Mutex req_mux_{};
     bthread::ConditionVariable req_cv_{};
     uint16_t unfinished_cnt_{0};
+};
+
+struct ShardCleanCc : public CcRequestBase
+{
+public:
+    ShardCleanCc() : free_count_(0)
+    {
+    }
+
+    ShardCleanCc(ShardCleanCc &&rhs) = delete;
+
+    bool Execute(CcShard &ccs) override
+    {
+        CcShardHeap *shard_heap = ccs.GetShardHeap();
+        int64_t heap_alloc, heap_commit;
+        if (shard_heap != nullptr &&
+            shard_heap->Full(&heap_alloc, &heap_commit))
+        {
+            assert(txservice_enable_cache_replacement);
+            bool need_yield = false;
+            if (shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+            {
+                size_t free_size = 0;
+                std::tie(free_size, need_yield) = ccs.Clean();
+                free_count_ += free_size;
+            }
+
+            if (shard_heap->Full(&heap_alloc, &heap_commit) &&
+                shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+            {
+                if (need_yield)
+                {
+                    // Continue to clean in the next run one round.
+                    ccs.Enqueue(this);
+                    return false;
+                }
+                else
+                {
+#ifndef ONE_KEY_OBJECT
+                    // Reach to the tail ccpage, but the allocated memory is
+                    // still larger than the heap threshold, just abort the
+                    // waiting ccrequests.
+                    ccs.DequeueWaitListAfterMemoryFree(true);
+#else
+                    // Waiting until have free memory.
+#endif
+
+                    // Notify the checkpointer thread to do checkpoint if there
+                    // is not freeable entries to be kicked out from ccmap and
+                    // if the shard is not doing defrag.
+                    if (free_count_ == 0 && !ccs.IsWaitingCkpt() &&
+                        !shard_heap->IsDefragHeapCcOnFly())
+                    {
+                        ccs.SetWaitingCkpt(true);
+                        ccs.NotifyCkpt();
+                    }
+                    free_count_ = 0;
+                    // Return true will set the request as free, which means the
+                    // request is not in working state.
+                    return true;
+                }
+            }
+            else
+            {
+                // Get the free memory, re-run a batch of the waiting ccrequest.
+                bool wait_list_empty =
+                    ccs.DequeueWaitListAfterMemoryFree(false, false);
+                if (!wait_list_empty)
+                {
+                    ccs.Enqueue(this);
+                }
+
+                // Reset the value if the ccrequest is finished.
+                free_count_ = (wait_list_empty) ? 0 : free_count_;
+                return wait_list_empty;
+            }
+        }
+        else
+        {
+            // There is available memory on this shard, re-run a batch of the
+            // waiting ccrequest if has any waiting request, otherwise, finish
+            // this shard clean ccrequests.
+            bool wait_list_empty =
+                ccs.DequeueWaitListAfterMemoryFree(false, false);
+            if (!wait_list_empty)
+            {
+                ccs.Enqueue(this);
+            }
+            return wait_list_empty;
+        }
+    }
+
+private:
+    size_t free_count_{0};
 };
 }  // namespace txservice
