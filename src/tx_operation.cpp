@@ -1337,6 +1337,9 @@ void ScanNextOperation::Reset()
 {
     alias_ = 0;
     scan_state_ = nullptr;
+#ifdef RANGE_PARTITION_ENABLED
+    range_table_name_ = TableName(empty_sv, TableType::RangePartition);
+#endif
     op_start_ = metrics::TimePoint::max();
     ResetResult();
 }

@@ -760,6 +760,11 @@ void TransactionExecution::ProcessTxRequest(ScanBatchTxRequest &scan_batch_req)
 
     scan_next_.Reset();
     scan_next_.tx_req_ = &scan_batch_req;
+    scan_next_.alias_ = scan_batch_req.alias_;
+#ifdef RANGE_PARTITION_ENABLED
+    scan_next_.range_table_name_ = TableName(
+        scan_batch_req.table_name_.StringView(), TableType::RangePartition);
+#endif
     PushOperation(&scan_next_);
     Process(scan_next_);
 }
@@ -2366,10 +2371,11 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    uint64_t alias = scan_next.tx_req_->alias_;
 
     if (scan_next.scan_state_ == nullptr)
     {
+        // Called from ScanBatchTxRequest
+        uint64_t alias = scan_next.tx_req_->alias_;
         auto scan_it = scans_.find(alias);
         if (scan_it == scans_.end())
         {
@@ -2381,7 +2387,10 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
         scan_next.UpdateScanState(&scan_it->second);
     }
-    scan_next.alias_ = alias;
+    else
+    {
+        // Called from PostProcess(ScanNextOperation)
+    }
 
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
     scan_next.is_running_ = true;
@@ -2543,9 +2552,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     scanner.Direction() == ScanDirection::Forward
                         ? ReadType::RangeLeftInclusive
                         : ReadType::RangeRightExclusive;
-                scan_next.range_table_name_ =
-                    TableName(scan_next.tx_req_->table_name_.StringView(),
-                              TableType::RangePartition);
 
                 bool finished = cc_handler_->ReadLocal(
                     scan_next.range_table_name_,
