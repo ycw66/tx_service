@@ -278,66 +278,12 @@ public:
         }
     }
 
-    template <typename T>
-    TxErrorCode AddWrite(const TableName &table_name,
-                         uint64_t schema_version,
-                         std::unique_ptr<T> key,
-                         TxRecord::Uptr rec,
-                         OperationType op_type,
-                         bool check_unqiue = false)
-    {
-        // Check write set bytes count.
-        wset_bytes_cnt_ += ((key ? key->SerializedLength() : 0) +
-                            (rec.get() ? rec.get()->SerializedLength() : 0));
-        if (wset_bytes_cnt_ > ReadWriteSet::MaxWriteSetBytesCnt)
-        {
-            return TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR;
-        }
-
-        auto iter = wset_.find(table_name);
-        if (iter == wset_.end())
-        {
-            auto insert_it = wset_.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(table_name.StringView(),
-                                      table_name.Type()),
-                std::forward_as_tuple(schema_version, TableWriteSet()));
-            iter = insert_it.first;
-        }
-
-        assert(!iter->first.IsStringOwner());
-
-        TableWriteSet &tws = iter->second.second;
-
-        WriteSetEntry wset_entry;
-        wset_entry.rec_ = std::move(rec);
-        wset_entry.op_ = op_type;
-
-        auto [it, inserted] =
-            tws.try_emplace(TxKey(std::move(key)), std::move(wset_entry));
-        if (inserted)
-        {
-            ++wset_cnt_;
-        }
-        else
-        {
-            if (check_unqiue)
-            {
-                return TxErrorCode::DUPLICATE_KEY;
-            }
-            // Modify old WriteSetEntry.
-            it->second.rec_ = std::move(wset_entry.rec_);
-            it->second.op_ = wset_entry.op_;
-        }
-        return TxErrorCode::NO_ERROR;
-    }
-
     TxErrorCode AddWrite(const TableName &table_name,
                          uint64_t schema_version,
                          TxKey tx_key,
                          TxRecord::Uptr rec,
                          OperationType op_type,
-                         bool check_unqiue = false)
+                         bool check_unique = false)
     {
         // Check write set bytes count.
         wset_bytes_cnt_ += ((tx_key.KeyPtr() ? tx_key.SerializedLength() : 0) +
@@ -361,28 +307,22 @@ public:
         assert(!iter->first.IsStringOwner());
 
         TableWriteSet &tws = iter->second.second;
-
-        WriteSetEntry wset_entry;
-        wset_entry.rec_ = std::move(rec);
-        wset_entry.op_ = op_type;
-
-        auto [it, inserted] =
-            tws.try_emplace(std::move(tx_key), std::move(wset_entry));
+        auto [it, inserted] = tws.try_emplace(std::move(tx_key));
         if (inserted)
         {
+            WriteSetEntry &wset_entry = it->second;
+            wset_entry.op_ = op_type;
+            wset_entry.rec_ = std::move(rec);
             ++wset_cnt_;
+            return TxErrorCode::NO_ERROR;
         }
         else
         {
-            if (check_unqiue)
-            {
-                return TxErrorCode::DUPLICATE_KEY;
-            }
-            // Modify old WriteSetEntry.
-            it->second.rec_ = std::move(wset_entry.rec_);
-            it->second.op_ = wset_entry.op_;
+            WriteSetEntry &wset_entry = it->second;
+            bool succeed = ApplyToWSetEntry(
+                wset_entry, op_type, std::move(rec), check_unique);
+            return succeed ? TxErrorCode::NO_ERROR : TxErrorCode::DUPLICATE_KEY;
         }
-        return TxErrorCode::NO_ERROR;
     }
 
     const WriteSetEntry *FindWrite(const TableName &table_name,
@@ -730,6 +670,108 @@ public:
 #else
         return 0;
 #endif
+    }
+
+private:
+    /**
+     * @brief Apply an operation to an existing wset_entry.
+     * @return [false] means duplicate key conflict. [true] means apply new
+     * operator successfully.
+     */
+    static bool ApplyToWSetEntry(WriteSetEntry &wset_entry,
+                                 OperationType op,
+                                 TxRecord::Uptr rec,
+                                 bool check_unique)
+    {
+        if (wset_entry.op_ == OperationType::Insert)
+        {
+            if (op == OperationType::Insert)
+            {
+                // duplicate key
+                if (check_unique)
+                {
+                    return false;
+                }
+                else
+                {
+                    wset_entry.op_ = OperationType::Insert;
+                    wset_entry.rec_ = std::move(rec);
+                    return true;
+                }
+            }
+            else if (op == OperationType::Update)
+            {
+                wset_entry.op_ = OperationType::Insert;
+                wset_entry.rec_ = std::move(rec);
+                return true;
+            }
+            else if (op == OperationType::Delete)
+            {
+                wset_entry.op_ = OperationType::Delete;
+                wset_entry.rec_ = nullptr;
+                return true;
+            }
+            else
+            {
+                assert(false);
+                return false;
+            }
+        }
+        else if (wset_entry.op_ == OperationType::Update)
+        {
+            if (op == OperationType::Insert)
+            {
+                assert(false);
+                return false;
+            }
+            else if (op == OperationType::Update)
+            {
+                wset_entry.op_ = OperationType::Update;
+                wset_entry.rec_ = std::move(rec);
+                return true;
+            }
+            else if (op == OperationType::Delete)
+            {
+                wset_entry.op_ = OperationType::Delete;
+                wset_entry.rec_ = nullptr;
+                return true;
+            }
+            else
+            {
+                assert(false);
+                return false;
+            }
+        }
+        else if (wset_entry.op_ == OperationType::Delete)
+        {
+            if (op == OperationType::Insert)
+            {
+                wset_entry.op_ = OperationType::Update;
+                wset_entry.rec_ = std::move(rec);
+                return true;
+            }
+            else if (op == OperationType::Update)
+            {
+                assert(false);
+                return false;
+            }
+            else if (op == OperationType::Delete)
+            {
+                wset_entry.op_ = OperationType::Delete;
+                wset_entry.rec_ = nullptr;
+                return true;
+            }
+            else
+            {
+                assert(false);
+                return false;
+            }
+        }
+        else
+        {
+            assert(false);
+            return false;
+        }
     }
 
 private:

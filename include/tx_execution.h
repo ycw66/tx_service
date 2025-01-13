@@ -164,28 +164,12 @@ public:
                        TxKey tx_key,
                        TxRecord::Uptr rec);
 
-    template <typename KeyT>
-    TxErrorCode TxUpsert(const TableName &table_name,
-                         uint64_t schema_version,
-                         std::unique_ptr<KeyT> key,
-                         TxRecord::Uptr rec,
-                         OperationType op,
-                         bool check_unqiue = false)
-    {
-        return rw_set_.AddWrite(table_name,
-                                schema_version,
-                                std::move(key),
-                                std::move(rec),
-                                op,
-                                check_unqiue);
-    }
-
     TxErrorCode TxUpsert(const TableName &table_name,
                          uint64_t schema_version,
                          TxKey key,
                          TxRecord::Uptr rec,
                          OperationType op,
-                         bool check_unique);
+                         bool check_unique = false);
 
     void TxRevert(const TableName &table_name, const TxKey &key);
 

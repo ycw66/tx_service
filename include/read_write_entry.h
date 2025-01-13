@@ -13,9 +13,6 @@
 
 namespace txservice
 {
-
-struct WriteSetEntry;
-
 struct WriteSetEntry
 {
     using Uptr = std::unique_ptr<WriteSetEntry>;
