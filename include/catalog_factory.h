@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cc/cc_map.h"
+#include "cc/ccm_scanner.h"  // CcScanner
 #include "schema.h"
 #include "tx_command.h"
 

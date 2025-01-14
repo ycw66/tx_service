@@ -1407,7 +1407,6 @@ public:
             std::shared_lock<std::shared_mutex> meta_data_lk(meta_data_mux_);
 
             const KeyT &key = page->keys_[idx];
-            auto &cce = page->entries_[idx];
 
             // Clean next range.
             auto range_entry = static_cast<TemplateTableRangeEntry<KeyT> *>(
@@ -1415,7 +1414,7 @@ public:
                     range_table_name, cc_ng_id, TxKey(&key)));
             if (range_entry == nullptr)
             {
-                clean_guard->MarkCleanForOrphanKey(key, cce);
+                clean_guard->MarkCleanForOrphanKey(idx);
                 idx++;
                 continue;
             }
@@ -1425,7 +1424,7 @@ public:
                 range_entry->PinStoreRange());
             if (store_range == nullptr)
             {
-                clean_guard->MarkCleanForOrphanKey(key, cce);
+                clean_guard->MarkCleanForOrphanKey(idx);
                 idx++;
                 continue;
             }
@@ -1462,9 +1461,7 @@ public:
         size_t page_size = page->Size();
         for (size_t idx = 0; idx < page_size; idx++)
         {
-            const KeyT &key = page->keys_[idx];
-            auto &cce = page->entries_[idx];
-            clean_guard->MarkCleanForOrphanKey(key, cce);
+            clean_guard->MarkCleanForOrphanKey(idx);
         }
 
         if (clean_guard->cc_shard_->IsBucketsMigrating())

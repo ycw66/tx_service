@@ -1,8 +1,10 @@
 #pragma once
 
 #include <algorithm>
+#include <bitset>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "cc_entry.h"
 #include "cc_map.h"
@@ -10,16 +12,15 @@
 #include "cc_request.h"
 #include "cc_shard.h"
 #include "tx_record.h"
-#include "tx_service_common.h"
 #include "type.h"
 
 namespace txservice
 {
 /**
  * Procedure of cleaning one page is divided into two subprocedure: Mark and
- * Compact. Mark marks those to-be-cleaned entries by assigning them to nullptr.
- * Compact erase those to-be-cleaned key/entries. Note that when a page's first
- * key can be cleanned, the ccmp_ has to erase/update its node key.
+ * Compact. Mark marks those to-be-cleaned entries by assigning them in
+ * clean_set_. Compact erase those to-be-cleaned key/entries. Note that when a
+ * page's first key can be cleanned, the ccmp_ has to erase/update its node key.
  *
  * Mark is done by LocalCcShards::KickoutPage.
  */
@@ -44,14 +45,20 @@ public:
 
     virtual void Compact()
     {
-        // Those to-be-cleaned entries have been assigned to nullptr. Erase
+        // Those to-be-cleaned entries have been marked. Erase
         // those keys/entries now.
-        auto key_insert_it = page_->keys_.begin();
-        auto entry_insert_it = page_->entries_.begin();
+
+        auto key_it = page_->keys_.begin();
+        auto entry_it = page_->entries_.begin();
         uint64_t smallest_ttl = UINT64_MAX;
+
+        CcPage<KeyT, ValueT>::SoftwarePrefetch(
+            CcPage<KeyT, ValueT>::PREFETCH_FLAG_PAYLOAD,
+            page_->entries_.begin(),
+            page_->entries_.end());  // Prefetch for TTL
         for (size_t idx = 0; idx < page_->Size(); ++idx)
         {
-            if (page_->entries_[idx])
+            if (clean_set_[idx] == false)
             {
                 if (page_->entries_[idx]->PayloadStatus() ==
                     RecordStatus::Normal)
@@ -68,19 +75,27 @@ public:
                 {
                     smallest_ttl = 0;
                 }
-                *key_insert_it = std::move(page_->keys_[idx]);
-                *entry_insert_it = std::move(page_->entries_[idx]);
-                ++key_insert_it;
-                ++entry_insert_it;
+                *key_it = std::move(page_->keys_[idx]);
+                *entry_it = std::move(page_->entries_[idx]);
+                ++key_it;
+                ++entry_it;
             }
         }
-        page_->keys_.erase(key_insert_it, page_->keys_.end());
-        page_->entries_.erase(entry_insert_it, page_->entries_.end());
+
+        page_->keys_.erase(key_it, page_->keys_.end());
+
+        CcPage<KeyT, ValueT>::SoftwarePrefetch(
+            CcPage<KeyT, ValueT>::PREFETCH_FLAG_BLOB,
+            page_->entries_.begin(),
+            page_->entries_.end());  // Prefetch for mi_free
+        page_->entries_.erase(entry_it, page_->entries_.end());
+
         page_->smallest_ttl_ = smallest_ttl;
-        assert(std::all_of(page_->entries_.begin(),
-                           page_->entries_.end(),
-                           [](const std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
-                           { return cce.get() != nullptr; }));
+    }
+
+    bool ToCleanPageHeadKey() const
+    {
+        return clean_set_[0];
     }
 
     // Number of keys freed.
@@ -120,8 +135,7 @@ protected:
     virtual bool IsCleanTarget(const KeyT &key,
                                const CcEntry<KeyT, ValueT> *cce) const = 0;
 
-    virtual void Reserve(const CcEntry<KeyT, ValueT> *cce,
-                         bool is_clean_target) = 0;
+    virtual void Reserve(uint8_t idx, bool is_clean_target) = 0;
 
     virtual bool NeedInvalidateLockTerm() const = 0;
 
@@ -167,6 +181,10 @@ protected:
             bool slice_kicked = false;
             bool tried_slice_kick = false;
 
+            CcPage<KeyT, ValueT>::SoftwarePrefetch(
+                CcPage<KeyT, ValueT>::PREFETCH_FLAG_CCENTRY,
+                page_->entries_.begin() + idx_in_page,
+                page_->entries_.begin() + slice_end_idx);
             for (size_t idx = idx_in_page; idx < slice_end_idx; ++idx)
             {
                 KeyT &key = page_->keys_[idx];
@@ -206,12 +224,12 @@ protected:
                                 key, cc_shard_->core_id_, store_slice);
                         }
 
-                        MarkClean(cc_ng_id_, cce, delay_free);
+                        MarkClean(cc_ng_id_, idx, delay_free);
                         continue;
                     }
                 }
 
-                Reserve(cce.get(), is_clean_target);
+                Reserve(idx, is_clean_target);
             }
 
             idx_in_page = slice_end_idx;
@@ -225,30 +243,32 @@ protected:
     /**
      * @brief Mark a key if it can be cleanned.
      *
-     * Under range partition, OrphanKey is the key whose StoreRange metadata has
-     * been kicked out.
-     * Under hash partition, regards every key as OrphanKey.
+     * - Under range partition, OrphanKey is the key whose StoreRange metadata
+     * has been kicked out.
+     * - Under hash partition, regards every key as OrphanKey.
      */
-    void MarkCleanForOrphanKey(const KeyT &key,
-                               std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
+    void MarkCleanForOrphanKey(uint8_t idx)
     {
+        const KeyT &key = page_->keys_[idx];
+        std::unique_ptr<CcEntry<KeyT, ValueT>> &cce = page_->entries_[idx];
+
         bool is_clean_target = IsCleanTarget(key, cce.get());
         auto [can_be_cleaned, delay_free] = CanBeCleaned(cce.get());
 
         if (is_clean_target && can_be_cleaned)
         {
-            MarkClean(cc_ng_id_, cce, delay_free);
+            MarkClean(cc_ng_id_, idx, delay_free);
         }
         else
         {
-            Reserve(cce.get(), is_clean_target);
+            Reserve(idx, is_clean_target);
         }
     }
 
-    void MarkClean(NodeGroupId cc_ng_id,
-                   std::unique_ptr<CcEntry<KeyT, ValueT>> &cce,
-                   bool delay_free)
+    void MarkClean(NodeGroupId cc_ng_id, uint8_t idx, bool delay_free)
     {
+        std::unique_ptr<CcEntry<KeyT, ValueT>> &cce = page_->entries_[idx];
+
         if (cce->PayloadStatus() == RecordStatus::Normal)
         {
 #ifdef ON_KEY_OBJECT
@@ -271,10 +291,8 @@ protected:
                           << cce.get();
             cc_shard_->AddInvalidCce(std::move(cce));
         }
-        else
-        {
-            cce.reset(nullptr);  // Set cce to nullptr to indicate deleting.
-        }
+
+        clean_set_.set(idx, true);
         ++free_cnt_;
     }
 
@@ -289,6 +307,9 @@ protected:
 #ifdef ON_KEY_OBJECT
     uint64_t clean_obj_cnt_{0};
 #endif
+
+private:
+    std::bitset<CcPage<KeyT, ValueT>::split_threshold_> clean_set_;
 
     friend class LocalCcShards;
 };
@@ -327,8 +348,7 @@ private:
         return true;
     }
 
-    void Reserve(const CcEntry<KeyT, ValueT> *cce,
-                 bool is_clean_target) override
+    void Reserve(uint8_t idx, bool is_clean_target) override
     {
         assert(is_clean_target);
     }
@@ -431,8 +451,7 @@ private:
         return kickout_cc_->IsCleanTarget(key, cce, this->cc_shard_);
     }
 
-    void Reserve(const CcEntry<KeyT, ValueT> *cce,
-                 bool is_clean_target) override
+    void Reserve(uint8_t idx, bool is_clean_target) override
     {
         if (is_clean_target)
         {

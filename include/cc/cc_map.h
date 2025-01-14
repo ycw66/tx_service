@@ -6,11 +6,9 @@
 
 #include "cc/cc_req_base.h"
 #include "cc_protocol.h"
-#include "ccm_scanner.h"
 #include "error_messages.h"  // CcErrorCode
-#include "tx_key.h"
-#include "tx_operation_result.h"
-#include "type.h"  // LockType, LockOpStatus
+#include "tx_record.h"       // RecordStatus
+#include "type.h"            // LockType, LockOpStatus
 
 namespace txservice
 {
@@ -22,6 +20,7 @@ struct RemoteReadOutside;
 }  // namespace remote
 
 struct LruEntry;
+struct LruPage;
 
 struct AcquireCc;
 struct AcquireAllCc;
@@ -113,6 +112,9 @@ enum struct CleanType
 
 class CcShard;
 struct TableSchema;
+struct KeySchema;
+struct Schema;
+class NonBlockingLock;
 
 class CcMap
 {

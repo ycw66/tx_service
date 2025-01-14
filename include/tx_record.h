@@ -177,6 +177,11 @@ struct TxRecord
         assert(false);
         return 0;
     }
+
+    virtual void Prefetch() const
+    {
+        return;
+    }
 };
 
 template <typename... Types>

@@ -1510,7 +1510,7 @@ struct CcPage : public LruPage
      * Construct page negative infinity and positive infinity.
      * @param parent
      */
-    CcPage<KeyT, ValueT>(CcMap *parent) : LruPage(parent)
+    explicit CcPage<KeyT, ValueT>(CcMap *parent) : LruPage(parent)
     {
     }
 
@@ -1983,6 +1983,64 @@ struct CcPage : public LruPage
         //        {
         //            LOG(INFO) << "entry ptr: " << up.get();
         //        }
+    }
+
+    /**
+     * @brief Software prefetch to speed up memory release.
+     *
+     * @note To make prefetch takes effect, NUMA machine should run with
+     * `numactl` binding or disable `kernel.numa_balancing`.
+     */
+    enum PREFETCH_FLAG
+    {
+        PREFETCH_FLAG_CCENTRY = 1u,
+        PREFETCH_FLAG_PAYLOAD = (1u << 1),
+        PREFETCH_FLAG_BLOB = (1u << 2),
+    };
+
+    static void SoftwarePrefetch(
+        PREFETCH_FLAG flag,
+        typename std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>::iterator
+            begin,
+        typename std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>::iterator
+            end)
+    {
+        if (flag & PREFETCH_FLAG_CCENTRY)
+        {
+            std::for_each(begin,
+                          end,
+                          [](const std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
+                          {
+                              if (cce)
+                              {
+                                  __builtin_prefetch(cce.get(), 1, 3);
+                              }
+                          });
+        }
+        if (flag & PREFETCH_FLAG_PAYLOAD)
+        {
+            std::for_each(begin,
+                          end,
+                          [](const std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
+                          {
+                              if (cce && cce->payload_.get())
+                              {
+                                  __builtin_prefetch(cce->payload_.get(), 1, 2);
+                              }
+                          });
+        }
+        if (flag & PREFETCH_FLAG_BLOB)
+        {
+            std::for_each(begin,
+                          end,
+                          [](const std::unique_ptr<CcEntry<KeyT, ValueT>> &cce)
+                          {
+                              if (cce && cce->payload_.get())
+                              {
+                                  cce->payload_->Prefetch();
+                              }
+                          });
+        }
     }
 
     // threshold to trigger page split when inserting
