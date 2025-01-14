@@ -347,16 +347,28 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             if (status->need_truncate_log_ && status->unfinished_tasks_ == 0 &&
                 status->err_code_ == CcErrorCode::NO_ERROR)
             {
+                if (status->truncate_log_ts_ == 0)
+                {
+                    // Since no table has been modified since the last sync
+                    // timestamp, update status->truncate_log_ts_ to mark the
+                    // completion of this checkpoint.
+                    //
+                    // This update is crucial during a graceful shutdown in a
+                    // cluster with a standby node using `eloqctl stop`. The
+                    // updated node group checkpoint ts is used by eloqctl to
+                    // verify that the final round of checkpointing has been
+                    // completed.
+                    status->truncate_log_ts_ = ckpt_ts;
+                }
+
                 // Truncate redo log
                 LOG_IF(INFO, FLAGS_report_ckpt)
                     << "Checkpoint of node group #" << node_group
                     << " succeeded with timestamp: "
-                    << (status->truncate_log_ts_ == 0
-                            ? ckpt_ts
-                            : status->truncate_log_ts_);
+                    << status->truncate_log_ts_;
 
-                // Note: `status->truncate_log_ts_ may larger than `ckpt_ts`. So
-                // we use `status->truncate_log_ts_` to truncate log.
+                // Note: `status->truncate_log_ts_ may be larger than `ckpt_ts`.
+                // So we use `status->truncate_log_ts_` to truncate log.
                 if (status->truncate_log_ts_ != UINT64_MAX &&
                     status->truncate_log_ts_ > last_ckpt_ts)
                 {
