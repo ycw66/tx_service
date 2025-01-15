@@ -63,7 +63,7 @@ namespace remote
 class CcStreamSender;
 };
 
-#define LOCK_VECTOR_SHRINK_THRESHOLD 4u
+#define LOCK_VECTOR_SHRINK_THRESHOLD 2u
 #define RESIZE_LOCK_LIMIT 3u
 #define LOCK_ARRAY_INIT_SIZE 8192u
 
@@ -344,7 +344,7 @@ public:
      * @brief Find an available NonBlockingLock in lock array and initialize it.
      *
      */
-    KeyGapLockAndExtraData *NewLock(CcMap *ccm, LruPage *page);
+    KeyGapLockAndExtraData *NewLock(CcMap *ccm, LruPage *page, LruEntry *entry);
 
     TEntry *LocateTx(const TxId &tx_id);
 

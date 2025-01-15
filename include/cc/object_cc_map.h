@@ -268,7 +268,7 @@ public:
             }
             req.block_type_ = ApplyCc::ApplyBlockType::NoBlocking;
         }
-        else if (cce_addr.CcePtr() == 0)
+        else if (cce_addr.ExtractCce() == nullptr)
         {
             // first time the request is processed
             const TxKey *req_key = req.Key();
@@ -486,8 +486,10 @@ public:
             if (acquired_lock != LockType::NoLock)
             {
                 assert(cce != nullptr);
-                cce_addr.SetCce(
-                    reinterpret_cast<uint64_t>(cce), ng_term, shard_->core_id_);
+                cce_addr.SetCceLock(reinterpret_cast<uint64_t>(
+                                        cce->GetKeyGapLockAndExtraData()),
+                                    ng_term,
+                                    shard_->core_id_);
             }
             break;
         }
@@ -1150,7 +1152,7 @@ public:
         const CcEntryAddr *cce_addr = req.CceAddr();
 
         CcEntry<KeyT, ValueT> *cce =
-            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr->CcePtr());
+            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr->ExtractCce());
 
         // check that this txn is lock owner
         NonBlockingLock *lk = cce->GetKeyLock();
@@ -1512,7 +1514,7 @@ public:
         const CcEntryAddr *cce_addr = req.CceAddr();
 
         CcEntry<KeyT, ValueT> *cce =
-            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr->CcePtr());
+            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr->ExtractCce());
 
         // check that this txn is lock owner
         NonBlockingLock *lk = cce->GetKeyLock();

@@ -30,17 +30,23 @@ struct ScanTuple
 {
 public:
     ScanTuple()
-        : key_ts_(0), gap_ts_(0), rec_status_(RecordStatus::Normal), cce_addr_()
+        : key_ts_(0),
+          gap_ts_(0),
+          rec_status_(RecordStatus::Normal),
+          cce_ptr_(nullptr),
+          cce_addr_()
     {
     }
 
     ScanTuple(uint64_t key_ts,
               uint64_t gap_ts,
               RecordStatus status,
+              LruEntry *cce_ptr,
               const CcEntryAddr &cce_addr)
         : key_ts_(key_ts),
           gap_ts_(gap_ts),
           rec_status_(status),
+          cce_ptr_(cce_ptr),
           cce_addr_(cce_addr)
     {
     }
@@ -56,6 +62,13 @@ public:
     uint64_t key_ts_;
     uint64_t gap_ts_;
     RecordStatus rec_status_;
+    // For range slice scan, to make sure that all shards' ScanSlice stop at the
+    // same end key, the tuple's cce is required to adjust the scan last
+    // position. Also, the last cce needs to be pinned by ReadIntent. Since the
+    // last cce could be any tuple after the scan adjustment, so each tuple
+    // should store the cce ptr. cce_addr_ only keeps the lock addr instead of
+    // the cce and the lock addr could be empty if no lock is acquired.
+    LruEntry *cce_ptr_;
     CcEntryAddr cce_addr_;
 };
 
@@ -73,7 +86,11 @@ public:
     }
 
     TemplateScanTuple(TemplateScanTuple<KeyT, ValueT> &&rhs)
-        : ScanTuple(rhs.key_ts_, rhs.gap_ts_, rhs.rec_status_, rhs.cce_addr_),
+        : ScanTuple(rhs.key_ts_,
+                    rhs.gap_ts_,
+                    rhs.rec_status_,
+                    rhs.cce_ptr_,
+                    rhs.cce_addr_),
           key_obj_(std::move(rhs.key_obj_)),
           rec_ptr_(std::move(rhs.rec_ptr_)),
           rec_obj_(std::move(rhs.rec_obj_)),

@@ -193,6 +193,13 @@ struct RemoteScanCache
         return cache_msg_->scan_tuple(cache_msg_->scan_tuple_size() - 1).key();
     }
 
+    remote::ScanTuple_msg *LastTuple()
+    {
+        auto *tuples = cache_msg_->mutable_scan_tuple();
+        assert(!tuples->empty());
+        return &tuples->at(tuples->size() - 1);
+    }
+
     remote::ScanCache_msg *cache_msg_;
     uint32_t cache_mem_size_;
 };
@@ -222,6 +229,7 @@ struct RemoteScanSliceCache
         key_ts_.clear();
         gap_ts_.clear();
         cce_ptr_.clear();
+        cce_lock_ptr_.clear();
         term_.clear();
         rec_status_.clear();
         keys_.clear();
@@ -251,6 +259,7 @@ struct RemoteScanSliceCache
         key_ts_.pop_back();
         gap_ts_.pop_back();
         cce_ptr_.pop_back();
+        cce_lock_ptr_.pop_back();
         term_.pop_back();
         rec_status_.pop_back();
         keys_.erase(key_off_vec_.back());
@@ -269,9 +278,15 @@ struct RemoteScanSliceCache
         return cce_ptr_.size();
     }
 
+    void SetLastCceLock(uint64_t lock_ptr)
+    {
+        cce_lock_ptr_.back() = lock_ptr;
+    }
+
     std::vector<uint64_t> key_ts_;
     std::vector<uint64_t> gap_ts_;
     std::vector<uint64_t> cce_ptr_;
+    std::vector<uint64_t> cce_lock_ptr_;
     std::vector<int64_t> term_;
     std::vector<remote::RecordStatusType> rec_status_;
     std::string keys_;

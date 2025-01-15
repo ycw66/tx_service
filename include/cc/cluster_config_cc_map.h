@@ -119,11 +119,12 @@ public:
             // read transactions that have read the item in all shards, and
             // (2) the local time.
             acquire_all_result.last_vali_ts_ = shard_->LastReadTs();
-            acquire_all_result.local_cce_addr_.SetCce(
-                reinterpret_cast<uint64_t>(cce_ptr),
-                ng_term,
-                req.NodeGroupId(),
-                shard_->LocalCoreId());
+            uint64_t lock_addr =
+                cce_ptr == nullptr ? 0
+                                   : reinterpret_cast<uint64_t>(
+                                         cce_ptr->GetKeyGapLockAndExtraData());
+            acquire_all_result.local_cce_addr_.SetCceLock(
+                lock_addr, ng_term, req.NodeGroupId(), shard_->LocalCoreId());
             acquire_all_result.commit_ts_ = cc_entry.CommitTs();
             acquire_all_result.node_term_ = ng_term;
 
@@ -148,7 +149,7 @@ public:
                     ng_term,
                     ng_id,
                     shard_->core_id_,
-                    reinterpret_cast<uint64_t>(&cc_entry));
+                    reinterpret_cast<uint64_t>(cc_entry.GetLockAddr()));
             }
 
             return false;

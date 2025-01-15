@@ -628,13 +628,10 @@ message TxId_msg {
 }
 
 message CceAddr_msg {
-    oneof entry_ptr {
-        uint64 cce_ptr = 1;
-        uint64 insert_ptr = 2;
-    }
-    int64 term = 3;
-    uint32 core_id = 4;
-    uint32 node_group_id = 5;
+    uint64 cce_lock_ptr = 1;
+    int64 term = 2;
+    uint32 core_id = 3;
+    uint32 node_group_id = 4;
 }
 
 enum IsolationType {
@@ -951,7 +948,7 @@ message ScanSliceRequest {
     bool end_inclusive = 11;
     bool is_forward = 12;
     uint64 ts = 13;
-    repeated uint64 prior_cce_vec = 14;
+    repeated uint64 prior_cce_lock_vec = 14;
     IsolationType iso_level = 15;
     CcProtocolType protocol = 16;
     bool is_for_write = 17;
@@ -976,7 +973,7 @@ message ScanSliceResponse {
     bytes rec_status = 11;
     bytes key_ts = 12;
     bytes gap_ts = 13;
-    bytes cce_ptr = 14;
+    bytes cce_lock_ptr = 14;
     bytes term = 15;
     bytes key_start_offsets = 16;
     bytes record_start_offsets = 17;

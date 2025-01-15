@@ -262,10 +262,12 @@ public:
                     // insert is aborted due to the duplidate key conflict.
                     if (cce_ptr->PayloadStatus() == RecordStatus::Deleted)
                     {
-                        cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
-                                        ng_term,
-                                        req.NodeGroupId(),
-                                        shard_->LocalCoreId());
+                        cce_addr.SetCceLock(
+                            reinterpret_cast<uint64_t>(
+                                cce_ptr->GetKeyGapLockAndExtraData()),
+                            ng_term,
+                            req.NodeGroupId(),
+                            shard_->LocalCoreId());
                     }
                     else
                     {
@@ -292,10 +294,6 @@ public:
                 }
 
                 assert(cce_ptr != nullptr);
-                cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
-                                ng_term,
-                                req.NodeGroupId(),
-                                shard_->LocalCoreId());
                 req.SetCcePtr(cce_ptr);
             }
         }
@@ -304,11 +302,6 @@ public:
         // new insert, or the cc entry whose key will be updated/deleted.
         CcEntry<KeyT, ValueT> &cc_entry = *cce_ptr;
 
-        if (cce_addr.CcePtr() == 0)
-        {
-            assert("Unsupported insert for phantom reads.");
-        }
-        else
         {
             if (!block_by_lock)
             {
@@ -326,6 +319,12 @@ public:
                                       0,
                                       false);
             }
+
+            cce_addr.SetCceLock(reinterpret_cast<uint64_t>(
+                                    cce_ptr->GetKeyGapLockAndExtraData()),
+                                ng_term,
+                                req.NodeGroupId(),
+                                shard_->LocalCoreId());
 
             if (err_code == CcErrorCode::NO_ERROR)
             {
@@ -532,7 +531,7 @@ public:
             else
             {
                 cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                    cce_addr->CcePtr());
+                    cce_addr->ExtractCce());
 
                 NonBlockingLock *lk = cce->GetKeyLock();
                 if (lk == nullptr || !lk->HasWriteLock() ||
@@ -826,8 +825,9 @@ public:
                     {
                         if (shard_->core_id_ == tx_core_id)
                         {
-                            acquire_all_result.local_cce_addr_.SetCce(
-                                reinterpret_cast<uint64_t>(cce_ptr),
+                            acquire_all_result.local_cce_addr_.SetCceLock(
+                                reinterpret_cast<uint64_t>(
+                                    cce_ptr->GetKeyGapLockAndExtraData()),
                                 ng_term,
                                 req.NodeGroupId(),
                                 shard_->LocalCoreId());
@@ -878,14 +878,14 @@ public:
             auto try_ack_for_remote_req = [&req](int64_t term = -1,
                                                  uint32_t node_group_id = 0,
                                                  uint32_t core_id = 0,
-                                                 uint64_t cce_addr = 0)
+                                                 uint64_t cce_lock_addr = 0)
             {
                 if (!req.IsLocal() && req.Protocol() == CcProtocol::Locking)
                 {
                     remote::RemoteAcquireAll &remote_req =
                         static_cast<remote::RemoteAcquireAll &>(req);
                     remote_req.TryAcknowledge(
-                        term, node_group_id, core_id, cce_addr);
+                        term, node_group_id, core_id, cce_lock_addr);
                 }
             };
 
@@ -925,8 +925,9 @@ public:
 
                 if (shard_->core_id_ == tx_core_id)
                 {
-                    acquire_all_result.local_cce_addr_.SetCce(
-                        reinterpret_cast<uint64_t>(cce_ptr),
+                    acquire_all_result.local_cce_addr_.SetCceLock(
+                        reinterpret_cast<uint64_t>(
+                            cce_ptr->GetKeyGapLockAndExtraData()),
                         ng_term,
                         req.NodeGroupId(),
                         shard_->LocalCoreId());
@@ -955,10 +956,11 @@ public:
                 // blocked.
                 if (!resume)
                 {
-                    try_ack_for_remote_req(ng_term,
-                                           ng_id,
-                                           shard_->core_id_,
-                                           reinterpret_cast<uint64_t>(cce_ptr));
+                    try_ack_for_remote_req(
+                        ng_term,
+                        ng_id,
+                        shard_->core_id_,
+                        reinterpret_cast<uint64_t>(cce_ptr->GetLockAddr()));
                 }
 
                 return false;
@@ -1199,7 +1201,7 @@ public:
     {
         const CcEntryAddr &cce_addr = *req.CceAddr();
         CcEntry<KeyT, ValueT> &cc_entry =
-            *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
+            *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.ExtractCce());
 
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -1245,8 +1247,8 @@ public:
             (standby_node_term < 0 || standby_node_term != cce_addr.Term()))
         {
             LOG(INFO) << "PostReadCc, node_group(#" << cce_addr.NodeGroupId()
-                      << ") term < 0, tx:" << req.Txn() << " ,cce: "
-                      << reinterpret_cast<void *>(cce_addr.CcePtr());
+                      << ") term < 0, tx:" << req.Txn()
+                      << " ,cce: " << cce_addr.ExtractCce();
             hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
@@ -1791,10 +1793,6 @@ public:
                 }
 #endif
                 req.SetCcePtr(cce);
-                cce_addr.SetCce(reinterpret_cast<uint64_t>(cce),
-                                ng_term,
-                                req.NodeGroupId(),
-                                shard_->LocalCoreId());
                 CODE_FAULT_INJECTOR("remote_read_msg_missed", {
                     LOG(INFO) << "FaultInject  remote_read_msg_missed"
                               << "txID: " << req.Txn();
@@ -1820,6 +1818,12 @@ public:
                                       cc_proto,
                                       req.ReadTimestamp(),
                                       req.IsCoveringKeys());
+
+                cce_addr.SetCceLock(reinterpret_cast<uint64_t>(
+                                        cce->GetKeyGapLockAndExtraData()),
+                                    ng_term,
+                                    req.NodeGroupId(),
+                                    shard_->LocalCoreId());
             }
 
             // After acquiring lock
@@ -1866,8 +1870,9 @@ public:
             // record from the data store for caching, the cc entry's
             // address is known.
             assert(req.NodeGroupId() == cce_addr.NodeGroupId());
-            assert(cce_addr.CcePtr() != 0);
-            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
+            assert(cce_addr.ExtractCce() != nullptr);
+            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                cce_addr.ExtractCce());
         }  //-- end: read outside
 
         // The request brings in the record to the cc entry for caching if
@@ -2056,14 +2061,14 @@ public:
         {
             LOG(INFO) << "RemoteReadOutside, node_group(#"
                       << cce_addr.NodeGroupId()
-                      << ") term < 0, tx:" << req.Txn() << " ,cce: "
-                      << reinterpret_cast<void *>(cce_addr.CcePtr());
+                      << ") term < 0, tx:" << req.Txn()
+                      << " ,cce: " << cce_addr.ExtractCce();
             req.Finish();
             return true;
         }
 
         CcEntry<KeyT, ValueT> *cce =
-            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
+            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.ExtractCce());
 
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
@@ -2572,6 +2577,11 @@ public:
                 cce_last->GetOrCreateKeyLock(shard_, this, ccp_last)
                     .AcquireReadIntent(req.Txn());
 
+            ScanTuple *last_tuple =
+                const_cast<ScanTuple *>(typed_cache->LastTuple());
+            assert(cce_last->GetLockAddr() != 0);
+            last_tuple->cce_addr_.SetCceLock(
+                reinterpret_cast<uint64_t>(cce_last->GetLockAddr()));
             if (add_intent)
             {
                 shard_->UpsertLockHoldingTx(req.Txn(),
@@ -2709,7 +2719,7 @@ public:
         else
         {
             prior_cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                typed_cache->Last()->cce_addr_.CcePtr());
+                typed_cache->Last()->cce_addr_.ExtractCce());
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
             assert(ccp != nullptr);
@@ -2914,6 +2924,11 @@ public:
                 cce_last->GetOrCreateKeyLock(shard_, this, ccp_last)
                     .AcquireReadIntent(req.Txn());
 
+            ScanTuple *last_tuple =
+                const_cast<ScanTuple *>(typed_cache->LastTuple());
+            assert(cce_last->GetLockAddr() != 0);
+            last_tuple->cce_addr_.SetCceLock(
+                reinterpret_cast<uint64_t>(cce_last->GetLockAddr()));
             if (add_intent)
             {
                 shard_->UpsertLockHoldingTx(req.Txn(),
@@ -3426,6 +3441,10 @@ public:
                 cce_last->GetOrCreateKeyLock(shard_, this, ccp_last)
                     .AcquireReadIntent(req.Txn());
 
+            remote::ScanTuple_msg *last_tuple = scan_cache.LastTuple();
+            assert(cce_last->GetLockAddr() != 0);
+            last_tuple->mutable_cce_addr()->set_cce_lock_ptr(
+                reinterpret_cast<uint64_t>(cce_last->GetLockAddr()));
             if (add_intent)
             {
                 shard_->UpsertLockHoldingTx(req.Txn(),
@@ -3546,7 +3565,7 @@ public:
         else
         {
             prior_cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                req.PriorCceAddr().CcePtr());
+                req.PriorCceAddr().ExtractCce());
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
             assert(ccp != nullptr);
@@ -3747,6 +3766,10 @@ public:
                 cce_last->GetOrCreateKeyLock(shard_, this, ccp_last)
                     .AcquireReadIntent(req.Txn());
 
+            remote::ScanTuple_msg *last_tuple = req.scan_cache_.LastTuple();
+            assert(cce_last->GetLockAddr() != 0);
+            last_tuple->mutable_cce_addr()->set_cce_lock_ptr(
+                reinterpret_cast<uint64_t>(cce_last->GetLockAddr()));
             if (add_intent)
             {
                 shard_->UpsertLockHoldingTx(req.Txn(),
@@ -3874,7 +3897,7 @@ public:
                 if (scan_cache->Last())
                 {
                     return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                        scan_cache->Last()->cce_addr_.CcePtr());
+                        scan_cache->Last()->cce_ptr_);
                 }
                 else
                 {
@@ -4022,7 +4045,7 @@ public:
                 {
                     req.SetBlockingInfo(
                         shard_->core_id_,
-                        reinterpret_cast<uint64_t>(cce),
+                        reinterpret_cast<uint64_t>(cce->GetLockAddr()),
                         scan_type,
                         ScanSliceCc::ScanBlockingType::BlockOnFuture);
                     return {ScanReturnType::Blocked, CcErrorCode::NO_ERROR};
@@ -4031,7 +4054,7 @@ public:
                 {
                     req.SetBlockingInfo(
                         shard_->core_id_,
-                        reinterpret_cast<uint64_t>(cce),
+                        reinterpret_cast<uint64_t>(cce->GetLockAddr()),
                         scan_type,
                         ScanSliceCc::ScanBlockingType::BlockOnLock);
                     req.SetRangeCcNgTerm(ng_term);
@@ -4083,10 +4106,13 @@ public:
             return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
         };
 
-        uint64_t addr = req.CceAddr(core_id);
-        if (addr != 0)
+        uint64_t cce_lock_addr = req.BlockingCceLockAddr(core_id);
+        if (cce_lock_addr != 0)
         {
-            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(addr);
+            KeyGapLockAndExtraData *lock =
+                reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
+            assert(lock != nullptr && lock->GetCcEntry() != nullptr);
+            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(lock->GetCcEntry());
         }
 
         if (cce != nullptr)
@@ -4528,7 +4554,7 @@ public:
                             // corresponding key.
                             CcEntry<KeyT, ValueT> *last_cce =
                                 reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                                    scan_cache->Last()->cce_addr_.CcePtr());
+                                    scan_cache->Last()->cce_ptr_);
                             while (scan_ccm_it->second != last_cce)
                             {
                                 --scan_ccm_it;
@@ -4911,7 +4937,7 @@ public:
                             // corresponding key.
                             CcEntry<KeyT, ValueT> *last_cce =
                                 reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                                    scan_cache->Last()->cce_addr_.CcePtr());
+                                    scan_cache->Last()->cce_ptr_);
                             while (scan_ccm_it->second != last_cce)
                             {
                                 ++scan_ccm_it;
@@ -5026,6 +5052,25 @@ public:
                 bool add_intent =
                     last_cce->GetOrCreateKeyLock(shard_, this, last_ccp)
                         .AcquireReadIntent(req.Txn());
+
+                // Lock might have not been acquired during the scan, set the
+                // lock addr of last tuple here.
+                if (req.IsLocal())
+                {
+                    ScanTuple *last_tuple =
+                        const_cast<ScanTuple *>(scan_cache->LastTuple());
+                    assert(last_tuple != nullptr);
+                    assert(last_cce->GetLockAddr() != nullptr);
+                    last_tuple->cce_addr_.SetCceLock(
+                        reinterpret_cast<uint64_t>(last_cce->GetLockAddr()));
+                }
+                else
+                {
+                    assert(remote_scan_cache->Size() > 0);
+                    assert(last_cce->GetLockAddr() != nullptr);
+                    remote_scan_cache->SetLastCceLock(
+                        reinterpret_cast<uint64_t>(last_cce->GetLockAddr()));
+                }
                 if (add_intent)
                 {
                     shard_->UpsertLockHoldingTx(req.Txn(),
@@ -6096,6 +6141,9 @@ public:
             bool add_intent =
                 it->second->GetOrCreateKeyLock(shard_, this, it.GetPage())
                     .AcquireReadIntent(req.Txn());
+            // TODO: use lock_ptr_ when we allow the ccentry to move to another
+            // memory
+
             assert(add_intent);
             (void) add_intent;
             shard_->UpsertLockHoldingTx(req.Txn(),
@@ -10093,10 +10141,12 @@ protected:
         }
 
         tuple->gap_ts_ = 0;
-        tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce),
-                                ng_term,
-                                ng_id,
-                                shard_->LocalCoreId());
+        tuple->cce_ptr_ = cce;
+        tuple->cce_addr_.SetCceLock(
+            reinterpret_cast<uint64_t>(cce->GetKeyGapLockAndExtraData()),
+            ng_term,
+            ng_id,
+            shard_->LocalCoreId());
 
         typed_cache->AddScanTupleSize(tuple_size);
     }
@@ -10231,6 +10281,8 @@ protected:
         }
 
         remote_cache->cce_ptr_.push_back(reinterpret_cast<uint64_t>(cce));
+        remote_cache->cce_lock_ptr_.push_back(
+            reinterpret_cast<uint64_t>(cce->GetLockAddr()));
         remote_cache->term_.push_back(ng_term);
         // For remote scans, the returned cc entries' node group ID is
         // set on the sender side when the sender receives the response.
@@ -10410,7 +10462,8 @@ protected:
         }
 
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
-        cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
+        cce_addr->set_cce_lock_ptr(
+            reinterpret_cast<uint64_t>(cce->GetLockAddr()));
         cce_addr->set_term(ng_term);
         cce_addr->set_core_id(shard_->LocalCoreId());
         // For remote scans, the returned cc entries' node group ID is
@@ -10427,10 +10480,12 @@ protected:
     {
         tuple->key_ts_ = 0;
         tuple->gap_ts_ = 0;
-        tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce),
-                                ng_term,
-                                ng_id,
-                                shard_->LocalCoreId());
+        tuple->cce_ptr_ = cce;
+        tuple->cce_addr_.SetCceLock(
+            reinterpret_cast<uint64_t>(cce->GetKeyGapLockAndExtraData()),
+            ng_term,
+            ng_id,
+            shard_->LocalCoreId());
     }
 
     void ScanGap(const KeyT *key,
@@ -10442,7 +10497,8 @@ protected:
         tuple->set_gap_ts(0);
 
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
-        cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
+        cce_addr->set_cce_lock_ptr(
+            reinterpret_cast<uint64_t>(cce->GetLockAddr()));
         cce_addr->set_term(ng_term);
         cce_addr->set_core_id(shard_->LocalCoreId());
 
@@ -10459,6 +10515,8 @@ protected:
         cache->gap_ts_.push_back(0);
 
         cache->cce_ptr_.push_back(reinterpret_cast<uint64_t>(cce));
+        cache->cce_lock_ptr_.push_back(
+            reinterpret_cast<uint64_t>(cce->GetLockAddr()));
         cache->term_.push_back(ng_term);
 
         // For remote scans, the returned cc entries' node group ID is

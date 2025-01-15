@@ -524,19 +524,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             if (acq_res.cce_addr_.Term() < 0)
             {
-                if (cce_addr_res.entry_ptr_case() ==
-                    CceAddr_msg::EntryPtrCase::kInsertPtr)
-                {
-                    acq_res.cce_addr_.SetInsert(cce_addr_res.insert_ptr(),
-                                                cce_addr_res.term(),
-                                                cce_addr_res.core_id());
-                }
-                else
-                {
-                    acq_res.cce_addr_.SetCce(cce_addr_res.cce_ptr(),
+                acq_res.cce_addr_.SetCceLock(cce_addr_res.cce_lock_ptr(),
                                              cce_addr_res.term(),
                                              cce_addr_res.core_id());
-                }
 
                 // Even though the role of remote_ack_cnt_ is to bookkeep how
                 // many remote acknowledgements have been received, the cc entry
@@ -659,9 +649,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     auto &cce_addr =
                         acq_all_res.blocked_remote_cce_addr_.emplace_back();
                     cce_addr.SetNodeGroupId(ack_cce_addr.node_group_id());
-                    cce_addr.SetCce(ack_cce_addr.cce_ptr(),
-                                    ack_cce_addr.term(),
-                                    ack_cce_addr.core_id());
+                    cce_addr.SetCceLock(ack_cce_addr.cce_lock_ptr(),
+                                        ack_cce_addr.term(),
+                                        ack_cce_addr.core_id());
                 }
             }
 
@@ -913,9 +903,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             if (read_result.cce_addr_.Term() < 0)
             {
                 const CceAddr_msg &cce_addr_msg = read_res.cce_addr();
-                read_result.cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
-                                             cce_addr_msg.term(),
-                                             cce_addr_msg.core_id());
+                read_result.cce_addr_.SetCceLock(cce_addr_msg.cce_lock_ptr(),
+                                                 cce_addr_msg.term(),
+                                                 cce_addr_msg.core_id());
                 // CC entry's shard Id has been set when the read request was
                 // sent.
             }
@@ -1130,17 +1120,18 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
                     size_t key_offset = 0;
                     size_t rec_offset = 0;
-                    shard_cache->AddScanTuple(tuple_msg.key(),
-                                              key_offset,
-                                              tuple_msg.key_ts(),
-                                              tuple_msg.record(),
-                                              rec_offset,
-                                              rec_status,
-                                              tuple_msg.gap_ts(),
-                                              tuple_msg.cce_addr().cce_ptr(),
-                                              tuple_msg.cce_addr().term(),
-                                              tuple_msg.cce_addr().core_id(),
-                                              ng_id);
+                    shard_cache->AddScanTuple(
+                        tuple_msg.key(),
+                        key_offset,
+                        tuple_msg.key_ts(),
+                        tuple_msg.record(),
+                        rec_offset,
+                        rec_status,
+                        tuple_msg.gap_ts(),
+                        tuple_msg.cce_addr().cce_lock_ptr(),
+                        tuple_msg.cce_addr().term(),
+                        tuple_msg.cce_addr().core_id(),
+                        ng_id);
                 }
             }
 
@@ -1246,7 +1237,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                           rec_offset,
                                           rec_status,
                                           tuple_msg.gap_ts(),
-                                          tuple_msg.cce_addr().cce_ptr(),
+                                          tuple_msg.cce_addr().cce_lock_ptr(),
                                           tuple_msg.cce_addr().term(),
                                           tuple_msg.cce_addr().core_id(),
                                           ng_id);
@@ -1887,9 +1878,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             if (obj_cmd_result.cce_addr_.Term() < 0)
             {
                 const CceAddr_msg &cce_addr_msg = apply_res.cce_addr();
-                obj_cmd_result.cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
-                                                cce_addr_msg.term(),
-                                                cce_addr_msg.core_id());
+                obj_cmd_result.cce_addr_.SetCceLock(cce_addr_msg.cce_lock_ptr(),
+                                                    cce_addr_msg.term(),
+                                                    cce_addr_msg.core_id());
                 // CC entry's shard Id has been set when the request was
                 // sent.
             }

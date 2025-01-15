@@ -450,6 +450,8 @@ private:
     // blocked due to conflicts in 2PL. After the request is unblocked and
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
+    // TODO: use lock_ptr_ when we allow the ccentry to move to another memory
+    // address
     LruEntry *cce_ptr_{nullptr};
     uint32_t hd_result_idx_{0};
     bool is_local_{true};
@@ -629,26 +631,24 @@ public:
                 return false;
             }
 
-            if (cce_addr_->InsertPtr() != 0)
+            assert(cce_addr_->CceLockPtr() != 0);
+            KeyGapLockAndExtraData *lock =
+                reinterpret_cast<KeyGapLockAndExtraData *>(
+                    cce_addr_->CceLockPtr());
+            if (lock->GetCcMap() == nullptr)
             {
-                const LruEntry *lru_entry =
-                    reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
-                if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-                {
-                    return false;
-                }
-                ccm_ = lru_entry->GetCcMap();
+                assert(lock->GetCcEntry() == nullptr);
+                assert(lock->GetCcPage() == nullptr);
+                return false;
             }
-            else if (cce_addr_->CcePtr() != 0)
+            else
             {
-                const LruEntry *lru_entry =
-                    reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+                const LruEntry *lru_entry = lock->GetCcEntry();
                 if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
                 {
                     return false;
                 }
-                ccm_ = lru_entry->GetCcMap();
-                assert(ccm_ != nullptr);
+                ccm_ = lock->GetCcMap();
             }
 
             return true;
@@ -1049,13 +1049,25 @@ public:
             return false;
         }
 
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
-        if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+        assert(cce_addr_->CceLockPtr() != 0);
+        KeyGapLockAndExtraData *lock =
+            reinterpret_cast<KeyGapLockAndExtraData *>(cce_addr_->CceLockPtr());
+        if (lock->GetCcMap() == nullptr)
         {
+            assert(lock->GetCcEntry() == nullptr);
+            assert(lock->GetCcPage() == nullptr);
             return false;
         }
-        ccm_ = lru_entry->GetCcMap();
+        else
+        {
+            const LruEntry *lru_entry = lock->GetCcEntry();
+            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+            {
+                return false;
+            }
+            ccm_ = lock->GetCcMap();
+        }
+
         assert(ccm_ != nullptr);
         return true;
     }
@@ -1148,20 +1160,32 @@ public:
         }
 
         auto &tmp_cce_addr = res_->Value().cce_addr_;
-        if (tmp_cce_addr.CcePtr() != 0)
+        if (tmp_cce_addr.CceLockPtr() != 0)
         {
             if (tmp_cce_addr.Term() != cc_ng_term)
             {
                 return false;
             }
 
-            const LruEntry *lru_entry =
-                reinterpret_cast<const LruEntry *>(tmp_cce_addr.CcePtr());
-            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+            KeyGapLockAndExtraData *lock =
+                reinterpret_cast<KeyGapLockAndExtraData *>(
+                    tmp_cce_addr.CceLockPtr());
+            if (lock->GetCcMap() == nullptr)
             {
+                assert(lock->GetCcEntry() == nullptr);
+                assert(lock->GetCcPage() == nullptr);
                 return false;
             }
-            ccm_ = lru_entry->GetCcMap();
+            else
+            {
+                const LruEntry *lru_entry = lock->GetCcEntry();
+                if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+                {
+                    return false;
+                }
+                ccm_ = lock->GetCcMap();
+            }
+
             assert(ccm_ != nullptr);
         }
         else
@@ -1224,7 +1248,7 @@ public:
         blk_type_ = NotBlocked;
 
         ccm_ = nullptr;
-        if (res->Value().cce_addr_.CcePtr() != 0)
+        if (!res->Value().cce_addr_.Empty())
         {
             table_name_ = nullptr;
         }
@@ -1273,7 +1297,7 @@ public:
         blk_type_ = NotBlocked;
 
         ccm_ = nullptr;
-        if (res->Value().cce_addr_.CcePtr() != 0)
+        if (!res->Value().cce_addr_.Empty())
         {
             table_name_ = nullptr;
         }
@@ -1322,7 +1346,7 @@ public:
         blk_type_ = NotBlocked;
 
         ccm_ = nullptr;
-        if (res->Value().cce_addr_.CcePtr() != 0)
+        if (!res->Value().cce_addr_.Empty())
         {
             table_name_ = nullptr;
         }
@@ -1463,6 +1487,8 @@ private:
     // blocked due to conflicts in 2PL. After the request is unblocked and
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
+    // TODO: use lock_ptr_ when we allow the ccentry to move to another memory
+    // address
     LruEntry *cce_ptr_{nullptr};
     bool is_local_{true};
 
@@ -1638,6 +1664,8 @@ private:
     // blocked due to conflicts in 2PL. After the request is unblocked and
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
+    // TODO: use lock_ptr_ when we allow the ccentry to move to another memory
+    // address
     LruEntry *cce_ptr_{nullptr};
 
     bool is_wait_for_post_write_{false};
@@ -1685,13 +1713,25 @@ public:
             return false;
         }
 
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
-        if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+        assert(cce_addr_->CceLockPtr() != 0);
+        KeyGapLockAndExtraData *lock =
+            reinterpret_cast<KeyGapLockAndExtraData *>(cce_addr_->CceLockPtr());
+        if (lock->GetCcMap() == nullptr)
         {
+            assert(lock->GetCcEntry() == nullptr);
+            assert(lock->GetCcPage() == nullptr);
             return false;
         }
-        ccm_ = lru_entry->GetCcMap();
+        else
+        {
+            const LruEntry *lru_entry = lock->GetCcEntry();
+            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+            {
+                return false;
+            }
+            ccm_ = lock->GetCcMap();
+        }
+
         assert(ccm_ != nullptr);
         return true;
     }
@@ -1806,6 +1846,8 @@ private:
     // blocked due to conflicts in 2PL. After the request is unblocked and
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
+    // TODO: use lock_ptr_ when we allow the ccentry to move to another memory
+    // address
     LruEntry *cce_ptr_{nullptr};
 
     bool is_wait_for_post_write_{false};
@@ -2223,10 +2265,10 @@ public:
         BlockOnFuture
     };
 
-    uint64_t CceAddr(uint16_t core_id)
+    uint64_t BlockingCceLockAddr(uint16_t core_id)
     {
         assert(core_id < blocking_vec_.size());
-        return blocking_vec_[core_id].cce_addr_;
+        return blocking_vec_[core_id].cce_lock_addr_;
     }
 
     std::pair<ScanBlockingType, ScanType> BlockingPair(uint16_t core_id)
@@ -2237,12 +2279,12 @@ public:
     }
 
     void SetBlockingInfo(uint16_t core_id,
-                         uint64_t cce_addr,
+                         uint64_t cce_lock_addr,
                          ScanType scan_type,
                          ScanBlockingType blocking_type)
     {
         assert(core_id < blocking_vec_.size());
-        blocking_vec_[core_id] = {cce_addr, scan_type, blocking_type};
+        blocking_vec_[core_id] = {cce_lock_addr, scan_type, blocking_type};
     }
 
     void SetShardCount(uint16_t shard_cnt)
@@ -2260,7 +2302,7 @@ public:
         unfinished_core_cnt_.store(core_cnt, std::memory_order_release);
     }
 
-    void SetPriorCceAddr(uint64_t addr, uint16_t shard_id)
+    void SetPriorCceLockAddr(uint64_t addr, uint16_t shard_id)
     {
         assert(shard_id < blocking_vec_.size());
         blocking_vec_[shard_id] = {
@@ -2466,7 +2508,7 @@ private:
 
     struct ScanBlockingInfo
     {
-        uint64_t cce_addr_;
+        uint64_t cce_lock_addr_;
         ScanType scan_type_;
         ScanBlockingType type_;
     };
@@ -2715,9 +2757,9 @@ public:
                 (const uint64_t *) resp_msg_->term().data();
             term_ptr += MetaOffset(remote_core_idx);
 
-            const uint64_t *cce_ptr_ptr =
-                (const uint64_t *) resp_msg_->cce_ptr().data();
-            cce_ptr_ptr += MetaOffset(remote_core_idx);
+            const uint64_t *cce_lock_ptr_ptr =
+                (const uint64_t *) resp_msg_->cce_lock_ptr().data();
+            cce_lock_ptr_ptr += MetaOffset(remote_core_idx);
 
             const remote::RecordStatusType *rec_status_ptr =
                 (const remote::RecordStatusType *) resp_msg_->rec_status()
@@ -2746,7 +2788,7 @@ public:
                                           rec_offset,
                                           rec_status,
                                           gap_ts_ptr[tuple_idx],
-                                          cce_ptr_ptr[tuple_idx],
+                                          cce_lock_ptr_ptr[tuple_idx],
                                           term_ptr[tuple_idx],
                                           remote_core_idx,
                                           scan_slice_result.cc_ng_id_);
@@ -5964,7 +6006,7 @@ public:
 
     bool ValidTermCheck() override
     {
-        assert(cce_addr_ != nullptr && cce_addr_->CcePtr() != 0 &&
+        assert(cce_addr_ != nullptr && cce_addr_->CceLockPtr() != 0 &&
                cce_addr_->Term() > 0);
 
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
@@ -5973,13 +6015,25 @@ public:
             return false;
         }
 
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
-        if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+        assert(cce_addr_->CceLockPtr() != 0);
+        KeyGapLockAndExtraData *lock =
+            reinterpret_cast<KeyGapLockAndExtraData *>(cce_addr_->CceLockPtr());
+        if (lock->GetCcMap() == nullptr)
         {
+            assert(lock->GetCcEntry() == nullptr);
+            assert(lock->GetCcPage() == nullptr);
             return false;
         }
-        ccm_ = lru_entry->GetCcMap();
+        else
+        {
+            const LruEntry *lru_entry = lock->GetCcEntry();
+            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
+            {
+                return false;
+            }
+            ccm_ = lock->GetCcMap();
+        }
+
         assert(ccm_ != nullptr);
         return true;
     }

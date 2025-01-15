@@ -124,7 +124,7 @@ void TransactionExecution::Reset()
         ReleaseCatalogsRead();
     }
 #endif
-    cache_miss_read_cce_addr_.SetCce(0, -1, 0, 0);
+    cache_miss_read_cce_addr_.SetCceLock(0, -1, 0, 0);
     state_stack_.clear();
     txid_.Reset();
     commit_ts_ = UINT64_MAX;
@@ -1961,8 +1961,8 @@ void TransactionExecution::Process(ReadOperation &read)
                                  read.hd_result_);
 
         DLOG_IF(INFO, TRACE_OCC_ERR)
-            << "ReadOutside ,txn: " << tx_number_ << " ,cce:" << std::hex
-            << cache_miss_read_cce_addr_.CcePtr() << " ,ts: " << std::dec
+            << "ReadOutside ,txn: " << tx_number_ << " ,cce lock:" << std::hex
+            << cache_miss_read_cce_addr_.CceLockPtr() << " ,ts: " << std::dec
             << read.read_outside_tx_req_->commit_ts_
             << " ,is_deleted: " << static_cast<int>(is_deleted);
 
@@ -2038,8 +2038,9 @@ void TransactionExecution::PostProcess(ReadOperation &read)
             {
                 DLOG_IF(INFO, TRACE_OCC_ERR)
                     << "Before AddRead, txn: " << tx_number_
-                    << " ,cce:" << std::hex << read_res.cce_addr_.CcePtr()
-                    << " ,ts: " << std::dec << read_res.ts_ << " ,rec_status: "
+                    << " ,cce lock:" << std::hex
+                    << read_res.cce_addr_.CceLockPtr() << " ,ts: " << std::dec
+                    << read_res.ts_ << " ,rec_status: "
                     << static_cast<int>(read_res.rec_status_)
                     << " ,lock: " << static_cast<int>(read_res.lock_type_)
                     << " ,table: " << table_name->String();
@@ -2059,7 +2060,8 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                 {
                     DLOG_IF(INFO, TRACE_OCC_ERR)
                         << "AddRead, occ_err: " << tx_number_
-                        << " ,cce:" << std::hex << read_res.cce_addr_.CcePtr()
+                        << " ,cce lock:" << std::hex
+                        << read_res.cce_addr_.CceLockPtr()
                         << " ,ts: " << read_res.ts_ << " ,rec_status: "
                         << static_cast<int>(read_res.rec_status_)
                         << " ,lock: " << static_cast<int>(read_res.lock_type_)
@@ -2110,7 +2112,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         }
         else
         {
-            cache_miss_read_cce_addr_.SetCce(0, -1, 0, 0);
+            cache_miss_read_cce_addr_.SetCceLock(0, -1, 0, 0);
         }
 
         rtp_resp_->Finish(std::pair<RecordStatus, uint64_t>(
@@ -2769,9 +2771,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                     .append(std::to_string(this->TxNumber()))
                                     .append(",\"tx_term\":")
                                     .append(std::to_string(this->tx_term_))
-                                    .append(",\"cce_ptr\":")
+                                    .append(",\"cce_lock_ptr\":")
                                     .append(std::to_string(
-                                        cc_scan_tuple->cce_addr_.CcePtr()));
+                                        cc_scan_tuple->cce_addr_.CceLockPtr()));
                             }));
 
                     // When the record status is unknown, the read ts is set
@@ -2999,9 +3001,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                     .append(std::to_string(this->TxNumber()))
                                     .append(",\"tx_term\":")
                                     .append(std::to_string(this->tx_term_))
-                                    .append(",\"cce_ptr\":")
+                                    .append(",\"cce_lock_ptr\":")
                                     .append(std::to_string(
-                                        cc_scan_tuple->cce_addr_.CcePtr()));
+                                        cc_scan_tuple->cce_addr_.CceLockPtr()));
                             }));
 
                     uint64_t read_ts =
@@ -5355,9 +5357,9 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
                         .append(std::to_string(this->TxNumber()))
                         .append(",\"tx_term\":")
                         .append(std::to_string(this->tx_term_))
-                        .append(",\"cce_ptr\":")
-                        .append(
-                            std::to_string(cc_scan_tuple->cce_addr_.CcePtr()));
+                        .append(",\"cce_lock_ptr\":")
+                        .append(std::to_string(
+                            cc_scan_tuple->cce_addr_.CceLockPtr()));
                 }));
 
         LockType scan_tuple_lock_type =

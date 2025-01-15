@@ -143,18 +143,10 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     post_commit->set_src_node_id(src_node_id);
     post_commit->set_node_group_id(cce_addr.NodeGroupId());
     CceAddr_msg *cce_addr_msg = post_commit->mutable_cce_addr();
-    if (cce_addr.CcePtr() != 0)
-    {
-        cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
-        cce_addr_msg->set_term(cce_addr.Term());
-        cce_addr_msg->set_core_id(cce_addr.CoreId());
-    }
-    else
-    {
-        cce_addr_msg->set_insert_ptr(cce_addr.InsertPtr());
-        cce_addr_msg->set_term(cce_addr.Term());
-        cce_addr_msg->set_core_id(cce_addr.CoreId());
-    }
+    assert(cce_addr.CceLockPtr() != 0);
+    cce_addr_msg->set_cce_lock_ptr(cce_addr.CceLockPtr());
+    cce_addr_msg->set_term(cce_addr.Term());
+    cce_addr_msg->set_core_id(cce_addr.CoreId());
 
     post_commit->clear_record();
     if (commit_ts > 0 && operation_type != OperationType::Delete)
@@ -316,7 +308,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
     vali->set_src_node_id(src_node_id);
     vali->set_node_group_id(cce_addr.NodeGroupId());
     CceAddr_msg *cce_addr_msg = vali->mutable_cce_addr();
-    cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
+    cce_addr_msg->set_cce_lock_ptr(cce_addr.CceLockPtr());
     cce_addr_msg->set_term(cce_addr.Term());
     cce_addr_msg->set_core_id(cce_addr.CoreId());
     vali->set_commit_ts(commit_ts);
@@ -418,11 +410,11 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
     send_msg.set_command_id(command_id);
 
     ReadOutsideRequest *read_outside = send_msg.mutable_read_outside_req();
-    assert(cce_addr.CcePtr() != 0);
+    assert(cce_addr.CceLockPtr() != 0);
     read_outside->set_node_group_id(cce_addr.NodeGroupId());
 
     CceAddr_msg *cce_msg = read_outside->mutable_cce_addr();
-    cce_msg->set_cce_ptr(cce_addr.CcePtr());
+    cce_msg->set_cce_lock_ptr(cce_addr.CceLockPtr());
     cce_msg->set_term(cce_addr.Term());
     cce_msg->set_core_id(cce_addr.CoreId());
 
@@ -562,7 +554,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_node_group_id(ng_id);
     const CcEntryAddr &last_cce_addr = scan_cache->LastTuple()->cce_addr_;
     CceAddr_msg *cce_addr_msg = scan_next->mutable_prior_cce_ptr();
-    cce_addr_msg->set_cce_ptr(last_cce_addr.CcePtr());
+    cce_addr_msg->set_cce_lock_ptr(last_cce_addr.CceLockPtr());
     cce_addr_msg->set_term(last_cce_addr.Term());
     cce_addr_msg->set_core_id(last_cce_addr.CoreId());
     scan_next->set_direction(scan_cache->Scanner()->Direction() ==
@@ -639,7 +631,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
 
     CcScanner &scanner = *hd_res.Value().ccm_scanner_;
 
-    scan_slice->clear_prior_cce_vec();
+    scan_slice->clear_prior_cce_lock_vec();
     // When the cc ng term is greater than 0, this scan resumes the last scan in
     // the range. Sets the cc entry addresses where last scan stops.
     if (cc_ng_term > 0)
@@ -650,8 +642,8 @@ void txservice::remote::RemoteCcHandler::ScanNext(
         {
             ScanCache *cache = scanner.Cache(core_id);
             const ScanTuple *last_tuple = cache->LastTuple();
-            scan_slice->add_prior_cce_vec(
-                last_tuple != nullptr ? last_tuple->cce_addr_.CcePtr() : 0);
+            scan_slice->add_prior_cce_lock_vec(
+                last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
         }
 
         scanner.ResetCaches();
@@ -853,18 +845,10 @@ void txservice::remote::RemoteCcHandler::BlockCcReqCheck(
 
     req->clear_cce_addr();
     CceAddr_msg *cce_addr_msg = req->add_cce_addr();
-    if (cce_addr.CcePtr() != 0)
-    {
-        cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
-        cce_addr_msg->set_term(cce_addr.Term());
-        cce_addr_msg->set_core_id(cce_addr.CoreId());
-    }
-    else
-    {
-        cce_addr_msg->set_insert_ptr(cce_addr.InsertPtr());
-        cce_addr_msg->set_term(cce_addr.Term());
-        cce_addr_msg->set_core_id(cce_addr.CoreId());
-    }
+    assert(cce_addr.CceLockPtr() != 0);
+    cce_addr_msg->set_cce_lock_ptr(cce_addr.CceLockPtr());
+    cce_addr_msg->set_term(cce_addr.Term());
+    cce_addr_msg->set_core_id(cce_addr.CoreId());
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, hres);
 }
@@ -898,18 +882,10 @@ void txservice::remote::RemoteCcHandler::BlockAcquireAllCcReqCheck(
     for (const auto &addr : cce_addrs)
     {
         CceAddr_msg *cce_addr_msg = req->add_cce_addr();
-        if (addr.CcePtr() != 0)
-        {
-            cce_addr_msg->set_cce_ptr(addr.CcePtr());
-            cce_addr_msg->set_term(addr.Term());
-            cce_addr_msg->set_core_id(addr.CoreId());
-        }
-        else
-        {
-            cce_addr_msg->set_insert_ptr(addr.InsertPtr());
-            cce_addr_msg->set_term(addr.Term());
-            cce_addr_msg->set_core_id(addr.CoreId());
-        }
+        assert(addr.CceLockPtr() != 0);
+        cce_addr_msg->set_cce_lock_ptr(addr.CceLockPtr());
+        cce_addr_msg->set_term(addr.Term());
+        cce_addr_msg->set_core_id(addr.CoreId());
     }
 
     stream_sender_.SendMessageToNg(node_group_id, send_msg, hres);
@@ -1053,8 +1029,8 @@ void txservice::remote::RemoteCcHandler::UploadTxCommands(
     cmds_req->set_node_group_id(cce_addr.NodeGroupId());
 
     CceAddr_msg *cce_addr_msg = cmds_req->mutable_cce_addr();
-    assert(cce_addr.CcePtr() != 0);
-    cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
+    assert(cce_addr.CceLockPtr() != 0);
+    cce_addr_msg->set_cce_lock_ptr(cce_addr.CceLockPtr());
     cce_addr_msg->set_term(cce_addr.Term());
     cce_addr_msg->set_core_id(cce_addr.CoreId());
 

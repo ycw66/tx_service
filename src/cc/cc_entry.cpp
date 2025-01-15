@@ -99,7 +99,7 @@ NonBlockingLock &LruEntry::GetOrCreateKeyLock(CcShard *ccs,
 {
     if (cc_lock_and_extra_ == nullptr)
     {
-        cc_lock_and_extra_ = ccs->NewLock(ccm, page);
+        cc_lock_and_extra_ = ccs->NewLock(ccm, page, this);
     }
 
     assert(cc_lock_and_extra_->GetCcMap() == ccm);
@@ -119,6 +119,11 @@ NonBlockingLock *LruEntry::GetGapLock() const
 {
     assert("Gap lock unsupported.");
     return nullptr;
+}
+
+KeyGapLockAndExtraData *LruEntry::GetLockAddr() const
+{
+    return cc_lock_and_extra_;
 }
 
 bool LruEntry::RecycleKeyLock(CcShard &ccs)
@@ -172,7 +177,7 @@ void LruEntry::ClearLocks(CcShard &ccs,
         cc_lock_and_extra_->BufferedCommandList().Size();
     ccs.UpdateBufferedCommandCnt(-buffered_cmd_cnt_decr);
 #endif
-    cc_lock_and_extra_->Reset(nullptr, nullptr);
+    cc_lock_and_extra_->Reset(nullptr, nullptr, nullptr);
     // reset lock entry in ccshard lock array to make it reusable.
     cc_lock_and_extra_->SetUsedStatus(false);
     cc_lock_and_extra_ = nullptr;

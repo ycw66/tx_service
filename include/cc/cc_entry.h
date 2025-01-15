@@ -341,6 +341,8 @@ public:
 
     NonBlockingLock *GetGapLock() const;
 
+    KeyGapLockAndExtraData *GetLockAddr() const;
+
     /**
      * @brief When release a lock, ccentry should call TryResetKeyLock to try to
      * recycle the lock ptr to lock array if lock set is empty.
@@ -2069,12 +2071,12 @@ struct CcPage : public LruPage
 struct CcEntryAddr
 {
 public:
-    CcEntryAddr() : cce_ptr_(0), node_group_id_(0), core_id_(0), term_(-1)
+    CcEntryAddr() : cce_lock_ptr_(0), node_group_id_(0), core_id_(0), term_(-1)
     {
     }
 
     CcEntryAddr(const CcEntryAddr &rhs)
-        : cce_ptr_(rhs.cce_ptr_),
+        : cce_lock_ptr_(rhs.cce_lock_ptr_),
           node_group_id_(rhs.node_group_id_),
           core_id_(rhs.core_id_),
           term_(rhs.term_.load(std::memory_order_acquire))
@@ -2084,7 +2086,8 @@ public:
     bool operator==(const CcEntryAddr &rhs) const
     {
         return node_group_id_ == rhs.node_group_id_ && term_ == rhs.term_ &&
-               cce_ptr_ != 0 && rhs.cce_ptr_ != 0 && cce_ptr_ == rhs.cce_ptr_;
+               cce_lock_ptr_ != 0 && rhs.cce_lock_ptr_ != 0 &&
+               cce_lock_ptr_ == rhs.cce_lock_ptr_;
     }
 
     CcEntryAddr &operator=(const CcEntryAddr &rhs)
@@ -2094,7 +2097,7 @@ public:
             return *this;
         }
 
-        cce_ptr_ = rhs.cce_ptr_;
+        cce_lock_ptr_ = rhs.cce_lock_ptr_;
         node_group_id_ = rhs.node_group_id_;
         term_.store(rhs.term_.load(std::memory_order_acquire),
                     std::memory_order_release);
@@ -2105,24 +2108,37 @@ public:
 
     bool Empty() const
     {
-        return cce_ptr_ == 0 || cce_ptr_ == 1;
+        return cce_lock_ptr_ == 0;
     }
 
-    uint64_t CcePtr() const
+    uint64_t CceLockPtr() const
     {
-        return cce_ptr_;
+        return cce_lock_ptr_;
+    }
+
+    /**
+     * This func should be used with caution. Can only be called by the lock's
+     * owner CcShard when executing CcRequest since the lock's memory is
+     * directly accessed. You cannot call ExtractCce() from another thread or
+     * another node which has a total different memory space, use CceLockPtr()
+     * instead. The lock owner CcEntry might change in the future (when page
+     * merge or rebalance happens).
+     * @return
+     */
+    LruEntry *ExtractCce() const
+    {
+        if (cce_lock_ptr_ == 0)
+        {
+            return nullptr;
+        }
+        KeyGapLockAndExtraData *lock =
+            reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_ptr_);
+        return lock->GetCcEntry();
     }
 
     uint64_t InsertPtr() const
     {
-        if (cce_ptr_ & 1)
-        {
-            return cce_ptr_ & (UINT64_MAX - 1);
-        }
-        else
-        {
-            return 0;
-        }
+        return 0;
     }
 
     uint32_t NodeGroupId() const
@@ -2140,33 +2156,24 @@ public:
         return core_id_;
     }
 
-    void SetCce(uint64_t addr, int64_t term, uint32_t core_id)
+    void SetCceLock(uint64_t cce_lock_addr)
     {
-        cce_ptr_ = addr;
+        cce_lock_ptr_ = cce_lock_addr;
+    }
+
+    void SetCceLock(uint64_t cce_lock_addr, int64_t term, uint32_t core_id)
+    {
+        cce_lock_ptr_ = cce_lock_addr;
         term_.store(term, std::memory_order_release);
         core_id_ = core_id;
     }
 
-    void SetCce(uint64_t addr, int64_t term, uint32_t ng, uint32_t core_id)
+    void SetCceLock(uint64_t cce_lock_addr,
+                    int64_t term,
+                    uint32_t ng,
+                    uint32_t core_id)
     {
-        cce_ptr_ = addr;
-        node_group_id_ = ng;
-        term_.store(term, std::memory_order_release);
-        core_id_ = core_id;
-    }
-
-    void SetInsert(uint64_t addr, int64_t term, uint32_t core_id)
-    {
-        assert((addr & 1) == 0);
-        cce_ptr_ = addr | 1;
-        term_.store(term, std::memory_order_release);
-        core_id_ = core_id;
-    }
-
-    void SetInsert(uint64_t addr, int64_t term, uint32_t ng, uint32_t core_id)
-    {
-        assert((addr & 1) == 0);
-        cce_ptr_ = addr | 1;
+        cce_lock_ptr_ = cce_lock_addr;
         node_group_id_ = ng;
         term_.store(term, std::memory_order_release);
         core_id_ = core_id;
@@ -2184,12 +2191,10 @@ public:
 
 private:
     /**
-     * @brief The cc entry memory address. Given that memory addresses are even
-     * numbers, we use the lowest bit to denote if this address points to an
-     * insert entry.
-     *
+     * The lock structure's memory address. It's safe to access the lock object
+     * since the space will stay in memory long enough.
      */
-    uint64_t cce_ptr_;
+    uint64_t cce_lock_ptr_{};
     uint32_t node_group_id_;
     uint32_t core_id_;
     // The term of the cc node group to which the cc entry belongs. The variable
@@ -2213,7 +2218,7 @@ struct hash<txservice::CcEntryAddr>
 {
     std::size_t operator()(const txservice::CcEntryAddr &key) const
     {
-        uint64_t ptr_hash = key.CcePtr() != 0 ? key.CcePtr() : key.InsertPtr();
+        uint64_t ptr_hash = key.CceLockPtr();
         return (size_t) key.NodeGroupId() * 23 + ptr_hash;
     }
 };

@@ -292,10 +292,11 @@ public:
         if (err_code == CcErrorCode::NO_ERROR)
         {
             CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
-            cce_addr.SetCce(reinterpret_cast<uint64_t>(floor_cce),
-                            ng_term,
-                            req.NodeGroupId(),
-                            shard_->LocalCoreId());
+            cce_addr.SetCceLock(reinterpret_cast<uint64_t>(
+                                    floor_cce->GetKeyGapLockAndExtraData()),
+                                ng_term,
+                                req.NodeGroupId(),
+                                shard_->LocalCoreId());
             RangeRecord *range_rec = static_cast<RangeRecord *>(req.Record());
             range_rec->CopyForReadResult(*(floor_cce->payload_));
             hd_result->Value().ts_ = floor_cce->CommitTs();
@@ -326,7 +327,8 @@ public:
     {
         const CcEntryAddr &cce_addr = *req.CceAddr();
         CcEntry<KeyT, RangeRecord> &cc_entry =
-            *reinterpret_cast<CcEntry<KeyT, RangeRecord> *>(cce_addr.CcePtr());
+            *reinterpret_cast<CcEntry<KeyT, RangeRecord> *>(
+                cce_addr.ExtractCce());
 
         // Release bucket record read lock. This lock was acquried in range
         // cc map read cc, and is not put into readset. So we need to be

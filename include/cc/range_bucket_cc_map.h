@@ -135,16 +135,25 @@ public:
                                   false);
         }
 
+        CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
+        assert(cce != nullptr);
+        cce_addr.SetCceLock(
+            reinterpret_cast<uint64_t>(cce->GetKeyGapLockAndExtraData()),
+            ng_term,
+            req.NodeGroupId(),
+            shard_->LocalCoreId());
+
         // after acquiring lock
         switch (err_code)
         {
         case CcErrorCode::NO_ERROR:
         {
             CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
-            cce_addr.SetCce(reinterpret_cast<uint64_t>(cce),
-                            ng_term,
-                            req.NodeGroupId(),
-                            shard_->LocalCoreId());
+            cce_addr.SetCceLock(
+                reinterpret_cast<uint64_t>(cce->GetKeyGapLockAndExtraData()),
+                ng_term,
+                req.NodeGroupId(),
+                shard_->LocalCoreId());
 
             RangeBucketRecord *bucket_rec =
                 static_cast<RangeBucketRecord *>(req.Record());

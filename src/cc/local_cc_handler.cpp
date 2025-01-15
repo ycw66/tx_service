@@ -48,7 +48,7 @@ void txservice::LocalCcHandler::AcquireWrite(
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     AcquireKeyResult &acquire_result = hres.Value()[hd_res_idx];
     acquire_result.cce_addr_.SetNodeGroupId(ng_id);
-    acquire_result.cce_addr_.SetCce(0, -1, 0);
+    acquire_result.cce_addr_.SetCceLock(0, -1, 0);
     acquire_result.commit_ts_ = 0;
     acquire_result.last_vali_ts_ = 0;
 
@@ -445,7 +445,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
     ReadKeyResult &read_result = hres.Value();
     CcEntryAddr &cce_addr = read_result.cce_addr_;
     cce_addr.SetNodeGroupId(cc_ng_id);
-    cce_addr.SetCce(0, -1, 0);
+    cce_addr.SetCceLock(0, -1, 0);
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
 #endif
@@ -515,7 +515,7 @@ void txservice::LocalCcHandler::ReadOutside(
     CcHandlerResult<ReadKeyResult> &hres,
     std::vector<VersionTxRecord> *archives)
 {
-    assert(cce_addr.CcePtr() != 0);
+    assert(cce_addr.CceLockPtr() != 0);
 
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -525,10 +525,10 @@ void txservice::LocalCcHandler::ReadOutside(
         ReadType read_type =
             is_deleted ? ReadType::OutsideDeleted : ReadType::OutsideNormal;
 
-        hres.Value().cce_addr_.SetCce(cce_addr.CcePtr(),
-                                      cce_addr.Term(),
-                                      cce_addr.NodeGroupId(),
-                                      cce_addr.CoreId());
+        hres.Value().cce_addr_.SetCceLock(cce_addr.CceLockPtr(),
+                                          cce_addr.Term(),
+                                          cce_addr.NodeGroupId(),
+                                          cce_addr.CoreId());
 
         ReadCc *req = read_pool.NextRequest();
         // A read-outside request brings a record into the cc map for caching.
@@ -621,7 +621,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         term = std::max(ng_leader_term, standby_node_term);
     }
     cce_addr.SetNodeGroupId(cc_ng_id);
-    cce_addr.SetCce(0, term, 0);
+    cce_addr.SetCceLock(0, term, 0);
 
     if (term < 0)
     {
@@ -762,7 +762,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         term = std::max(ng_leader_term, standby_node_term);
     }
     cce_addr.SetNodeGroupId(cc_ng_id);
-    cce_addr.SetCce(0, term, 0);
+    cce_addr.SetCceLock(0, term, 0);
 
     if (term < 0)
     {
@@ -1393,8 +1393,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
             ScanCache *cache = scanner.Cache(core_id);
             const ScanTuple *last_tuple = cache->LastTuple();
 
-            req->SetPriorCceAddr(
-                last_tuple != nullptr ? last_tuple->cce_addr_.CcePtr() : 0,
+            req->SetPriorCceLockAddr(
+                last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0,
                 core_id);
         }
 
@@ -1802,7 +1802,7 @@ void txservice::LocalCcHandler::ObjectCommand(
     hres.SetToBlock();
 #endif
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
-    hres.Value().cce_addr_.SetCce(0, -1, ng_id, 0);
+    hres.Value().cce_addr_.SetCceLock(0, -1, ng_id, 0);
 
     bool is_standby_tx = IsStandbyTx(tx_term);
     // Standby transaction only execute local request.

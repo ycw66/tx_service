@@ -489,7 +489,9 @@ TEntry &CcShard::NewTx(NodeGroupId tx_ng_id,
     return tentry;
 }
 
-KeyGapLockAndExtraData *CcShard::NewLock(CcMap *ccm, LruPage *page)
+KeyGapLockAndExtraData *CcShard::NewLock(CcMap *ccm,
+                                         LruPage *page,
+                                         LruEntry *entry)
 {
     // Circular iteration to find an available lock.
     size_t cnt = 0;
@@ -530,7 +532,7 @@ KeyGapLockAndExtraData *CcShard::NewLock(CcMap *ccm, LruPage *page)
 
     KeyGapLockAndExtraData *lk = lock_vec_.at(next_lock_idx_).get();
     assert(!lk->GetUsedStatus());
-    lk->Reset(ccm, page);
+    lk->Reset(ccm, page, entry);
     lk->SetUsedStatus(true);
     used_lock_count_++;
     ++next_lock_idx_;
@@ -1969,28 +1971,38 @@ void CcShard::TryResizeLockArray()
 
         // shrink the capacity of the lock vector.
         uint32_t old_size = (uint32_t) lock_vec_.size();
-        uint32_t new_size =
+        uint32_t new_size_expect =
             (uint32_t) (old_size >> (LOCK_VECTOR_SHRINK_THRESHOLD - 1u));
 
-        // move the used slot whose position is larger than new_size to the
-        // front of lock array.
-        for (high_idx = new_size; high_idx < old_size; high_idx++)
+        // recycle the recylable slot and keep the unrecylable
+        for (high_idx = old_size - 1;
+             high_idx >= new_size_expect && high_idx > low_idx;
+             high_idx--)
         {
-            if (lock_vec_[high_idx]->GetUsedStatus())
+            if (!lock_vec_[high_idx]->SafeToRecycle())
             {
                 // find an unused slot
-                while (lock_vec_[low_idx]->GetUsedStatus())
+                while (low_idx < high_idx &&
+                       !lock_vec_[low_idx]->SafeToRecycle())
                 {
                     low_idx++;
                 }
+                if (low_idx == high_idx)
+                {
+                    break;
+                }
+
                 lock_vec_[low_idx++] = std::move(lock_vec_[high_idx]);
             }
         }
-        lock_vec_.resize(new_size);
-        lock_vec_.shrink_to_fit();
-        next_lock_idx_ = next_lock_idx_ >= new_size ? 0 : next_lock_idx_;
 
-        DLOG(INFO) << "the size of lock array decreased to: " << new_size;
+        lock_vec_.resize(high_idx + 1);
+        lock_vec_.shrink_to_fit();
+        next_lock_idx_ =
+            next_lock_idx_ >= lock_vec_.size() ? 0 : next_lock_idx_;
+
+        DLOG(INFO) << "the size of lock array decreased from: " << old_size
+                   << " to: " << lock_vec_.size();
     }
 }
 

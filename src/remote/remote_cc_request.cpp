@@ -51,14 +51,8 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
 
             const CcEntryAddr &addr = acquire_key_res.cce_addr_;
             CceAddr_msg *resp_addr = resp->mutable_cce_addr();
-            if (addr.CcePtr() != 0)
-            {
-                resp_addr->set_cce_ptr(addr.CcePtr());
-            }
-            else
-            {
-                resp_addr->set_insert_ptr(addr.InsertPtr());
-            }
+            assert(addr.CceLockPtr() != 0);
+            resp_addr->set_cce_lock_ptr(addr.CceLockPtr());
             resp_addr->set_term(addr.Term());
             resp_addr->set_core_id(addr.CoreId());
         }
@@ -128,15 +122,8 @@ void txservice::remote::RemoteAcquire::Acknowledge()
 
     CceAddr_msg *resp_addr = acquire_resp->mutable_cce_addr();
     const CcEntryAddr &addr = cc_res_.Value()[0].cce_addr_;
-    assert(addr.CcePtr() != 0 || addr.InsertPtr() != 0);
-    if (addr.CcePtr() != 0)
-    {
-        resp_addr->set_cce_ptr(addr.CcePtr());
-    }
-    else
-    {
-        resp_addr->set_insert_ptr(addr.InsertPtr());
-    }
+    assert(addr.CceLockPtr() != 0);
+    resp_addr->set_cce_lock_ptr(addr.CceLockPtr());
     resp_addr->set_term(addr.Term());
     resp_addr->set_core_id(addr.CoreId());
 
@@ -251,7 +238,7 @@ void txservice::remote::RemoteAcquireAll::Acknowledge()
     for (size_t idx = 0; idx < cce_addrs_.size(); ++idx)
     {
         CceAddr_msg *addr_msg = mutable_cce_addrs->Add();
-        addr_msg->set_cce_ptr(cce_addrs_[idx].CcePtr());
+        addr_msg->set_cce_lock_ptr(cce_addrs_[idx].CceLockPtr());
         addr_msg->set_term(cce_addrs_[idx].Term());
         addr_msg->set_core_id(cce_addrs_[idx].CoreId());
         addr_msg->set_node_group_id(cce_addrs_[idx].NodeGroupId());
@@ -316,10 +303,10 @@ void txservice::remote::RemotePostRead::Reset(
     const CceAddr_msg &cce_addr = req.cce_addr();
 
     need_resp_ = req.need_resp();
-    cce_addr_.SetCce(cce_addr.cce_ptr(),
-                     cce_addr.term(),
-                     req.node_group_id(),
-                     cce_addr.core_id());
+    cce_addr_.SetCceLock(cce_addr.cce_lock_ptr(),
+                         cce_addr.term(),
+                         req.node_group_id(),
+                         cce_addr.core_id());
 
     PostReadCc::Reset(&cce_addr_,
                       input_msg->tx_number(),
@@ -373,7 +360,7 @@ txservice::remote::RemoteRead::RemoteRead()
             resp->set_ts(read_result.ts_);
 
             CceAddr_msg *cce_addr_msg = resp->mutable_cce_addr();
-            cce_addr_msg->set_cce_ptr(read_result.cce_addr_.CcePtr());
+            cce_addr_msg->set_cce_lock_ptr(read_result.cce_addr_.CceLockPtr());
             cce_addr_msg->set_term(read_result.cce_addr_.Term());
             cce_addr_msg->set_core_id(read_result.cce_addr_.CoreId());
         }
@@ -416,7 +403,7 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
         break;
     }
 
-    cc_res_.Value().cce_addr_.SetCce(0, -1, req.key_shard_code() >> 10, 0);
+    cc_res_.Value().cce_addr_.SetCceLock(0, -1, req.key_shard_code() >> 10, 0);
 
     ReadResponse *resp = output_msg_.mutable_read_resp();
     resp->clear_record();
@@ -485,15 +472,8 @@ void txservice::remote::RemoteRead::Acknowledge()
 
     CceAddr_msg *resp_addr = read_resp->mutable_cce_addr();
     const CcEntryAddr &addr = cc_res_.Value().cce_addr_;
-    assert(addr.CcePtr() != 0 || addr.InsertPtr() != 0);
-    if (addr.CcePtr() != 0)
-    {
-        resp_addr->set_cce_ptr(addr.CcePtr());
-    }
-    else
-    {
-        resp_addr->set_insert_ptr(addr.InsertPtr());
-    }
+    assert(addr.CceLockPtr() != 0);
+    resp_addr->set_cce_lock_ptr(addr.CceLockPtr());
     resp_addr->set_term(addr.Term());
     resp_addr->set_core_id(addr.CoreId());
 
@@ -556,21 +536,10 @@ void txservice::remote::RemotePostWrite::Reset(
             commit_ts > 0 ? &post_commit.record() : nullptr;
         const CceAddr_msg &cce_addr_msg = post_commit.cce_addr();
 
-        if (cce_addr_msg.entry_ptr_case() ==
-            CceAddr_msg::EntryPtrCase::kInsertPtr)
-        {
-            cce_addr_.SetInsert(cce_addr_msg.insert_ptr(),
-                                cce_addr_msg.term(),
-                                post_commit.node_group_id(),
-                                cce_addr_msg.core_id());
-        }
-        else
-        {
-            cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
+        cce_addr_.SetCceLock(cce_addr_msg.cce_lock_ptr(),
                              cce_addr_msg.term(),
                              post_commit.node_group_id(),
                              cce_addr_msg.core_id());
-        }
         PostWriteCc::Reset(
             &cce_addr_,
             input_msg->tx_number(),
@@ -937,8 +906,7 @@ bool txservice::remote::RemoteScanNextBatch::ValidTermCheck()
         return false;
     }
 
-    const LruEntry *lru_entry =
-        reinterpret_cast<const LruEntry *>(prior_cce_addr_.CcePtr());
+    const LruEntry *lru_entry = prior_cce_addr_.ExtractCce();
     ccm_ = lru_entry->GetCcMap();
     assert(ccm_ != nullptr);
     tbl_type_ = ccm_->Type();
@@ -969,10 +937,10 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     cce_ptr_ = nullptr;
     snapshot_ts_ = scan_next.ts();
 
-    prior_cce_addr_.SetCce(cce_addr.cce_ptr(),
-                           cce_addr.term(),
-                           node_group_id_,
-                           cce_addr.core_id());
+    prior_cce_addr_.SetCceLock(cce_addr.cce_lock_ptr(),
+                               cce_addr.term(),
+                               node_group_id_,
+                               cce_addr.core_id());
 
 #ifdef ON_KEY_OBJECT
     obj_type_ = scan_next.obj_type();
@@ -1112,9 +1080,9 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
                 output_msg_.mutable_term()->append(
                     (const char *) cache.term_.data(),
                     cache.term_.size() * sizeof(uint64_t));
-                output_msg_.mutable_cce_ptr()->append(
-                    (const char *) cache.cce_ptr_.data(),
-                    cache.cce_ptr_.size() * sizeof(uint64_t));
+                output_msg_.mutable_cce_lock_ptr()->append(
+                    (const char *) cache.cce_lock_ptr_.data(),
+                    cache.cce_lock_ptr_.size() * sizeof(uint64_t));
                 output_msg_.mutable_rec_status()->append(
                     (const char *) cache.rec_status_.data(),
                     cache.rec_status_.size() * sizeof(RecordStatusType));
@@ -1171,12 +1139,12 @@ void txservice::remote::RemoteScanSlice::Reset(
 
     SetShardCount(core_cnt);
 
-    size_t vec_size = scan_slice_req.prior_cce_vec_size();
+    size_t vec_size = scan_slice_req.prior_cce_lock_vec_size();
     for (size_t core_id = 0; core_id < core_cnt; ++core_id)
     {
-        uint64_t cce_addr =
-            core_id < vec_size ? scan_slice_req.prior_cce_vec(core_id) : 0;
-        SetPriorCceAddr(cce_addr, core_id);
+        uint64_t cce_lock_addr =
+            core_id < vec_size ? scan_slice_req.prior_cce_lock_vec(core_id) : 0;
+        SetPriorCceLockAddr(cce_lock_addr, core_id);
     }
 
     RangeScanSliceResult &slice_result = cc_res_.Value();
@@ -1209,11 +1177,11 @@ void txservice::remote::RemoteReadOutside::Reset(
 
     const ReadOutsideRequest &req = input_msg->read_outside_req();
 
-    assert(req.cce_addr().cce_ptr() != 0);
-    cce_addr_.SetCce(req.cce_addr().cce_ptr(),
-                     req.cce_addr().term(),
-                     req.node_group_id(),
-                     req.cce_addr().core_id());
+    assert(req.cce_addr().cce_lock_ptr() != 0);
+    cce_addr_.SetCceLock(req.cce_addr().cce_lock_ptr(),
+                         req.cce_addr().term(),
+                         req.node_group_id(),
+                         req.cce_addr().core_id());
     rec_status_ = ToLocalType::ConvertRecordStatusType(req.rec_status());
     commit_ts_ = req.commit_ts();
     rec_str_ = &req.record();
@@ -1651,19 +1619,10 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
             }
             else
             {
-                LruEntry *lru_entry = nullptr;
-                if (caddr.entry_ptr_case() ==
-                    CceAddr_msg::EntryPtrCase::kInsertPtr)
-                {
-                    lru_entry =
-                        reinterpret_cast<LruEntry *>(caddr.insert_ptr());
-                }
-                else
-                {
-                    lru_entry = reinterpret_cast<LruEntry *>(caddr.cce_ptr());
-                }
-
-                NonBlockingLock *lock = lru_entry->GetKeyLock();
+                NonBlockingLock *lock =
+                    reinterpret_cast<KeyGapLockAndExtraData *>(
+                        caddr.cce_lock_ptr())
+                        ->KeyLock();
                 if (lock != nullptr)
                 {
                     bool b = lock->FindQueueRequest(input_msg_->tx_number());
@@ -1834,7 +1793,7 @@ txservice::remote::RemoteApplyCc::RemoteApplyCc() : ApplyCc(false)
             resp->set_last_vali_ts(apply_result.last_vali_ts_);
 
             CceAddr_msg *cce_addr_msg = resp->mutable_cce_addr();
-            cce_addr_msg->set_cce_ptr(apply_result.cce_addr_.CcePtr());
+            cce_addr_msg->set_cce_lock_ptr(apply_result.cce_addr_.CceLockPtr());
             cce_addr_msg->set_term(apply_result.cce_addr_.Term());
             cce_addr_msg->set_core_id(apply_result.cce_addr_.CoreId());
 
@@ -1876,7 +1835,7 @@ void txservice::remote::RemoteApplyCc::Reset(
     remote_table_name_ = TableName(
         table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
 
-    cc_res_.Value().cce_addr_.SetCce(0, -1, req.key_shard_code() >> 10, 0);
+    cc_res_.Value().cce_addr_.SetCceLock(0, -1, req.key_shard_code() >> 10, 0);
 
     ApplyResponse *resp = output_msg_.mutable_apply_cc_resp();
     resp->clear_cmd_result();
@@ -1915,15 +1874,8 @@ void txservice::remote::RemoteApplyCc::Acknowledge()
 
     CceAddr_msg *resp_addr = apply_resp->mutable_cce_addr();
     const CcEntryAddr &addr = cc_res_.Value().cce_addr_;
-    assert(addr.CcePtr() != 0 || addr.InsertPtr() != 0);
-    if (addr.CcePtr() != 0)
-    {
-        resp_addr->set_cce_ptr(addr.CcePtr());
-    }
-    else
-    {
-        resp_addr->set_insert_ptr(addr.InsertPtr());
-    }
+    assert(addr.CceLockPtr() != 0);
+    resp_addr->set_cce_lock_ptr(addr.CceLockPtr());
     resp_addr->set_term(addr.Term());
     resp_addr->set_core_id(addr.CoreId());
 
@@ -1982,10 +1934,10 @@ void txservice::remote::RemoteUploadTxCommandsCc::Reset(
         }
 
         const CceAddr_msg &cce_addr_msg = cmds_req.cce_addr();
-        cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
-                         cce_addr_msg.term(),
-                         cmds_req.node_group_id(),
-                         cce_addr_msg.core_id());
+        cce_addr_.SetCceLock(cce_addr_msg.cce_lock_ptr(),
+                             cce_addr_msg.term(),
+                             cmds_req.node_group_id(),
+                             cce_addr_msg.core_id());
 
         UploadTxCommandsCc::Reset(&cce_addr_,
                                   input_msg->tx_number(),

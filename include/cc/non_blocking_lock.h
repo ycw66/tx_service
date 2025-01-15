@@ -27,6 +27,7 @@ struct CcEntry;
 
 class CcMap;
 struct LruPage;
+struct LruEntry;
 struct StandbyForwardEntry;
 
 class NonBlockingLock
@@ -353,11 +354,12 @@ public:
 
     KeyGapLockAndExtraData() = default;
 
-    void Reset(CcMap *ccm, LruPage *page)
+    void Reset(CcMap *ccm, LruPage *page, LruEntry *entry)
     {
         key_lock_.Reset();
         ccm_ = ccm;
         page_ = page;
+        entry_ = entry;
 
 #ifdef ON_KEY_OBJECT
         dirty_payload_ = nullptr;
@@ -376,6 +378,8 @@ public:
         return in_use_;
     }
 
+    bool SafeToRecycle() const;
+
     NonBlockingLock *KeyLock()
     {
         return &key_lock_;
@@ -389,6 +393,18 @@ public:
     LruPage *GetCcPage() const
     {
         return page_;
+    }
+
+    LruEntry *GetCcEntry() const
+    {
+        return entry_;
+    }
+
+    // TODO: allow CcEntry to be moved to another memory space, needs to update
+    // the lock's entry field.
+    void UpdateCcEntry(LruEntry *entry)
+    {
+        entry_ = entry;
     }
 
     void UpdateCcPage(LruPage *new_page)
@@ -518,8 +534,13 @@ public:
 private:
     NonBlockingLock key_lock_;
     bool in_use_{false};
+    uint64_t last_used_ts_{0};
+    // the lock object can be recycled (released in memory) in 30 seconds since
+    // it was last used
+    static inline uint64_t recycle_interval_us_ = 30000000;
     CcMap *ccm_{nullptr};
     LruPage *page_{nullptr};
+    LruEntry *entry_{nullptr};
 
 #ifdef ON_KEY_OBJECT
     std::variant<TxCommand *, std::unique_ptr<TxCommand>> pending_cmd_{nullptr};

@@ -76,7 +76,7 @@ public:
     void TryAcknowledge(int64_t term = -1,
                         uint32_t node_group_id = 0,
                         uint32_t core_id = 0,
-                        uint64_t cce_ptr = 0)
+                        uint64_t cce_lock_ptr = 0)
     {
         if (Protocol() == CcProtocol::Locking)
         {
@@ -87,7 +87,7 @@ public:
             {
                 auto &cce_addr = cce_addrs_.emplace_back();
                 cce_addr.SetNodeGroupId(node_group_id);
-                cce_addr.SetCce(cce_ptr, term, core_id);
+                cce_addr.SetCceLock(cce_lock_ptr, term, core_id);
             }
 
             if (core_cnt_ == 0 && !cce_addrs_.empty())
@@ -189,8 +189,8 @@ public:
 
     CcMap *Ccm()
     {
-        LruEntry *lru_entry_ = reinterpret_cast<LruEntry *>(cce_addr_.CcePtr());
-        return lru_entry_->GetCcMap();
+        LruEntry *lru_entry = cce_addr_.ExtractCce();
+        return lru_entry->GetCcMap();
     }
 
     bool Execute(CcShard &ccs) override
@@ -200,8 +200,8 @@ public:
         {
             LOG(INFO) << "RemoteReadOutside, node_group(#"
                       << cce_addr_.NodeGroupId() << ") term < 0, tx:" << Txn()
-                      << " ,cce: "
-                      << reinterpret_cast<void *>(cce_addr_.CcePtr());
+                      << " ,cce_lock: "
+                      << reinterpret_cast<void *>(cce_addr_.CceLockPtr());
             Finish();
             return true;
         }

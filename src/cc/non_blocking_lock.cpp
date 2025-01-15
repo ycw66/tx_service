@@ -1,6 +1,7 @@
 #include "cc/non_blocking_lock.h"
 
 #include <butil/logging.h>
+#include <local_cc_shards.h>
 
 #include <cassert>
 
@@ -608,7 +609,19 @@ LockType NonBlockingLock::SearchLock(TxNumber txn)
 void KeyGapLockAndExtraData::SetUsedStatus(bool is_used)
 {
     in_use_ = is_used;
+    if (!in_use_)
+    {
+        last_used_ts_ = Sharder::Instance().GetLocalCcShards()->TsBase();
+    }
 }
+
+bool KeyGapLockAndExtraData::SafeToRecycle() const
+{
+    return !in_use_ &&
+           Sharder::Instance().GetLocalCcShards()->TsBase() - last_used_ts_ >=
+               recycle_interval_us_;
+}
+
 #ifdef ON_KEY_OBJECT
 void KeyGapLockAndExtraData::PopBlockRequest(CcShard *ccs,
                                              txservice::TxObject *object)

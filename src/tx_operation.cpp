@@ -440,7 +440,7 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
         int64_t term = addr.Term();
         if (term < 0)
         {
-            write_entry->cce_addr_.SetCce(0, -1, 0);
+            write_entry->cce_addr_.SetCceLock(0, -1, 0);
         }
         else if (acquire_key_res.commit_ts_ == 0)
         {
@@ -452,7 +452,7 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
             // CcHandler::PostWrite() on this entry, also set term in
             // AcquireKeyResult because we want to update acquire_write_cnt
             // during TransactionExecution::Abort().
-            write_entry->cce_addr_.SetCce(0, -1, 0);
+            write_entry->cce_addr_.SetCceLock(0, -1, 0);
             addr.SetTerm(-1);
         }
         else
@@ -483,12 +483,12 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
             term = addr.Term();
             if (term < 0)
             {
-                cce_addr.SetCce(0, -1, 0);
+                cce_addr.SetCceLock(0, -1, 0);
             }
             else if (acquire_key_res.commit_ts_ == 0)
             {
                 // acqurie write failed on forward addr.
-                cce_addr.SetCce(0, -1, 0);
+                cce_addr.SetCceLock(0, -1, 0);
                 // Set term to -1 so that post write will not be sent to this
                 // addr.
                 addr.SetTerm(-1);
@@ -1478,7 +1478,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             // unlocks the range now.
             if (scan_slice_result.slice_position_ != SlicePosition::Middle &&
                 txm->iso_level_ < IsolationLevel::RepeatableRead &&
-                scan_state_->range_cce_addr_.CcePtr() != 0)
+                scan_state_->range_cce_addr_.CceLockPtr() != 0)
             {
                 if (lock_range_result_.IsFinished())
                 {
@@ -6740,7 +6740,7 @@ void CmdForwardAcquireWriteOp::AggregateAcquiredKeys(TransactionExecution *txm)
         int64_t term = addr.Term();
         if (term < 0)
         {
-            forward_entry->cce_addr_.SetCce(0, -1, 0);
+            forward_entry->cce_addr_.SetCceLock(0, -1, 0);
         }
         else
         {
