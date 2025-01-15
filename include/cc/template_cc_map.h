@@ -5310,6 +5310,10 @@ public:
                     static_cast<const TemplateStoreSlice<KeyT> *>(
                         new_slice_id.Slice());
                 const KeyT *slice_end_key = slice->EndKey();
+                if (*req_end_key < *slice_end_key)
+                {
+                    slice_end_key = req_end_key;
+                }
 
                 if (slice_end_key == KeyT::PositiveInfinity())
                 {
@@ -5379,7 +5383,10 @@ public:
 
                 assert(slice != nullptr);
 
-                search_end_key = slice->EndKey();
+                if (*slice->EndKey() < *req_end_key)
+                {
+                    search_end_key = slice->EndKey();
+                }
             }
 
             if (search_end_key == KeyT::PositiveInfinity())
@@ -5630,7 +5637,7 @@ public:
                 bool pin_next_slice =
                     it == end_it &&
                     slice->EndKey() != KeyT::PositiveInfinity() &&
-                    !(*slice->EndKey() == *req_end_key);
+                    (*slice->EndKey() < *req_end_key);
 
                 // FIXME(lokax): Only loop X times to avoid blocking TxProcesser
                 // when the range has many empty slices.
@@ -5703,6 +5710,11 @@ public:
                         static_cast<TemplateStoreSlice<KeyT> *>(
                             new_slice_id.Slice());
                     const KeyT *slice_end_key = new_slice->EndKey();
+
+                    if (*req_end_key < *slice_end_key)
+                    {
+                        slice_end_key = req_end_key;
+                    }
 
                     it = LowerBound(*slice_start_key);
                     std::pair<Iterator, ScanType> end_pair =

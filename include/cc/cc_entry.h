@@ -73,6 +73,8 @@ public:
     // do not need to flush / update its ckpt ts.
     LruEntry *cce_{nullptr};
 
+    int32_t partition_id_{-1};
+
     FlushRecord() : tx_key_(), key_type_(FlushKeyType::TxKey)
     {
     }
@@ -85,7 +87,8 @@ public:
                 RecordStatus payload_status,
                 uint64_t commit_ts,
                 LruEntry *cce,
-                int32_t delta_size)
+                int32_t delta_size,
+                int32_t partition_id)
     {
         tx_key_.Release();
         tx_key_ = std::move(key);
@@ -95,6 +98,7 @@ public:
         commit_ts_ = commit_ts;
         cce_ = cce;
         delta_size_ = delta_size;
+        partition_id_ = partition_id;
     }
 #else
     FlushRecord(TxKey key,
@@ -102,7 +106,8 @@ public:
                 RecordStatus payload_status,
                 uint64_t commit_ts,
                 LruEntry *cce,
-                int32_t delta_size)
+                int32_t delta_size,
+                int32_t partition_id)
     {
         tx_key_.Release();
         tx_key_ = std::move(key);
@@ -113,6 +118,7 @@ public:
         commit_ts_ = commit_ts;
         cce_ = cce;
         delta_size_ = delta_size;
+        partition_id_ = partition_id;
     }
 #endif
 
@@ -153,6 +159,7 @@ public:
         commit_ts_ = rhs.commit_ts_;
         cce_ = rhs.cce_;
         delta_size_ = rhs.delta_size_;
+        partition_id_ = rhs.partition_id_;
         return *this;
     }
 
@@ -178,6 +185,7 @@ public:
         commit_ts_ = rhs.commit_ts_;
         delta_size_ = rhs.delta_size_;
         cce_ = rhs.cce_;
+        partition_id_ = rhs.partition_id_;
     }
 
     FlushRecord(const FlushRecord &) = delete;

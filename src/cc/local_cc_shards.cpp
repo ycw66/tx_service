@@ -2968,7 +2968,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                                    rec.payload_status_,
                                                    rec.commit_ts_,
                                                    rec.cce_,
-                                                   rec.delta_size_);
+                                                   rec.delta_size_,
+                                                   range_id);
                 }
 
                 for (size_t j = 0; j < scan_cc.ArchiveVec(i).size(); ++j)
@@ -3727,6 +3728,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 {
                     // cce_ is null means the key is already persisted on kv, so
                     // we don't need to put it into the flush vec.
+                    int32_t part_id = (rec.Key().Hash() >> 10) & 0x3FF;
                     data_sync_vec->emplace_back(rec.Key().Clone(),
 #ifdef ON_KEY_OBJECT
                                                 rec.GetPayload(),
@@ -3736,7 +3738,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                                 rec.payload_status_,
                                                 rec.commit_ts_,
                                                 rec.cce_,
-                                                rec.delta_size_);
+                                                rec.delta_size_,
+                                                part_id);
                 }
             }
 

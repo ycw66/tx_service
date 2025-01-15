@@ -4168,6 +4168,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                  previous_scan_ts,
                                  ckpt_ts,
                                  &local_cc_shards](
+                                    int32_t range_id,
                                     const TxKey *req_start_key,
                                     const TxKey *req_end_key,
                                     bool export_base_table_rec_if_need) mutable
@@ -4242,7 +4243,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                     rec.payload_status_,
                                                     rec.commit_ts_,
                                                     rec.cce_,
-                                                    rec.delta_size_);
+                                                    rec.delta_size_,
+                                                    range_id);
                                             }
 
                                             for (size_t j = 0;
@@ -4302,17 +4304,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                 // data which need to be flushed.
 
                                 auto err =
-                                    scan_func(&start_key, &end_key, false);
-                                if (err != CcErrorCode::NO_ERROR)
-                                {
-                                    hd_res.SetError(err);
-                                    return;
-                                }
-                            }
-                            else
-                            {
-                                auto err =
-                                    scan_func(&start_key,
+                                    scan_func(range_info_->PartitionId(),
+                                              &start_key,
                                               &new_range_info_.begin()->first,
                                               false);
 
@@ -4322,15 +4315,98 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     return;
                                 }
 
-                                err = scan_func(&new_range_info_.begin()->first,
-                                                &end_key,
-                                                true);
+                                for (uint32_t i = 0; i < new_range_info_.size();
+                                     i++)
+                                {
+                                    if (i == new_range_info_.size() - 1)
+                                    {
+                                        err =
+                                            scan_func(new_range_info_[i].second,
+                                                      &new_range_info_[i].first,
+                                                      &end_key,
+                                                      false);
+                                    }
+                                    else
+                                    {
+                                        err = scan_func(
+                                            new_range_info_[i].second,
+                                            &new_range_info_[i].first,
+                                            &new_range_info_[i + 1].first,
+                                            false);
+                                    }
+                                    if (err != CcErrorCode::NO_ERROR)
+                                    {
+                                        hd_res.SetError(err);
+                                        return;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                auto err =
+                                    scan_func(range_info_->PartitionId(),
+                                              &start_key,
+                                              &new_range_info_.begin()->first,
+                                              false);
 
                                 if (err != CcErrorCode::NO_ERROR)
                                 {
                                     hd_res.SetError(err);
                                     return;
                                 }
+
+                                for (uint32_t i = 0; i < new_range_info_.size();
+                                     i++)
+                                {
+                                    if (i == new_range_info_.size() - 1)
+                                    {
+                                        err =
+                                            scan_func(new_range_info_[i].second,
+                                                      &new_range_info_[i].first,
+                                                      &end_key,
+                                                      true);
+                                    }
+                                    else
+                                    {
+                                        err = scan_func(
+                                            new_range_info_[i].second,
+                                            &new_range_info_[i].first,
+                                            &new_range_info_[i + 1].first,
+                                            true);
+                                    }
+                                    if (err != CcErrorCode::NO_ERROR)
+                                    {
+                                        hd_res.SetError(err);
+                                        return;
+                                    }
+                                }
+                            }
+
+                            auto lower_bound_cmp =
+                                [](const FlushRecord &rec, const TxKey &key)
+                            { return rec.Key() < key; };
+                            // Update partition id in previous_data_sync_vec
+                            auto old_range_end_it = std::lower_bound(
+                                previous_data_sync_vec->begin(),
+                                previous_data_sync_vec->end(),
+                                new_range_info_.begin()->first,
+                                lower_bound_cmp);
+                            size_t new_range_idx = 0;
+                            for (auto it = old_range_end_it;
+                                 it != previous_data_sync_vec->end();
+                                 ++it)
+                            {
+                                while (
+                                    new_range_idx !=
+                                        new_range_info_.size() - 1 &&
+                                    !(it->Key() <
+                                      new_range_info_[new_range_idx + 1].first))
+                                {
+                                    new_range_idx++;
+                                }
+
+                                it->partition_id_ =
+                                    new_range_info_[new_range_idx].second;
                             }
 
                             // Sort output vectors in key sorting order.
