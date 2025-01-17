@@ -569,7 +569,7 @@ public:
     {
         if (!sync_info)
         {
-            return range_slices_ && range_slices_->Pins() == 0;
+            return !range_slices_ || range_slices_->Pins() == 0;
         }
 
         // If the sync_info flag is true, it means this function is called

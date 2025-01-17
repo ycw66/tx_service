@@ -1277,10 +1277,7 @@ public:
                                 size_t payload_size = 0;
                                 if (it->payload_status_ == RecordStatus::Normal)
                                 {
-                                    payload_size =
-                                        tbl_type == TableType::Secondary
-                                            ? payload_->Size()
-                                            : it->payload_->Size();
+                                    payload_size = it->payload_->Size();
                                 }
                                 ref.post_flush_size_ =
                                     (it->payload_status_ ==

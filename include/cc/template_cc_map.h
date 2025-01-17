@@ -5224,10 +5224,41 @@ public:
 
         auto &pause_key_and_is_drained = req.PausePos(shard_->core_id_);
 
+        std::function<int32_t(int32_t, bool)> next_slice_func;
+        if (req.export_base_table_item_)
+        {
+            next_slice_func = [&](int32_t idx, bool forward) -> int32_t
+            {
+                assert(forward);
+                return idx + 1;
+            };
+        }
+        else
+        {
+            next_slice_func = [&](int32_t idx, bool forward) -> int32_t
+            {
+                const TemplateStoreRange<KeyT> *range =
+                    static_cast<TemplateStoreRange<KeyT> *>(
+                        req.StoreRangePtr());
+                auto &slices = range->TypedSlices();
+                assert(forward && static_cast<size_t>(idx) < slices.size());
+                int32_t sid = idx;
+                while (static_cast<size_t>(++sid) < slices.size())
+                {
+                    uint64_t slice_post_ckpt_size = slices[sid]->PostCkptSize();
+                    if (slice_post_ckpt_size != UINT64_MAX &&
+                        slice_post_ckpt_size > StoreSlice::slice_upper_bound)
+                    {
+                        break;
+                    }
+                }
+                return sid;
+            };
+        }
+
         auto pin_range_slice =
-            [this, &req, &pause_key_and_is_drained](
-                const KeyT &search_key,
-                uint32_t prefetch_size) -> std::pair<RangeSliceId, bool>
+            [this, &req, &pause_key_and_is_drained, &next_slice_func](
+                const KeyT &search_key) -> std::pair<RangeSliceId, bool>
         {
             bool succ = false;
             RangeSliceOpStatus pin_status;
@@ -5245,7 +5276,11 @@ public:
                 shard_,
                 pin_status,
                 true,
-                prefetch_size);
+                32,
+                false,
+                false,
+                !req.export_base_table_item_,
+                next_slice_func);
 
             switch (pin_status)
             {
@@ -5314,18 +5349,12 @@ public:
         };
 
         auto check_split_slice =
-            [this,
-             &req](std::map<TxKey, int64_t>::const_iterator &slice_it) -> bool
+            [this, &req](std::vector<TxKey>::const_iterator &slice_it) -> bool
         {
-            const TxKey &slice_tx_key = slice_it->first;
-            const StoreSlice *slice =
-                req.StoreRangePtr()->FindSlice(slice_tx_key);
+            const StoreSlice *slice = req.StoreRangePtr()->FindSlice(*slice_it);
 
-            int64_t slice_post_ckpt_size = slice->Size() + slice_it->second;
-            uint64_t slice_size =
-                slice_post_ckpt_size > 0 ? slice_post_ckpt_size : 0;
-
-            return slice_size > StoreSlice::slice_upper_bound;
+            assert(slice->PostCkptSize() != UINT64_MAX);
+            return slice->PostCkptSize() > StoreSlice::slice_upper_bound;
         };
 
         const KeyT *req_end_key = nullptr;
@@ -5342,28 +5371,27 @@ public:
                 ++curr_slice_it;
             }
             req_end_key = req.StoreRangePtr()
-                              ->FindSlice(curr_slice_it->first)
+                              ->FindSlice(*curr_slice_it)
                               ->EndTxKey()
                               .GetKey<KeyT>();
         }
 
-        auto find_slice = [this,
-                           &req,
-                           req_end_key,
-                           &deduce_iterator,
-                           &check_split_slice,
-                           &pin_range_slice](
-                              const KeyT &search_key,
-                              bool move_next =
-                                  true) -> std::tuple<StoreSlice *, bool, bool>
+        auto find_non_empty_slice = [this,
+                                     &req,
+                                     req_end_key,
+                                     &deduce_iterator,
+                                     &check_split_slice,
+                                     &pin_range_slice](const KeyT &search_key,
+                                                       bool move_next = true)
+            -> std::tuple<Iterator, Iterator, const KeyT *, bool, bool, bool>
         {
             // Check whether need to pinslice.
-            bool pin_next_slice = true;
+            bool need_pin_slice = false;
             const KeyT *start_key = nullptr;
             if (req.export_base_table_item_)
             {
                 start_key = &search_key;
-                pin_next_slice = !req.slice_ids_[shard_->core_id_].Slice();
+                need_pin_slice = !req.slice_ids_[shard_->core_id_].Slice();
             }
             else
             {
@@ -5374,59 +5402,103 @@ public:
                 }
                 assert(curr_slice_it != req.EndSliceIt());
 
-                pin_next_slice = !req.slice_ids_[shard_->core_id_].Slice() &&
+                need_pin_slice = !req.slice_ids_[shard_->core_id_].Slice() &&
                                  check_split_slice(curr_slice_it);
-                start_key = pin_next_slice
-                                ? req.StoreRangePtr()
-                                      ->FindSlice(curr_slice_it->first)
-                                      ->StartTxKey()
-                                      .GetKey<KeyT>()
-                                : nullptr;
+                const KeyT *curr_start_key = req.StoreRangePtr()
+                                                 ->FindSlice(*curr_slice_it)
+                                                 ->StartTxKey()
+                                                 .GetKey<KeyT>();
+                start_key = (*curr_start_key < search_key ? &search_key
+                                                          : curr_start_key);
+                assert(
+                    [&]()
+                    {
+                        const KeyT *curr_end_key =
+                            req.StoreRangePtr()
+                                ->FindSlice(*curr_slice_it)
+                                ->EndTxKey()
+                                .GetKey<KeyT>();
+                        return !(*curr_start_key < search_key) ||
+                               (search_key < *curr_end_key);
+                    }());
             }
 
-            // Loop to pin slice if need until find one non-empty slice or
-            // reach the last slice of this request.
-            while (pin_next_slice)
+            // Loop to find slice if need until find one non-empty slice or
+            // reach to the last slice of this request.
+            StoreSlice *store_slice = nullptr;
+            bool slice_pinned =
+                req.slice_ids_[shard_->core_id_].Slice() != nullptr;
+            Iterator it;
+            Iterator end_it;
+            const KeyT *slice_end_key = nullptr;
+            bool is_last_slice = false;
+            do
             {
-                // Execute the pinslice operation, and return the RangeSliceId
-                // If the value of export_base_table_item_ is false, it means
-                // that the pin slice operation is required due to slice
-                // splitting, then, only need pin the current slice that needs
-                // to be split.
-                uint32_t prefetch_size = req.export_base_table_item_ ? 32 : 0;
-                auto [new_slice_id, succ] =
-                    pin_range_slice(*start_key, prefetch_size);
-                if (!succ)
+                if (need_pin_slice)
                 {
-                    return {nullptr, false, false};
-                }
-                assert(new_slice_id.Slice());
+                    // Execute the pinslice operation, and return the
+                    // RangeSliceId If the value of export_base_table_item_ is
+                    // false, it means that the pin slice operation is required
+                    // due to slice splitting, then, only need pin the current
+                    // slice that needs to be split.
+                    auto [new_slice_id, succ] = pin_range_slice(*start_key);
+                    if (!succ)
+                    {
+                        return {Iterator(),
+                                Iterator(),
+                                nullptr,
+                                false,
+                                false,
+                                false};
+                    }
+                    assert(new_slice_id.Slice());
 
-                // Store the range slice id
-                req.slice_ids_[shard_->core_id_] = new_slice_id;
+                    // Store the range slice id
+                    req.slice_ids_[shard_->core_id_] = new_slice_id;
+                    slice_pinned = true;
+                }
 
                 // Get the begin iterator and the end iterator of current slice.
-                Iterator it = deduce_iterator(*start_key);
+                it = deduce_iterator(*start_key);
+
+                if (req.slice_ids_[shard_->core_id_].Slice())
+                {
+                    assert(slice_pinned);
+                    store_slice = req.slice_ids_[shard_->core_id_].Slice();
+                }
+                else
+                {
+                    assert(!req.export_base_table_item_);
+                    auto &curr_slice_it = req.CurrentSliceIt(shard_->core_id_);
+                    // Store the slice
+                    store_slice =
+                        req.StoreRangePtr()->FindSlice(*curr_slice_it);
+                }
 
                 const TemplateStoreSlice<KeyT> *typed_slice =
-                    static_cast<const TemplateStoreSlice<KeyT> *>(
-                        new_slice_id.Slice());
-                const KeyT *slice_end_key = typed_slice->EndKey();
-                Iterator end_it = deduce_iterator(*slice_end_key);
+                    static_cast<const TemplateStoreSlice<KeyT> *>(store_slice);
+                slice_end_key = typed_slice->EndKey();
+                end_it = deduce_iterator(*slice_end_key);
 
-                if (it == end_it && !(*slice_end_key == *req_end_key))
+                is_last_slice = !(*slice_end_key < *req_end_key);
+
+                if (it == end_it && !is_last_slice)
                 {
                     // The current slice is empty, and it is not the last slice
-                    // of the request. Try to pin next slice if need. Unpin and
+                    // of the request. Try to find next slice if need. Unpin and
                     // reset
-                    req.slice_ids_[shard_->core_id_].Unpin();
-                    req.slice_ids_[shard_->core_id_].Reset();
+                    if (slice_pinned)
+                    {
+                        req.slice_ids_[shard_->core_id_].Unpin();
+                        req.slice_ids_[shard_->core_id_].Reset();
+                        slice_pinned = false;
+                    }
 
-                    // Try pin next slice if the current slice is not the last
+                    // Try find next slice if the current slice is not the last
                     // slice of this request.
                     if (req.export_base_table_item_)
                     {
-                        pin_next_slice = true;
+                        need_pin_slice = true;
                         // Get the search start key
                         start_key = slice_end_key;
                     }
@@ -5436,43 +5508,26 @@ public:
                             req.CurrentSliceIt(shard_->core_id_);
                         ++curr_slice_it;
                         assert(curr_slice_it != req.EndSliceIt());
-                        pin_next_slice = check_split_slice(curr_slice_it);
+                        need_pin_slice = check_split_slice(curr_slice_it);
 
-                        // Get the search start key if need
-                        start_key = pin_next_slice
-                                        ? req.StoreRangePtr()
-                                              ->FindSlice(curr_slice_it->first)
-                                              ->StartTxKey()
-                                              .GetKey<KeyT>()
-                                        : nullptr;
+                        // Get the search start key of next slice that contains
+                        // non-persisted keys.
+                        start_key = req.StoreRangePtr()
+                                        ->FindSlice(*curr_slice_it)
+                                        ->StartTxKey()
+                                        .GetKey<KeyT>();
                     }
                 }
                 else
                 {
                     // The slice is non-empty or the empty slice is the last
                     // slice of this request.
-                    pin_next_slice = false;
+                    break;
                 }
-            }
+            } while (true);
 
-            StoreSlice *store_slice = nullptr;
-            if (req.slice_ids_[shard_->core_id_].Slice())
-            {
-                store_slice = req.slice_ids_[shard_->core_id_].Slice();
-            }
-            else
-            {
-                assert(!req.export_base_table_item_);
-                auto &curr_slice_it = req.CurrentSliceIt(shard_->core_id_);
-                // Store the slice
-                store_slice =
-                    req.StoreRangePtr()->FindSlice(curr_slice_it->first);
-            }
-
-            bool slice_pinned =
-                req.slice_ids_[shard_->core_id_].Slice() != nullptr;
-
-            return {store_slice, slice_pinned, true};
+            return {
+                it, end_it, slice_end_key, slice_pinned, is_last_slice, true};
         };
 
         const KeyT *const req_start_key = req.start_key_ != nullptr
@@ -5480,7 +5535,7 @@ public:
                                               : KeyT::NegativeInfinity();
 
         Iterator key_it;
-        Iterator slice_end_it;
+        Iterator slice_end_it = key_it;
 
         // 1. Find the first slice to be scanned.
         const KeyT *search_start_key = nullptr;
@@ -5496,24 +5551,21 @@ public:
             search_start_key = pause_key_and_is_drained.first.GetKey<KeyT>();
         }
 
-        StoreSlice *slice = nullptr;
-        bool slice_pinned = true;
-        bool succ = true;
-        std::tie(slice, slice_pinned, succ) =
-            find_slice(*search_start_key, false);
+        bool slice_pinned = false;
+        bool succ = false;
+        const KeyT *slice_end_key = req_end_key;
+        bool is_last_slice = false;
+        std::tie(key_it,
+                 slice_end_it,
+                 slice_end_key,
+                 slice_pinned,
+                 is_last_slice,
+                 succ) = find_non_empty_slice(*search_start_key, false);
         if (!succ)
         {
             // The request is blocked by pin slice.
             return false;
         }
-
-        // 2. Get the begin iterator and end iterator of current slice.
-        key_it = deduce_iterator(*search_start_key);
-
-        const TemplateStoreSlice<KeyT> *typed_slice =
-            static_cast<const TemplateStoreSlice<KeyT> *>(slice);
-        const KeyT *slice_end_key = typed_slice->EndKey();
-        slice_end_it = deduce_iterator(*slice_end_key);
 
         uint64_t recycle_ts = 1U;
         if (shard_->EnableMvcc() && !req.export_base_table_item_only_)
@@ -5527,6 +5579,7 @@ public:
         // keys in this slice to get the subslice keys.
         bool export_persisted_key_only =
             !req.export_base_table_item_ && slice_pinned;
+        assert(key_it != slice_end_it || is_last_slice);
 
         // 3. Loop to scan keys
         // DataSyncScanCc is running on TxProcessor thread. To avoid
@@ -5568,7 +5621,6 @@ public:
                               req.MoveBaseIdxVec(shard_->core_id_),
                               req.data_sync_ts_,
                               recycle_ts,
-                              Type(),
                               shard_->EnableMvcc(),
                               req.accumulated_scan_cnt_[shard_->core_id_],
                               req.export_base_table_item_,
@@ -5592,28 +5644,22 @@ public:
                     slice_pinned = false;
                 }
 
-                // If slice_end_key is equal to req_end_key, it means that reach
-                // to the end of this request, no need to find the next slice.
-                if (!(*slice_end_key == *req_end_key))
+                if (!is_last_slice)
                 {
                     // Reach to the end of current slice, and find the next
                     // slice.
                     search_start_key = slice_end_key;
-                    std::tie(slice, slice_pinned, succ) =
-                        find_slice(*search_start_key);
+                    std::tie(key_it,
+                             slice_end_it,
+                             slice_end_key,
+                             slice_pinned,
+                             is_last_slice,
+                             succ) = find_non_empty_slice(*search_start_key);
                     if (!succ)
                     {
                         // The request is blocked by pin slice.
                         return false;
                     }
-
-                    const TemplateStoreSlice<KeyT> *typed_slice =
-                        static_cast<const TemplateStoreSlice<KeyT> *>(slice);
-                    const KeyT *slice_start_key = typed_slice->StartKey();
-                    key_it = deduce_iterator(*slice_start_key);
-
-                    slice_end_key = typed_slice->EndKey();
-                    slice_end_it = deduce_iterator(*slice_end_key);
 
                     export_persisted_key_only =
                         !req.export_base_table_item_ && slice_pinned;
@@ -7750,6 +7796,7 @@ public:
         return true;
     }
 
+#ifdef RANGE_PARTITION_ENABLED
     bool Execute(ScanSliceDeltaSizeCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -7964,6 +8011,33 @@ public:
                     assert(commit_ts > cce->CkptTs());
                     if (paused_position.second == nullptr)
                     {
+                        if (req.StoreRangePtr() == nullptr)
+                        {
+                            // Pin the range so that it can't be kicked out
+                            // during data sync.
+                            auto [range_entry, store_range] =
+                                shard_->local_shards_.PinStoreRange(
+                                    table_name_,
+                                    req.NodeGroupId(),
+                                    req.NodeGroupTerm(),
+                                    req.StartTxKey(),
+                                    &req,
+                                    shard_);
+                            if (store_range &&
+                                !req.SetStoreRange(store_range,
+                                                   shard_->core_id_))
+                            {
+                                // StoreRange already been pinned by other core,
+                                // unpin on the current core.
+                                range_entry->UnPinStoreRange();
+                            }
+                            else if (!store_range)
+                            {
+                                // Blocked by loading RangeSlices.
+                                paused_position.first = key->CloneTxKey();
+                                return false;
+                            }
+                        }
                         // Step into a new slice.
                         TemplateStoreRange<KeyT> *store_range =
                             static_cast<TemplateStoreRange<KeyT> *>(
@@ -8051,39 +8125,31 @@ public:
                                           : req_start_key;
         const KeyT *slice_end_key = req_end_key;
 
-        Iterator it;
-        Iterator end_it;
-        it = LowerBound(*slice_start_key);
-        if (it == Begin())
+        auto deduce_iterator = [this](const KeyT &search_key) -> Iterator
         {
-            ++it;
-        }
-
-        if (slice_end_key == KeyT::PositiveInfinity())
-        {
-            end_it = End();
-        }
-        else
-        {
-            std::pair<Iterator, ScanType> end_pair =
-                ForwardScanStart(*slice_end_key, true);
-            end_it = end_pair.first;
-            if (end_pair.second == ScanType::ScanGap)
+            Iterator it;
+            std::pair<Iterator, ScanType> search_pair =
+                ForwardScanStart(search_key, true);
+            it = search_pair.first;
+            if (search_pair.second == ScanType::ScanGap)
             {
-                ++end_it;
+                ++it;
             }
-        }
+            return it;
+        };
 
-        using KeySamplePool = SampleSubRangeKeysCc::SamplePool<
-            SampleSubRangeKeysCc::SamplePoolSize,
-            KeyT,
-            typename TemplateCcMapSamplePool<KeyT>::CopyKey>;
+        Iterator it = deduce_iterator(*slice_start_key);
+        Iterator end_it = deduce_iterator(*slice_end_key);
+
+        using KeySamplePool = SampleSubRangeKeysCc::
+            SamplePool<KeyT, typename TemplateCcMapSamplePool<KeyT>::CopyKey>;
 
         KeySamplePool *const key_sample_pool = [&req]
         {
             if (req.SamplePoolPtr() == nullptr)
             {
-                req.SetSamplePool(std::move(std::make_unique<KeySamplePool>()));
+                req.SetSamplePool(std::move(
+                    std::make_unique<KeySamplePool>(req.SamplePoolCapacity())));
             }
             return static_cast<KeySamplePool *>(req.SamplePoolPtr());
         }();
@@ -8111,14 +8177,19 @@ public:
             // Get the target keys
             const std::vector<KeyT> &sample_keys =
                 key_sample_pool->SampleKeys();
-            assert(sample_keys.size() <= SampleSubRangeKeysCc::SamplePoolSize);
+            assert(sample_keys.size() <= req.SamplePoolCapacity());
+
+            const size_t target_cnt = req.TargetKeyCount();
             std::vector<TxKey> &target_txkeys = req.TargetTxKeys();
-            size_t target_cnt = target_txkeys.size();
+            target_txkeys.reserve(target_cnt);
             size_t step_size = sample_keys.size() / (target_cnt + 1);
-            for (size_t i = 0; i < target_cnt; ++i)
+            step_size = step_size > 0 ? step_size : 1;
+
+            for (size_t tk_idx = 0, sk_idx = step_size;
+                 tk_idx < target_cnt && sk_idx < sample_keys.size();
+                 ++tk_idx, sk_idx = (step_size * (tk_idx + 1)))
             {
-                size_t idx = step_size * (i + 1);
-                target_txkeys[i] = TxKey(&sample_keys[idx]);
+                target_txkeys.emplace_back(&sample_keys[sk_idx]);
             }
 
             // Finish
@@ -8133,6 +8204,7 @@ public:
 
         return false;
     }
+#endif
 
     bool Execute(ApplyCc &req) override
     {

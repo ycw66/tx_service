@@ -999,22 +999,27 @@ public:
     }
 
     template <typename KeyT>
-    RangeSliceId PinRangeSlice(const TableName &table_name,
-                               NodeGroupId cc_ng_id,
-                               int64_t cc_ng_term,
-                               const Schema *key_schema,
-                               const Schema *rec_schema,
-                               uint64_t schema_ts,
-                               const KVCatalogInfo *kv_info,
-                               const KeyT &key,
-                               bool inclusive,
-                               CcRequestBase *cc_request,
-                               CcShard *cc_shard,
-                               RangeSliceOpStatus &pin_status,
-                               bool force_load,
-                               uint32_t prefetch_size,
-                               bool check_key_cache = false,
-                               bool no_load_on_miss = false)
+    RangeSliceId PinRangeSlice(
+        const TableName &table_name,
+        NodeGroupId cc_ng_id,
+        int64_t cc_ng_term,
+        const Schema *key_schema,
+        const Schema *rec_schema,
+        uint64_t schema_ts,
+        const KVCatalogInfo *kv_info,
+        const KeyT &key,
+        bool inclusive,
+        CcRequestBase *cc_request,
+        CcShard *cc_shard,
+        RangeSliceOpStatus &pin_status,
+        bool force_load,
+        uint32_t prefetch_size,
+        bool check_key_cache = false,
+        bool no_load_on_miss = false,
+        bool prefetch_force_load = false,
+        std::function<int32_t(int32_t, bool)> next_prefetch_slice =
+            [](int32_t idx, bool forward)
+        { return forward ? (idx + 1) : (idx - 1); })
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -1087,7 +1092,9 @@ public:
                                       last_pinned_slice,
                                       check_key_cache,
                                       cc_shard->core_id_,
-                                      no_load_on_miss);
+                                      no_load_on_miss,
+                                      prefetch_force_load,
+                                      next_prefetch_slice);
     }
 
     template <typename KeyT>
@@ -1588,6 +1595,14 @@ public:
         bool is_dirty,
         uint64_t txn,
         CcHandlerResult<Void> *hres);
+
+    std::pair<TableRangeEntry *, StoreRange *> PinStoreRange(
+        const TableName &table_name,
+        const NodeGroupId ng_id,
+        int64_t ng_term,
+        const TxKey &start_key,
+        CcRequestBase *cc_request,
+        CcShard *cc_shard);
 #endif
 
     void InitPrebuiltTables(NodeGroupId ng_id, int64_t term);
@@ -2151,6 +2166,13 @@ private:
      */
 
     /**
+     * @brief Update the post ckpt size of slices that contain unpersisted data.
+     */
+    void UpdateSlicePostCkptSize(
+        StoreRange *store_range,
+        const std::map<TxKey, int64_t> &slices_delta_size);
+
+    /**
      * @brief Decide the range update plan based on the @@slices_delta_size
      * parameter.
      */
@@ -2159,7 +2181,6 @@ private:
                               int64_t node_group_term,
                               uint64_t data_sync_ts,
                               StoreRange *store_range,
-                              const std::map<TxKey, int64_t> &slices_delta_size,
                               std::vector<TxKey> &splitting_info);
 
     /**
@@ -2169,8 +2190,6 @@ private:
      *
      * @param all_data_exported - True if the scan finished for a DataSync task.
      * @param data_sync_vec - The vector of current batch data sync data.
-     * @param slices_delta_size - Delta size of all slices that contained the
-     * unpersisted data. Used to decide whether a slice need to be split.
      * @param status - Only to update a slice spec in case that all data of the
      * slice are exported in the @@data_sync_vec. Otherwise, store the status of
      * this slice, and continue to process it in the next batch data.
@@ -2180,7 +2199,6 @@ private:
                       StoreRange *store_range,
                       bool all_data_exported,
                       const std::vector<FlushRecord> &data_sync_vec,
-                      const std::map<TxKey, int64_t> &slices_delta_size,
                       UpdateSliceStatus &status);
     /**
      * @brief Worker thread that split the target range and flush the data into

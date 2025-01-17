@@ -956,18 +956,6 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     WriteToLogOp clean_log_op_;
 
 private:
-    /**
-     * Merge multi sorted ascending vectors into a single one. Remove the data
-     * from previous_datas. Note that We need to make sure the element of input
-     * vector has not duplication.
-     */
-    void MergeFlushRecord(std::vector<FlushRecord> &&previous_datas,
-                          std::vector<std::vector<FlushRecord>> &&datas,
-                          std::vector<FlushRecord> &output,
-                          std::vector<FlushRecord> &new_archive_records,
-                          std::unordered_map<size_t, int32_t> &old_delta_sizes,
-                          bool enable_mvcc);
-
     void FillPrepareLogRequest(TransactionExecution *txm);
     void FillCommitLogRequest(TransactionExecution *txm);
     void FillCleanLogRequest(TransactionExecution *txm);

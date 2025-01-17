@@ -1142,7 +1142,11 @@ public:
         const StoreSlice *&last_pinned_slice,
         bool check_key_cache = false,
         uint16_t shard_id = 0,  // only used if check_key_cache = true
-        bool no_load_on_miss = false)
+        bool no_load_on_miss = false,
+        bool prefetch_force_load = false,
+        std::function<int32_t(int32_t, bool)> next_prefetch_slice =
+            [](int32_t idx, bool forward)
+        { return forward ? (idx + 1) : (idx - 1); })
     {
         // A shared lock on the range to prevent concurrent splitting or merging
         // of slices.
@@ -1352,15 +1356,21 @@ public:
         if (to_prefetch)
         {
             LoadSliceController load_ctrl =
-                LoadSliceController::NonForceLoadController(true, cc_shard);
+                prefetch_force_load
+                    ? LoadSliceController::ForceLoadConotroller()
+                    : LoadSliceController::NonForceLoadController(true,
+                                                                  cc_shard);
 
             if (forward_pin)
             {
-                unsigned start_sid =
-                    slice_idx + (pin_slice_cnt > 0 ? pin_slice_cnt : 1);
-                for (unsigned sid = start_sid, k = 0;
-                     sid < slices_.size() && k < prefetch_size;
-                     ++sid, ++k)
+                int32_t curr_idx =
+                    slice_idx + (pin_slice_cnt > 1 ? (pin_slice_cnt - 1) : 0);
+                int32_t sid = next_prefetch_slice(curr_idx, true);
+
+                for (uint32_t k = 0;
+                     static_cast<size_t>(sid) < slices_.size() &&
+                     k < prefetch_size;
+                     ++k)
                 {
                     TemplateStoreSlice<KeyT> *prefetch_slice =
                         slices_[sid].get();
@@ -1396,15 +1406,17 @@ public:
                                   load_ctrl,
                                   std::move(prefetch_lk));
                     }
+
+                    sid = next_prefetch_slice(sid, true);
                 }
             }
             else if (slice_idx > 0)
             {
-                int start_sid =
-                    slice_idx - (pin_slice_cnt > 0 ? pin_slice_cnt : 1);
-                for (int sid = start_sid, k = 0;
-                     sid > -1 && k < static_cast<int>(prefetch_size);
-                     --sid, ++k)
+                uint32_t curr_idx =
+                    slice_idx - (pin_slice_cnt > 1 ? (pin_slice_cnt - 1) : 0);
+                int32_t sid = next_prefetch_slice(curr_idx, false);
+
+                for (uint32_t k = 0; sid > -1 && k < prefetch_size; ++k)
                 {
                     TemplateStoreSlice<KeyT> *prefetch_slice =
                         slices_[sid].get();
@@ -1439,6 +1451,8 @@ public:
                                   load_ctrl,
                                   std::move(prefetch_lk));
                     }
+
+                    sid = next_prefetch_slice(sid, false);
                 }
             }
         }
@@ -1530,21 +1544,26 @@ public:
                 {
                     return false;
                 }
-                assert(first_key_idx < new_range_keys.size());
+                assert(first_key_idx <= new_range_keys.size());
 
-                // Update the current slice into multiple slices. To avoid more
-                // than one subrange task access one slice simultaneously during
-                // handling the FlushRecords.
-                // NOTE: The new slice spec is not the final status, the new
-                // subslices boundary is equal to the boundary of the subrange
-                // which the new subslice belong to.
-                UpdateSliceSpec(curr_slice,
-                                new_range_keys,
-                                first_key_idx,
-                                slice_subranges_cnt);
+                size_t actual_subranges_cnt =
+                    new_range_keys.size() - first_key_idx + 1;
+                if (actual_subranges_cnt > 1)
+                {
+                    // Update the current slice into multiple slices. To avoid
+                    // more than one subrange task access one slice
+                    // simultaneously during handling the FlushRecords. NOTE:
+                    // The new slice spec is not the final status, the new
+                    // subslices boundary is equal to the boundary of the
+                    // subrange which the new subslice belong to.
+                    UpdateSliceSpec(curr_slice,
+                                    new_range_keys,
+                                    first_key_idx,
+                                    actual_subranges_cnt);
+                }
 
                 // Update the slice index:
-                slice_idx += slice_subranges_cnt;
+                slice_idx += actual_subranges_cnt;
             }
             // Skip the first subrange since it will reuse the current range
             // entry.
@@ -1559,6 +1578,16 @@ public:
 
             subrange_slice_idx = slice_idx;
         }
+        assert(
+            [&]()
+            {
+                bool sorted = std::is_sorted(new_range_keys.begin(),
+                                             new_range_keys.end());
+                auto it = std::adjacent_find(new_range_keys.begin(),
+                                             new_range_keys.end());
+                bool unique = it == new_range_keys.end();
+                return sorted && unique;
+            }());
         return true;
     }
 
@@ -1690,8 +1719,12 @@ public:
             assert(end_key);
             const KeyT *typed_key = start_key->GetKey<KeyT>();
             slice_start_idx = SearchSlice(*typed_key, true);
-            typed_key = end_key->GetKey<KeyT>();
-            slice_end_idx = SearchSlice(*typed_key, true);
+            slice_end_idx = slice_start_idx;
+            while (++slice_end_idx < slices_.size() &&
+                   slices_[slice_end_idx]->StartTxKey() < *end_key)
+            {
+                ;
+            }
         }
 
         // Iterate over all slices

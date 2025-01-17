@@ -56,8 +56,10 @@ struct KeyObjectStandbyForwardCc;
 struct EscalateStandbyCcmCc;
 struct RestoreCcMapCc;
 struct InvalidateTableCacheCc;
+#ifdef RANGE_PARTITION_ENABLED
 struct SampleSubRangeKeysCc;
 struct ScanSliceDeltaSizeCc;
+#endif
 
 enum struct ScanType : uint8_t
 {
@@ -175,8 +177,10 @@ public:
     virtual bool Execute(EscalateStandbyCcmCc &req) = 0;
     virtual bool Execute(RestoreCcMapCc &req) = 0;
     virtual bool Execute(InvalidateTableCacheCc &req) = 0;
+#ifdef RANGE_PARTITION_ENABLED
     virtual bool Execute(SampleSubRangeKeysCc &req) = 0;
     virtual bool Execute(ScanSliceDeltaSizeCc &req) = 0;
+#endif
 
     virtual size_t size() const = 0;
     virtual size_t NormalObjectSize()

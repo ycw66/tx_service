@@ -500,7 +500,9 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                        << "of ng#" << node_group_id_
                        << " caused by upload task failed."
                        << static_cast<uint32_t>(upload_res);
+#ifdef RANGE_PARTITION_ENABLED
             scan_req.UnpinSlices();
+#endif
             task_result_ = upload_res;
         }
     } while (!scan_pk_finished);

@@ -3241,7 +3241,6 @@ public:
           export_base_table_item_(export_base_table_item),
           export_base_table_item_only_(export_base_table_item_only),
           store_range_(store_range),
-          old_slices_delta_size_(old_slices_delta_size),
 #else
           previous_ckpt_ts_(previous_ckpt_ts),
           only_scan_one_core_(only_one_core),
@@ -3251,6 +3250,18 @@ public:
     {
         tx_number_ = txn;
         assert(scan_batch_size_ > DataSyncScanBatchSize);
+#ifdef RANGE_PARTITION_ENABLED
+        if (!export_base_table_item_)
+        {
+            slices_to_scan_.reserve(old_slices_delta_size->size());
+            std::for_each(old_slices_delta_size->begin(),
+                          old_slices_delta_size->end(),
+                          [&](decltype(*old_slices_delta_size->begin()) &elem) {
+                              slices_to_scan_.emplace_back(
+                                  std::move(elem.first.GetShallowCopy()));
+                          });
+        }
+#endif
         for (size_t i = 0; i < core_cnt; i++)
         {
             data_sync_vec_.emplace_back();
@@ -3269,8 +3280,8 @@ public:
             pause_pos_.emplace_back(TxKey(), false);
             if (!export_base_table_item_)
             {
-                assert(old_slices_delta_size_->size() > 0);
-                curr_slice_it_.emplace_back(old_slices_delta_size_->begin());
+                assert(slices_to_scan_.size() > 0);
+                curr_slice_it_.emplace_back(slices_to_scan_.begin());
             }
 #else
             pause_pos_.emplace_back(nullptr, false);
@@ -3485,6 +3496,12 @@ public:
         return node_group_term_;
     }
 
+    void SetNotTruncateLog()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
+    }
+
 #ifdef RANGE_PARTITION_ENABLED
     void UnpinSlices()
     {
@@ -3497,30 +3514,22 @@ public:
             }
         }
     }
-#endif
 
-    void SetNotTruncateLog()
-    {
-        std::lock_guard<std::mutex> lk(mux_);
-        err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
-    }
-
-#ifdef RANGE_PARTITION_ENABLED
     StoreRange *StoreRangePtr() const
     {
         return store_range_;
     }
 
-    std::map<TxKey, int64_t>::const_iterator &CurrentSliceIt(uint16_t core_id)
+    std::vector<TxKey>::const_iterator &CurrentSliceIt(uint16_t core_id)
     {
         assert(!export_base_table_item_);
         return curr_slice_it_[core_id];
     }
 
-    std::map<TxKey, int64_t>::const_iterator EndSliceIt() const
+    std::vector<TxKey>::const_iterator EndSliceIt() const
     {
         assert(!export_base_table_item_);
-        return old_slices_delta_size_->end();
+        return slices_to_scan_.end();
     }
 #endif
 
@@ -3577,13 +3586,10 @@ private:
     // This is used for scan during add index txm.
     bool export_base_table_item_only_{false};
     StoreRange *store_range_{nullptr};
-    // Directory of slice TxKey and the slice delta size.
-    // The main purpose of this variable is to determine whether the slice
-    // currently being scanned needs to be split, if necessary, the pinslice
-    // operation is performed.
-    const std::map<TxKey, int64_t> *old_slices_delta_size_{nullptr};
+    // The start txkey of the slices containing the items to be ckpted.
+    std::vector<TxKey> slices_to_scan_;
     // Slice TxKey currently being scanned.
-    std::vector<std::map<TxKey, int64_t>::const_iterator> curr_slice_it_;
+    std::vector<std::vector<TxKey>::const_iterator> curr_slice_it_;
 #else
     // Used during regular data sync scan. It is used as a hint to decide if a
     // page has dirty data since last round of checkpoint. It is guaranteed that
@@ -7491,6 +7497,7 @@ private:
     size_t free_count_{0};
 };
 
+#ifdef RANGE_PARTITION_ENABLED
 struct ScanSliceDeltaSizeCc : public CcRequestBase
 {
     static constexpr size_t ScanBatchSize = 128;
@@ -7515,13 +7522,15 @@ struct ScanSliceDeltaSizeCc : public CcRequestBase
           store_range_(store_range),
           unfinished_cnt_(core_cnt)
     {
-        assert(store_range_);
         tx_number_ = txn;
         pause_pos_.resize(core_cnt);
         for (size_t i = 0; i < core_cnt; ++i)
         {
             slice_delta_size_.emplace_back();
-            slice_delta_size_.back().reserve(store_range_->SlicesCount());
+            if (store_range_)
+            {
+                slice_delta_size_.back().reserve(store_range_->SlicesCount());
+            }
         }
     }
 
@@ -7638,6 +7647,19 @@ struct ScanSliceDeltaSizeCc : public CcRequestBase
         return store_range_;
     }
 
+    bool SetStoreRange(StoreRange *store_range, uint16_t core_id)
+    {
+        bool res = false;
+        std::lock_guard<std::mutex> lk(mux_);
+        if (store_range_ == nullptr)
+        {
+            store_range_ = store_range;
+            res = true;
+        }
+        slice_delta_size_[core_id].reserve(store_range_->SlicesCount());
+        return res;
+    }
+
     std::pair<TxKey, StoreSlice *> &PausedPos(size_t core_id)
     {
         return pause_pos_[core_id];
@@ -7681,18 +7703,23 @@ private:
 struct SampleSubRangeKeysCc : public CcRequestBase
 {
 public:
-    static constexpr size_t ScanBatchSize = 128;
-    static constexpr size_t SamplePoolSize = 1024;
+    static constexpr uint32_t ScanBatchSize = 128;
+    static constexpr uint32_t SamplePoolSize = 1024;
 
     struct SamplePoolBase
     {
         virtual ~SamplePoolBase() = default;
     };
 
-    template <uint32_t CapacityN, typename KeyT, typename CopyKey>
+    template <typename KeyT, typename CopyKey>
     struct SamplePool : public SamplePoolBase
     {
     public:
+        explicit SamplePool(uint32_t capacity = SamplePoolSize)
+            : random_pairing_(capacity)
+        {
+        }
+
         void Insert(const KeyT &key)
         {
             random_pairing_.Insert(key, ++counter_);
@@ -7704,7 +7731,7 @@ public:
         }
 
     public:
-        RandomPairing<CapacityN, KeyT, CopyKey> random_pairing_;
+        RandomPairing<KeyT, CopyKey> random_pairing_;
         size_t counter_{0};
     };
 
@@ -7715,15 +7742,16 @@ public:
                          uint64_t data_sync_ts,
                          const TxKey *start_key,
                          const TxKey *end_key,
-                         size_t subrange_key_cnt)
+                         size_t target_key_cnt)
         : table_name_(table_name),
           node_group_id_(ng_id),
           node_group_term_(ng_term),
           data_sync_ts_(data_sync_ts),
           start_key_(start_key),
-          end_key_(end_key)
+          end_key_(end_key),
+          target_key_cnt_(target_key_cnt),
+          sample_pool_capacity_(std::max(SamplePoolSize, target_key_cnt_ * 10))
     {
-        subrange_keys_.resize(subrange_key_cnt);
     }
 
     ~SampleSubRangeKeysCc() = default;
@@ -7758,15 +7786,13 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            const CatalogEntry *catalog_entry = ccs.InitCcm(
-                table_name_, node_group_id_, node_group_term_, this);
+            ccs.InitCcm(table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
             // data sync txm.
-            assert(catalog_entry && catalog_entry->schema_);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
+            assert(ccm != nullptr);
         }
-        assert(ccm != nullptr);
         ccm->Execute(*this);
         // return false since SampleSubRangeKeysCc is not re-used and does not
         // need to call CcRequestBase::Free
@@ -7815,6 +7841,16 @@ public:
         return end_key_;
     }
 
+    uint32_t TargetKeyCount() const
+    {
+        return target_key_cnt_;
+    }
+
+    uint32_t SamplePoolCapacity() const
+    {
+        return sample_pool_capacity_;
+    }
+
     TxKey &PausePos()
     {
         return paused_pos_;
@@ -7842,6 +7878,8 @@ private:
     uint64_t data_sync_ts_;
     const TxKey *start_key_;
     const TxKey *end_key_;
+    const uint32_t target_key_cnt_{0};
+    const uint32_t sample_pool_capacity_{0};
     std::vector<TxKey> subrange_keys_;
     TxKey paused_pos_;
 
@@ -7852,5 +7890,6 @@ private:
     bool finished_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 };
+#endif
 
 }  // namespace txservice
