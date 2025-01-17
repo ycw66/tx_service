@@ -732,9 +732,6 @@ private:
 
 struct FetchRecordCc : public FetchCc
 {
-    uint64_t start_ts{0};
-    uint64_t end_ts{0};
-
 public:
     FetchRecordCc() = delete;
     FetchRecordCc(const TableName *tbl_name,

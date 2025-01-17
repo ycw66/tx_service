@@ -1397,11 +1397,6 @@ void CcShard::FetchRecord(const TableName &table_name,
 
     if (fetch_req->RequesterCount() == 1)
     {
-        // TODO(lzx): Is this "start_ts" only for debug ???
-        fetch_req->start_ts =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count();
         if (txservice_skip_kv || fetch_from_primary)
         {
             int64_t primary_node_id = Sharder::Instance().GetPrimaryNodeId();

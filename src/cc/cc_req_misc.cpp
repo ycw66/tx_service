@@ -858,9 +858,6 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 
 void FetchRecordCc::SetFinish(int err)
 {
-    this->end_ts = std::chrono::duration_cast<std::chrono::microseconds>(
-                       std::chrono::system_clock::now().time_since_epoch())
-                       .count();
     error_code_ = err;
     ccs_.Enqueue(this);
 }
