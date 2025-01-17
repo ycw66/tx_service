@@ -435,6 +435,7 @@ struct ScanState
 
 #ifdef RANGE_PARTITION_ENABLED
     ScanState(std::unique_ptr<CcScanner> scanner,
+              uint64_t schema_version,
               const TxKey *end_key,
               bool end_inclusive,
               uint32_t range_id,
@@ -443,6 +444,7 @@ struct ScanState
               bool inclusive,
               SlicePosition position)
         : scanner_(std::move(scanner)),
+          schema_version_(schema_version),
           scan_end_key_(end_key),
           scan_end_inclusive_(end_inclusive),
           range_id_(range_id),
@@ -465,6 +467,7 @@ struct ScanState
         return &slice_last_key_;
     }
 
+    uint64_t schema_version_;
     uint32_t range_id_;
     NodeGroupId range_ng_;
     TxKey slice_last_key_;

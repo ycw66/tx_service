@@ -505,7 +505,6 @@ void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
                                      int64_t term,
                                      uint64_t ckpt_ts)
 {
-#ifndef RUNNING_TXSERVICE_ALONE
     if (!txservice_skip_wal)
     {
         assert(log_agent_ != nullptr);
@@ -515,7 +514,6 @@ void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
     {
         assert(log_agent_ == nullptr);
     }
-#endif
 }
 
 bool Checkpointer::CkptEntryForTest(const TableName &tbl_name,

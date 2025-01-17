@@ -259,6 +259,7 @@ public:
                        ) override;
 
     void ScanNextBatch(const TableName &tbl_name,
+                       const uint64_t schema_version,
                        uint32_t range_id,
                        NodeGroupId range_owner,
                        int64_t cc_ng_term,

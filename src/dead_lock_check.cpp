@@ -132,7 +132,7 @@ void DeadLockCheck::UpdateCheckNodeId(uint32_t node_id)
     }
 }
 
-void DeadLockCheck::GatherLockDependancy()
+bool DeadLockCheck::GatherLockDependancy()
 {
     std::unique_lock<std::mutex> lk(mutex_);
     UpdateCheckNodeId(Sharder::Instance().NodeId());
@@ -195,7 +195,7 @@ void DeadLockCheck::GatherLockDependancy()
 
     if (stop_)
     {
-        return;
+        return false;
     }
 
     if (node_unfinished_ > 0)
@@ -203,12 +203,20 @@ void DeadLockCheck::GatherLockDependancy()
         LOG(INFO) << "[Global dead lock detector]: fails to receive lock "
                      "waiting information from node. Failed nodes: "
                   << node_unfinished_;
-        return;
+        return false;
     }
 
     std::map<TxEdge, int32_t, EdgeLess> map_edge = GenerateTxWaitGraph();
     std::vector<std::vector<TxEdge>> vct_dead = DetectDeadLock(map_edge);
+
+    if (vct_dead.size() == 0)
+    {
+        // No dead lock detected.
+        return false;
+    }
+
     RemoveDeadTransaction(vct_dead);
+    return true;
 }
 
 // This method will preprocess the data that collected from all nodes. The
@@ -228,6 +236,7 @@ std::map<TxEdge, int32_t, EdgeLess> DeadLockCheck::GenerateTxWaitGraph()
          it_wait != txid_waited_entry_map_.end();
          it_wait++)
     {
+        const LockNode &tx_waiting_lock = it_wait->first;
         for (auto &it_ety : it_wait->second.lock_node_set)
         {
             auto it_lock_set = entry_locked_txid_map_.find(it_ety);
@@ -236,20 +245,20 @@ std::map<TxEdge, int32_t, EdgeLess> DeadLockCheck::GenerateTxWaitGraph()
                 continue;
             }
 
-            for (auto &it_lock : it_lock_set->second.lock_node_set)
+            for (auto &tx_holding_lock : it_lock_set->second.lock_node_set)
             {
                 // Some time a transaction need to upgrade lock from read to
                 // write intend or from write intent to write. If it is blocked
                 // by other lock, it will be added into block queue of the
                 // ccentry. If not except this case, it will generate a circle
                 // from this transaction to this transaction.
-                if (it_wait->first == it_lock)
+                if (tx_waiting_lock == tx_holding_lock)
                 {
                     continue;
                 }
 
-                map_edge.emplace(TxEdge(it_wait->first.tx_id, it_lock.tx_id),
-                                 -1);
+                map_edge.emplace(
+                    TxEdge(tx_waiting_lock.tx_id, tx_holding_lock.tx_id), -1);
             }
         }
     }
@@ -480,9 +489,19 @@ void DeadLockCheck::Run()
 
     while (!stop_)
     {
-        CODE_FAULT_INJECTOR("dead_lock_check", {
-            FaultInject::Instance().InjectFault("dead_lock_check", "remove");
-            GatherLockDependancy();
+        CODE_FAULT_INJECTOR("should_detect_dead_lock", {
+            FaultInject::Instance().InjectFault("should_detect_dead_lock",
+                                                "remove");
+            while (!GatherLockDependancy())
+            {
+                std::this_thread::sleep_for(1s);
+            }
+        });
+
+        CODE_FAULT_INJECTOR("should_not_detect_dead_lock", {
+            FaultInject::Instance().InjectFault("should_not_detect_dead_lock",
+                                                "remove");
+            assert(!GatherLockDependancy());
         });
 
         std::unique_lock<std::mutex> lk(mutex_);

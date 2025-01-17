@@ -3068,13 +3068,6 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        if (req.GetSchemaVersion() != 0 && req.GetSchemaVersion() != schema_ts_)
-        {
-            req.Result()->SetError(
-                CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
-            return true;
-        }
-
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
         int64_t tx_term = req.TxTerm();
@@ -3088,6 +3081,13 @@ public:
         if (ng_term < 0)
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
+        }
+
+        if (req.GetSchemaVersion() != 0 && req.GetSchemaVersion() != schema_ts_)
+        {
+            req.Result()->SetError(
+                CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return true;
         }
 
@@ -3793,6 +3793,13 @@ public:
         {
             return req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
+
+        if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
+        {
+            req.SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            return true;
+        }
+
         if (req.SendResponseIfFinished())
         {
             req.UnpinSlices();

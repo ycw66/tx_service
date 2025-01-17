@@ -1329,6 +1329,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
 
 void txservice::LocalCcHandler::ScanNextBatch(
     const TableName &tbl_name,
+    const uint64_t schema_version,
     uint32_t range_id,
     NodeGroupId range_owner,
     int64_t cc_ng_term,
@@ -1358,6 +1359,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
 
         ScanSliceCc *req = scan_slice_pool.NextRequest();
         req->Set(tbl_name,
+                 schema_version,
                  range_id,
                  range_owner,
                  cc_ng_term,
@@ -1412,6 +1414,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
         hd_res.Value().is_local_ = false;
         remote_hd_.ScanNext(cc_shards_.node_id_,
                             tbl_name,
+                            schema_version,
                             range_id,
                             range_owner,
                             cc_ng_term,

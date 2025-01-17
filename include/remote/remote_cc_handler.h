@@ -174,6 +174,7 @@ public:
 
     void ScanNext(uint32_t src_node_id,
                   const TableName &tbl_name,
+                  uint64_t schema_version,
                   uint32_t range_id,
                   NodeGroupId cc_ng_id,
                   int64_t cc_ng_term,

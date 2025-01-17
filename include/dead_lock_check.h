@@ -179,7 +179,7 @@ public:
 
 protected:
     void Run();
-    void GatherLockDependancy();
+    bool GatherLockDependancy();
     std::vector<std::vector<TxEdge>> DetectDeadLock(
         std::map<TxEdge, int32_t, EdgeLess> &map_edge);
     void RemoveDeadTransaction(std::vector<std::vector<TxEdge>> &vct_dead);
@@ -192,7 +192,7 @@ protected:
     // map for cc entry and its locked txids
     std::unordered_map<LockNode, LockNodeSet, NeHash, NeEqual>
         entry_locked_txid_map_;
-    // the map for txid and its waited entrys
+    // the map for txid and the entrys it wants to acquire lock on
     std::unordered_map<LockNode, LockNodeSet, NeHash, NeEqual>
         txid_waited_entry_map_;
     // The map for txids and the number that locked entrys

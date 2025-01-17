@@ -997,6 +997,7 @@ message ScanSliceRequest {
     bool is_require_recs = 20;
     bool is_require_sort = 21;
     uint32 prefetch_size = 22;
+    uint64 schema_version = 23;
 }
 
 message ScanSliceResponse {

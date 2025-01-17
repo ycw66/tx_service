@@ -2180,7 +2180,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                 .append(std::to_string(this->tx_term_));
         });
     const TableName &table_name = *scan_open.tx_req_->tab_name_;
-
+    uint64_t schema_version = scan_open.tx_req_->schema_version_;
     ScanIndexType index_type = scan_open.tx_req_->indx_type_;
     const TxKey &start_key = *scan_open.tx_req_->StartKey();
     bool inclusive = scan_open.tx_req_->start_inclusive_;
@@ -2192,7 +2192,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool is_require_keys = scan_open.tx_req_->is_require_keys_;
     bool is_require_recs = scan_open.tx_req_->is_require_recs_;
     bool is_require_sort = scan_open.tx_req_->is_require_sort_;
-    uint64_t schema_version = scan_open.tx_req_->schema_version_;
 
     scan_open.Reset();
     scan_open.is_running_ = true;
@@ -2338,6 +2337,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     open_result.scanner_->SetStatus(ScannerStatus::Blocked);
     scans_.try_emplace(open_result.scan_alias_,
                        std::move(open_result.scanner_),
+                       scan_open.tx_req_->schema_version_,
                        scan_open.tx_req_->EndKey(),
                        scan_open.tx_req_->end_inclusive_,
                        UINT32_MAX,
@@ -2459,6 +2459,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
             cc_handler_->ScanNextBatch(
                 scan_next.tx_req_->table_name_,
+                scan_state.schema_version_,
                 scan_state.range_id_,
                 scan_state.range_ng_,
                 scan_next.RangeNgTerm(),
@@ -2517,6 +2518,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 // range will match the term.
                 cc_handler_->ScanNextBatch(
                     scan_next.tx_req_->table_name_,
+                    0,
                     scan_state.range_id_,
                     scan_state.range_ng_,
                     -1,

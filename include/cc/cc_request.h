@@ -1894,7 +1894,8 @@ public:
         : start_key_(nullptr),
           end_key_(nullptr),
           start_key_type_(RangeKeyType::RawPtr),
-          end_key_type_(RangeKeyType::RawPtr)
+          end_key_type_(RangeKeyType::RawPtr),
+          schema_version_(0)
     {
         parallel_req_ = true;
     }
@@ -1912,6 +1913,7 @@ public:
     }
 
     void Set(const TableName &tbl_name,
+             uint64_t schema_version,
              uint32_t range_id,
              uint32_t ng_id,
              int64_t ng_term,
@@ -1937,6 +1939,7 @@ public:
         TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>::Reset(
             &tbl_name, &hd_res, ng_id, tx_number, tx_term, protocol, iso_level);
 
+        schema_version_ = schema_version;
         range_id_ = range_id;
 
         if (start_key_type_ == RangeKeyType::UniquePtr)
@@ -1972,6 +1975,7 @@ public:
     }
 
     void Set(const TableName &tbl_name,
+             uint64_t schema_version,
              uint32_t range_id,
              uint32_t ng_id,
              int64_t ng_term,
@@ -1998,6 +2002,7 @@ public:
         TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>::Reset(
             &tbl_name, &hd_res, ng_id, tx_number, tx_term, protocol, iso_level);
 
+        schema_version_ = schema_version;
         range_id_ = range_id;
 
         if (start_key_type_ == RangeKeyType::UniquePtr)
@@ -2451,6 +2456,11 @@ public:
             direction_ == ScanDirection::Forward);
     }
 
+    uint64_t SchemaVersion() const
+    {
+        return schema_version_;
+    }
+
 private:
     enum struct RangeKeyType : uint8_t
     {
@@ -2475,6 +2485,7 @@ private:
 
     RangeKeyType start_key_type_;
     RangeKeyType end_key_type_;
+    uint64_t schema_version_;
     bool start_inclusive_{false};
     bool end_inclusive_{false};
 

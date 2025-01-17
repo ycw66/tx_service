@@ -578,6 +578,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
 void txservice::remote::RemoteCcHandler::ScanNext(
     uint32_t src_node_id,
     const TableName &tbl_name,
+    const uint64_t schema_version,
     uint32_t range_id,
     NodeGroupId cc_ng_id,
     int64_t cc_ng_term,
@@ -609,6 +610,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_slice->set_cc_ng_term(cc_ng_term);
     scan_slice->set_table_name_str(tbl_name.StringView().data());
     scan_slice->set_table_type(ToRemoteType::ConvertTableType(tbl_name.Type()));
+    scan_slice->set_schema_version(schema_version);
     scan_slice->set_range_id(range_id);
     scan_slice->clear_start_key();
     if (start_key->Type() == KeyType::Normal)

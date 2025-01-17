@@ -878,7 +878,7 @@ std::pair<size_t, bool> CcShard::Clean()
     size_t free_cnt = 0;
     bool yield = false;
 
-#ifndef RUNNING_TXSERVICE_ALONE
+#ifndef RUNNING_TXSERVICE_CTEST
     size_t clean_page_cnt = 0, scan_page_cnt = 0;
     uint64_t begin_ts =
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -909,6 +909,9 @@ std::pair<size_t, bool> CcShard::Clean()
 
     yield = ccp != &tail_ccp_;
 #else
+    // tx_service ctest does not call tx_service->Start(), so shard_heap_ is not
+    // initialized.
+    assert(shard_heap_ == nullptr);
     ccp = head_ccp_.lru_next_;
     while (ccp != &tail_ccp_)
     {
@@ -2025,31 +2028,31 @@ void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)
          it_ng != lock_holding_txs_.end();
          it_ng++)
     {
-        for (auto iter = it_ng->second.begin(); iter != it_ng->second.end();
-             iter++)
+        for (auto it_tx = it_ng->second.begin(); it_tx != it_ng->second.end();
+             it_tx++)
         {
             dlr.txid_ety_lock_count_[core_id_].insert(
-                {iter->first, iter->second.cce_list_.size()});
-            for (auto itset = iter->second.cce_list_.begin();
-                 itset != iter->second.cce_list_.end();
-                 itset++)
+                {it_tx->first, it_tx->second.cce_list_.size()});
+            for (auto it_cce = it_tx->second.cce_list_.begin();
+                 it_cce != it_tx->second.cce_list_.end();
+                 it_cce++)
             {
-                NonBlockingLock *key_lock = (*itset)->GetKeyLock();
+                NonBlockingLock *key_lock = (*it_cce)->GetKeyLock();
                 if (key_lock == nullptr)
                 {
                     continue;
                 }
 
                 std::vector<uint64_t> vct =
-                    key_lock->GetBlockTxIds(iter->first);
+                    key_lock->GetBlockTxIds(it_tx->first);
                 if (vct.size() == 0)
                 {
                     continue;
                 }
 
                 auto itet =
-                    entry_lock_info_map.try_emplace((uint64_t) (*itset));
-                itet.first->second.lock_txids.insert(iter->first);
+                    entry_lock_info_map.try_emplace((uint64_t) (*it_cce));
+                itet.first->second.lock_txids.insert(it_tx->first);
 
                 for (uint64_t id : vct)
                 {

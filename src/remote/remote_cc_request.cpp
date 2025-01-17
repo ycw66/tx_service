@@ -1110,6 +1110,7 @@ void txservice::remote::RemoteScanSlice::Reset(
                   ToLocalType::ConvertCcTableType(scan_slice_req.table_type()));
 
     ScanSliceCc::Set(remote_tbl_name_,
+                     scan_slice_req.schema_version(),
                      scan_slice_req.range_id(),
                      scan_slice_req.node_group_id(),
                      scan_slice_req.cc_ng_term(),
