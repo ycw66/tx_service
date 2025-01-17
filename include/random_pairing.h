@@ -15,23 +15,26 @@
 
 namespace txservice
 {
-template <uint32_t CapacityN, typename KeyT, typename CopyKey>
+template <typename KeyT, typename CopyKey>
 class RandomPairing
 {
 public:
-    RandomPairing() = default;
-
-    explicit RandomPairing(const std::vector<KeyT> &keys)
+    explicit RandomPairing(uint32_t capacity) : capacity_(capacity)
     {
-        sample_pool_.reserve(CapacityN);
+    }
+
+    RandomPairing(const std::vector<KeyT> &keys, uint32_t capacity)
+        : capacity_(capacity)
+    {
+        sample_pool_.reserve(capacity_);
 
         for (size_t i = 0; i < keys.size(); ++i)
         {
             const KeyT &key = keys[i];
 
-            // keys.size() maybe larger than CapacityN, in case like shrink node
+            // keys.size() maybe larger than capacity_, in case like shrink node
             // groups. By calling Insert, re-sample from the original sample
-            // pool, and shrink sample pool size to CapacityN.
+            // pool, and shrink sample pool size to capacity_.
             Insert(key, i + 1);
         }
     }
@@ -40,7 +43,7 @@ public:
     {
         if (c1_ + c2_ <= 0)
         {
-            if (static_cast<uint32_t>(sample_pool_.size()) < CapacityN)
+            if (static_cast<uint32_t>(sample_pool_.size()) < capacity_)
             {
                 Insert(key);
                 assert(
@@ -51,7 +54,7 @@ public:
                 std::uniform_int_distribution<uint64_t> random_dis(0,
                                                                    dataset - 1);
                 uint64_t random = random_dis(random_dev_);
-                if (random < CapacityN)
+                if (random < capacity_)
                 {
                     Replace(random, key);
                     assert(std::is_sorted(sample_pool_.begin(),
@@ -67,7 +70,7 @@ public:
 
             if (random < c1_)
             {
-                assert(sample_pool_.size() < CapacityN);
+                assert(sample_pool_.size() < capacity_);
                 assert(c1_ > 0);
                 c1_ -= 1;
 
@@ -100,7 +103,7 @@ public:
             sample_pool_.resize(sample_pool_.size() - 1);
 
             assert(std::is_sorted(sample_pool_.begin(), sample_pool_.end()));
-            assert(sample_pool_.size() < CapacityN);
+            assert(sample_pool_.size() < capacity_);
         }
         else
         {
@@ -118,9 +121,9 @@ public:
         return sample_pool_.size();
     }
 
-    static constexpr uint32_t Capacity()
+    uint32_t Capacity() const
     {
-        return CapacityN;
+        return capacity_;
     }
 
     void Clear()
@@ -138,7 +141,7 @@ public:
 private:
     void Insert(const KeyT &key)
     {
-        assert(sample_pool_.size() < CapacityN);
+        assert(sample_pool_.size() < capacity_);
 
         auto iter =
             std::lower_bound(sample_pool_.begin(), sample_pool_.end(), key);
@@ -163,7 +166,7 @@ private:
             sample_pool_.push_back(key);
         }
 
-        assert(sample_pool_.size() <= CapacityN);
+        assert(sample_pool_.size() <= capacity_);
     }
 
     void Replace(uint64_t random, const KeyT &key)
@@ -203,5 +206,7 @@ private:
     std::vector<KeyT> sample_pool_;
 
     std::mt19937_64 random_dev_;
+
+    uint32_t capacity_{0};
 };
 }  // namespace txservice

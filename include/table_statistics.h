@@ -55,7 +55,8 @@ public:
         }
     };
 
-    using SamplePool = RandomPairing<1024, KeyT, CopyKey>;
+    static constexpr uint32_t sample_pool_capacity = 1024;
+    using SamplePool = RandomPairing<KeyT, CopyKey>;
 
 private:
     struct alignas(64) PerCcShardVar
@@ -72,6 +73,7 @@ public:
         : table_or_index_name_(table_or_index_name),
           ng_id_(ng_id),
           cc_shards_var_(Sharder::Instance().GetLocalCcShardsCount()),
+          sample_pool_(sample_pool_capacity),
           statistics_(statistics)
     {
     }
@@ -83,7 +85,7 @@ public:
         : table_or_index_name_(table_or_index_name),
           ng_id_(ng_id),
           cc_shards_var_(Sharder::Instance().GetLocalCcShardsCount()),
-          sample_pool_(param.sample_keys_),
+          sample_pool_(param.sample_keys_, sample_pool_capacity),
           statistics_(statistics)
     {
         SetRecords(param.records_);
@@ -422,17 +424,17 @@ private:
     }
 
 private:
-    static bool NeedAccumulateRecords(int64_t records)
+    bool NeedAccumulateRecords(int64_t records)
     {
-        return records <= SamplePool::Capacity() ||
+        return records <= sample_pool_.Capacity() ||
                static_cast<uint64_t>(records) %
                        Sharder::Instance().GetLocalCcShardsCount() ==
                    0;
     }
 
-    static bool NeedAccumulateUpserts(int64_t records, int64_t upserts)
+    bool NeedAccumulateUpserts(int64_t records, int64_t upserts)
     {
-        return records <= SamplePool::Capacity() ||
+        return records <= sample_pool_.Capacity() ||
                static_cast<uint64_t>(upserts) %
                        Sharder::Instance().GetLocalCcShardsCount() ==
                    0;
@@ -477,9 +479,9 @@ private:
     // For small tables, do sampling/record on all cc_shards.
     // For large tables, do sampling on a assigned cc_shard.
     // For large tables, do record on per cc_shard.
-    static bool RunOnAllCcShards(int64_t records)
+    bool RunOnAllCcShards(int64_t records)
     {
-        return records <= SamplePool::Capacity();
+        return records <= sample_pool_.Capacity();
     }
 
     // Points to key of index_sample_pool_map_.

@@ -6491,12 +6491,9 @@ public:
         // AnalyzeTableAllCc::slice_sample_pool_ are unique_ptr to a abstract
         // class. But TemplateCcMap::Execute(AnalyzeTableAllCc) expects concrete
         // class.
-        using KeySamplePool = AnalyzeTableAllCc::SamplePool<
-            AnalyzeTableAllCc::sample_pool_capacity_,
-            KeyT,
-            typename TemplateCcMapSamplePool<KeyT>::CopyKey>;
+        using KeySamplePool = AnalyzeTableAllCc::
+            SamplePool<KeyT, typename TemplateCcMapSamplePool<KeyT>::CopyKey>;
         using StoreSliceSamplePool = AnalyzeTableAllCc::SamplePool<
-            AnalyzeTableAllCc::sample_pool_capacity_,
             std::pair<int32_t /*range_id*/, const TemplateStoreSlice<KeyT> *>,
             Copy<std::pair<int32_t, const TemplateStoreSlice<KeyT> *>>>;
 
@@ -6504,7 +6501,8 @@ public:
         {
             if (req.key_sample_pool_ == nullptr)
             {
-                req.key_sample_pool_ = std::make_unique<KeySamplePool>();
+                req.key_sample_pool_ = std::make_unique<KeySamplePool>(
+                    AnalyzeTableAllCc::sample_pool_capacity_);
             }
             return static_cast<KeySamplePool *>(req.key_sample_pool_.get());
         }();
@@ -6514,7 +6512,8 @@ public:
             if (req.store_slice_sample_pool_ == nullptr)
             {
                 req.store_slice_sample_pool_ =
-                    std::make_unique<StoreSliceSamplePool>();
+                    std::make_unique<StoreSliceSamplePool>(
+                        AnalyzeTableAllCc::sample_pool_capacity_);
             }
             return static_cast<StoreSliceSamplePool *>(
                 req.store_slice_sample_pool_.get());

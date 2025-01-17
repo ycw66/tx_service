@@ -4286,10 +4286,14 @@ public:
         virtual uint32_t Size() const = 0;
     };
 
-    template <uint32_t CapacityN, typename KeyT, typename CopyKey>
+    template <typename KeyT, typename CopyKey>
     struct SamplePool : public SamplePoolBase
     {
     public:
+        explicit SamplePool(uint32_t capacity) : random_pairing_(capacity)
+        {
+        }
+
         // Template method is not allowd to be virtual.
         void Insert(const KeyT &key)
         {
@@ -4308,7 +4312,7 @@ public:
         }
 
     public:
-        RandomPairing<CapacityN, KeyT, CopyKey> random_pairing_;
+        RandomPairing<KeyT, CopyKey> random_pairing_;
         size_t counter_{0};
     };
 
