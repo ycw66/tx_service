@@ -1,6 +1,7 @@
 #include "sharder.h"
 
 #include <brpc/channel.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <memory>
@@ -126,7 +127,8 @@ int Sharder::Init(
     std::unique_ptr<TxLog> log_agent,
     const std::string &local_path,
     const uint16_t rep_group_cnt,
-    bool enable_brpc_builtin_services)
+    bool enable_brpc_builtin_services,
+    bool fork_host_manager)
 {
     node_id_ = node_id;
     native_ng_ = ng_id;
@@ -300,39 +302,42 @@ int Sharder::Init(
         hm_port_ = *hm_port;
 #ifdef FORK_HM_PROCESS
         // Fork host manager process.
-
-        hm_ip_ = "0.0.0.0";
-        assert(hm_bin_path != nullptr);
-        DLOG(INFO) << "Forking host manager process with " << *hm_bin_path
-                   << ", the hm will be listening on " << hm_ip_ << ":"
-                   << hm_port_;
-        int pid = fork();
-        if (pid == -1)
+        if (fork_host_manager)
         {
-            LOG(FATAL) << "Failed to fork host manager process";
-            return -1;
-        }
-        if (pid == 0)
-        {
-            std::string log_path = local_path + "/tx_service";
-            if (execl(hm_bin_path->c_str(),
-                      "host_manager",
-                      hm_ip_.c_str(),
-                      std::to_string(hm_port_).c_str(),
-                      log_path.c_str(),
-                      enable_brpc_builtin_services ? "Y" : "N",
-#if BRPC_WITH_GLOG
-                      FLAGS_log_dir.c_str(),
-#endif
-                      (char *) 0) == -1)
+            hm_ip_ = "0.0.0.0";
+            assert(hm_bin_path != nullptr);
+            DLOG(INFO) << "Forking host manager process with " << *hm_bin_path
+                       << ", the hm will be listening on " << hm_ip_ << ":"
+                       << hm_port_;
+            int pid = fork();
+            if (pid == -1)
             {
-                LOG(ERROR) << "Failed to start host manager process, errno: "
-                           << errno;
+                LOG(FATAL) << "Failed to fork host manager process";
+                return -1;
             }
-            // Should not reach here if exec succeeds.
-            std::exit(0);
-        }
+            if (pid == 0)
+            {
+                std::string log_path = local_path + "/tx_service";
+                if (execl(hm_bin_path->c_str(),
+                          "host_manager",
+                          hm_ip_.c_str(),
+                          std::to_string(hm_port_).c_str(),
+                          log_path.c_str(),
+                          enable_brpc_builtin_services ? "Y" : "N",
+#if BRPC_WITH_GLOG
+                          FLAGS_log_dir.c_str(),
 #endif
+                          (char *) 0) == -1)
+                {
+                    LOG(ERROR)
+                        << "Failed to start host manager process, errno: "
+                        << errno;
+                }
+                // Should not reach here if exec succeeds.
+                std::exit(0);
+            }
+#endif
+        }
         int max_retries = 300;
         int retries = 0;
         int delay_ms = 200;
@@ -368,6 +373,7 @@ int Sharder::Init(
         req.set_node_id(node_id_);
         req.set_ng_id(native_ng_);
         req.set_config_version(config_version);
+        req.set_txservice_pid(getpid());
         if (log_agent_)
         {
             req.set_log_replica_num(log_agent_->LogGroupReplicaNum());

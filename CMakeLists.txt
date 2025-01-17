@@ -274,6 +274,8 @@ SET(RaftHM_SOURCES
     ${HOST_MANAGER_SOURCE_DIR}/src/main.cpp
     ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager_service.cpp
     ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager.cpp
+    ${HOST_MANAGER_SOURCE_DIR}/src/ini.c
+    ${HOST_MANAGER_SOURCE_DIR}/src/INIReader.cpp
     ${PROTO_SRC}/${PROTO_NAME}.pb.cc
     ${LOG_PROTO_SRC}/log_agent.cpp
     ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc

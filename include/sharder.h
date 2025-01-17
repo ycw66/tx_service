@@ -273,7 +273,8 @@ public:
              std::unique_ptr<TxLog> log_agent,
              const std::string &local_path,
              const uint16_t rep_group_cnt,
-             bool enable_brpc_builtin_services);
+             bool enable_brpc_builtin_services,
+             bool fork_host_manager);
 
     /**
      * @brief Checks if the current leader of the input cc node group is on the

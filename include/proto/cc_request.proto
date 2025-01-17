@@ -3,6 +3,8 @@ package txservice.remote;
 
 option cc_generic_services = true;
 
+import "google/protobuf/empty.proto";
+
 enum StreamType {
     RegularCcStream = 0;
     LongMsgCcStream = 1;
@@ -561,6 +563,7 @@ message StartNodeRequest
     repeated int32 log_ports = 6;
     int32 log_replica_num = 7;
     uint32 ng_id = 8;
+    int32 txservice_pid = 9;
 }
 
 message StartNodeResponse
@@ -612,6 +615,40 @@ message UpdateNodeGroupConfigResponse
 	bool error = 1;
 }
 
+
+enum ErrorCode {
+    Success = 0;
+    InProgress = 1;
+    StatusUpdateError = 2;
+    InvalidRequestParamsError = 3;
+    SystemError = 4;
+}
+
+message DetachTxServiceResponse {
+    ErrorCode err_code = 1;
+}
+
+message AttachTxServiceRequest {
+    string config_path = 1;
+}
+
+message AttachTxServiceResponse {
+    ErrorCode err_code = 1;
+    string err_msg = 2;
+}
+
+message HmHealthzHttpResponse {
+    enum HmStatus {
+        Initializing = 0;
+        Started = 1;
+        Terminated = 2;
+        Attaching = 3;
+        Detaching = 4;
+    }
+    
+    HmStatus hm_status = 1;
+}
+
 service HostMangerService {
 	rpc StartNode(StartNodeRequest) returns (StartNodeResponse);
 	rpc UpdateNodeGroupConfigs(UpdateNodeGroupConfigRequest) returns (UpdateNodeGroupConfigResponse);
@@ -619,6 +656,9 @@ service HostMangerService {
 	
 	// Transfer API should only be exposed to raft host manager implementation
 	rpc Transfer(TransferRequest) returns (TransferResponse);
+    rpc CheckHealth(google.protobuf.Empty) returns (HmHealthzHttpResponse);
+    rpc DetachTxService(google.protobuf.Empty) returns (DetachTxServiceResponse);
+    rpc AttachTxService(AttachTxServiceRequest) returns (AttachTxServiceResponse);
 }
 
 message TxId_msg {

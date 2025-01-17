@@ -1113,7 +1113,8 @@ public:
               const std::map<std::string, uint32_t> &conf,
               std::unique_ptr<TxLog> log_agent,
               const std::string &local_path,
-              bool enable_brpc_builtin_services = true)
+              bool enable_brpc_builtin_services = true,
+              bool fork_host_manager = true)
     {
         if (!txservice_enable_cache_replacement && !txservice_skip_kv)
         {
@@ -1144,7 +1145,8 @@ public:
                                      std::move(log_agent),
                                      local_path,
                                      ng_rep_cnt,
-                                     enable_brpc_builtin_services) < 0)
+                                     enable_brpc_builtin_services,
+                                     fork_host_manager) < 0)
 
         {
             return -1;
