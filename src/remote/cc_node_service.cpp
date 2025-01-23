@@ -2001,5 +2001,44 @@ void CcNodeService::CheckCkptStatus(
     return;
 }
 
+void CcNodeService::UpdateLogGroupConfig(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::UpdateLogGroupConfigRequest *request,
+    ::txservice::remote::UpdateLogGroupConfigResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    std::vector<std::string> ips;
+    std::vector<uint16_t> ports;
+    for (const auto &ip : request->ips())
+    {
+        ips.push_back(ip);
+    }
+    for (const auto &port : request->ports())
+    {
+        ports.push_back(port);
+    }
+    if (Sharder::Instance().GetLogAgent()->UpdateLogGroupConfig(
+            ips, ports, request->log_group_id()))
+    {
+        // Update the log group config in the raft host manager
+        brpc::Channel *channel = Sharder::Instance().GetHostManagerChannel();
+        if (!channel)
+        {
+            LOG(ERROR) << "Failed to get host manager channel";
+            response->set_error(true);
+            return;
+        }
+        remote::HostMangerService_Stub stub(channel);
+        brpc::Controller cntl;
+        // RPC call to host manager will set the response for us.
+        stub.UpdateLogGroupConfig(&cntl, request, response, nullptr);
+    }
+    else
+    {
+        response->set_error(true);
+    }
+}
+
 }  // namespace remote
 }  // namespace txservice

@@ -92,17 +92,17 @@ public:
         log_agent_.TransferLeader(log_group_id, leader_idx);
     }
 
-    uint32_t LogGroupCount() const override
+    uint32_t LogGroupCount() override
     {
         return log_agent_.LogGroupCount();
     }
 
-    uint32_t LogGroupReplicaNum() const override
+    uint32_t LogGroupReplicaNum() override
     {
         return log_agent_.LogGroupReplicaNum();
     }
 
-    uint32_t GetLogGroupId(uint64_t tx_number) const override
+    uint32_t GetLogGroupId(uint64_t tx_number) override
     {
         return tx_number % log_agent_.LogGroupCount();
     }
@@ -143,6 +143,13 @@ public:
         uint32_t log_group_id, const std::string &id) override
     {
         return log_agent_.CheckClusterScaleStatus(log_group_id, id);
+    }
+
+    bool UpdateLogGroupConfig(std::vector<std::string> &ips,
+                              std::vector<uint16_t> &ports,
+                              uint32_t log_group_id) override
+    {
+        return log_agent_.UpdateLogGroupConfig(ips, ports, log_group_id);
     }
 
 private:

@@ -631,6 +631,11 @@ public:
             std::memory_order_acquire);
     }
 
+    brpc::Channel *GetHostManagerChannel()
+    {
+        return &hm_channel_;
+    }
+
 private:
     Sharder();
 

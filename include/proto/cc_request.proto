@@ -466,6 +466,17 @@ message FetchClusterBackupRequest{
     string backup_name = 1;
 }
 
+message UpdateLogGroupConfigRequest{
+    repeated string ips = 1;
+    repeated uint32 ports = 2;
+    uint32 log_group_id = 3;
+}
+
+message UpdateLogGroupConfigResponse{
+    bool error = 1;
+    string error_msg = 2;
+}
+
 
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
@@ -506,6 +517,7 @@ service CcRpcService {
     rpc FetchClusterBackup(FetchClusterBackupRequest) returns (ClusterBackupResponse);
     rpc NotifyShutdownCkpt(NotifyShutdownCkptRequest) returns (NotifyShutdownCkptResponse);
     rpc CheckCkptStatus(CheckCkptStatusRequest) returns (CheckCkptStatusResponse);
+    rpc UpdateLogGroupConfig(UpdateLogGroupConfigRequest) returns (UpdateLogGroupConfigResponse);
 }
 
 enum ShutdownStatus{
@@ -653,6 +665,7 @@ service HostMangerService {
 	rpc StartNode(StartNodeRequest) returns (StartNodeResponse);
 	rpc UpdateNodeGroupConfigs(UpdateNodeGroupConfigRequest) returns (UpdateNodeGroupConfigResponse);
 	rpc GetLeader(GetLeaderRequest) returns (GetLeaderResponse);
+    rpc UpdateLogGroupConfig(UpdateLogGroupConfigRequest) returns (UpdateLogGroupConfigResponse);
 	
 	// Transfer API should only be exposed to raft host manager implementation
 	rpc Transfer(TransferRequest) returns (TransferResponse);

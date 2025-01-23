@@ -214,6 +214,12 @@ public:
         ::txservice::remote::CheckCkptStatusResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void UpdateLogGroupConfig(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::UpdateLogGroupConfigRequest *request,
+        ::txservice::remote::UpdateLogGroupConfigResponse *response,
+        ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

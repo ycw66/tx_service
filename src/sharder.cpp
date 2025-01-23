@@ -459,6 +459,10 @@ uint16_t Sharder::ShardBucketIdToCoreIdx(uint16_t bucket_id)
 std::shared_ptr<brpc::Channel> Sharder::GetCcNodeServiceChannel(
     uint32_t node_id)
 {
+    if (!cc_nodes_init_.load(std::memory_order_acquire))
+    {
+        return nullptr;
+    }
     std::shared_lock<std::shared_mutex> lk(node_channel_mux_);
     auto channel_it = cc_node_service_channels_.find(node_id);
     if (channel_it == cc_node_service_channels_.end())
@@ -505,6 +509,10 @@ std::shared_ptr<brpc::Channel> Sharder::GetCcNodeServiceChannel(
 std::shared_ptr<brpc::Channel> Sharder::UpdateCcNodeServiceChannel(
     uint32_t node_id, std::shared_ptr<brpc::Channel> old_channel)
 {
+    if (!cc_nodes_init_.load(std::memory_order_acquire))
+    {
+        return nullptr;
+    }
     std::string ip;
     uint16_t port;
     GetNodeAddress(node_id, ip, port);
