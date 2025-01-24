@@ -17,7 +17,6 @@
 #include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "proto/cc_request.pb.h"
 #include "tx_serialize.h"
-#include "tx_service_common.h"
 #include "txlog.h"
 #include "type.h"
 

@@ -11,10 +11,11 @@
 #include "cc/cc_entry.h"
 #include "cc_handler_result.h"
 #include "cc_req_base.h"
+#include "cc_req_misc.h"  // FetchRangeSlicesReq
 #include "cc_request.pb.h"
 #include "error_messages.h"
-#include "range_record.h"
-// #include "range_slice.h"
+#include "range_slice.h"  // SplitRangeInfo
+#include "sharder.h"      // NodeConfig
 #include "store/data_store_scanner.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -123,11 +124,20 @@ public:
         return true;
     }
 
+    /**
+     * @param write_time is used to maintain idempotence. For eventual
+     * consistency storage, records with larger write_time wins. Cassandra
+     * supports microsecond precision write_time, BigTable supports milliseconds
+     * write_time, while DynamoDB and RocksDB don't support write_time. For
+     * commit, write_time is equal to commit_ts. For rollback, there is no
+     * commit_ts, and write_time is equal max(last_valid_ts..., last_write_time)
+     * + 1.
+     */
     virtual void UpsertTable(
         const TableSchema *old_table_schema,
         const TableSchema *new_table_schema,
         OperationType op_type,
-        uint64_t commit_ts,
+        uint64_t write_time,
         NodeGroupId ng_id,
         int64_t tx_term,
         CcHandlerResult<Void> *hd_res,
