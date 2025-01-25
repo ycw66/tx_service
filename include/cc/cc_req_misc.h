@@ -620,6 +620,11 @@ public:
         return ((uint64_t) node_id << 10) << 32L | UINT32_MAX;
     }
 
+    uint16_t &RetryCnt()
+    {
+        return retry_cnt_;
+    }
+
     const TableName *table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
     TxKey tx_key_;
@@ -635,6 +640,7 @@ public:
     // Only used for fetch record from primary
     int64_t standby_term_;
     std::function<void(CcShard &)> handle_resp_;
+    uint16_t retry_cnt_{0};
 };
 
 struct RunOnTxProcessorCc : public CcRequestBase

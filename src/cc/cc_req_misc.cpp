@@ -727,7 +727,8 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
       cce_(cce),
       ccm_(ccm),
       range_id_(range_id),
-      fetch_from_primary_(fetch_from_primary)
+      fetch_from_primary_(fetch_from_primary),
+      retry_cnt_(0)
 {
 }
 
@@ -819,6 +820,7 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 void FetchRecordCc::SetFinish(int err)
 {
     error_code_ = err;
+    retry_cnt_ = 0;
     ccs_.Enqueue(this);
 }
 
