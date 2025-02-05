@@ -19,7 +19,6 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
-#include "catalog.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc/non_blocking_lock.h"
@@ -411,11 +410,6 @@ public:
     size_t QueueSize()
     {
         return cc_queue_size_.load(std::memory_order_relaxed);
-    }
-
-    Catalog *GetCatalog()
-    {
-        return nullptr;
     }
 
     CatalogFactory *GetCatalogFactory()

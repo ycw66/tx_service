@@ -608,7 +608,7 @@ private:
 
     // The dbs (for EloqKV) this txm has read.
     // All elements are value-initialized to {nullptr,0(schema_version)}
-    // TODO: accommodate for MonographDB
+    // TODO: accommodate for EloqSql
     std::array<std::pair<NonBlockingLock *, uint64_t>, RedisDBCnt> locked_db_{};
 
     // TODO(zkl): allocate these fields on heap since they are rarely used.

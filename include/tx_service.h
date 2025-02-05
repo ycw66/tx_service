@@ -26,7 +26,6 @@
 #include <utility>
 #include <vector>
 
-#include "catalog.h"
 #include "catalog_factory.h"
 #include "checkpointer.h"
 #include "circular_queue.h"
@@ -1017,7 +1016,7 @@ public:
         TxLog *log_hd,                      // = nullptr,
         bool enable_mvcc = true,
         bool skip_wal = false,
-        bool skip_kv = false,  // only used in mono_redis
+        bool skip_kv = false,  // only used in eloqkv
         bool enable_cache_replacement = true,
         metrics::MetricsRegistry *metrics_registry = nullptr,
         metrics::CommonLabels common_labels = {},

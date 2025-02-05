@@ -1958,8 +1958,7 @@ private:
     // TODO: Better separate lock of catalog ccmap from CcShard locks
     //
     // The uint64_t represents the table schema version and it is only used in
-    // eloqkv, the schema version in eloqsql will be passed via ha_monograph
-    // handler.
+    // eloqkv, the schema version in eloqsql will be passed via storage handler.
     absl::flat_hash_map<std::string, std::pair<NonBlockingLock *, uint64_t>>
         table_locks_;
 };

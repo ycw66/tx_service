@@ -556,8 +556,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 if (info->recovery_error_)
                 {
                     LOG(ERROR)
-                        << "monographdb failed to recovery on ccnode group:"
-                        << cc_ng_id << " with term:" << cc_ng_term;
+                        << "Failed to recovery on ccnode group:" << cc_ng_id
+                        << " with term:" << cc_ng_term;
                 }
                 else
                 {
