@@ -136,18 +136,19 @@ struct CatalogEntry
 {
     CatalogEntry() = default;
 
-    ~CatalogEntry();
+    ~CatalogEntry() = default;
 
     void InitSchema(std::unique_ptr<TableSchema> schema, uint64_t version_ts)
     {
+        std::unique_lock<std::shared_mutex> lk(s_mux_);
         assert(version_ts > 0);
 
-        if (Version() < version_ts)
+        if (schema_version_ < version_ts)
         {
             schema_ = std::move(schema);
             schema_version_ = version_ts;
         }
-        if (DirtyVersion() <= version_ts)
+        if (dirty_schema_version_ <= version_ts)
         {
             dirty_schema_ = nullptr;
             dirty_schema_version_ = 0;
@@ -157,6 +158,7 @@ struct CatalogEntry
     void SetDirtySchema(std::unique_ptr<TableSchema> dirty_schema,
                         uint64_t dirty_version_ts)
     {
+        std::unique_lock<std::shared_mutex> lk(s_mux_);
         if (dirty_version_ts > dirty_schema_version_ &&
             dirty_version_ts > schema_version_)
         {
@@ -167,6 +169,7 @@ struct CatalogEntry
 
     void CommitDirtySchema()
     {
+        std::unique_lock<std::shared_mutex> lk(s_mux_);
         if (dirty_schema_version_ > schema_version_)
         {
             if (dirty_schema_)
@@ -185,24 +188,9 @@ struct CatalogEntry
 
     void RejectDirtySchema()
     {
+        std::unique_lock<std::shared_mutex> lk(s_mux_);
         dirty_schema_.reset();
         dirty_schema_version_ = 0;
-    }
-
-    /**
-     * @brief The version of the schema, represented by the commit timestamp
-     * when the schema is last modified. Timestamp being 0 means that the schema
-     * is unspecified.
-     *
-     */
-    uint64_t Version() const
-    {
-        return schema_version_;
-    }
-
-    uint64_t DirtyVersion() const
-    {
-        return dirty_schema_version_;
     }
 
 #ifndef RANGE_PARTITION_ENABLED
@@ -262,9 +250,6 @@ struct CatalogEntry
     uint64_t dirty_schema_version_{0};
 
     std::shared_mutex s_mux_;
-    std::condition_variable_any cv_;
-    bool committing_{false};
-    uint32_t waiting_thd_cnt_{0};
 };
 
 /**

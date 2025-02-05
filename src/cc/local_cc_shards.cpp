@@ -316,7 +316,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
     {
         // If the input schema version is greater than the existing one,
         // replaces the existing scheme with the new one.
-        if (catalog_entry.Version() < commit_ts)
+        if (catalog_entry.schema_version_ < commit_ts)
         {
             catalog_entry.InitSchema(
                 catalog_image.empty()
@@ -325,7 +325,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
                           table_name, catalog_image, commit_ts),
                 commit_ts);
         }
-        else if (catalog_entry.Version() == commit_ts)
+        else if (catalog_entry.schema_version_ == commit_ts)
         {
             // It is kv_store_failure and is restoring old schema, treat as
             // create successfully.
@@ -366,7 +366,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
     auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
     CatalogEntry &catalog_entry = catalog_it.first->second;
 
-    if (catalog_it.second || catalog_entry.Version() == 0)
+    if (catalog_it.second || catalog_entry.schema_version_ == 0)
     {
         // If catalog entry is not initialized yet, use the old schema image
         // stored in prepare log to restore old schema.
@@ -378,8 +378,8 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
             old_schema_ts);
     }
 
-    if (catalog_entry.Version() < dirty_schema_ts &&
-        catalog_entry.DirtyVersion() < dirty_schema_ts)
+    if (catalog_entry.schema_version_ < dirty_schema_ts &&
+        catalog_entry.dirty_schema_version_ < dirty_schema_ts)
     {
         // For idempotency, only installs the dirty version when the input ts is
         // greater than the existing version and dirty version.
@@ -391,8 +391,8 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
             dirty_schema_ts);
         return {true, &catalog_entry};
     }
-    else if (catalog_entry.Version() == old_schema_ts &&
-             catalog_entry.DirtyVersion() == dirty_schema_ts)
+    else if (catalog_entry.schema_version_ == old_schema_ts &&
+             catalog_entry.dirty_schema_version_ == dirty_schema_ts)
     {
         // Rerun ReplayLogCc req.
         return {true, &catalog_entry};
@@ -421,8 +421,8 @@ CatalogEntry *LocalCcShards::CreateDirtyCatalog(
     auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
     CatalogEntry &catalog_entry = catalog_it.first->second;
 
-    if (catalog_entry.Version() < commit_ts &&
-        catalog_entry.DirtyVersion() < commit_ts)
+    if (catalog_entry.schema_version_ < commit_ts &&
+        catalog_entry.dirty_schema_version_ < commit_ts)
     {
         // For idempotency, only installs the dirty version when the input ts is
         // greater than the existing version and dirty version.
@@ -499,7 +499,9 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
         auto catalog_it = ng_catalog_map.find(cc_ng_id);
         if (catalog_it != ng_catalog_map.end())
         {
-            const CatalogEntry &catalog_entry = catalog_it->second;
+            CatalogEntry &catalog_entry =
+                const_cast<CatalogEntry &>(catalog_it->second);
+            std::shared_lock<std::shared_mutex> lk(catalog_entry.s_mux_);
             if (catalog_entry.schema_ != nullptr)
             {
                 auto ins_it = tables.emplace(
@@ -532,7 +534,7 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                 // dirty index table before the `snapshot_ts`, then, there is no
                 // need to do checkpoint or table stats sync.
                 if (catalog_entry.dirty_schema_ != nullptr &&
-                    catalog_entry.DirtyVersion() <= snapshot_ts)
+                    catalog_entry.dirty_schema_version_ <= snapshot_ts)
                 {
                     // Only search new index table name, because the base table
                     // and the old index have been obtained via above.
@@ -1468,29 +1470,33 @@ std::shared_ptr<TableSchema> LocalCcShards::GetSharedTableSchema(
 
     CatalogEntry &catalog_entry = catalog_it->second;
 
+    std::shared_lock<std::shared_mutex> catalog_s_lk(catalog_entry.s_mux_);
+    return catalog_it->second.schema_;
+}
+
+std::shared_ptr<TableSchema> LocalCcShards::GetSharedDirtyTableSchema(
+    const TableName &table_name, NodeGroupId ng_id)
+{
+    TableName base_table_name(table_name.GetBaseTableNameSV(),
+                              TableType::Primary);
+    std::shared_lock<std::shared_mutex> shards_lk(meta_data_mux_);
+
+    auto ng_catalog_it = table_catalogs_.find(base_table_name);
+    if (ng_catalog_it == table_catalogs_.end())
     {
-        std::shared_lock<std::shared_mutex> catalog_s_lk(catalog_entry.s_mux_);
-        if (!catalog_entry.committing_)
-        {
-            return catalog_entry.schema_;
-        }
+        return nullptr;
     }
 
-    std::unique_lock<std::shared_mutex> catalog_lk(catalog_entry.s_mux_);
-    // Releases the shared lock on the catatalog collection while keeping the
-    // exclusive lock on the specified table's catalog. This allows other tx's
-    // to create, drop or alter other tables' catalogs and the cc node to clear
-    // all associating table catalogs when it steps down from the leader.
-    // Stepping down will de-allocate the catalog entry, which synchronizes with
-    // runtime threads obtaining a catalog pointer via the catalog entry's lock.
-    shards_lk.unlock();
+    auto catalog_it = ng_catalog_it->second.find(ng_id);
+    if (catalog_it == ng_catalog_it->second.end())
+    {
+        return nullptr;
+    }
 
-    ++catalog_entry.waiting_thd_cnt_;
-    catalog_entry.cv_.wait(
-        catalog_lk, [&catalog_entry] { return !catalog_entry.committing_; });
-    --catalog_entry.waiting_thd_cnt_;
+    CatalogEntry &catalog_entry = catalog_it->second;
 
-    return catalog_entry.schema_;
+    std::shared_lock<std::shared_mutex> catalog_s_lk(catalog_entry.s_mux_);
+    return catalog_entry.dirty_schema_;
 }
 
 TableRangeEntry *LocalCcShards::GetTableRangeEntryInternal(

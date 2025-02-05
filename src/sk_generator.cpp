@@ -276,13 +276,21 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                                      int64_t ng_term,
                                      uint64_t tx_number)
 {
+    assert(new_indexes_name_->size() > 0);
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
-    auto catalog_entry =
-        cc_shards->GetCatalog(*base_table_name_, node_group_id_);
-    // In this case, we can get the dirty schema safely, because the this node
-    // group has hold the catalog write intent lock already.
-    table_schema_ = catalog_entry->dirty_schema_;
-    assert(table_schema_.get() != nullptr && new_indexes_name_->size() > 0);
+    table_schema_ = cc_shards->GetSharedDirtyTableSchema(
+        new_indexes_name_->front(), node_group_id_);
+    if (table_schema_ == nullptr)
+    {
+        // The dirty schema is not available, thare are two situations:
+        // 1) The node is no longer the leader of the node group. 2) The catalog
+        // already been committed.
+        LOG(ERROR)
+            << "ScanAndEncodeIndex: Get table dirty schema failed for table: "
+            << base_table_name_->StringView() << " of ng#" << node_group_id_;
+        task_result_ = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+        return;
+    }
     size_t core_cnt = cc_shards->Count();
 
     DataSyncScanCc scan_req(*base_table_name_,

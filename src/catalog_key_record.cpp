@@ -392,16 +392,4 @@ CatalogRecord &CatalogRecord::operator=(CatalogRecord &&rhs)
     return *this;
 }
 
-CatalogEntry::~CatalogEntry()
-{
-    {
-        std::unique_lock<std::shared_mutex> lk(s_mux_);
-        committing_ = false;
-    }
-    cv_.notify_all();
-
-    std::unique_lock<std::shared_mutex> lk(s_mux_);
-    cv_.wait(lk, [this] { return waiting_thd_cnt_ == 0; });
-}
-
 }  // namespace txservice

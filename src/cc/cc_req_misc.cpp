@@ -575,7 +575,7 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
         if (catalog_entry != nullptr)
         {
             // Successfully load table catalog from data store.
-            assert(catalog_entry->Version() > 0);
+            assert(catalog_entry->schema_version_ > 0);
 
             // For a filling range slice request, there must be a prior
             // request reading and locking the table's schema, to prevent
@@ -991,7 +991,7 @@ bool RestoreCcMapCc::Execute(CcShard &ccs)
         if (catalog_entry != nullptr)
         {
             // Successfully load table catalog from data store.
-            assert(catalog_entry->Version() > 0);
+            assert(catalog_entry->schema_version_ > 0);
 
             // For a filling range slice request, there must be a prior
             // request reading and locking the table's schema, to prevent

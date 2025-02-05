@@ -1338,6 +1338,9 @@ public:
     std::shared_ptr<TableSchema> GetSharedTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
 
+    std::shared_ptr<TableSchema> GetSharedDirtyTableSchema(
+        const TableName &table_name, NodeGroupId ng_id);
+
 #ifdef RANGE_PARTITION_ENABLED
     /**
      * @brief Kickout a page assigned by clean_guard.

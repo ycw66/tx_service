@@ -369,7 +369,7 @@ public:
 
                 schema_rec->Set(catalog_entry->schema_,
                                 catalog_entry->dirty_schema_,
-                                catalog_entry->Version());
+                                catalog_entry->schema_version_);
             }
             else
             {
@@ -540,7 +540,7 @@ public:
                 {
                     schema_rec->Set(catalog_entry->dirty_schema_,
                                     nullptr,
-                                    catalog_entry->DirtyVersion());
+                                    catalog_entry->dirty_schema_version_);
                 }
             }
             else
@@ -573,7 +573,7 @@ public:
         const TableSchema *old_schema = catalog_entry->schema_.get();
         const TableSchema *new_schema = catalog_entry->dirty_schema_.get();
         if (req.CommitType() == PostWriteType::PostCommit &&
-            catalog_entry->DirtyVersion() > 0)
+            catalog_entry->dirty_schema_version_ > 0)
         {
             if (req.OpType() == OperationType::TruncateTable)
             {
@@ -633,7 +633,8 @@ public:
                 // node-level schema view. The version timestamp of the schema
                 // is 0, if the schema is uninitialized (null). Or, the current
                 // schema must not be null.
-                assert(catalog_entry->Version() == 0 || old_schema != nullptr);
+                assert(catalog_entry->schema_version_ == 0 ||
+                       old_schema != nullptr);
 
                 // This is a DROP TABLE statement. Drops the cc maps
                 // associated with the table in the final commit step.
@@ -669,7 +670,7 @@ public:
             }
             else if (req.OpType() == OperationType::CreateTable)
             {
-                assert(catalog_entry->DirtyVersion() > 0 &&
+                assert(catalog_entry->dirty_schema_version_ > 0 &&
                        new_schema != nullptr);
 
                 // This is a CREATE TABLE statement. Creates the cc maps
@@ -707,7 +708,7 @@ public:
                         base_range_table_name,
                         new_schema,
                         req.NodeGroupId(),
-                        catalog_entry->DirtyVersion(),
+                        catalog_entry->dirty_schema_version_,
                         false);
                 }
 #endif
@@ -745,7 +746,7 @@ public:
                                     index_range_table_name,
                                     new_schema,
                                     req.NodeGroupId(),
-                                    catalog_entry->DirtyVersion(),
+                                    catalog_entry->dirty_schema_version_,
                                     false);
                             }
 #endif
@@ -771,11 +772,11 @@ public:
             }
 
             UpdateTableLocks(table_key->Name().StringView(),
-                             catalog_entry->DirtyVersion(),
+                             catalog_entry->dirty_schema_version_,
                              cce_ptr->GetKeyLock());
         }
         else if (req.CommitType() == PostWriteType::PrepareCommit &&
-                 catalog_entry->DirtyVersion() > 0)
+                 catalog_entry->dirty_schema_version_ > 0)
         {
             // Prepare commit. For certain schema operations, e.g., create
             // secondary index, the cc map is modified in the prepare commit
@@ -815,7 +816,7 @@ public:
                             new_index_range_name,
                             new_schema,
                             req.NodeGroupId(),
-                            catalog_entry->DirtyVersion());
+                            catalog_entry->dirty_schema_version_);
                     }
                 }
             }
@@ -823,7 +824,7 @@ public:
 
         if (req.CommitType() == PostWriteType::PostCommit &&
             shard_->core_id_ == shard_->core_cnt_ - 1 &&
-            catalog_entry->DirtyVersion() > 0)
+            catalog_entry->dirty_schema_version_ > 0)
         {
             // If this is a drop table req, drop the range table also
             // Drop table range before drop catalog
@@ -939,7 +940,7 @@ public:
             // the catalog has been constructed at this node. If so, turns
             // this request into a read-outside request that installs the
             // value in the cc entry.
-            if (catalog_entry != nullptr && catalog_entry->Version() > 0)
+            if (catalog_entry != nullptr && catalog_entry->schema_version_ > 0)
             {
                 if (catalog_entry->schema_ != nullptr)
                 {
@@ -961,14 +962,14 @@ public:
                     cce->payload_ = std::make_unique<CatalogRecord>();
                     cce->payload_->Set(catalog_entry->schema_,
                                        catalog_entry->dirty_schema_,
-                                       catalog_entry->Version());
-                    cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
-                                                  RecordStatus::Normal);
+                                       catalog_entry->schema_version_);
+                    cce->SetCommitTsPayloadStatus(
+                        catalog_entry->schema_version_, RecordStatus::Normal);
                 }
                 else
                 {
-                    cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
-                                                  RecordStatus::Deleted);
+                    cce->SetCommitTsPayloadStatus(
+                        catalog_entry->schema_version_, RecordStatus::Deleted);
                 }
             }
             else
@@ -1191,10 +1192,11 @@ public:
                 // Pk range table ccmap
                 const TableName base_range_name{table_name.StringView(),
                                                 TableType::RangePartition};
-                shard_->CreateOrUpdateRangeCcMap(base_range_name,
-                                                 old_schema,
-                                                 req.NodeGroupId(),
-                                                 catalog_entry->Version());
+                shard_->CreateOrUpdateRangeCcMap(
+                    base_range_name,
+                    old_schema,
+                    req.NodeGroupId(),
+                    catalog_entry->schema_version_);
 #endif
 
                 // Old sk table ccmap using old schema.
@@ -1208,10 +1210,11 @@ public:
                     // old sk range table ccmap
                     const TableName old_index_range_name{
                         old_index_name.StringView(), TableType::RangePartition};
-                    shard_->CreateOrUpdateRangeCcMap(old_index_range_name,
-                                                     old_schema,
-                                                     req.NodeGroupId(),
-                                                     catalog_entry->Version());
+                    shard_->CreateOrUpdateRangeCcMap(
+                        old_index_range_name,
+                        old_schema,
+                        req.NodeGroupId(),
+                        catalog_entry->schema_version_);
 #endif
                 }
 
@@ -1236,7 +1239,7 @@ public:
                             new_index_range_name,
                             new_schema,
                             req.NodeGroupId(),
-                            catalog_entry->DirtyVersion());
+                            catalog_entry->dirty_schema_version_);
 #endif
                     }
                 }
@@ -1358,7 +1361,7 @@ public:
         }
         cce->payload_->Set(catalog_entry->schema_,
                            catalog_entry->dirty_schema_,
-                           catalog_entry->Version());
+                           catalog_entry->schema_version_);
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {
@@ -1437,14 +1440,14 @@ public:
                     cce->payload_ = std::make_unique<CatalogRecord>();
                     cce->payload_->Set(catalog_entry->schema_,
                                        catalog_entry->dirty_schema_,
-                                       catalog_entry->Version());
-                    cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
-                                                  RecordStatus::Normal);
+                                       catalog_entry->schema_version_);
+                    cce->SetCommitTsPayloadStatus(
+                        catalog_entry->schema_version_, RecordStatus::Normal);
                 }
                 else
                 {
-                    cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
-                                                  RecordStatus::Deleted);
+                    cce->SetCommitTsPayloadStatus(
+                        catalog_entry->schema_version_, RecordStatus::Deleted);
                 }
             }
             else
@@ -1751,7 +1754,7 @@ public:
                            false);
 
             UpdateTableLocks(table_key->Name().StringView(),
-                             catalog_entry->Version(),
+                             catalog_entry->schema_version_,
                              cce->GetKeyLock());
 
             if (shard_->core_id_ == (shard_->core_cnt_ - 1))
@@ -1800,8 +1803,8 @@ public:
                 cce->payload_ = std::make_unique<CatalogRecord>();
                 cce->payload_->Set(catalog_entry->schema_,
                                    catalog_entry->dirty_schema_,
-                                   catalog_entry->Version());
-                cce->SetCommitTsPayloadStatus(catalog_entry->Version(),
+                                   catalog_entry->schema_version_);
+                cce->SetCommitTsPayloadStatus(catalog_entry->schema_version_,
                                               RecordStatus::Normal);
             }
             else
@@ -1890,10 +1893,11 @@ public:
                 return {CcErrorCode::READ_CATALOG_FAIL, nullptr, 0};
             }
 
-            assert(catalog_entry != nullptr && catalog_entry->Version() > 0);
+            assert(catalog_entry != nullptr &&
+                   catalog_entry->schema_version_ > 0);
             assert(catalog_entry->schema_ != nullptr);
 
-            schema_version = catalog_entry->Version();
+            schema_version = catalog_entry->schema_version_;
 
             lock_ptr =
                 &catalog_cce->GetOrCreateKeyLock(shard_, this, catalog_ccp);

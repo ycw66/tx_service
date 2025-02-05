@@ -3899,7 +3899,7 @@ public:
 
                     // If FetchCatalogCc failure due to storage fault,
                     // FetchCatalogCc::Execute() abort the ReplayLogCc
-                    assert(catalog_entry->Version() > 0);
+                    assert(catalog_entry->schema_version_ > 0);
                     if (catalog_entry->schema_ == nullptr)
                     {
                         // table has been dropped
@@ -3958,7 +3958,7 @@ public:
                     {
                         // If FetchCatalogCc failure due to storage fault,
                         // FetchCatalogCc::Execute() abort the ReplayLogCc
-                        assert(catalog_entry->Version() > 0);
+                        assert(catalog_entry->schema_version_ > 0);
                         if (catalog_entry->schema_ != nullptr)
                         {
                             ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
@@ -5026,7 +5026,7 @@ public:
                     ccs.UpdateCcmSchema(*table_name_,
                                         node_group_id_,
                                         catalog_entry->dirty_schema_.get(),
-                                        catalog_entry->DirtyVersion());
+                                        catalog_entry->dirty_schema_version_);
                 }
 
                 if (ccs.core_id_ == 0 && !txservice_skip_kv &&

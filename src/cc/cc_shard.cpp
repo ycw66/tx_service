@@ -1559,7 +1559,7 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
     }
 
     const TableSchema *curr_schema = catalog_entry->schema_.get();
-    if (curr_schema != nullptr && catalog_entry->Version() > 0)
+    if (curr_schema != nullptr && catalog_entry->schema_version_ > 0)
     {
 #ifdef STATISTICS
         if (!LoadRangesAndStatisticsNx(
