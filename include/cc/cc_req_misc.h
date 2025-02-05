@@ -279,16 +279,21 @@ public:
 
     void Wait()
     {
-        std::unique_lock<std::mutex> lk(mux_);
-        wait_cv_.wait(lk, [this]() { return finish_cnt_ == core_cnt_; });
+        std::unique_lock lk(mux_);
+        while (finish_cnt_ != core_cnt_)
+        {
+            wait_cv_.wait(lk);
+        }
     }
 
 private:
     const uint32_t cc_ng_id_;
     const uint16_t core_cnt_;
     uint16_t finish_cnt_{0};
-    std::mutex mux_;
-    std::condition_variable wait_cv_;
+    // ClearCcNodeGroup is issued and Waited on RPC handler bthread, use bthread
+    // mutex and condition variable.
+    bthread::Mutex mux_;
+    bthread::ConditionVariable wait_cv_;
 };
 
 struct FillStoreSliceCc;

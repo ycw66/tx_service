@@ -390,7 +390,7 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
         ccs.ClearActvieSiTxs();
     }
 
-    std::unique_lock<std::mutex> lk(mux_);
+    std::unique_lock lk(mux_);
     ++finish_cnt_;
     if (finish_cnt_ == core_cnt_)
     {
