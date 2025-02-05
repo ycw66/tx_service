@@ -71,6 +71,7 @@ void NonBlockingLock::TryPopBlockingQueue(CcShard *ccs)
     {
         const LockQueueEntry &queue_head = blocking_queue_.Peek();
         TxNumber queued_txn = queue_head.req_->Txn();
+
         if (queue_head.lk_type_ == LockType::WriteLock)
         {
             if (NoWriteConflict(queued_txn) && NoReadLockConflict(queued_txn))

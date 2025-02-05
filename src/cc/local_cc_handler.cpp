@@ -2205,6 +2205,10 @@ void txservice::LocalCcHandler::BlockCcReqCheck(uint64_t tx_number,
                                    type,
                                    acq_key_result_vec_idx);
     }
+    else
+    {
+        // No need to check the liveness of the local node.
+    }
 }
 
 void txservice::LocalCcHandler::BlockAcquireAllCcReqCheck(

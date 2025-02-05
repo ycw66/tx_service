@@ -280,6 +280,11 @@ public:
 
     bool SetResultByTimeoutThread() override
     {
+        if (result_status_.load(std::memory_order_acquire) == -1)
+        {
+            return true;
+        }
+
         int32_t expect = 0;
         bool succeed = result_status_.compare_exchange_strong(
             expect, -1, std::memory_order_acquire, std::memory_order_relaxed);

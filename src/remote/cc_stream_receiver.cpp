@@ -288,6 +288,10 @@ void CcStreamReceiver::RecycleScanSliceResp(
 void CcStreamReceiver::PreProcessScanResp(
     std::unique_ptr<ScanSliceResponse> msg)
 {
+    CODE_FAULT_INJECTOR("before_mark_remote_received", {
+        std::this_thread::sleep_for(std::chrono::seconds(15));
+        std::this_thread::yield();
+    });
     CcHandlerResult<RangeScanSliceResult> *hd_res = nullptr;
     uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
     int64_t tx_term = msg->tx_term();
@@ -303,14 +307,8 @@ void CcStreamReceiver::PreProcessScanResp(
         hd_res = reinterpret_cast<CcHandlerResult<RangeScanSliceResult> *>(
             msg->handler_addr());
 
-        CODE_FAULT_INJECTOR("before_mark_remote_received", {
-            std::this_thread::sleep_for(std::chrono::seconds(15));
-            std::this_thread::yield();
-        });
-
         if (!hd_res->SetResultByStreamThread())
         {
-            LOG(INFO) << "RangeScanSliceResult rejected due to txm timeout";
             scan_resp_pool_.enqueue(std::move(msg));
             return;
         }
@@ -328,11 +326,6 @@ void CcStreamReceiver::PreProcessScanResp(
             hd_res->DecreaseCurrentHandlingResponse();
             return;
         }
-
-        CODE_FAULT_INJECTOR("after_mark_remote_received", {
-            std::this_thread::sleep_for(std::chrono::seconds(15));
-            std::this_thread::yield();
-        });
     }
 
     assert(hd_res->Txm()->TxNumber() == msg->tx_number());
@@ -1688,6 +1681,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
 
             AckStatus status = (AckStatus) resp.req_status();
+
             if (status == AckStatus::ErrorTerm)
             {
                 hd_res->SetError(CcErrorCode::NG_TERM_CHANGED);

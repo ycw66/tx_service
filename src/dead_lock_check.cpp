@@ -132,7 +132,7 @@ void DeadLockCheck::UpdateCheckNodeId(uint32_t node_id)
     }
 }
 
-bool DeadLockCheck::GatherLockDependancy()
+void DeadLockCheck::GatherLockDependancy()
 {
     std::unique_lock<std::mutex> lk(mutex_);
     UpdateCheckNodeId(Sharder::Instance().NodeId());
@@ -195,7 +195,7 @@ bool DeadLockCheck::GatherLockDependancy()
 
     if (stop_)
     {
-        return false;
+        return;
     }
 
     if (node_unfinished_ > 0)
@@ -203,20 +203,13 @@ bool DeadLockCheck::GatherLockDependancy()
         LOG(INFO) << "[Global dead lock detector]: fails to receive lock "
                      "waiting information from node. Failed nodes: "
                   << node_unfinished_;
-        return false;
+        return;
     }
 
     std::map<TxEdge, int32_t, EdgeLess> map_edge = GenerateTxWaitGraph();
     std::vector<std::vector<TxEdge>> vct_dead = DetectDeadLock(map_edge);
 
-    if (vct_dead.size() == 0)
-    {
-        // No dead lock detected.
-        return false;
-    }
-
     RemoveDeadTransaction(vct_dead);
-    return true;
 }
 
 // This method will preprocess the data that collected from all nodes. The
@@ -489,28 +482,19 @@ void DeadLockCheck::Run()
 
     while (!stop_)
     {
-        CODE_FAULT_INJECTOR("should_detect_dead_lock", {
-            FaultInject::Instance().InjectFault("should_detect_dead_lock",
+        CODE_FAULT_INJECTOR("trigger_dead_lock_detection", {
+            FaultInject::Instance().InjectFault("trigger_dead_lock_detection",
                                                 "remove");
-            while (!GatherLockDependancy())
-            {
-                std::this_thread::sleep_for(1s);
-            }
-        });
-
-        CODE_FAULT_INJECTOR("should_not_detect_dead_lock", {
-            FaultInject::Instance().InjectFault("should_not_detect_dead_lock",
-                                                "remove");
-            assert(!GatherLockDependancy());
+            GatherLockDependancy();
         });
 
         std::unique_lock<std::mutex> lk(mutex_);
         con_var_.wait_for(
             lk, 1s, [this]() { return stop_ || requested_check_; });
-        // If the time is in interval time since previous check, it will sleep
-        // again.
+
+        // Proceeds on ival >= interval OR requested_check_
         uint64_t ival = LocalCcShards::ClockTs() - last_check_time_;
-        if (stop_ || ival < time_interval_ || !requested_check_)
+        if (stop_ || (ival < time_interval_ && !requested_check_))
         {
             continue;
         }

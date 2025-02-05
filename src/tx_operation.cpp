@@ -218,7 +218,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
 #endif
         txm->PostProcess(*this);
     }
-    else if (!hd_result_.Value().is_local_)
+    else
     {
         bool fault_inject = false;
         CODE_FAULT_INJECTOR("read_operation_timeout", {
@@ -289,6 +289,9 @@ void ReadOperation::Forward(TransactionExecution *txm)
             // Unset timeout status. So the cc_stream_reciver can handle
             // response.
             hd_result_.UnsetByTimeoutThread();
+
+            // Trigger deadlock check.
+            DeadLockCheck::RequestCheck();
 
             txm->cc_handler_->BlockCcReqCheck(
                 txm->TxNumber(),
@@ -1518,11 +1521,9 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         scanner.SetStatus(ScannerStatus::Open);
         txm->PostProcess(*this);
     }
-    else if (!slice_hd_result_.Value().is_local_ && txm->IsTimeOut() &&
-             slice_hd_result_.SetResultByTimeoutThread())
+    else if (txm->IsTimeOut())
 #else
-    else if (!hd_result_.Value().is_local_ && txm->IsTimeOut() &&
-             hd_result_.SetResultByTimeoutThread())
+    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
 #endif
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1538,14 +1539,37 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             });
 
 #ifdef RANGE_PARTITION_ENABLED
-        bool force_error = slice_hd_result_.ForceError();
+        // When timeout in RANGE_PARTITION, check deadlock first, then force
+        // error.
+        DeadLockCheck::RequestCheck();
+        txm->cc_handler_->BlockCcReqCheck(txm->TxNumber(),
+                                          txm->TxTerm(),
+                                          txm->CommandId(),
+                                          lock_range_result_.Value().cce_addr_,
+                                          &slice_hd_result_,
+                                          ResultTemplateType::ReadKeyResult);
+
+        if (retry_num_ > 0 &&
+            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
+        {
+            ReRunOp(txm);
+            return;
+        }
+        else if (slice_hd_result_.SetResultByTimeoutThread())
+        {
+            bool force_error = slice_hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+            }
+        }
 #else
         bool force_error = hd_result_.ForceError();
-#endif
         if (force_error)
         {
             txm->PostProcess(*this);
         }
+#endif
     }
 }
 
@@ -5352,13 +5376,6 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             if (hd_result.IsFinished())
             {
                 continue;
-            }
-
-            if (hd_result.Value().is_local_)
-            {
-                // If there's pending local request, keep waiting. We never
-                // timeout local requests.
-                break;
             }
 
             // Here should consider 2 cases, 1. cce_addr.Term() < 0 does

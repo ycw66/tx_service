@@ -1,4 +1,5 @@
 #pragma once
+
 #include <condition_variable>
 #include <map>
 #include <mutex>
@@ -179,7 +180,7 @@ public:
 
 protected:
     void Run();
-    bool GatherLockDependancy();
+    void GatherLockDependancy();
     std::vector<std::vector<TxEdge>> DetectDeadLock(
         std::map<TxEdge, int32_t, EdgeLess> &map_edge);
     void RemoveDeadTransaction(std::vector<std::vector<TxEdge>> &vct_dead);
@@ -218,6 +219,6 @@ protected:
     // The node to rise dead lock check.
     uint32_t check_node_id_;
 
-    bool requested_check_;
+    bool requested_check_{false};
 };
 }  // namespace txservice
