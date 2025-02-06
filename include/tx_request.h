@@ -713,6 +713,10 @@ struct UpsertTableTxRequest
           op_type_(op_type),
           alter_table_info_image_(alter_table_info_image)
     {
+        if (op_type == OperationType::AddIndex)
+        {
+            pack_sk_err_ = std::make_unique<PackSkError>();
+        }
     }
 
     const TableName *table_name_;
@@ -721,6 +725,9 @@ struct UpsertTableTxRequest
     const std::string *dirty_image_;
     txservice::OperationType op_type_;
     const std::string *alter_table_info_image_;
+
+    // Available when create index raise pack sk error.
+    std::unique_ptr<PackSkError> pack_sk_err_;
 };
 
 struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>

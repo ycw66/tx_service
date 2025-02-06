@@ -257,6 +257,7 @@ public:
         uint32_t &total_pk_items_count,
         uint32_t &dispatched_task_count,
         CcErrorCode &task_res,
+        PackSkError &pack_sk_err,
         std::function<void(TxKey batch_range_start_key,
                            TxKey batch_range_end_key,
                            const std::string *batch_range_start_key_str,
@@ -273,6 +274,7 @@ public:
           total_pk_items_count_(total_pk_items_count),
           dispatched_task_count_(dispatched_task_count),
           task_res_(task_res),
+          pack_sk_err_(pack_sk_err),
           dispatch_func_(dispatch_func)
     {
     }
@@ -430,8 +432,15 @@ public:
                        << " with error: " << CcErrorMessage(res_code);
             std::unique_lock<std::mutex> lk(mux_);
             --unfinished_task_cnt_;
-            task_res_ =
-                task_res_ == CcErrorCode::NO_ERROR ? res_code : task_res_;
+            if (task_res_ == CcErrorCode::NO_ERROR)
+            {
+                task_res_ = res_code;
+                if (res_code == CcErrorCode::PACK_SK_ERR)
+                {
+                    pack_sk_err_.code_ = response_.pack_err_code();
+                    pack_sk_err_.message_ = response_.pack_err_msg();
+                }
+            }
             cv_.notify_one();
             return;
         }
@@ -522,6 +531,7 @@ private:
     uint32_t &total_pk_items_count_;
     uint32_t &dispatched_task_count_;
     CcErrorCode &task_res_;
+    PackSkError &pack_sk_err_;
     std::function<void(TxKey batch_range_start_key,
                        TxKey batch_range_end_key,
                        const std::string *batch_range_start_key_str,

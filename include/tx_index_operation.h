@@ -1,8 +1,5 @@
 #pragma once
 
-#include "cc_req_pool.h"
-#include "rpc_closure.h"
-#include "store/data_store_scanner.h"
 #include "tx_operation.h"
 
 namespace txservice
@@ -16,6 +13,7 @@ struct UpsertTableIndexOp : public SchemaOp
                        const std::string &dirty_image,
                        const std::string &alter_table_image,
                        OperationType op_type,
+                       PackSkError *store_pack_sk_err,
                        TransactionExecution *txm);
 
     ~UpsertTableIndexOp()
@@ -34,6 +32,7 @@ struct UpsertTableIndexOp : public SchemaOp
                const std::string &dirty_image,
                const std::string &alter_table_image,
                OperationType op_type,
+               PackSkError *store_pack_sk_err,
                TransactionExecution *txm);
 
     /**
@@ -80,7 +79,7 @@ struct UpsertTableIndexOp : public SchemaOp
      * @brief Generate sk record from pk record parallelly. The parallel
      * granularity of the operation is range.
      */
-    AsyncOp<Void> generate_sk_parallel_op_;
+    AsyncOp<PackSkError> generate_sk_parallel_op_;
     /**
      * @brief Flush the index data of the old tuples into data store. Consist of
      * scan, flush.
@@ -105,6 +104,15 @@ struct UpsertTableIndexOp : public SchemaOp
      * failures.
      */
     WriteToLogOp commit_log_op_;
+
+    /**
+     * @brief Rollback the create index transaction if any constraints violated.
+     * @note We reuse upsert_kv_table_op_ instead of define another
+     * DsUpsertTableOp, because DsUpsertTableOp holds some pointers to members
+     * of UpsertIndexOp.
+     *
+     * DsUpsertTableOp upsert_kv_table_op_;
+     */
 
     /**
      * @brief Clean ccmap on all node groups
@@ -155,7 +163,7 @@ private:
                (last_scanned_end_key_.Type() == KeyType::PositiveInf);
     }
     void DispatchRangeTask(TransactionExecution *upsert_index_txm,
-                           CcHandlerResult<Void> &hd_res);
+                           CcHandlerResult<PackSkError> &hd_res);
     void HandleRangeTask(
         const TableName &base_table_name,
         int32_t partition_id,
@@ -172,6 +180,7 @@ private:
         uint32_t &total_pk_items_count,
         uint32_t &dispatched_task_count,
         CcErrorCode &task_res,
+        PackSkError &pack_sk_err,
         std::function<void(TxKey batch_range_start_key,
                            TxKey batch_range_end_key,
                            const std::string *batch_range_start_key_str,
@@ -210,6 +219,9 @@ private:
     size_t scanned_pk_range_count_{0};
     size_t finished_pk_range_count_{0};
     size_t total_scanned_pk_items_count_{0};
+
+    // Points to UpsertTableTxRequest::pack_sk_err or nullptr.
+    PackSkError *store_pack_sk_err_{nullptr};
 };
 
 }  // namespace txservice

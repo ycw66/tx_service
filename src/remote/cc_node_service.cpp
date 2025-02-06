@@ -865,7 +865,8 @@ void CcNodeService::GenerateSkFromPk(
     bthread::ConditionVariable bthd_cv;
     bool is_finished = false;
     size_t scanned_pk_items_count = 0;
-    int res_code = 0;
+    CcErrorCode task_res = CcErrorCode::NO_ERROR;
+    PackSkError pack_sk_err;
     std::vector<int64_t> ng_terms_vec;
     std::thread worker_thd = std::thread(
         [&base_table_name,
@@ -879,7 +880,8 @@ void CcNodeService::GenerateSkFromPk(
          &bthd_cv,
          &is_finished,
          &scanned_pk_items_count,
-         &res_code,
+         &task_res,
+         &pack_sk_err,
          &ng_terms_vec,
          tx_number,
          tx_term]()
@@ -903,8 +905,7 @@ void CcNodeService::GenerateSkFromPk(
                              << "node receive this task of ng#" << ng_id
                              << " for partition id: " << partition_id;
                 std::unique_lock<bthread::Mutex> lk(bthd_mux);
-                res_code =
-                    static_cast<int>(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                task_res = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
                 is_finished = true;
                 bthd_cv.notify_all();
                 return;
@@ -942,12 +943,12 @@ void CcNodeService::GenerateSkFromPk(
                                 new_indexes_name);
             sk_generator->ProcessTask();
 
-            CcErrorCode task_res = sk_generator->TaskResult();
-            if (task_res != CcErrorCode::NO_ERROR)
+            CcErrorCode cc_err = sk_generator->TaskResult();
+            if (cc_err != CcErrorCode::NO_ERROR)
             {
                 LOG(ERROR) << "Finish this generate index task of ng#" << ng_id
                            << " for partition id: " << partition_id
-                           << " caused by error: " << CcErrorMessage(task_res);
+                           << " caused by error: " << CcErrorMessage(cc_err);
             }
             else
             {
@@ -962,7 +963,11 @@ void CcNodeService::GenerateSkFromPk(
             }
 
             std::unique_lock<bthread::Mutex> lk(bthd_mux);
-            res_code = static_cast<int>(task_res);
+            task_res = cc_err;
+            if (task_res == CcErrorCode::PACK_SK_ERR)
+            {
+                pack_sk_err = std::move(sk_generator->GetPackSkError());
+            }
             is_finished = true;
             bthd_cv.notify_all();
 
@@ -981,8 +986,13 @@ void CcNodeService::GenerateSkFromPk(
         bthd_cv.wait(lk);
     }
 
-    response->set_error_code(res_code);
+    response->set_error_code(static_cast<int>(task_res));
     response->set_pk_items_count(scanned_pk_items_count);
+    if (task_res == CcErrorCode::PACK_SK_ERR)
+    {
+        response->set_pack_err_code(pack_sk_err.code_);
+        response->set_pack_err_msg(pack_sk_err.message_);
+    }
     for (size_t idx = 0; idx < ng_terms_vec.size(); ++idx)
     {
         response->add_ng_terms(ng_terms_vec.at(idx));
@@ -991,8 +1001,7 @@ void CcNodeService::GenerateSkFromPk(
     worker_thd.join();
     DLOG(INFO) << "CcNodeService GenerateSkFromPk RPC of ng#" << ng_id
                << " for partition id: " << partition_id
-               << " finished with error: "
-               << CcErrorMessage(static_cast<CcErrorCode>(res_code))
+               << " finished with error: " << CcErrorMessage(task_res)
                << ". Scanned items count: " << scanned_pk_items_count;
 }
 

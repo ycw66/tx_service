@@ -416,6 +416,10 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
 
     case CcErrorCode::READ_CATALOG_CONFLICT:
         return TxErrorCode::READ_CATALOG_CONFLICT;
+    case CcErrorCode::UNIQUE_CONSTRAINT:
+        return TxErrorCode::UNIQUE_CONSTRAINT;
+    case CcErrorCode::PACK_SK_ERR:
+        return TxErrorCode::CAL_ENGINE_DEFINED_CONSTRAINT;
 
     case CcErrorCode::UNDEFINED_ERR:
     default:
@@ -928,6 +932,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
                     *req.dirty_image_,
                     *req.alter_table_info_image_,
                     req.op_type_,
+                    req.pack_sk_err_.get(),
                     this);
 
             index_op_ = std::move(index_op);
@@ -944,6 +949,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
                              *req.dirty_image_,
                              *req.alter_table_info_image_,
                              req.op_type_,
+                             req.pack_sk_err_.get(),
                              this);
         }
         lk.unlock();
@@ -1366,6 +1372,7 @@ void TransactionExecution::ProcessTxRequest(
                         schema_op_msg.new_catalog_blob(),
                         schema_op_msg.alter_table_info_blob(),
                         operation_type,
+                        nullptr,
                         this);
 
                 index_op_ = std::move(index_op);
@@ -1383,6 +1390,7 @@ void TransactionExecution::ProcessTxRequest(
                                  schema_op_msg.new_catalog_blob(),
                                  schema_op_msg.alter_table_info_blob(),
                                  operation_type,
+                                 nullptr,
                                  this);
             }
             lk.unlock();
@@ -5393,10 +5401,11 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
 #ifdef EXT_TX_PROC_ENABLED
     ds_upsert_table_op.hd_result_.SetToBlock();
 #endif
+
     cc_handler_->DataStoreUpsertTable(ds_upsert_table_op.table_schema_old_,
                                       ds_upsert_table_op.table_schema_,
                                       ds_upsert_table_op.op_type_,
-                                      commit_ts_,
+                                      ds_upsert_table_op.write_time_,
                                       TxCcNodeId(),
                                       TxTerm(),
                                       ds_upsert_table_op.hd_result_,
@@ -5746,6 +5755,8 @@ void TransactionExecution::Process(AsyncOp<ResultType> &ds_op)
 
 template void TransactionExecution::Process(AsyncOp<Void> &ds_op);
 template void TransactionExecution::Process(AsyncOp<PostProcessResult> &ds_op);
+template void TransactionExecution::Process(
+    AsyncOp<PackSkError> &generate_sk_parallel_op);
 
 template <typename ResultType>
 void TransactionExecution::PostProcess(AsyncOp<ResultType> &ds_op)
@@ -5766,6 +5777,8 @@ void TransactionExecution::PostProcess(AsyncOp<ResultType> &ds_op)
 template void TransactionExecution::PostProcess(AsyncOp<Void> &ds_op);
 template void TransactionExecution::PostProcess(
     AsyncOp<PostProcessResult> &ds_op);
+template void TransactionExecution::PostProcess(
+    AsyncOp<PackSkError> &generate_sk_parallel_op);
 
 void TransactionExecution::Process(NoOp &no_op)
 {

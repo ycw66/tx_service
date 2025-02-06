@@ -160,6 +160,16 @@ public:
         return task_result_;
     }
 
+    const PackSkError &GetPackSkError() const
+    {
+        return pack_sk_err_;
+    }
+
+    PackSkError &GetPackSkError()
+    {
+        return pack_sk_err_;
+    }
+
     size_t ScannedItemsCount() const
     {
         return scanned_items_count_;
@@ -197,7 +207,12 @@ private:
     UploadIndexContext upload_index_ctx_;
     std::vector<SkEncoder::uptr> sk_encoder_vec_;
     size_t scan_batch_size_{LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE};
+
     CcErrorCode task_result_{CcErrorCode::NO_ERROR};
+
+    // Detail error information for CcErrorCode::PACK_SK_ERR.
+    PackSkError pack_sk_err_;
+
     size_t scanned_items_count_{0};
     std::shared_ptr<TableSchema> table_schema_{nullptr};
 };

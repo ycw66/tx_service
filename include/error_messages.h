@@ -28,6 +28,10 @@ enum struct TxErrorCode
     READ_WRITE_CONFLICT,
     DUPLICATE_KEY,
 
+    //-- generate_sk_parallel_op_
+    UNIQUE_CONSTRAINT,
+    CAL_ENGINE_DEFINED_CONSTRAINT,
+
     //-- WriteToLogOp
     LOG_SERVICE_UNREACHABLE,
     WRITE_LOG_FAIL,
@@ -91,6 +95,10 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::READ_WRITE_CONFLICT,
      "Transaction failed due to read-write conflicts."},
     {TxErrorCode::DUPLICATE_KEY, "Transaction failed due to duplicate key."},
+    {TxErrorCode::UNIQUE_CONSTRAINT,
+     "Create index violates unique constraint."},
+    {TxErrorCode::CAL_ENGINE_DEFINED_CONSTRAINT,
+     "Create index violates calculation engine defined constraint."},
     {TxErrorCode::LOG_SERVICE_UNREACHABLE,
      "Log service is unreachable, transaction status is unknown."},
     {TxErrorCode::WRITE_LOG_FAIL, "Write Log fails."},
@@ -195,7 +203,7 @@ enum struct CcErrorCode : uint8_t
     ESTABLISH_NODE_CHANNEL_FAILED,
     //
     PACK_SK_ERR,
-    UPLOAD_RECORD_TO_CCMAP_ERR,
+    UNIQUE_CONSTRAINT,
 
     // Error when call system handler, like ReloadCacheCc.
     SYSTEM_HANDLER_ERR,
@@ -277,7 +285,7 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
      "ESTABLISH_NODE_CHANNEL_FAILED"},
 
     {CcErrorCode::PACK_SK_ERR, "PACK_SK_ERROR"},
-    {CcErrorCode::UPLOAD_RECORD_TO_CCMAP_ERR, "UPLOAD_SK_TO_CCMAP_ERROR"},
+    {CcErrorCode::UNIQUE_CONSTRAINT, "UNIQUE_CONSTRAINT"},
 
     // Error when call system handler, like ReloadCacheCc.
     {CcErrorCode::SYSTEM_HANDLER_ERR, "SYSTEM_HANDLER_ERR"},

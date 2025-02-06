@@ -2465,6 +2465,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         upsert_kv_table_op_.table_schema_old_ = catalog_rec_.Schema();
         upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
         upsert_kv_table_op_.alter_table_info_ = nullptr;
+        upsert_kv_table_op_.write_time_ = txm->commit_ts_;
         txm->PushOperation(&upsert_kv_table_op_);
         txm->Process(upsert_kv_table_op_);
     }
@@ -2847,6 +2848,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     upsert_kv_table_op_.table_schema_ =
                         catalog_rec_.DirtySchema();
                     upsert_kv_table_op_.alter_table_info_ = nullptr;
+                    upsert_kv_table_op_.write_time_ = txm->commit_ts_;
                     txm->PushOperation(&upsert_kv_table_op_);
                     DLOG(INFO) << "txn: " << txm->TxNumber()
                                << " process upsert_kv_table_op_";
@@ -3120,6 +3122,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
 
     upsert_kv_table_op_.alter_table_info_ = nullptr;
     upsert_kv_table_op_.op_type_ = op_type_;
+    upsert_kv_table_op_.write_time_ = 0;
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
     acquire_all_lock_op_.keys_.clear();
@@ -3180,16 +3183,9 @@ void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
     ::txlog::WriteLogRequest *commit_log_rec =
         commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
-    if (upsert_kv_table_op_.hd_result_.IsError())
-    {
-        // Serve as new catalog_ts. Set to 0 if flush kv fails.
-        commit_log_rec->set_commit_timestamp(tx_op_failed_ts_);
-    }
-    else
-    {
-        assert(txm->commit_ts_ != tx_op_failed_ts_);
-        commit_log_rec->set_commit_timestamp(txm->commit_ts_);
-    }
+    assert(txm->commit_ts_ != tx_op_failed_ts_ ||
+           upsert_kv_table_op_.hd_result_.IsError());
+    commit_log_rec->set_commit_timestamp(txm->commit_ts_);
 }
 
 void UpsertTableOp::ForceToFinish(TransactionExecution *txm)
@@ -3371,6 +3367,7 @@ void AsyncOp<ResultType>::Reset()
 
 template struct AsyncOp<PostProcessResult>;
 template struct AsyncOp<Void>;
+template struct AsyncOp<PackSkError>;
 
 CompositeTransactionOperation::CompositeTransactionOperation() : op_(nullptr)
 {

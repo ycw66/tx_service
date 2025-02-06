@@ -769,4 +769,26 @@ struct HeapMemStats
     size_t wait_list_size_{0};
 };
 
+/**
+ * SkEncoder depends on calculation engine supplied methods to generate
+ * packed secondary key. Those methods might raise self-defined exceptions.
+ * Capture and return them to calculation engine.
+ */
+struct PackSkError
+{
+    PackSkError() = default;
+    PackSkError(int32_t code, std::string message)
+        : code_(code), message_(std::move(message))
+    {
+    }
+
+    void Reset()
+    {
+        code_ = 0;
+        message_.clear();
+    }
+
+    int32_t code_{0};
+    std::string message_;
+};
 }  // namespace txservice

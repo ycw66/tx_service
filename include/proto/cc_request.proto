@@ -145,7 +145,12 @@ message GenerateSkFromPkResponse
 {
     uint32 error_code = 1;
     uint32 pk_items_count = 2;
-    repeated int64 ng_terms = 3;
+ 
+    // Available if CcErrorCode::PACK_SK_ERR
+    int32 pack_err_code = 3;
+    string pack_err_msg = 4;
+
+    repeated int64 ng_terms = 5;
 }
 
 enum UploadBatchKind 

@@ -89,17 +89,39 @@ struct SkEncoder
     virtual ~SkEncoder() = default;
     /**
      * @brief Generate packed secondary key using TxKey and TxRecord.
-     *
-     * @param sk_idx Secondary key index of this table excluding the primary
-     * key.
+     * @note It is a non-const method, and subclass should call SetError() to
+     * store self-defined exception.
      */
     virtual bool AppendPackedSk(const TxKey *pk,
                                 const TxRecord *record,
                                 uint64_t version_ts,
-                                std::vector<WriteEntry> &dest_vec) const = 0;
+                                std::vector<WriteEntry> &dest_vec) = 0;
+
     virtual void Reset()
     {
+        err_.code_ = 0;
+        err_.message_.clear();
     }
+
+    const PackSkError &GetError() const
+    {
+        return err_;
+    }
+
+    PackSkError &GetError()
+    {
+        return err_;
+    }
+
+protected:
+    void SetError(int32_t code, std::string message)
+    {
+        err_.code_ = code;
+        err_.message_ = std::move(message);
+    }
+
+private:
+    PackSkError err_;
 };
 
 struct TableSchema

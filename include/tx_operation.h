@@ -626,6 +626,13 @@ struct DsUpsertTableOp : public TransactionOperation
     OperationType op_type_{OperationType::Upsert};
     CcHandlerResult<Void> hd_result_;
     txservice::AlterTableInfo *alter_table_info_{nullptr};
+
+    // write_time_ is corresponding to kv-storage's write_time. Generally,
+    // write_time_ is assigned to commit_ts and commit_ts is regarded as new
+    // schema version. But for rollback create-index, write_time_ is assigned to
+    // `max(commit_ts, latest commit_ts_bound_) + 1` to overwrite catalog image
+    // in kv-storage.
+    uint64_t write_time_{0};
 };
 
 template <typename ResultType>

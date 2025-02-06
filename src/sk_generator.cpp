@@ -396,11 +396,11 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
             index_set.reserve(reserve_size);
 
             size_t vec_idx = tbl_name_it - new_indexes_name_->cbegin();
-            const SkEncoder *sk_encoder = nullptr;
+            SkEncoder *sk_encoder = nullptr;
             if (vec_idx >= sk_encoder_vec_.size())
             {
                 sk_encoder_vec_.emplace_back(
-                    std::move(table_schema_->CreateSkEncoder(*tbl_name_it)));
+                    table_schema_->CreateSkEncoder(*tbl_name_it));
             }
             sk_encoder = sk_encoder_vec_[vec_idx].get();
 
@@ -431,6 +431,10 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                             << "of ng#" << node_group_id_;
                         // Finish the pack sk operation
                         task_result_ = CcErrorCode::PACK_SK_ERR;
+                        pack_sk_err_ = std::move(sk_encoder->GetError());
+#ifdef RANGE_PARTITION_ENABLED
+                        scan_req.UnpinSlices();
+#endif
                         return;
                     }
 
@@ -448,6 +452,9 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                             << node_group_id_;
                         task_status_->TerminateGenerateSk();
                         task_result_ = CcErrorCode::TX_NODE_NOT_LEADER;
+#ifdef RANGE_PARTITION_ENABLED
+                        scan_req.UnpinSlices();
+#endif
                         return;
                     }
 #ifndef ON_KEY_OBJECT
