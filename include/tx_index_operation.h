@@ -93,7 +93,7 @@ struct UpsertTableIndexOp : public SchemaOp
      * this log ensure that write intent is hold before this log, rather than
      * write lock which will block checkpointer(acquire read lock).
      */
-    WriteToLogOp prepare_log_for_sk_op_;
+    WriteToLogOp prepare_data_log_op_;
     /**
      * @brief Upgrades acquired write intents to write locks in all nodes.
      */
@@ -144,7 +144,7 @@ struct UpsertTableIndexOp : public SchemaOp
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);
-    void FillPrepareIndexTableLogRequest(TransactionExecution *txm);
+    void FillPrepareDataLogRequest(TransactionExecution *txm);
     void FillCommitLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
 

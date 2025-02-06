@@ -37,7 +37,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
       upsert_kv_table_op_(&table_key_.Name(), op_type, txm),
       generate_sk_parallel_op_(txm),
       flush_all_old_tuples_sk_op_(txm),
-      prepare_log_for_sk_op_(txm),
+      prepare_data_log_op_(txm),
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
       clean_ccm_op_(txm),
@@ -131,7 +131,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
         this, &generate_sk_parallel_op_, "generate_sk_parallel_op_");
     TX_TRACE_ASSOCIATE(
         this, &flush_all_old_tuples_sk_op_, "flush_all_old_tuples_sk_op_");
-    TX_TRACE_ASSOCIATE(this, &prepare_log_for_sk_op_, "prepare_log_for_sk_op_");
+    TX_TRACE_ASSOCIATE(this, &prepare_data_log_op_, "prepare_data_log_op_");
     TX_TRACE_ASSOCIATE(this, &acquire_all_lock_op_, "acquire_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
     TX_TRACE_ASSOCIATE(this, &clean_ccm_op_, "clean_ccm_op_");
@@ -156,7 +156,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             LOG(ERROR) << "Alter Table Index read cluster config failed, txn:"
                        << txm->TxNumber();
             if (!prepare_log_op_.hd_result_.IsFinished() &&
-                !prepare_log_for_sk_op_.hd_result_.IsFinished())
+                !prepare_data_log_op_.hd_result_.IsFinished())
             {
                 txm->commit_ts_ = tx_op_failed_ts_;
             }
@@ -164,7 +164,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             return;
         }
         if (prepare_log_op_.hd_result_.IsFinished() ||
-            prepare_log_for_sk_op_.hd_result_.IsFinished())
+            prepare_data_log_op_.hd_result_.IsFinished())
         {
             assert(op_type_ == OperationType::AddIndex);
             LOG(INFO) << "Alter Table Index transaction post acquire all"
@@ -677,8 +677,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             // There is no pk items in batch range task, and no sk items
             // generated, therefore there is no need to flush sk.
-            op_ = &prepare_log_for_sk_op_;
-            prepare_log_for_sk_op_.hd_result_.SetFinished();
+            op_ = &prepare_data_log_op_;
+            prepare_data_log_op_.hd_result_.SetFinished();
             // Update the last finished end key.
             last_finished_end_key_ = last_scanned_end_key_.GetShallowCopy();
             is_last_finished_key_str_ = false;
@@ -831,15 +831,15 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                       << " log with last finished end key: "
                       << ". Base table: " << table_key_.Name().Trace()
                       << ". Txn: " << txm->TxNumber();
-            op_ = &prepare_log_for_sk_op_;
-            FillPrepareIndexTableLogRequest(txm);
-            txm->PushOperation(&prepare_log_for_sk_op_);
-            txm->Process(prepare_log_for_sk_op_);
+            op_ = &prepare_data_log_op_;
+            FillPrepareDataLogRequest(txm);
+            txm->PushOperation(&prepare_data_log_op_);
+            txm->Process(prepare_data_log_op_);
         }
     }
-    else if (op_ == &prepare_log_for_sk_op_)
+    else if (op_ == &prepare_data_log_op_)
     {
-        if (prepare_log_for_sk_op_.hd_result_.IsError())
+        if (prepare_data_log_op_.hd_result_.IsError())
         {
             // Fails to flush the prepare flush log. Retries the operation if
             // the tx node is still the leader or the tx is in the recovery
@@ -848,11 +848,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             {
                 // set retry flag and retry commit log
                 ::txlog::WriteLogRequest *log_req =
-                    prepare_log_for_sk_op_.log_closure_.LogRequest()
+                    prepare_data_log_op_.log_closure_.LogRequest()
                         .mutable_write_log_request();
                 log_req->set_retry(true);
-                txm->PushOperation(&prepare_log_for_sk_op_);
-                txm->Process(prepare_log_for_sk_op_);
+                txm->PushOperation(&prepare_data_log_op_);
+                txm->Process(prepare_data_log_op_);
             }
             else
             {
@@ -1232,7 +1232,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     upsert_kv_table_op_.Reset();
     generate_sk_parallel_op_.Reset();
     flush_all_old_tuples_sk_op_.Reset();
-    prepare_log_for_sk_op_.Reset();
+    prepare_data_log_op_.Reset();
     commit_log_op_.Reset();
     clean_log_op_.Reset();
 
@@ -1286,7 +1286,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     upsert_kv_table_op_.ResetHandlerTxm(txm);
     generate_sk_parallel_op_.ResetHandlerTxm(txm);
     flush_all_old_tuples_sk_op_.ResetHandlerTxm(txm);
-    prepare_log_for_sk_op_.ResetHandlerTxm(txm);
+    prepare_data_log_op_.ResetHandlerTxm(txm);
     acquire_all_lock_op_.ResetHandlerTxm(txm);
     commit_log_op_.ResetHandlerTxm(txm);
     clean_ccm_op_.ResetHandlerTxm(txm);
@@ -1338,7 +1338,6 @@ void UpsertTableIndexOp::FillPrepareLogRequest(TransactionExecution *txm)
 
     auto &node_terms = *prepare_log_rec->mutable_node_terms();
     node_terms.clear();
-    size_t key_cnt = upgrade_all_intent_to_lock_op_.keys_.size();
     for (size_t idx = 0; idx < upgrade_all_intent_to_lock_op_.upload_cnt_;
          ++idx)
     {
@@ -1349,44 +1348,42 @@ void UpsertTableIndexOp::FillPrepareLogRequest(TransactionExecution *txm)
     }
 }
 
-void UpsertTableIndexOp::FillPrepareIndexTableLogRequest(
-    TransactionExecution *txm)
+void UpsertTableIndexOp::FillPrepareDataLogRequest(TransactionExecution *txm)
 {
-    prepare_log_for_sk_op_.log_type_ = TxLogType::PREPARE;
+    prepare_data_log_op_.log_type_ = TxLogType::PREPARE;
 
-    prepare_log_for_sk_op_.log_closure_.LogRequest().Clear();
+    prepare_data_log_op_.log_closure_.LogRequest().Clear();
 
-    ::txlog::WriteLogRequest *prepare_log_for_sk_rec =
-        prepare_log_for_sk_op_.log_closure_.LogRequest()
+    ::txlog::WriteLogRequest *prepare_data_log_rec =
+        prepare_data_log_op_.log_closure_.LogRequest()
             .mutable_write_log_request();
 
-    prepare_log_for_sk_rec->set_tx_term(txm->tx_term_);
-    prepare_log_for_sk_rec->set_txn_number(txm->tx_number_);
-    prepare_log_for_sk_rec->set_commit_timestamp(txm->commit_ts_);
+    prepare_data_log_rec->set_tx_term(txm->tx_term_);
+    prepare_data_log_rec->set_txn_number(txm->tx_number_);
+    prepare_data_log_rec->set_commit_timestamp(txm->commit_ts_);
 
-    ::txlog::SchemaOpMessage *prepare_schema_for_sk_msg =
-        prepare_log_for_sk_rec->mutable_log_content()->mutable_schema_log();
-    prepare_schema_for_sk_msg->set_stage(
-        ::txlog::SchemaOpMessage_Stage_PrepareIndexTable);
+    ::txlog::SchemaOpMessage *prepare_data_msg =
+        prepare_data_log_rec->mutable_log_content()->mutable_schema_log();
+    prepare_data_msg->set_stage(::txlog::SchemaOpMessage_Stage_PrepareData);
 
     if (last_finished_end_key_.Type() == KeyType::PositiveInf)
     {
-        // reach the last range
-        prepare_schema_for_sk_msg->set_last_key_type(
+        // reach to the last range
+        prepare_data_msg->set_last_key_type(
             txlog::SchemaOpMessage::LastKeyType::
                 SchemaOpMessage_LastKeyType_PosInfKey);
-        prepare_schema_for_sk_msg->mutable_last_key_value()->append("00");
+        prepare_data_msg->mutable_last_key_value()->append("00");
     }
     else
     {
-        prepare_schema_for_sk_msg->set_last_key_type(
+        prepare_data_msg->set_last_key_type(
             txlog::SchemaOpMessage::LastKeyType::
                 SchemaOpMessage_LastKeyType_NormalKey);
         last_finished_end_key_.Serialize(
-            *prepare_schema_for_sk_msg->mutable_last_key_value());
+            *prepare_data_msg->mutable_last_key_value());
     }
 
-    prepare_log_for_sk_rec->mutable_node_terms()->clear();
+    prepare_data_log_rec->mutable_node_terms()->clear();
 }
 
 void UpsertTableIndexOp::FillCommitLogRequest(TransactionExecution *txm)

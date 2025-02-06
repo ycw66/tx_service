@@ -1404,7 +1404,7 @@ void TransactionExecution::ProcessTxRequest(
             }
             else if (schema_op_msg.stage() ==
                      ::txlog::SchemaOpMessage::Stage::
-                         SchemaOpMessage_Stage_PrepareIndexTable)
+                         SchemaOpMessage_Stage_PrepareData)
             {
                 if (schema_op_msg.last_key_type() ==
                     ::txlog::SchemaOpMessage::LastKeyType::
@@ -1425,8 +1425,8 @@ void TransactionExecution::ProcessTxRequest(
                     index_op_->is_last_finished_key_str_ = true;
                 }
 
-                index_op_->op_ = &index_op_->prepare_log_for_sk_op_;
-                index_op_->prepare_log_for_sk_op_.hd_result_.SetFinished();
+                index_op_->op_ = &index_op_->prepare_data_log_op_;
+                index_op_->prepare_data_log_op_.hd_result_.SetFinished();
             }
             else
             {

@@ -1038,9 +1038,8 @@ public:
             if (schema_op_msg.stage() ==
                     ::txlog::SchemaOpMessage_Stage::
                         SchemaOpMessage_Stage_PrepareSchema ||
-                schema_op_msg.stage() ==
-                    ::txlog::SchemaOpMessage_Stage::
-                        SchemaOpMessage_Stage_PrepareIndexTable)
+                schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
+                                             SchemaOpMessage_Stage_PrepareData)
             {
                 // If we are recovering from prepare log, we need to restore to
                 // the state right before commit log is flushed, so both current
@@ -1174,9 +1173,8 @@ public:
         // 2. Replay the table ccmap.
         if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
                                          SchemaOpMessage_Stage_PrepareSchema ||
-            schema_op_msg.stage() ==
-                ::txlog::SchemaOpMessage_Stage::
-                    SchemaOpMessage_Stage_PrepareIndexTable)
+            schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
+                                         SchemaOpMessage_Stage_PrepareData)
 
         {
             const TableSchema *old_schema = catalog_entry->schema_.get();
@@ -1294,8 +1292,7 @@ public:
             }
             break;
         }
-        case ::txlog::SchemaOpMessage_Stage::
-            SchemaOpMessage_Stage_PrepareIndexTable:
+        case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData:
         {
 #ifdef RANGE_PARTITION_ENABLED
             lock_type = LockType::WriteIntent;
