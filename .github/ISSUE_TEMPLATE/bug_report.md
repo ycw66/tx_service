@@ -12,4 +12,4 @@ e.g. 0.0.1
 
 - **Actual result (describe the incorrect result actually happened):**(required)
 
-- **Related issues (references to the related issues, e.g. monographdb/repository#number):**(optional)
+- **Related issues (references to the related issues, e.g. eloqdb/repository#number):**(optional)

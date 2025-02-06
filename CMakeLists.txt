@@ -1,19 +1,20 @@
 cmake_minimum_required(VERSION 3.8)
-project (monograph)
+project(eloq)
 
 find_package(Threads)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
-set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wno-parentheses -Wno-error -W -fPIC")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-parentheses -Wno-error -W -fPIC")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DFAULT_INJECTOR")
 
-if ( CMAKE_COMPILER_IS_GNUCC )
-    set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-reorder -Wno-unused-parameter -Wno-parentheses")
+if(CMAKE_COMPILER_IS_GNUCC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-reorder -Wno-unused-parameter -Wno-parentheses")
 endif()
-if ( MSVC )
-    set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} /W3")
+
+if(MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W3")
 endif()
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -29,44 +30,50 @@ option(BRPC_WITH_GLOG "With glog" ON)
 option(RUN_TX_SERVICE_TESTS "Run unit-tests" ON)
 option(RANGE_PARTITION_ENABLED "Whether enable range partition" ON)
 message(NOTICE "RANGE_PARTITION_ENABLED : ${RANGE_PARTITION_ENABLED}")
-if (RANGE_PARTITION_ENABLED)
+
+if(RANGE_PARTITION_ENABLED)
     add_definitions(-DRANGE_PARTITION_ENABLED)
 endif()
-option (FORK_HM_PROCESS "Whether fork host manager process" ON)
+
+option(FORK_HM_PROCESS "Whether fork host manager process" ON)
 message(NOTICE "FORK_HM_PROCESS : ${FORK_HM_PROCESS}")
-if (FORK_HM_PROCESS)
+
+if(FORK_HM_PROCESS)
     add_definitions(-DFORK_HM_PROCESS)
 endif()
 
 option(ON_KEY_OBJECT "Enable ON_KEY_OBJECT" OFF)
 message(STATUS "ON_KEY_OBJECT : ${ON_KEY_OBJECT}")
-if (ON_KEY_OBJECT)
+
+if(ON_KEY_OBJECT)
     add_definitions(-DON_KEY_OBJECT)
 endif()
 
 option(RUNNING_TXSERVICE_CTEST "running tx_service alone to run test" ON)
 message(STATUS "RUNNING_TXSERVICE_CTEST : ${RUNNING_TXSERVICE_CTEST}")
-if (RUNNING_TXSERVICE_CTEST)
+
+if(RUNNING_TXSERVICE_CTEST)
     add_definitions(-DRUNNING_TXSERVICE_CTEST)
 endif()
 
-if (USE_ROCKSDB_LOG_STATE)
-  if (WITH_ROCKSDB_CLOUD MATCHES "S3|GCS")
-    if (WITH_ROCKSDB_CLOUD STREQUAL "S3")
-        add_compile_definitions(WITH_ROCKSDB_CLOUD=1)
-    elseif (WITH_ROCKSDB_CLOUD STREQUAL "GCS")
-        add_compile_definitions(WITH_ROCKSDB_CLOUD=2)
+if(USE_ROCKSDB_LOG_STATE)
+    if(WITH_ROCKSDB_CLOUD MATCHES "S3|GCS")
+        if(WITH_ROCKSDB_CLOUD STREQUAL "S3")
+            add_compile_definitions(WITH_ROCKSDB_CLOUD=1)
+        elseif(WITH_ROCKSDB_CLOUD STREQUAL "GCS")
+            add_compile_definitions(WITH_ROCKSDB_CLOUD=2)
+        endif()
     endif()
-  endif()
-  add_compile_definitions(USE_ROCKSDB_LOG_STATE)
+
+    add_compile_definitions(USE_ROCKSDB_LOG_STATE)
 endif()
 
 add_subdirectory(abseil-cpp)
 
 set(ABSEIL
-        absl::btree
-        absl::flat_hash_map
-        absl::span
+    absl::btree
+    absl::flat_hash_map
+    absl::span
 )
 
 find_package(Protobuf REQUIRED)
@@ -77,10 +84,9 @@ find_package(MIMALLOC REQUIRED)
 find_path(GFLAGS_INCLUDE_PATH gflags/gflags.h)
 find_library(GFLAGS_LIBRARY NAMES gflags libgflags)
 
-if ((NOT GFLAGS_INCLUDE_PATH) OR (NOT GFLAGS_LIBRARY))
+if((NOT GFLAGS_INCLUDE_PATH) OR(NOT GFLAGS_LIBRARY))
     message(FATAL_ERROR "Fail to find gflags")
-endif ()
-
+endif()
 
 message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
 
@@ -89,10 +95,11 @@ message(STATUS "protobuf include dir: ${Protobuf_INCLUDE_DIR}")
 message(STATUS "gflags libs dir: ${GFLAGS_LIBRARY}")
 message(STATUS "gflags include dir: ${GFLAGS_INCLUDE_DIR}")
 
-if ( CMAKE_COMPILER_IS_GNUCC )
+if(CMAKE_COMPILER_IS_GNUCC)
     find_path(BRPC_INCLUDE_PATH NAMES brpc/stream.h)
     find_library(BRPC_LIB NAMES brpc)
-    if ((NOT BRPC_INCLUDE_PATH) OR (NOT BRPC_LIB))
+
+    if((NOT BRPC_INCLUDE_PATH) OR(NOT BRPC_LIB))
         message(FATAL_ERROR "Fail to find brpc")
     endif()
 
@@ -106,9 +113,11 @@ if ( CMAKE_COMPILER_IS_GNUCC )
     if(BRPC_WITH_GLOG)
         find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
         find_library(GLOG_LIB NAMES glog VERSION ">=0.6.0" REQUIRED)
-        if((NOT GLOG_INCLUDE_PATH) OR (NOT GLOG_LIB))
+
+        if((NOT GLOG_INCLUDE_PATH) OR(NOT GLOG_LIB))
             message(FATAL_ERROR "Fail to find glog")
         endif()
+
         include_directories(${GLOG_INCLUDE_PATH})
         set(LINK_LIB ${LINK_LIB} ${GLOG_LIB})
         message(STATUS "glog lib dir: ${GLOG_LIB}")
@@ -116,17 +125,17 @@ if ( CMAKE_COMPILER_IS_GNUCC )
 
     find_path(LEVELDB_INCLUDE_PATH NAMES leveldb/db.h)
     find_library(LEVELDB_LIB NAMES leveldb)
-    if ((NOT LEVELDB_INCLUDE_PATH) OR (NOT LEVELDB_LIB))
+
+    if((NOT LEVELDB_INCLUDE_PATH) OR(NOT LEVELDB_LIB))
         message(FATAL_ERROR "Fail to find leveldb")
     endif()
 
     # find_path(OPENSSL_INCLUDE_PATH NAMES openssl/ssl.h)
     # find_library(OPENSSL_LIB NAMES ssl)
     # if ((NOT OPENSSL_INCLUDE_PATH) OR (NOT OPENSSL_LIB))
-    #     message(FATAL_ERROR "Fail to find openssl")
+    # message(FATAL_ERROR "Fail to find openssl")
     # endif()
 endif()
-
 
 # Compile all protobuf files under proto directory.
 set(PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/include/proto)
@@ -143,7 +152,6 @@ execute_process(
     WORKING_DIRECTORY ${LOG_PROTO_SRC}
 )
 
-
 set(TX_SERVICE_SOURCE_DIR ${CMAKE_SOURCE_DIR})
 SET(METRICS_SERVICE_SOURCE_DIR ${CMAKE_SOURCE_DIR}/../eloq_metrics)
 
@@ -157,7 +165,7 @@ set(INCLUDE_DIR
     ${METRICS_SERVICE_SOURCE_DIR}/include
     ${Protobuf_INCLUDE_DIR})
 
-if ( CMAKE_COMPILER_IS_GNUCC )
+if(CMAKE_COMPILER_IS_GNUCC)
     set(INCLUDE_DIR ${INCLUDE_DIR}
         ${MIMALLOC_INCLUDE_PATH}
         ${BRPC_INCLUDE_PATH}
@@ -168,14 +176,14 @@ endif()
 
 set(LINK_LIB ${LINK_LIB} ${PROTOBUF_LIBRARY})
 
-if ( CMAKE_COMPILER_IS_GNUCC )
-   set(LINK_LIB ${LINK_LIB}
-       ${MIMALLOC_LIB}
-       ${GFLAGS_LIBRARY}
-       ${LEVELDB_LIB}
-       ${BRAFT_LIB}
-       ${BRPC_LIB}
-       ${OPENSSL_LIB}
+if(CMAKE_COMPILER_IS_GNUCC)
+    set(LINK_LIB ${LINK_LIB}
+        ${MIMALLOC_LIB}
+        ${GFLAGS_LIBRARY}
+        ${LEVELDB_LIB}
+        ${BRAFT_LIB}
+        ${BRPC_LIB}
+        ${OPENSSL_LIB}
     )
 endif()
 
@@ -222,16 +230,15 @@ set(TxService_SOURCES ${TxService_SOURCES} ${PROTO_SRC}/${PROTO_NAME}.pb.cc)
 set(TxService_SOURCES ${TxService_SOURCES} ${LOG_PROTO_SRC}/log_agent.cpp)
 set(TxService_SOURCES ${TxService_SOURCES} ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc)
 
-add_library(txservice STATIC ${TxService_SOURCES} )
+add_library(txservice STATIC ${TxService_SOURCES})
 
 target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
 
 target_link_libraries(txservice PUBLIC mimalloc ${LINK_LIB} ${PROTOBUF_LIBRARIES} ${ABSEIL})
 
-#add_executable(hello ${CMAKE_SOURCE_DIR}/hello.cpp)
-#target_link_libraries(hello PRIVATE txservice ${CMAKE_THREAD_LIBS_INIT})
-
-SET (HOST_MANAGER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/raft_host_manager)
+# add_executable(hello ${CMAKE_SOURCE_DIR}/hello.cpp)
+# target_link_libraries(hello PRIVATE txservice ${CMAKE_THREAD_LIBS_INIT})
+SET(HOST_MANAGER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/raft_host_manager)
 set(HOST_MANAGER_INCLUDE_DIR
     ${HOST_MANAGER_SOURCE_DIR}/include
     ${TX_SERVICE_SOURCE_DIR}/tx-log-protos
@@ -239,7 +246,7 @@ set(HOST_MANAGER_INCLUDE_DIR
     ${PROTO_SRC}
     ${LOG_PROTO_SRC})
 
-if ( CMAKE_COMPILER_IS_GNUCC )
+if(CMAKE_COMPILER_IS_GNUCC)
     set(HOST_MANAGER_INCLUDE_DIR ${HOST_MANAGER_INCLUDE_DIR}
         ${BRPC_INCLUDE_PATH}
         ${BRAFT_INCLUDE_PATH}
@@ -249,12 +256,14 @@ endif()
 
 set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${PROTOBUF_LIBRARIES})
 
-if ( CMAKE_COMPILER_IS_GNUCC )
+if(CMAKE_COMPILER_IS_GNUCC)
     find_path(BRAFT_INCLUDE_PATH NAMES braft/raft.h)
     find_library(BRAFT_LIB NAMES braft)
-    if ((NOT BRAFT_INCLUDE_PATH) OR (NOT BRAFT_LIB))
-        message (FATAL_ERROR "Fail to find braft")
+
+    if((NOT BRAFT_INCLUDE_PATH) OR(NOT BRAFT_LIB))
+        message(FATAL_ERROR "Fail to find braft")
     endif()
+
     set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB}
         ${GFLAGS_LIBRARY}
         ${LEVELDB_LIB}
@@ -263,9 +272,11 @@ if ( CMAKE_COMPILER_IS_GNUCC )
         ${OPENSSL_LIB})
     find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
     find_library(GLOG_LIB NAMES glog VERSION ">=0.6.0" REQUIRED)
-    if((NOT GLOG_INCLUDE_PATH) OR (NOT GLOG_LIB))
+
+    if((NOT GLOG_INCLUDE_PATH) OR(NOT GLOG_LIB))
         message(FATAL_ERROR "Fail to find glog")
     endif()
+
     include_directories(${GLOG_INCLUDE_PATH})
     set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${GLOG_LIB})
 endif()
@@ -279,18 +290,18 @@ SET(RaftHM_SOURCES
     ${PROTO_SRC}/${PROTO_NAME}.pb.cc
     ${LOG_PROTO_SRC}/log_agent.cpp
     ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc
-    )
+)
 
 include_directories(${HOST_MANAGER_INCLUDE_DIR})
 add_executable(host_manager ${RaftHM_SOURCES})
-target_link_libraries(host_manager  ${HOST_MANAGER_LINK_LIB})
+target_link_libraries(host_manager ${HOST_MANAGER_LINK_LIB})
 
 install(TARGETS host_manager
-        RUNTIME DESTINATION bin)
-
+    RUNTIME DESTINATION bin)
 
 message(NOTICE "with tests: ${RUN_TX_SERVICE_TESTS}")
-if (RUN_TX_SERVICE_TESTS)
+
+if(RUN_TX_SERVICE_TESTS)
     # Ensure tests are enabled
     enable_testing()
 
@@ -315,4 +326,4 @@ if (RUN_TX_SERVICE_TESTS)
     add_test(NAME CcEntry-Test COMMAND CcEntry-Test)
     add_test(NAME CcPage-Test COMMAND CcPage-Test)
     add_test(NAME StartTsCollector-Test COMMAND StartTsCollector-Test)
-endif ()
+endif()

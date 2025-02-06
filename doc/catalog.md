@@ -35,9 +35,9 @@ View catalog stores in `mono.mariadb_views`
 TODO(xiaoyang): Please update this section.
 
 
-Other catalogs like use privilege, procedure, sequences etc. are stored as normal monograph tables. They are mostly stored in `mysql` database which inherits from Mysql (to be specific, standard Mysql stores these catalog in `mysql` database with Aria engine).
+Other catalogs like use privilege, procedure, sequences etc. are stored as normal eloq tables. They are mostly stored in `mysql` database which inherits from Mysql (to be specific, standard Mysql stores these catalog in `mysql` database with Aria engine).
 
-Currently, these catalogs are stored distributed across the cluster. Mysql will read some catalog tables during startup. As a result,  Mysql startup process depends on the tx_service cluster is ready. Here the ready means all the txnodes finishes the log recovery and can serve transactions. We added a checker in monograph engine initializer to support this behavior.
+Currently, these catalogs are stored distributed across the cluster. Mysql will read some catalog tables during startup. As a result,  Mysql startup process depends on the tx_service cluster is ready. Here the ready means all the txnodes finishes the log recovery and can serve transactions. We added a checker in eloq engine initializer to support this behavior.
 
 ```
 cassandra@cqlsh:mono> describe tables;
@@ -102,7 +102,7 @@ cassandra@cqlsh:mono> select tablename, kvtablename from mariadb_tables;
 TBD
 
 ### Catalog in Memory
-Access KV store is slow, monographDB stores the catalog in memory as well. Catalogs like privilege are normal monograph tables, which are stored in ccmap directly. This section focus on how does monographDB store table catalog in tx_service layer.
+Access KV store is slow, eloqDB stores the catalog in memory as well. Catalogs like privilege are normal eloq tables, which are stored in ccmap directly. This section focus on how does eloqDB store table catalog in tx_service layer.
 
 <p align="center">
 <img src="../blob/images/catalog_fig1.png">
@@ -144,9 +144,9 @@ struct CatalogRecord
 
 
 #### Fetch Table Catalog
-Suppose a table is created by previous transaction and server restart. Then how does table catalog being fetched from KV store? There are two ways in monographdb:
+Suppose a table is created by previous transaction and server restart. Then how does table catalog being fetched from KV store? There are two ways in eloqdb:
 
-1. Using monograph_discover_table() interface in ha_monograph. When this is the first open_table on the target table t1. Handler interface `monograph_discover_table()` will be called. It will issue a local ReadTxRequest to Tx_service to get the table catalog. Local ReadTxRequest will read a special ccmap `__catalog` using ReadCcRequest. Generally this ccmap is similar to normal TemplateCcMap, but has some additional logics which are impemented in catalog_cc_map.h. The logics include: For ReadType::Inside, if the catalog_ccmap doesn't contain the value, check whether the CatalogEntry is constructed at this node. If so create pk/sk ccmap and install the value into catalog_ccmap on the fly. For ReadType::Outside, create CatalogEntry and pk/sk ccmaps on the fly.
+1. Using eloq_discover_table() interface in ha_eloq. When this is the first open_table on the target table t1. Handler interface `eloq_discover_table()` will be called. It will issue a local ReadTxRequest to Tx_service to get the table catalog. Local ReadTxRequest will read a special ccmap `__catalog` using ReadCcRequest. Generally this ccmap is similar to normal TemplateCcMap, but has some additional logics which are impemented in catalog_cc_map.h. The logics include: For ReadType::Inside, if the catalog_ccmap doesn't contain the value, check whether the CatalogEntry is constructed at this node. If so create pk/sk ccmap and install the value into catalog_ccmap on the fly. For ReadType::Outside, create CatalogEntry and pk/sk ccmaps on the fly.
 
 2. Fetch catalog from kv store on the fly. When executing a CcRequest on a ccmap, the ccmap may not be created yet. If LocalCcShard contains the catalog, then we are able to create the ccmap based on catalog. But if the catalog doesn't exist, then we need to generate FetchCatalogCc request to fetch catalog from kv store on the fly. The current CcRequest will be queued in FetchCatalogCc request. And once the catalog in kv store is returned and FetchCatalogCc finished, then the queued CcRequest will be executed again.
 
@@ -155,7 +155,7 @@ Create/Drop Table statement in Mysql will create/drop the table catalog. We focu
 
 1. Normal create/drop table DDL.
 
-Create/Drop table in monographDB is implemented as a multi-phase operations:
+Create/Drop table in eloqDB is implemented as a multi-phase operations:
 
 a. acquire all the write intents: This is used to prevent concurrent DDL on the same table.
 

@@ -16,7 +16,7 @@ enum class LockType
 (2) Conflicts between different lock types is as follows:
 
 | LockType    | Confilcts With                   |
-|-------------|----------------------------------|
+| ----------- | -------------------------------- |
 | NoLock      | -                                |
 | ReadIntent  | -                                |
 | ReadLock    | WriteLock                        |
@@ -33,7 +33,7 @@ There are two way:
 - Optimistic: fail and abort when conflict occurs;
 - Pessimistic: block and wait for other lock released when conflict occurs.
 
-(1) In MonographDB, we conbine it with read and write operations, the definition of CcProtocol is: 
+(1) In EloqDB, we conbine it with read and write operations, the definition of CcProtocol is: 
 ```
 enum class CcProtocol
 {
@@ -94,21 +94,21 @@ enum class CcOperation
 
 (1) What type of lock to acquire and how to handle the request if conflict occurs under different `IsolationLevel` and `CcProtocol`  
 
-| IsolationLevel | CcProtocol | CcOperation                                  |                               |                                 |             |
-|----------------|------------|----------------------------------------------|-------------------------------|---------------------------------|-------------|
-|                |            | Read                                         | Write                         | ReadForWrite                    | ReadSkIndex |
-|----------------|------------|----------------------------------------------|-------------------------------|---------------------------------|-------------|
-| ReadCommitted  | OCC        | NoLock                                       | WriteLock( conflict: backoff) | WriteIntent( conflict: backoff) | ReadLock    |
-|                | OccRead    | NoLock                                       | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
-|                | Locking    | NoLock                                       | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
-| Snapshot       | OCC        | NoLock                                       | WriteLock( conflict: backoff) | WriteIntent( conflict: backoff) | No ReadLock |
-|                | OccRead    | NoLock                                       | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | No ReadLock |
-| RepeatableRead | OCC        | ReadIntent (Commit: validate)                | WriteLock( conflict: backoff) | WriteIntent( conflict: backoff) | ReadLock    |
-|                | OccRead    | ReadIntent (Commit: validate)                | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
-|                | Locking    | ReadLock                                     | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
-| Serializable   | OCC        | ReadIntent on key and gap (Commit: validate) | WriteLock( conflict: backoff) | WriteIntent( conflict: backoff) | ReadLock    |
-|                | OccRead    | ReadIntent on key and gap (Commit: validate) | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
-|                | Locking    | ReadLock on key and gap                      | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
+| IsolationLevel   | CcProtocol   | CcOperation                                    |                                 |                                   |               |
+| ---------------- | ------------ | ---------------------------------------------- | ------------------------------- | --------------------------------- | ------------- |
+|                  |              | Read                                           | Write                           | ReadForWrite                      | ReadSkIndex   |
+| ---------------- | ------------ | ---------------------------------------------- | ------------------------------- | --------------------------------- | ------------- |
+| ReadCommitted    | OCC          | NoLock                                         | WriteLock( conflict: backoff)   | WriteIntent( conflict: backoff)   | ReadLock      |
+|                  | OccRead      | NoLock                                         | WriteLock( conflict: block)     | WriteIntent( conflict: block)     | ReadLock      |
+|                  | Locking      | NoLock                                         | WriteLock( conflict: block)     | WriteIntent( conflict: block)     | ReadLock      |
+| Snapshot         | OCC          | NoLock                                         | WriteLock( conflict: backoff)   | WriteIntent( conflict: backoff)   | No ReadLock   |
+|                  | OccRead      | NoLock                                         | WriteLock( conflict: block)     | WriteIntent( conflict: block)     | No ReadLock   |
+| RepeatableRead   | OCC          | ReadIntent (Commit: validate)                  | WriteLock( conflict: backoff)   | WriteIntent( conflict: backoff)   | ReadLock      |
+|                  | OccRead      | ReadIntent (Commit: validate)                  | WriteLock( conflict: block)     | WriteIntent( conflict: block)     | ReadLock      |
+|                  | Locking      | ReadLock                                       | WriteLock( conflict: block)     | WriteIntent( conflict: block)     | ReadLock      |
+| Serializable     | OCC          | ReadIntent on key and gap (Commit: validate)   | WriteLock( conflict: backoff)   | WriteIntent( conflict: backoff)   | ReadLock      |
+|                  | OccRead      | ReadIntent on key and gap (Commit: validate)   | WriteLock( conflict: block)     | WriteIntent( conflict: block)     | ReadLock      |
+|                  | Locking      | ReadLock on key and gap                        | WriteLock( conflict: block)     | WriteIntent( conflict: block)     | ReadLock      |
 
 *Notice:*
 - The request is always blocked if failed to acquire ReadLock.

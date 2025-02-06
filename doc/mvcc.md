@@ -12,8 +12,8 @@ When these historical versions of data are no longer needed, the garbage collect
 
 - The second implementation method only saves the latest version of data in the database, but will dynamically reconstruct the old version of data when using undo log. This method is used in Oracle database and Mysql/Innodb.
 
-# Design of MVCC in MonographDB
-MonographDB use the first way above to implement MVCC feature. 
+# Design of MVCC in EloqDB
+EloqDB use the first way above to implement MVCC feature. 
 
 
 <p align="center">
@@ -98,7 +98,7 @@ For an example, one base tables in KvStore may be defined as follows now:
 ## MVCC READ (Consistent read without read lock)
 
 *(NOTICE: Before reading this part, please visit "README.md" document to fetch the procedure of read.
-This part is a sketch of the read procedure under `SI` isolation level. Please visit  `ha_monograph::PkRead()`,`TemplateCcMap::Execute(ReadCc &req)`, `CcEntry::MvccGet()` functions to acquire the details.)*
+This part is a sketch of the read procedure under `SI` isolation level. Please visit  `ha_eloq::PkRead()`,`TemplateCcMap::Execute(ReadCc &req)`, `CcEntry::MvccGet()` functions to acquire the details.)*
 
 Before going into detail, let's understand which version is ** the wanted version ** of MvccRead: the version whose `commit_ts` is equal with `read_ts` or the version whose `commit_ts` is the closest to `read_ts` (of course, the `commit_ts` must less than `read_ts`).
 
@@ -139,7 +139,7 @@ Main process is as follows:
 
 The procedure of fetching needed historical version  is similar to it in "MvccRead".
 
-As konwn, the scan operation in MonographDB is a merge of entries in ccmap, local write set and data store. 
+As konwn, the scan operation in EloqDB is a merge of entries in ccmap, local write set and data store. 
 
 Here, the detailed procedure for searching key with query conditions is skipped.
 
@@ -148,7 +148,7 @@ Here, the detailed procedure for searching key with query conditions is skipped.
 - (2) For each key in scan result, charge the `commit_ts` of current scan result is equal to or less than `read_ts`. If not, must fetch the wanted version from `mvcc_archives` table.
 (this step is similiar to "MvccRead").
 
-*(NOTICE: Please visit `ha_monograph::PkIndexScanNext()`,`TemplateCcMap::Execute(ScanOpenBatchCc &req)`，`TemplateCcMap::Execute(ScanNextBatchCc &req)`,`TemplateCcMap::ScanKey()` for detailed implementation.)*
+*(NOTICE: Please visit `ha_eloq::PkIndexScanNext()`,`TemplateCcMap::Execute(ScanOpenBatchCc &req)`，`TemplateCcMap::Execute(ScanNextBatchCc &req)`,`TemplateCcMap::ScanKey()` for detailed implementation.)*
 
 
 ## How to safely clean historical versions
@@ -192,7 +192,7 @@ Up to now, there are two places to remove them.
 ### Under what circumstances can unrepeatable reading occur using snapshot read?
 Case read-tx's `read_ts` is bigger than the current `commit_ts` of ccentry(*that is, the version to read is the current version*). And, the ccentry is updated with the `commit_ts` smaller than `read_ts`. Then, next snapshot read of the read-tx will get the newly uploaded version.
 
-### Review the "RepeatableRead" design of "OCC" and "Locking" CcProtocol in MonographDB
+### Review the "RepeatableRead" design of "OCC" and "Locking" CcProtocol in EloqDB
 
 *(Read record of readset including: `CcEntryAddr`, `version_ts`, `CcProtocol`, `LockType`)*
 
@@ -222,7 +222,7 @@ As we konwn, the  `commit_ts` of "write_Tx" has not been calculated on these sta
 
 On these stages after `AcquireWrite()`, inputs of `commit_ts` calculation has collected by "write_Tx". Then, `commit_ts` of "write_Tx" can not be interfered.
 
-To ensure repeatable read, MonographDB add `wlock_ts` into `CcEntry`. Once the ccentry is locked by "write_tx", `wlock_ts` must be updated.
+To ensure repeatable read, EloqDB add `wlock_ts` into `CcEntry`. Once the ccentry is locked by "write_tx", `wlock_ts` must be updated.
 ```
  wlock_ts = std::max(req.Ts(), shard_->Now());
  req.Ts() is the `ts_base` value of the node creating "write_tx".

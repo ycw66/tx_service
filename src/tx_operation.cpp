@@ -7265,7 +7265,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                   << ", txn: " << txm->TxNumber();
 
 #ifdef RANGE_PARTITION_ENABLED
-        // Test drop table t1 concurrently. See monograph_test repo. table
+        // Test drop table t1 concurrently. See eloq_test repo. table
         // name need to keep consistent
 
         data_sync_op_.op_func_ = [this, txm]
@@ -7410,7 +7410,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             }
         }
 
-        // Test drop table t1 concurrently. See monograph_test repo. table
+        // Test drop table t1 concurrently. See eloq_test repo. table
         // name need to keep consistent
         CODE_FAULT_INJECTOR("add_dropped_table_for_test", {
             std::string t1_table_name = "./test/t1";

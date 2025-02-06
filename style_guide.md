@@ -1,4 +1,4 @@
-# Coding style of MonographDB
+# Coding style of EloqDB
 Refer to Google Coding Style: https://google.github.io/styleguide/cppguide.html
 1. Using Clang-format to format your code. Recommend to enable 'format on save' feature on VS code.
 2. Using unique_ptr instead of raw pointer.
