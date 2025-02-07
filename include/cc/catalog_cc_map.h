@@ -588,8 +588,10 @@ public:
                 // is 0, if the schema is uninitialized (null). Or, the current
                 // schema must not be null.
 
-                assert(catalog_entry->Version() == 0 || old_schema != nullptr);
-                assert(new_schema->Version() == catalog_entry->DirtyVersion());
+                assert(catalog_entry->schema_version_ == 0 ||
+                       old_schema != nullptr);
+                assert(new_schema->Version() ==
+                       catalog_entry->dirty_schema_version_);
 
                 // Sync ddl op to standby nodes.
                 if (shard_->core_id_ == 0 &&
@@ -613,13 +615,14 @@ public:
                     forward_req->add_cmd_list(std::move(rec_str));
                     assert(schema_rec != nullptr);
                     assert(schema_rec->SchemaTs() ==
-                           catalog_entry->DirtyVersion());
+                           catalog_entry->dirty_schema_version_);
                     assert(schema_rec->Schema() != nullptr);
                     assert(schema_rec->SchemaImage().size() > 0);
 
-                    forward_req->set_commit_ts(catalog_entry->DirtyVersion());
+                    forward_req->set_commit_ts(
+                        catalog_entry->dirty_schema_version_);
                     forward_req->set_schema_version(
-                        catalog_entry->DirtyVersion());
+                        catalog_entry->dirty_schema_version_);
                     shard_->ForwardStandbyMessage(forward_entry);
                 }
 #endif
