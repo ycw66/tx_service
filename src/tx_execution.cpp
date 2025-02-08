@@ -3237,8 +3237,9 @@ void TransactionExecution::ScanClose(
         {
             LockType lk_type =
                 scanner->DeduceScanTupleLockType(last_tuple->rec_status_);
-
-            if (lk_type == LockType::NoLock
+            // key ts == 0 means the lock is on the gap. So the read intent is
+            // acquired on the last cce during last scan batch.
+            if ((lk_type == LockType::NoLock || last_tuple->key_ts_ == 0)
 #ifdef ON_KEY_OBJECT
                 && !rw_set_.FindObjectCommand(table_name, last_tuple->cce_addr_)
 #endif

@@ -2723,13 +2723,15 @@ public:
                 static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
-            typed_cache->Reset();
 
-            if (LockTypeUtil::DeduceLockType(cc_op,
+            // key ts == 0 means the lock is on the gap. So the read intent is
+            // acquired on the last cce during last scan batch.
+            if (typed_cache->Last()->key_ts_ == 0 ||
+                LockTypeUtil::DeduceLockType(cc_op,
                                              req.Isolation(),
                                              req.Protocol(),
                                              req.IsCoveringKeys()) ==
-                LockType::NoLock)
+                    LockType::NoLock)
             {
                 ReleaseCceLock(prior_cce->GetKeyLock(),
                                prior_cce,
@@ -2737,6 +2739,7 @@ public:
                                ng_id,
                                LockType::ReadIntent);
             }
+            typed_cache->Reset();
         }
 
         if (direction == ScanDirection::Forward)
