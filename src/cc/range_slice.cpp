@@ -187,11 +187,13 @@ StoreRange::StoreRange(uint32_t partition_id,
                        NodeGroupId range_owner,
                        LocalCcShards &cc_shards,
                        bool init_key_cache,
-                       size_t estimate_rec_size)
+                       size_t estimate_rec_size,
+                       bool has_dml_since_ddl)
     : partition_id_(partition_id),
       cc_ng_id_(range_owner),
       local_cc_shards_(cc_shards),
-      last_accessed_ts_(local_cc_shards_.ClockTs())
+      last_accessed_ts_(local_cc_shards_.ClockTs()),
+      has_dml_since_ddl_(has_dml_since_ddl)
 {
     if (init_key_cache && txservice_enable_key_cache)
     {

@@ -573,6 +573,8 @@ public:
         NodeGroupId range_owner =
             GetRangeOwner(old_info->PartitionId(), ng_id)->BucketOwner();
 
+        bool has_dml_since_ddl = true;
+
         if (range_owner == ng_id)
         {
             uint64_t old_last_sync_ts = old_entry->GetLastSyncTs();
@@ -581,6 +583,8 @@ public:
             TemplateStoreRange<KeyT> *old_store_range =
                 old_entry->TypedStoreRange();
             assert(old_store_range);
+            has_dml_since_ddl = old_store_range->HasDmlSinceDdl();
+
             const TxKey &tx_key = old_info->NewKey()->front();
             // Split the StoreRange struct in old TableRangeEntry and get
             // the removed slice keys and sizes. These keys will be reused
@@ -671,16 +675,23 @@ public:
                         &cur_range_slices,
                         false,
                         old_last_sync_ts,
-                        estimate_rec_size);
+                        estimate_rec_size,
+                        has_dml_since_ddl);
+
                 new_range_entries.push_back(new_range);
             }
         }
         else
         {
-            std::unique_ptr<std::pair<
+            std::unique_ptr<std::tuple<
+                bool,
                 bool,
                 std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>
                 new_range_slices = old_entry->ReleaseDirtyRangeSlices();
+
+            has_dml_since_ddl = new_range_slices != nullptr
+                                    ? std::get<1>(*new_range_slices)
+                                    : true;
             // Acquire meta lock since table_ranges_ is not consistent during
             // split.
             std::unique_lock<std::shared_mutex> meta_lk(meta_data_mux_);
@@ -702,9 +713,10 @@ public:
                             ->BucketOwner();
                     if (new_range_owner == ng_id)
                     {
-                        auto tmp_it = new_range_slices->second.find(
+                        auto &new_store_range = std::get<2>(*new_range_slices);
+                        auto tmp_it = new_store_range.find(
                             old_info->NewPartitionId()->at(i));
-                        if (tmp_it != new_range_slices->second.end())
+                        if (tmp_it != new_store_range.end())
                         {
                             slices_keys = &(tmp_it->second);
                         }
@@ -720,7 +732,8 @@ public:
                                      slices_keys,
                                      false,
                                      0,
-                                     estimate_rec_size);
+                                     estimate_rec_size,
+                                     has_dml_since_ddl);
 
                 new_range_entries.push_back(new_range);
             }
@@ -746,7 +759,8 @@ public:
         std::vector<SliceInitInfo> *slice_keys = nullptr,
         bool need_meta_lk = true,
         uint64_t last_sync_ts = 0,
-        size_t estimate_rec_size = UINT64_MAX)
+        size_t estimate_rec_size = UINT64_MAX,
+        bool has_dml_since_ddl = true)
     {
         std::unique_lock<std::shared_mutex> lk(meta_data_mux_, std::defer_lock);
         if (need_meta_lk)
@@ -818,7 +832,8 @@ public:
                                                range_ng,
                                                table_name.IsBase(),
                                                false,
-                                               estimate_rec_size);
+                                               estimate_rec_size,
+                                               has_dml_since_ddl);
             }
 
             mi_heap_set_default(prev_heap);
@@ -855,7 +870,10 @@ public:
                     partition_id,
                     range_ng,
                     *this,
-                    table_name.IsBase());
+                    table_name.IsBase(),
+                    false,
+                    UINT64_MAX,
+                    has_dml_since_ddl);
                 range_slices->InitSlices(std::move(*slice_keys));
             }
             range_entry->UpdateRangeEntry(version, std::move(range_slices));
@@ -1219,6 +1237,7 @@ public:
                                 int32_t range_id,
                                 uint64_t dirty_ts,
                                 int32_t new_range_id,
+                                bool has_dml_since_ddl,
                                 std::vector<SliceInitInfo> &&new_slices)
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -1227,7 +1246,7 @@ public:
                 GetTableRangeEntryInternal(range_table_name, ng_id, range_id));
         assert(range_entry != nullptr);
         return range_entry->UploadDirtyRangeSlices(
-            new_range_id, dirty_ts, std::move(new_slices));
+            new_range_id, dirty_ts, has_dml_since_ddl, std::move(new_slices));
     }
 
     template <typename KeyT>

@@ -259,6 +259,7 @@ message UploadRangeSlicesRequest
     // [int8_t,....]
     bytes new_slices_status = 9;
     uint32 new_slices_num = 10;
+    bool has_dml_since_ddl = 11;
 }
 
 message UploadRangeSlicesResponse

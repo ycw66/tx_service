@@ -433,7 +433,8 @@ public:
                                  NodeGroupId ng_id,
                                  bool init_key_cache,
                                  bool empty_range = false,
-                                 size_t estimate_rec_size = UINT64_MAX) = 0;
+                                 size_t estimate_rec_size = UINT64_MAX,
+                                 bool has_dml_since_ddl = true) = 0;
 
     /**
      * @brief Check whether the store range is free or not.
@@ -540,7 +541,8 @@ public:
                          NodeGroupId ng_id,
                          bool init_key_cache,
                          bool empty_range = false,
-                         size_t estimate_rec_size = UINT64_MAX) override
+                         size_t estimate_rec_size = UINT64_MAX,
+                         bool has_dml_since_ddl = true) override
     {
         std::unique_ptr<TemplateStoreRange<KeyT>> range_slices =
             std::make_unique<TemplateStoreRange<KeyT>>(
@@ -551,7 +553,8 @@ public:
                 *Sharder::Instance().GetLocalCcShards(),
                 init_key_cache,
                 empty_range,
-                estimate_rec_size);
+                estimate_rec_size,
+                has_dml_since_ddl);
 
         if (!empty_range)
         {
@@ -652,6 +655,7 @@ public:
 
     bool UploadDirtyRangeSlices(int32_t new_partition_id,
                                 uint64_t dirty_ts,
+                                bool has_dml_since_ddl,
                                 std::vector<SliceInitInfo> &&new_slices)
     {
         std::lock_guard<std::shared_mutex> entry_lk(mux_);
@@ -660,16 +664,18 @@ public:
         {
             if (dirty_range_slices_ == nullptr)
             {
-                dirty_range_slices_ = std::make_unique<std::pair<
+                dirty_range_slices_ = std::make_unique<std::tuple<
+                    bool,
                     bool,
                     std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>();
-                dirty_range_slices_->first = true;
+                std::get<0>(*dirty_range_slices_) = true;
+                std::get<1>(*dirty_range_slices_) = has_dml_since_ddl;
             }
             DLOG(INFO) << "Received new range slices info, range_id:"
                        << range_info_.PartitionId()
                        << ", new_range_id:" << new_partition_id;
             auto ins_pair =
-                dirty_range_slices_->second.try_emplace(new_partition_id);
+                std::get<2>(*dirty_range_slices_).try_emplace(new_partition_id);
             // overwrite old slice specs with the new one. If a range split
             // fails during create sk, we might get different sk slice specs on
             // recover.
@@ -693,7 +699,7 @@ public:
             dirty_range_slices_ != nullptr)
         {
             assert(range_info_.IsDirty());
-            if (!dirty_range_slices_->first)
+            if (!std::get<0>(*dirty_range_slices_))
             {
                 // this range data has been kicked, don't update slices
                 // status.
@@ -706,7 +712,7 @@ public:
             assert(new_partition_id >= 0);
 
             std::unordered_map<int32_t, std::vector<SliceInitInfo>>
-                &range_slices = dirty_range_slices_->second;
+                &range_slices = std::get<2>(*dirty_range_slices_);
             assert(range_slices.find(new_partition_id) != range_slices.end());
 
             std::vector<SliceInitInfo> &slices =
@@ -730,7 +736,7 @@ public:
         std::shared_lock<std::shared_mutex> entry_lk(mux_);
         if (dirty_range_slices_ != nullptr && DirtyVersion() == dirty_version)
         {
-            return dirty_range_slices_->first;
+            return std::get<0>(*dirty_range_slices_);
         }
         return false;
     }
@@ -741,19 +747,21 @@ public:
 
         if (dirty_range_slices_ != nullptr)
         {
-            dirty_range_slices_->first = accept;
+            std::get<0>(*dirty_range_slices_) = accept;
         }
     }
 
     std::unique_ptr<
-        std::pair<bool,
-                  std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>
+        std::tuple<bool,
+                   bool,
+                   std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>
     ReleaseDirtyRangeSlices()
     {
         std::lock_guard<std::shared_mutex> entry_lk(mux_);
-        if (dirty_range_slices_ != nullptr && !dirty_range_slices_->first)
+        if (dirty_range_slices_ != nullptr &&
+            !std::get<0>(*dirty_range_slices_))
         {
-            auto &map_ref = dirty_range_slices_->second;
+            auto &map_ref = std::get<2>(*dirty_range_slices_);
             for (auto it = map_ref.begin(); it != map_ref.end(); it++)
             {
                 auto &slices = it->second;
@@ -778,10 +786,11 @@ private:
     // 2. mutex lock is acquried on TableRangeEntry.mux_.
     std::unique_ptr<TemplateStoreRange<KeyT>> range_slices_{nullptr};
 
-    // (accept_data, {new_range_id->[slices_info,...], ...})
+    // (accept_data, has_dml_since_ddl, {new_range_id->[slices_info,...], ...})
     std::unique_ptr<
-        std::pair<bool,
-                  std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>
+        std::tuple<bool,
+                   bool,
+                   std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>
         dirty_range_slices_{nullptr};
 };
 

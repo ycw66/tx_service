@@ -246,4 +246,5 @@ public:
     uint64_t tx_number_{0};
 #endif
 };
+
 }  // namespace txservice

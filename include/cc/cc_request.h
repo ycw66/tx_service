@@ -3533,9 +3533,6 @@ public:
     }
 #endif
 
-    // For ScanFlushRecords, this indicates the count of keys that have been
-    // exported. For ScanDeltaSize, it is the count of slices that have been
-    // scanned.
     std::vector<size_t> accumulated_scan_cnt_;
     std::vector<uint64_t> accumulated_mem_usage_;
     bool scan_heap_is_full_{false};
@@ -6706,6 +6703,7 @@ public:
                int32_t partition_id,
                uint64_t version_ts,
                int32_t new_partition_id,
+               bool has_dml_since_ddl,
                const std::string *new_slices_keys,
                const std::string *new_slices_sizes,
                const std::string *new_slices_status,
@@ -6724,6 +6722,7 @@ public:
         ng_term_ = ng_term;
 
         parse_offset_ = {0, 0, 0};
+        has_dml_since_ddl_ = has_dml_since_ddl;
     }
 
     bool ValidTermCheck()
@@ -6906,6 +6905,11 @@ public:
         return new_slices_;
     }
 
+    bool HasDmlSinceDdl() const
+    {
+        return has_dml_since_ddl_;
+    }
+
 private:
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_{0};
@@ -6925,6 +6929,8 @@ private:
     std::tuple<size_t, size_t, size_t> parse_offset_{0, 0, 0};
 
     std::vector<SliceInitInfo> new_slices_{};
+
+    bool has_dml_since_ddl_{true};
 
     bthread::Mutex mutex_;
     bthread::ConditionVariable cv_;
@@ -7511,7 +7517,8 @@ struct ScanSliceDeltaSizeCc : public CcRequestBase
                          uint64_t txn,
                          const TxKey &target_start_key,
                          const TxKey &target_end_key,
-                         StoreRange *store_range)
+                         StoreRange *store_range,
+                         bool is_dirty)
         : table_name_(table_name),
           node_group_id_(ng_id),
           node_group_term_(ng_term),
@@ -7520,16 +7527,19 @@ struct ScanSliceDeltaSizeCc : public CcRequestBase
           start_key_(target_start_key),
           end_key_(target_end_key),
           store_range_(store_range),
+          is_dirty_(is_dirty),
+          has_dml_since_ddl_(false),
           unfinished_cnt_(core_cnt)
     {
         tx_number_ = txn;
         pause_pos_.resize(core_cnt);
+        size_t slice_cnt = store_range ? store_range->SlicesCount() : 0;
         for (size_t i = 0; i < core_cnt; ++i)
         {
             slice_delta_size_.emplace_back();
-            if (store_range_)
+            if (slice_cnt > 0)
             {
-                slice_delta_size_.back().reserve(store_range_->SlicesCount());
+                slice_delta_size_.back().reserve(slice_cnt);
             }
         }
     }
@@ -7644,19 +7654,16 @@ struct ScanSliceDeltaSizeCc : public CcRequestBase
 
     StoreRange *StoreRangePtr() const
     {
-        return store_range_;
+        return store_range_.load(std::memory_order_relaxed);
     }
 
     bool SetStoreRange(StoreRange *store_range, uint16_t core_id)
     {
-        bool res = false;
-        std::lock_guard<std::mutex> lk(mux_);
-        if (store_range_ == nullptr)
-        {
-            store_range_ = store_range;
-            res = true;
-        }
-        slice_delta_size_[core_id].reserve(store_range_->SlicesCount());
+        StoreRange *expect = nullptr;
+        assert(store_range);
+        bool res = store_range_.compare_exchange_strong(
+            expect, store_range, std::memory_order_acq_rel);
+        slice_delta_size_[core_id].reserve(store_range->SlicesCount());
         return res;
     }
 
@@ -7668,6 +7675,23 @@ struct ScanSliceDeltaSizeCc : public CcRequestBase
     std::vector<std::pair<TxKey, int64_t>> &SliceDeltaSize(size_t core_id)
     {
         return slice_delta_size_[core_id];
+    }
+
+    bool IsDirty() const
+    {
+        return is_dirty_;
+    }
+
+    void SetHasDmlSinceDdl()
+    {
+        bool expect = false;
+        has_dml_since_ddl_.compare_exchange_strong(
+            expect, true, std::memory_order_acq_rel);
+    }
+
+    bool HasDmlSinceDdl() const
+    {
+        return has_dml_since_ddl_.load(std::memory_order_relaxed);
     }
 
 private:
@@ -7684,7 +7708,7 @@ private:
     // Start/end key of target range.
     const TxKey &start_key_;
     const TxKey &end_key_;
-    StoreRange *store_range_{nullptr};
+    std::atomic<StoreRange *> store_range_{nullptr};
     // Position that we left off during last round of scan.
     // pause_pos_.first is the key that we stopped at (has not been scanned
     // though), .second is the slice that we stopped in (has not been scanned
@@ -7693,6 +7717,21 @@ private:
     // The delta size of the slices. First is the TxKey of the slice, second is
     // the delta size. The TxKey is not the owner of the key.
     std::vector<std::vector<std::pair<TxKey, int64_t>>> slice_delta_size_;
+
+    // Generally, if the size of a key in the data store is unknown (the
+    // data_store_size_ is INT32_MAX), we need to read the storage (via
+    // LoadSlice) to determine the value. However, in some cases, we know
+    // whether the key may exist in the storage. For example, when the value of
+    // this variable is true (during index creation), if there are no concurrent
+    // write transactions, there is no need to check the size of this key in the
+    // storage and can be set to 0 directly.
+    bool is_dirty_{false};
+    // During the index creation, the version of the sk generated by the pk is
+    // smaller than the version of the key schema, while the version of the key
+    // generated by the write transaction is larger than the version of the key
+    // schema. Therefore, based on this fact, it can be determined whether there
+    // are concurrent write transactions during the index creation.
+    std::atomic<bool> has_dml_since_ddl_{false};
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
     uint32_t unfinished_cnt_;

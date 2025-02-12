@@ -1264,6 +1264,7 @@ public:
             req.RangeId(),
             req.VersionTs(),
             req.NewRangeId(),
+            req.HasDmlSinceDdl(),
             std::move(new_slices));
         if (res)
         {

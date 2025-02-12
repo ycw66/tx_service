@@ -574,7 +574,8 @@ public:
                NodeGroupId range_owner,
                LocalCcShards &cc_shards,
                bool init_key_cache,
-               size_t estimate_rec_size);
+               size_t estimate_rec_size,
+               bool has_dml_since_ddl = true);
 
     StoreRange(const StoreRange &) = delete;
 
@@ -706,6 +707,16 @@ public:
         return key_cache_[core_id]->Info();
     }
 
+    void SetHasDmlSinceDdl()
+    {
+        has_dml_since_ddl_ = true;
+    }
+
+    bool HasDmlSinceDdl() const
+    {
+        return has_dml_since_ddl_;
+    }
+
 protected:
     class LoadSliceController
     {
@@ -830,6 +841,12 @@ protected:
         key_cache_;
     std::atomic<uint64_t> last_init_key_cache_time_{0};
 
+    // This variable is used during the upsert table scheme transaction(such as,
+    // add index), it represents that whether there are keys whose version is
+    // larger than the dirty table version in this range, that is to say, there
+    // are concurrent dml transaction during the ddl transaction.
+    bool has_dml_since_ddl_{true};
+
     friend class StoreSlice;
     friend struct TableRangeEntry;
     friend struct RangeSliceId;
@@ -846,12 +863,14 @@ public:
                        LocalCcShards &cc_shards,
                        bool init_key_cache,
                        bool empty_range = false,
-                       size_t estimate_rec_size = UINT64_MAX)
+                       size_t estimate_rec_size = UINT64_MAX,
+                       bool has_dml_since_ddl = true)
         : StoreRange(partition_id,
                      range_owner,
                      cc_shards,
                      init_key_cache,
-                     estimate_rec_size),
+                     estimate_rec_size,
+                     has_dml_since_ddl),
           range_start_key_(start_key),
           range_end_key_(end_key)
     {

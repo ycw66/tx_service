@@ -976,11 +976,24 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     if (empty_table)
     {
         assert(init_ranges.size() == 1);
-        std::vector<SliceInitInfo> slices;
-        slices.emplace_back(
-            catalog_factory_->NegativeInfKey(), 0, SliceStatus::FullyCached);
-        ranges.begin()->second->InitRangeSlices(
-            std::move(slices), ng_id, range_table_name.IsBase(), true);
+        NodeGroupId range_owner =
+            GetRangeOwnerNoLocking(init_ranges.begin()->partition_id_, ng_id)
+                ->BucketOwner();
+        if (range_owner == ng_id)
+        {
+            // The store range is only initialized on the node group that owns
+            // this range.
+            std::vector<SliceInitInfo> slices;
+            slices.emplace_back(catalog_factory_->NegativeInfKey(),
+                                0,
+                                SliceStatus::FullyCached);
+            ranges.begin()->second->InitRangeSlices(std::move(slices),
+                                                    ng_id,
+                                                    range_table_name.IsBase(),
+                                                    true,
+                                                    UINT64_MAX,
+                                                    false);
+        }
     }
 
     mi_heap_set_default(prev_heap);
@@ -3137,6 +3150,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             if (catalog_rec.DirtySchema() &&
                 !table_schema->IndexKeySchema(table_name))
             {
+                assert(is_dirty);
                 table_schema = catalog_rec.CopyDirtySchema();
             }
             // For index table, if this table has been dropped, skip it.
@@ -3234,7 +3248,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         assert(store_range);
 
         last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
-        schema_version = 0;
+        schema_version = table_schema->Version();
     }
 
     // Scan the delta slice size
@@ -3248,7 +3262,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                             tx_number,
                                             start_tx_key,
                                             end_tx_key,
-                                            store_range);
+                                            store_range,
+                                            is_dirty);
 
     for (size_t i = 0; i < cc_shards_.size(); i++)
     {
@@ -3300,10 +3315,21 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             // Update the task status for this range.
             range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
-            // The StoreRange will be pinned only when there are items in the
-            // range that needs to be ckpted. Therefore, there is no need to
-            // unpin it here.
-            assert(scan_delta_size_cc.StoreRangePtr() == nullptr);
+            // Generally, the StoreRange will be pinned only when there are data
+            // items in the range that needs to be ckpted.
+            if (scan_delta_size_cc.StoreRangePtr() != nullptr)
+            {
+                // This will happen if ng failover during split range, the
+                // recovering split range transaction is finished on the
+                // failover node. The dirty data already been persisted, but the
+                // before the checkpointer is able to truncate the data log, the
+                // prefer leader node is launched, and the data log is replayed
+                // on the prefer leader. When the prefer leader node try to
+                // persist those dirty data, it need to check the data store
+                // size of these data, after load slice, it find that these data
+                // are not really dirty, so do not need to export them anymore.
+                range_entry->UnPinStoreRange();
+            }
 
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
         }
@@ -3313,6 +3339,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     assert(slices_delta_size.size() > 0 || export_base_table_items);
     store_range = scan_delta_size_cc.StoreRangePtr();
     assert(store_range);
+
+    if (is_dirty && scan_delta_size_cc.HasDmlSinceDdl())
+    {
+        store_range->SetHasDmlSinceDdl();
+    }
 
     // Update slice post ckpt size.
     UpdateSlicePostCkptSize(store_range, slices_delta_size);
@@ -5949,6 +5980,7 @@ void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
             reinterpret_cast<const char *>(&slice_status);
         status_str->append(slice_status_ptr, sizeof(slice_status));
     }
+    req.set_has_dml_since_ddl(store_range_->HasDmlSinceDdl());
     stub.UploadRangeSlices(&cntl, &req, &resp, nullptr);
 
     if (cntl.Failed())

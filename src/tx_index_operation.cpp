@@ -401,6 +401,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             else
             {
                 ForceToFinish(txm);
+                return;
             }
         }
         assert(op_type_ == OperationType::AddIndex);

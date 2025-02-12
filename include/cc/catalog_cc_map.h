@@ -268,80 +268,6 @@ public:
                         return false;
                     }
 
-                    // Bind statistics for the dirty schema.
-                    catalog_entry->dirty_schema_->BindStatistics(
-                        catalog_entry->schema_->StatisticsObject());
-                    if (req.OpType() == OperationType::AddIndex)
-                    {
-                        std::vector<TableName> new_index_names =
-                            catalog_entry->dirty_schema_->IndexNames();
-                        std::vector<TableName> old_index_names =
-                            catalog_entry->schema_->IndexNames();
-                        for (const TableName &new_index_name : new_index_names)
-                        {
-                            if (std::find(old_index_names.begin(),
-                                          old_index_names.end(),
-                                          new_index_name) ==
-                                old_index_names.end())
-                            {
-                                catalog_entry->schema_->StatisticsObject()
-                                    ->CreateIndex(
-                                        new_index_name,
-                                        catalog_entry->dirty_schema_
-                                            ->IndexKeySchema(new_index_name),
-                                        cc_ng_id_);
-                            }
-                        }
-                    }
-
-#ifdef RANGE_PARTITION_ENABLED
-                    // Load ranges for the new added indexes. We cannot
-                    // simply initialize it with empty range table since we
-                    // might have pre-defined range table based on the data
-                    // distribution offered by caller.
-                    if (req.OpType() == OperationType::AddIndex)
-                    {
-                        std::vector<TableName> new_index_names =
-                            catalog_entry->dirty_schema_->IndexNames();
-                        std::vector<TableName> old_index_names =
-                            catalog_entry->schema_->IndexNames();
-                        bool found = false;
-                        for (const TableName &new_index_name : new_index_names)
-                        {
-                            found = false;
-                            for (const auto &old_index_name : old_index_names)
-                            {
-                                if (!new_index_name.String().compare(
-                                        old_index_name.String()))
-                                {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (!found)
-                            {
-                                TableName index_range_name{
-                                    new_index_name.StringView(),
-                                    TableType::RangePartition};
-                                auto ranges = shard_->GetTableRangesForATable(
-                                    index_range_name, req.NodeGroupId());
-                                if (ranges == nullptr)
-                                {
-                                    shard_->FetchTableRanges(index_range_name,
-                                                             &req,
-                                                             req.NodeGroupId(),
-                                                             ng_term);
-                                    return false;
-                                }
-                                for (auto &range : *ranges)
-                                {
-                                    range.second->SetVersion(req.CommitTs());
-                                }
-                            }
-                        }
-                    }
-#endif
-
                     if (catalog_entry->schema_ && catalog_entry->dirty_schema_)
                     {
                         // For ALTER TABLE, set the dirty index name, and this
@@ -364,6 +290,97 @@ public:
                                     new_index_name);
                             }
                         }
+                    }
+
+                    // Bind statistics for the dirty schema.
+                    catalog_entry->dirty_schema_->BindStatistics(
+                        catalog_entry->schema_->StatisticsObject());
+                    if (req.OpType() == OperationType::AddIndex)
+                    {
+                        auto &new_index_names =
+                            *(catalog_entry->dirty_schema_->DirtyIndexNames());
+                        for (const TableName &new_index_name : new_index_names)
+                        {
+                            catalog_entry->schema_->StatisticsObject()
+                                ->CreateIndex(
+                                    new_index_name,
+                                    catalog_entry->dirty_schema_
+                                        ->IndexKeySchema(new_index_name),
+                                    cc_ng_id_);
+                        }
+
+#ifdef RANGE_PARTITION_ENABLED
+                        // Load ranges for the new added indexes. We cannot
+                        // simply initialize it with empty range table since we
+                        // might have pre-defined range table based on the data
+                        // distribution offered by caller.
+                        for (const TableName &new_index_name : new_index_names)
+                        {
+                            TableName index_range_name{
+                                new_index_name.StringView(),
+                                TableType::RangePartition};
+
+                            auto ranges = shard_->GetTableRangesForATable(
+                                index_range_name, req.NodeGroupId());
+                            if (ranges == nullptr)
+                            {
+                                shard_->FetchTableRanges(index_range_name,
+                                                         &req,
+                                                         req.NodeGroupId(),
+                                                         ng_term);
+                                return false;
+                            }
+
+                            for (auto &range : *ranges)
+                            {
+                                range.second->SetVersion(req.CommitTs());
+                                NodeGroupId range_owner =
+                                    shard_
+                                        ->GetRangeOwner(
+                                            range.second->GetRangeInfo()
+                                                ->PartitionId(),
+                                            req.NodeGroupId())
+                                        ->BucketOwner();
+                                if (range_owner == req.NodeGroupId())
+                                {
+                                    // The owner this this range, and this is a
+                                    // empty range.
+
+                                    std::unique_lock<std::mutex> heap_lk(
+                                        shard_->local_shards_
+                                            .table_ranges_heap_mux_);
+                                    bool is_override_thd =
+                                        mi_is_override_thread();
+                                    mi_threadid_t prev_thd = mi_override_thread(
+                                        shard_->local_shards_
+                                            .GetTableRangesHeapThreadId());
+                                    mi_heap_t *prev_heap = mi_heap_set_default(
+                                        shard_->local_shards_
+                                            .GetTableRangesHeap());
+
+                                    std::vector<SliceInitInfo> slices;
+                                    range.second->InitRangeSlices(
+                                        std::move(slices),
+                                        req.NodeGroupId(),
+                                        false,
+                                        true,
+                                        UINT64_MAX,
+                                        false);
+
+                                    mi_heap_set_default(prev_heap);
+                                    if (is_override_thd)
+                                    {
+                                        mi_override_thread(prev_thd);
+                                    }
+                                    else
+                                    {
+                                        mi_restore_default_thread_id();
+                                    }
+                                    heap_lk.unlock();
+                                }
+                            }
+                        }
+#endif
                     }
                 }
 

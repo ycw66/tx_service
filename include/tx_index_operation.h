@@ -159,7 +159,7 @@ private:
     void ResetLeaderTerms();
     bool NeedTriggerFlushSkOp()
     {
-        return (scanned_pk_range_count_ % 60 == 0) ||
+        return (scanned_pk_range_count_ % 6000 == 0) ||
                (last_scanned_end_key_.Type() == KeyType::PositiveInf);
     }
     void DispatchRangeTask(TransactionExecution *upsert_index_txm,

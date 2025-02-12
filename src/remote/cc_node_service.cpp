@@ -1144,6 +1144,7 @@ void CcNodeService::UploadRangeSlices(
     const std::string &sizes = request->new_slices_sizes();
     const std::string &status = request->new_slices_status();
     uint32_t keys_num = request->new_slices_num();
+    bool has_dml_since_ddl = request->has_dml_since_ddl();
 
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
     size_t core_cnt = cc_shards->Count();
@@ -1155,6 +1156,7 @@ void CcNodeService::UploadRangeSlices(
               old_partition_id,
               version_ts,
               new_partition_id,
+              has_dml_since_ddl,
               &keys,
               &sizes,
               &status,
