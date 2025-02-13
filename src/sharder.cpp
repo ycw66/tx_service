@@ -416,6 +416,11 @@ int Sharder::Init(
             node_buf->set_port(GET_CCNODE_RPC_PORT(node_config.port_));
         }
 
+        // Give host manager some time to start, otherwise the RPC connect might
+        // be refused and won't be able to reconnect until after 3 seconds
+        // (controlled by flag health_check_interval).
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
         cntl.set_timeout_ms(500);
         stub.StartNode(&cntl, &req, &response, nullptr);
         for (int retry = 1000; retry > 0 && cntl.Failed(); --retry)
