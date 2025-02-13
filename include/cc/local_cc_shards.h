@@ -1818,8 +1818,8 @@ private:
     const NodeGroupId ng_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
-    // The memory quote of data sync work
-    uint64_t data_sync_worker_memory_usage_quote_{0};
+    // The memory quota of data sync work
+    uint64_t data_sync_worker_memory_usage_quota_{0};
 
     // The background thread that periodically advances the timers of the local
     // shards to the current wall clock.
@@ -2063,6 +2063,101 @@ private:
     std::vector<std::deque<std::shared_ptr<DataSyncTask>>>
         data_sync_task_queue_;
 #endif
+
+    struct DataSyncMemoryController
+    {
+        explicit DataSyncMemoryController(uint64_t mem_quota)
+            : flush_data_mem_usage_(0), flush_data_mem_quota_(mem_quota)
+        {
+        }
+
+        DataSyncMemoryController(const DataSyncMemoryController &rhs) = delete;
+        DataSyncMemoryController(DataSyncMemoryController &&rhs)
+            : flush_data_mem_usage_(rhs.flush_data_mem_usage_),
+              flush_data_mem_quota_(rhs.flush_data_mem_quota_)
+        {
+        }
+
+        // Function to allocate memory quota
+        uint64_t AllocateFlushDataMemQuota(uint64_t quota)
+        {
+            std::unique_lock<bthread::Mutex> lk(mem_mutex_);
+
+            // Lambda to check if there's enough available memory
+            auto has_enough_memory = [this, quota]()
+            {
+                // if quota is avaliable
+                if ((flush_data_mem_usage_ + quota) <= flush_data_mem_quota_)
+                {
+                    return true;
+                }
+                // Or a single object quota is bigger than overall quota which
+                // means the object is also bigger than scan heap limit, we have
+                // to allow it to be flushed, otherwise it will block ckpt
+                if (quota > flush_data_mem_quota_)
+                {
+                    LOG(WARNING)
+                        << "Flush object is too large (size: " << quota
+                        << ") which excceds the flush data mem quota (size: "
+                        << flush_data_mem_quota_ << ")";
+                    return true;
+                }
+
+                return false;
+            };
+
+            // Wait until enough memory is available
+            while (!has_enough_memory())
+            {
+                DLOG(INFO) << "Flush data memory quota is full "
+                           << flush_data_mem_usage_
+                           << " ,request quota: " << quota
+                           << " total quota: " << flush_data_mem_quota_;
+                mem_cv_.wait(lk);
+            }
+
+            // Allocate the memory quota
+            uint64_t old_usage = flush_data_mem_usage_;
+            flush_data_mem_usage_ += quota;
+            return old_usage;
+        }
+
+        // return the quota to flush data memory usage pool and notify waiting
+        // data sync thread
+        uint64_t DeallocateFlushMemQuota(uint64_t quota)
+        {
+            std::lock_guard<bthread::Mutex> lock(mem_mutex_);
+
+            assert(quota <= flush_data_mem_usage_);
+
+            // Deallocate the memory quota
+            uint64_t old_usage = flush_data_mem_usage_;
+            flush_data_mem_usage_ -= quota;
+
+            // Notify all waiting threads that memory has been freed
+            mem_cv_.notify_one();
+
+            return old_usage;
+        }
+
+        uint64_t FlushMemoryQuota() const
+        {
+            return flush_data_mem_quota_;
+        }
+
+    private:
+        // Accumulated pending flush data memory usage for back pressure the
+        // DataSyncScan
+        // Synchronization primitives
+        bthread::Mutex mem_mutex_;
+        bthread::ConditionVariable mem_cv_;
+        // Memory usage tracking
+        uint64_t flush_data_mem_usage_{0};
+        const uint64_t flush_data_mem_quota_{0};
+    };
+
+    std::vector<DataSyncMemoryController> data_sync_mem_controllers_;
+
     struct DataSyncTaskLimiter
     {
         // `0` means no pending task
@@ -2254,20 +2349,14 @@ private:
                       std::unique_ptr<std::vector<FlushRecord>> archive_vec,
                       std::unique_ptr<std::vector<TxKey>> mv_base_vec,
                       uint64_t vec_mem_usage,
-                      TransactionExecution *data_sync_txm
-#ifndef RANGE_PARTITION_ENABLED
-                      ,
-                      size_t scan_task_worker_idx
-#endif
-                      )
+                      TransactionExecution *data_sync_txm,
+                      size_t scan_task_worker_idx)
             : schema_(schema),
               data_sync_vec_(std::move(data_sync_vec)),
               archive_vec_(std::move(archive_vec)),
               mv_base_vec_(std::move(mv_base_vec)),
               vec_mem_usage_(vec_mem_usage),
-#ifndef RANGE_PARTITION_ENABLED
               scan_task_worker_idx_(scan_task_worker_idx),
-#endif
               data_sync_task_(data_sync_task),
               data_sync_txm_(data_sync_txm)
         {
@@ -2278,9 +2367,7 @@ private:
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
         std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
         uint64_t vec_mem_usage_{0};
-#ifndef RANGE_PARTITION_ENABLED
         size_t scan_task_worker_idx_{0};
-#endif
         // Increased by worker after finishing the retrieved work.
         std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};
         TransactionExecution *data_sync_txm_{nullptr};

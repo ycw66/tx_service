@@ -171,9 +171,9 @@ LocalCcShards::LocalCcShards(
     }
     node_memory_limit_mb = static_cast<uint64_t>(MB(node_memory_limit_mb));
     node_memory_limit_mb /= data_sync_worker_ctx_.worker_num_;
-    data_sync_worker_memory_usage_quote_ = node_memory_limit_mb * 0.1 * 0.75;
-    DLOG(INFO) << "Data sync work memory usage quote: "
-               << data_sync_worker_memory_usage_quote_;
+    data_sync_worker_memory_usage_quota_ = node_memory_limit_mb * 0.1 * 0.75;
+    DLOG(INFO) << "Data sync work memory usage quota: "
+               << data_sync_worker_memory_usage_quota_;
 }
 
 LocalCcShards::~LocalCcShards()
@@ -210,9 +210,12 @@ void LocalCcShards::StartBackgroudWorkers()
     data_sync_task_queue_.resize(data_sync_worker_ctx_.worker_num_);
 #endif
 
+    data_sync_mem_controllers_.reserve(data_sync_worker_ctx_.worker_num_);
     // Starts datasync worker threads.
     for (int id = 0; id < data_sync_worker_ctx_.worker_num_; id++)
     {
+        data_sync_mem_controllers_.emplace_back(
+            data_sync_worker_memory_usage_quota_);
         data_sync_worker_ctx_.worker_thd_.push_back(
             std::thread([this, id] { DataSyncWorker(id); }));
     }
@@ -2150,18 +2153,17 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
             // Push task to worker task queue.
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_.emplace_back(std::make_shared<DataSyncTask>(
-                table_name,
-                range_info->PartitionId(),
-                range_info->VersionTs(),
-                ng_id,
-                ng_term,
-                data_sync_ts,
-                data_sync_worker_memory_usage_quote_,
-                status,
-                is_dirty,
-                can_be_skipped,
-                hres));
+            data_sync_task_queue_.emplace_back(
+                std::make_shared<DataSyncTask>(table_name,
+                                               range_info->PartitionId(),
+                                               range_info->VersionTs(),
+                                               ng_id,
+                                               ng_term,
+                                               data_sync_ts,
+                                               status,
+                                               is_dirty,
+                                               can_be_skipped,
+                                               hres));
             return true;
         }
         else
@@ -2181,7 +2183,6 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                             ng_id,
                             ng_term,
                             data_sync_ts,
-                            data_sync_worker_memory_usage_quote_,
                             status,
                             is_dirty,
                             can_be_skipped,
@@ -2204,18 +2205,16 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                 // LastCheckpoint). So we push this task to the pending task
                 // queue of `Limiter`
                 iter->second->pending_tasks_.push(
-                    std::make_shared<DataSyncTask>(
-                        table_name,
-                        range_info->PartitionId(),
-                        range_info->VersionTs(),
-                        ng_id,
-                        ng_term,
-                        data_sync_ts,
-                        data_sync_worker_memory_usage_quote_,
-                        status,
-                        is_dirty,
-                        can_be_skipped,
-                        hres));
+                    std::make_shared<DataSyncTask>(table_name,
+                                                   range_info->PartitionId(),
+                                                   range_info->VersionTs(),
+                                                   ng_id,
+                                                   ng_term,
+                                                   data_sync_ts,
+                                                   status,
+                                                   is_dirty,
+                                                   can_be_skipped,
+                                                   hres));
                 return true;
             }
         }
@@ -2300,7 +2299,6 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
         is_dirty,
         false,
         txn,
-        data_sync_worker_memory_usage_quote_,
         status,
         hres));
 
@@ -2322,7 +2320,6 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
                                            is_dirty,
                                            need_copy_range,
                                            txn,
-                                           data_sync_worker_memory_usage_quote_,
                                            status,
                                            hres));
     }
@@ -2374,21 +2371,19 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
         // Relase `task_limiter_mux_`
         task_limiter_lk.unlock();
 
-        auto task =
-            std::make_shared<DataSyncTask>(table_name,
-                                           0,
-                                           0,
-                                           ng_id,
-                                           ng_term,
-                                           data_sync_ts,
-                                           data_sync_worker_memory_usage_quote_,
-                                           status,
-                                           is_dirty,
-                                           can_be_skipped,
-                                           hres,
-                                           filter_lambda,
-                                           send_cache_for_migration,
-                                           is_standby_node);
+        auto task = std::make_shared<DataSyncTask>(table_name,
+                                                   0,
+                                                   0,
+                                                   ng_id,
+                                                   ng_term,
+                                                   data_sync_ts,
+                                                   status,
+                                                   is_dirty,
+                                                   can_be_skipped,
+                                                   hres,
+                                                   filter_lambda,
+                                                   send_cache_for_migration,
+                                                   is_standby_node);
 
         // Push task to worker task queue.
         {
@@ -2410,21 +2405,19 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
             {
                 iter->second->latest_pending_task_ts_ = data_sync_ts;
                 iter->second->pending_tasks_.push(
-                    std::make_shared<DataSyncTask>(
-                        table_name,
-                        0,
-                        0,
-                        ng_id,
-                        ng_term,
-                        data_sync_ts,
-                        data_sync_worker_memory_usage_quote_,
-                        status,
-                        is_dirty,
-                        can_be_skipped,
-                        hres,
-                        filter_lambda,
-                        send_cache_for_migration,
-                        is_standby_node));
+                    std::make_shared<DataSyncTask>(table_name,
+                                                   0,
+                                                   0,
+                                                   ng_id,
+                                                   ng_term,
+                                                   data_sync_ts,
+                                                   status,
+                                                   is_dirty,
+                                                   can_be_skipped,
+                                                   hres,
+                                                   filter_lambda,
+                                                   send_cache_for_migration,
+                                                   is_standby_node));
                 enqueued_task = true;
             }
             else
@@ -2442,21 +2435,20 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
             // LastCheckpoint). Because these operations need to explicitly
             // flush data into storage, rather than relying on other
             // checkpoint tasks.
-            iter->second->pending_tasks_.push(std::make_shared<DataSyncTask>(
-                table_name,
-                0,
-                0,
-                ng_id,
-                ng_term,
-                data_sync_ts,
-                data_sync_worker_memory_usage_quote_,
-                status,
-                is_dirty,
-                can_be_skipped,
-                hres,
-                filter_lambda,
-                send_cache_for_migration,
-                is_standby_node));
+            iter->second->pending_tasks_.push(
+                std::make_shared<DataSyncTask>(table_name,
+                                               0,
+                                               0,
+                                               ng_id,
+                                               ng_term,
+                                               data_sync_ts,
+                                               status,
+                                               is_dirty,
+                                               can_be_skipped,
+                                               hres,
+                                               filter_lambda,
+                                               send_cache_for_migration,
+                                               is_standby_node));
             enqueued_task = true;
         }
     }
@@ -3477,6 +3469,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         data_sync_task->flight_task_cnt_ += 1;
     }
 
+    DataSyncMemoryController &mem_controller =
+        data_sync_mem_controllers_[worker_idx];
+
     while (!scan_data_drained)
     {
         for (size_t i = 0; i < cc_shards_.size(); ++i)
@@ -3506,13 +3501,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             {
                 scan_mem_usage += mem_usage;
             }
-            // This thread will wait in AllocatePendingFlushDataMemQuote if
-            // quote is not available
+            // This thread will wait in AllocatePendingFlushDataMemQuota if
+            // quota is not available
             uint64_t old_usage =
-                data_sync_task->AllocateFlushDataMemQuote(scan_mem_usage);
-            DLOG(INFO) << "AllocateFlushDataMemQuote old_usage: " << old_usage
+                mem_controller.AllocateFlushDataMemQuota(scan_mem_usage);
+            DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
                        << " new_usage: " << old_usage + scan_mem_usage
-                       << " quote: " << data_sync_task->FlushMemQuote()
+                       << " quota: " << mem_controller.FlushMemoryQuota()
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
                        << " of range: " << range_id
                        << " for table: " << table_name.StringView();
@@ -3699,7 +3694,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                                     std::move(archive_vec),
                                                     std::move(mv_base_vec),
                                                     scan_mem_usage,
-                                                    data_sync_txm));
+                                                    data_sync_txm,
+                                                    worker_idx));
 
                 flush_data_worker_ctx_.cv_.notify_one();
             }
@@ -4288,13 +4284,15 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 continue;
             }
 
-            // this thread will wait in AllocatePendingFlushDataMemQuote if
-            // quote is not available
+            DataSyncMemoryController &mem_controller =
+                data_sync_mem_controllers_[worker_idx];
+            // this thread will wait in AllocatePendingFlushDataMemQuota if
+            // quota is not available
             uint64_t old_usage =
-                data_sync_task->AllocateFlushDataMemQuote(scan_mem_usage);
-            DLOG(INFO) << "AllocateFlushDataMemQuote old_usage: " << old_usage
+                mem_controller.AllocateFlushDataMemQuota(scan_mem_usage);
+            DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
                        << " new_usage: " << old_usage + scan_mem_usage
-                       << " quote: " << data_sync_task->FlushMemQuote()
+                       << " quota: " << mem_controller.FlushMemoryQuota()
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
                        << " record count: " << scan_cc.accumulated_scan_cnt_[0];
 
@@ -4915,10 +4913,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     const TableSchema *schema = cur_work->schema_.get();
     assert(schema != nullptr);
 
-#ifndef RANGE_PARTITION_ENABLED
     size_t scan_task_worker_idx = cur_work->scan_task_worker_idx_;
-#endif
-
     std::vector<FlushRecord> *data_sync_vec = cur_work->data_sync_vec_.get();
     std::vector<FlushRecord> *archive_vec = cur_work->archive_vec_.get();
     std::vector<TxKey> *mv_base_vec = cur_work->mv_base_vec_.get();
@@ -5149,12 +5144,14 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
 
     // notify waiting data sync scan thread
+    DataSyncMemoryController &mem_controller =
+        data_sync_mem_controllers_[scan_task_worker_idx];
     uint64_t old_usage =
-        data_sync_task->DeallocateFlushMemQuote(cur_work->vec_mem_usage_);
+        mem_controller.DeallocateFlushMemQuota(cur_work->vec_mem_usage_);
 
-    DLOG(INFO) << "DelocateFlushDataMemQuote old_usage: " << old_usage
+    DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
                << " new_usage: " << old_usage - cur_work->vec_mem_usage_
-               << " quote: " << data_sync_task->flush_data_mem_quote_
+               << " quota: " << mem_controller.FlushMemoryQuota()
                << " flight_tasks: " << data_sync_task->flight_task_cnt_;
     PostProcessDataSyncTask(std::move(data_sync_task),
 #ifndef RANGE_PARTITION_ENABLED
