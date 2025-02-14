@@ -336,8 +336,8 @@ int Sharder::Init(
                 // Should not reach here if exec succeeds.
                 std::exit(0);
             }
-#endif
         }
+#endif
         int max_retries = 300;
         int retries = 0;
         int delay_ms = 200;
