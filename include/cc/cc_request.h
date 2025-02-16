@@ -5232,7 +5232,7 @@ public:
         case CleanType::CleanBucketData:
         {
             assert(bucket_ids_ && !bucket_ids_->empty());
-            uint16_t bucket_id = key.Hash() & 0x3FFF;
+            uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key.Hash());
             for (uint16_t id : *bucket_ids_)
             {
                 if (bucket_id == id)

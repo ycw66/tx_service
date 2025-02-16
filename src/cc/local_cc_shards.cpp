@@ -285,7 +285,17 @@ void LocalCcShards::TimerRun()
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::system_clock::now().time_since_epoch())
                 .count();
-        LocalCcShards::local_clock.store(clock_ts, std::memory_order_relaxed);
+        uint64_t old_clock_ts = LocalCcShards::local_clock.load();
+        if (clock_ts > old_clock_ts)
+        {
+            LocalCcShards::local_clock.compare_exchange_strong(
+                old_clock_ts, clock_ts, std::memory_order_relaxed);
+        }
+        else
+        {
+            LOG(WARNING) << "system_clock::now() is smaller than "
+                            "LocalCcShards::local_clock";
+        }
         UpdateTsBase(clock_ts);
 
         timer_terminate_cv_.wait_for(
@@ -2675,7 +2685,8 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
                 send_cache_for_migration,
                 [&bucket_ids](size_t key_hash) -> bool
                 {
-                    uint16_t bucket_id = key_hash & 0x3FFF;
+                    uint16_t bucket_id =
+                        Sharder::MapKeyHashToBucketId(key_hash);
                     for (uint16_t target_id : bucket_ids)
                     {
                         if (bucket_id == target_id)
@@ -3789,7 +3800,8 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                     task->table_name_.GetBaseTableNameSV(), TableType::Primary};
                 CatalogEntry *catalog_entry =
                     GetCatalogInternal(base_table_name, task->node_group_id_);
-                if (catalog_entry && task->data_sync_ts_ != UINT64_MAX)
+                if (catalog_entry && task->data_sync_ts_ != UINT64_MAX &&
+                    !task->filter_lambda_)
                 {
                     catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
                                                         worker_idx);
@@ -4137,7 +4149,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                      idx++)
                 {
                     FlushRecord &ref = scan_cc.DataSyncVec(0)[idx];
-                    uint16_t bucket_id = ref.Key().Hash() & 0x3FFF;
+                    uint16_t bucket_id =
+                        Sharder::MapKeyHashToBucketId(ref.Key().Hash());
                     NodeGroupId dest_ng =
                         bucket_infos->at(bucket_id)->DirtyBucketOwner();
                     assert(dest_ng != UINT32_MAX);

@@ -5797,6 +5797,14 @@ public:
                     pause_pos_and_is_drained.first);
             CcPage<KeyT, ValueT> *ccp =
                 static_cast<CcPage<KeyT, ValueT> *>(pause_entry->GetCcPage());
+            if (ccp == nullptr)
+            {
+                // the pause_entry may be kicked (moved to
+                // ccshard::invalid_cces_) by other operation such as
+                // KickoutBucketData.
+                req.SetError(CcErrorCode::TASK_EXPIRED);
+                return false;
+            }
             it = Iterator(pause_entry, ccp, &neg_inf_);
             ReleaseCceLock(
                 pause_entry->GetKeyLock(), pause_entry, req.Txn(), cc_ng_id_);
@@ -5901,7 +5909,7 @@ public:
                 cce->KickOutArchiveRecords(recycle_ts);
             }
 
-            if (req.filter_lambda_(key->Hash()) &&
+            if ((!req.filter_lambda_ || req.filter_lambda_(key->Hash())) &&
                 (cce->NeedCkpt() || req.include_persisted_data_))
             {
                 uint64_t mem_usage = 0;
@@ -5928,7 +5936,7 @@ public:
             }
 #else
             uint64_t key_hash = key->Hash();
-            if (req.filter_lambda_(key_hash))
+            if (!req.filter_lambda_ || req.filter_lambda_(key_hash))
             {
                 if (cce->HasBufferedCommandList())
                 {

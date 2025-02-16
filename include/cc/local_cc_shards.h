@@ -1479,7 +1479,7 @@ public:
                             const NodeGroupId ng_id,
                             const KeyT &key)
     {
-        uint16_t bucket_id = key.Hash() & 0x3FFF;
+        uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key.Hash());
         std::shared_lock<std::shared_mutex> s_lk(meta_data_mux_);
         GetBucketInfoInternal(bucket_id, ng_id)->SetAcceptsUploadBatch(false);
     }
@@ -1777,8 +1777,7 @@ private:
         std::shared_ptr<DataSyncStatus> status = nullptr,
         CcHandlerResult<Void> *hres = nullptr,
         bool send_cache_for_migration = false,
-        std::function<bool(size_t)> filter_lambda = [](size_t) -> bool
-        { return true; });
+        std::function<bool(size_t)> filter_lambda = nullptr);
 #endif
 
     void PopPendingTask(NodeGroupId ng_id,

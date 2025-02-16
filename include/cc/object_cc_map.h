@@ -178,6 +178,62 @@ public:
             }
         }
 
+        auto need_fetch_kv = [this, &override_kv_val, &txn, &cmd](
+                                 CcEntry<KeyT, ValueT> *cce, CcOperation cc_op)
+        {
+            // Check if this cce does not exists in ccmap at all.
+            // We need to double check that there is no dirty payload
+            // status on the cce since a previous cmd might ignores
+            // old payload value and directly applied dirty payload
+            // status.
+
+            NonBlockingLock *lk = cce->GetKeyLock();
+            bool check_dirty_status = cc_op != CcOperation::Read ||
+                                      (lk != nullptr && lk->HasWriteLock() &&
+                                       lk->WriteLockTx() == txn);
+
+            // When do we need to FetchRecord from KV?
+            // First, the payload status must be unknown, then:
+            // If the dirty payload doesn't exist, or it exists but this command
+            // only reads the committed status and doesn't check the dirty
+            // status. Which means, the dirty status could be set by another txn
+            // and this txn only reads the committed payload (under OCC read)
+            // and cannot read the uncommitted dirty status, should FetchRecord.
+            // In summary, FetchRecord if the cce's payload status is unknown
+            // and the command don't check_dirty_status or the dirty status does
+            // not exist;
+            if (cce->PayloadStatus() == RecordStatus::Unknown &&
+                (!check_dirty_status || lk == nullptr ||
+                 cce->DirtyPayloadStatus() == RecordStatus::NonExistent))
+            {
+                // if ccm contains all the ccentries, then unknown status means
+                // that we can skip accessing kv store and return deleted status
+                // directly.
+                if (ccm_has_full_entries_ || txservice_skip_kv)
+                {
+                    cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
+                    cce->SetCkptTs(1U);
+                }
+                else
+                {
+                    // if command does not care about previous value of the key,
+                    // we do not need to fetch kv value. We will assume the key
+                    // does not exist.
+                    if (!cmd->IgnoreKvValue())
+                    {
+                        return true;
+                    }
+                    else
+                    {
+                        // We will apply a DELETED dirty payload status after
+                        // lock is acquired.
+                        override_kv_val = true;
+                    }
+                }
+            }
+            return false;
+        };
+
         // Always read the cce first to check if the object exists.
         CcOperation cc_op =
             req.IsReadOnly() ? CcOperation::Read : CcOperation::ReadForWrite;
@@ -195,6 +251,22 @@ public:
                     ApplyCc::ApplyBlockType::BlockOnWriteLock)
                 {
                     cc_op = CcOperation::Write;
+                }
+
+                if (need_fetch_kv(cce, cc_op))
+                {
+                    // Fetch record from storage
+                    //(req acquired lock, no need to add ReadIntent for
+                    // FetchRecord)
+                    shard_->FetchRecord(table_name_,
+                                        table_schema_,
+                                        TxKey(look_key),
+                                        cce,
+                                        this,
+                                        cc_ng_id_,
+                                        ng_term,
+                                        &req);
+                    return false;
                 }
 
                 // For ON_KEY_OBJECT, we add lock regardless of whether the
@@ -246,12 +318,19 @@ public:
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
+                    assert(cce != nullptr &&
+                           cce->GetKeyGapLockAndExtraData() != nullptr);
+                    cce_addr.SetCceLock(reinterpret_cast<uint64_t>(
+                                            cce->GetKeyGapLockAndExtraData()),
+                                        ng_term,
+                                        shard_->core_id_);
                     // If the read request comes from a remote node, sends
                     // acknowledgement to the sender when the request is
                     // blocked.
                     if (!req.IsLocal())
                     {
-                        //                req.Acknowledge();
+                        static_cast<remote::RemoteApplyCc *>(&req)
+                            ->Acknowledge();
                     }
                     req.block_type_ = ApplyCc::ApplyBlockType::BlockOnWriteLock;
                     // Acquire lock fail should stop the execution of current
@@ -339,99 +418,50 @@ public:
                 return false;
             }
 
-            // Check if this cce does not exists in ccmap at all.
-            // We need to double check that there is no dirty payload
-            // status on the cce since a previous cmd might ignores
-            // old payload value and directly applied dirty payload
-            // status.
-
-            NonBlockingLock *lk = cce->GetKeyLock();
-            bool check_dirty_status = cc_op != CcOperation::Read ||
-                                      (lk != nullptr && lk->HasWriteLock() &&
-                                       lk->WriteLockTx() == txn);
-
-            // When do we need to FetchRecord from KV?
-            // First, the payload status must be unknown, then:
-            // If the dirty payload doesn't exist, or it exists but this command
-            // only reads the committed status and doesn't check the dirty
-            // status. Which means, the dirty status could be set by another txn
-            // and this txn only reads the committed payload (under OCC read)
-            // and cannot read the uncommitted dirty status, should FetchRecord.
-            // In summary, FetchRecord if the cce's payload status is unknown
-            // and the command don't check_dirty_status or the dirty status does
-            // not exist;
-            if (cce->PayloadStatus() == RecordStatus::Unknown &&
-                (!check_dirty_status || lk == nullptr ||
-                 cce->DirtyPayloadStatus() == RecordStatus::NonExistent))
+            if (need_fetch_kv(cce, cc_op))
             {
-                // if ccm contains all the ccentries, then unknown status means
-                // that we can skip accessing kv store and return deleted status
-                // directly.
-                if (ccm_has_full_entries_ || txservice_skip_kv)
-                {
-                    cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
-                    cce->SetCkptTs(1U);
-                }
-                else
-                {
-                    // if command does not care about previous value of the key,
-                    // we do not need to fetch kv value. We will assume the key
-                    // does not exist.
-                    if (!cmd->IgnoreKvValue())
+                CODE_FAULT_INJECTOR("disable_fetch_record_from_kv", {
+                    if (is_standby_tx)
                     {
-                        CODE_FAULT_INJECTOR("disable_fetch_record_from_kv", {
-                            if (is_standby_tx)
-                            {
-                                LOG(INFO) << "FaultInject  "
-                                             "disable_fetch_record_from_kv";
+                        LOG(INFO) << "FaultInject  "
+                                     "disable_fetch_record_from_kv";
 
-                                if (cmd->IsReadOnly())
-                                {
-                                    assert(acquired_lock == LockType::NoLock);
-                                    obj_result.rec_status_ =
-                                        RecordStatus::Deleted;
-                                    hd_res->SetFinished();
-                                    return true;
-                                }
-                            }
-                        });
-                        // Fetch record from storage
-                        shard_->FetchRecord(table_name_,
-                                            table_schema_,
-                                            TxKey(look_key),
-                                            cce,
-                                            this,
-                                            cc_ng_id_,
-                                            ng_term,
-                                            &req);
-
-                        req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
-                        // Acquire a read intent on this cce with the
-                        // special txn to avoid cce being kicked out before
-                        // fetch record returns.
-                        cce->GetOrCreateKeyLock(shard_, this, ccp)
-                            .AcquireReadIntent(
-                                FetchRecordCc::GetFetchRecordTxNumber(
-                                    cc_ng_id_));
-
-                        if (metrics::enable_cache_hit_rate)
+                        if (cmd->IsReadOnly())
                         {
-                            auto meter = shard_->GetMeter();
-                            meter->Collect(
-                                metrics::NAME_CACHE_HIT_OR_MISS_TOTAL,
-                                1,
-                                "miss");
+                            assert(acquired_lock == LockType::NoLock);
+                            obj_result.rec_status_ = RecordStatus::Deleted;
+                            hd_res->SetFinished();
+                            return true;
                         }
-                        return false;
                     }
-                    else
-                    {
-                        // We will apply a DELETED dirty payload status after
-                        // lock is acquired.
-                        override_kv_val = true;
-                    }
+                });
+                // Fetch record from storage
+                shard_->FetchRecord(table_name_,
+                                    table_schema_,
+                                    TxKey(look_key),
+                                    cce,
+                                    this,
+                                    cc_ng_id_,
+                                    ng_term,
+                                    &req);
+
+                req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
+                // Acquire a read intent on this cce with the
+                // special txn to avoid cce being kicked out before
+                // fetch record returns.
+                cce->GetOrCreateKeyLock(shard_, this, ccp)
+                    .AcquireReadIntent(
+                        FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
+
+                if (metrics::enable_cache_hit_rate)
+                {
+                    auto meter = shard_->GetMeter();
+                    meter->Collect(
+                        metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
                 }
+                return false;
             }
+
             if (metrics::enable_cache_hit_rate)
             {
                 auto meter = shard_->GetMeter();
@@ -498,9 +528,15 @@ public:
             // If the read request comes from a remote node, sends
             // acknowledgement to the sender when the request is
             // blocked.
+            assert(cce != nullptr &&
+                   cce->GetKeyGapLockAndExtraData() != nullptr);
+            cce_addr.SetCceLock(
+                reinterpret_cast<uint64_t>(cce->GetKeyGapLockAndExtraData()),
+                ng_term,
+                shard_->core_id_);
             if (!req.IsLocal())
             {
-                //                req.Acknowledge();
+                static_cast<remote::RemoteApplyCc *>(&req)->Acknowledge();
             }
             req.block_type_ = ApplyCc::ApplyBlockType::BlockOnRead;
             // Acquire lock fail should stop the execution of current
@@ -752,9 +788,16 @@ public:
                 // If the read request comes from a remote node, sends
                 // acknowledgement to the sender when the request is
                 // blocked.
+
+                assert(cce != nullptr &&
+                       cce->GetKeyGapLockAndExtraData() != nullptr);
+                cce_addr.SetCceLock(reinterpret_cast<uint64_t>(
+                                        cce->GetKeyGapLockAndExtraData()),
+                                    ng_term,
+                                    shard_->core_id_);
                 if (!req.IsLocal())
                 {
-                    //                req.Acknowledge();
+                    static_cast<remote::RemoteApplyCc *>(&req)->Acknowledge();
                 }
                 req.block_type_ = ApplyCc::ApplyBlockType::BlockOnWriteLock;
                 // Acquire lock fail should stop the execution of current
@@ -1352,7 +1395,7 @@ public:
             next_ts_offset += sizeof(uint64_t);
 
             hash = key->Hash();
-            uint16_t bucket_id = hash & 0x3FFF;
+            uint16_t bucket_id = Sharder::MapKeyHashToBucketId(hash);
             size_t core_idx = (hash & 0x3FF) % shard_->core_cnt_;
             if (!(core_idx == shard_->core_id_) || commit_ts <= 1 ||
                 !shard_->GetBucketInfo(bucket_id, cc_ng_id_)

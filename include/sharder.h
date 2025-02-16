@@ -193,6 +193,9 @@ public:
 
     static inline uint16_t MapKeyHashToBucketId(uint64_t hash_code)
     {
+#ifdef RANGE_PARTITION_ENABLED
+        assert(false);
+#endif
 #ifdef ON_KEY_OBJECT
         uint16_t slot_id = hash_code & 0x3FFF;
         uint16_t bucket_id = slot_id % total_range_buckets;
