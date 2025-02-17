@@ -7514,16 +7514,15 @@ public:
             cc_page = it.GetPage();
             if (cce == nullptr)
             {
-                DLOG(WARNING) << "!!!WARNING!!! UploadBatchCc OOM on core: "
-                              << shard_->core_id_ << ". Txn: " << req.Txn()
-                              << ", table name: " << this->table_name_.Trace();
                 // This cc shard has reached max memory limit. We didn't write
                 // data log for this upload batch req, but we have acquired
                 // range read lock for this key. If we do not return error and
                 // release the range read lock, it might block range split from
                 // finishing. We should return error here so that coordinator
                 // can release range read lock and retry later.
-                return req.SetError(CcErrorCode::OUT_OF_MEMORY);
+                // OOM will occurred when shard clean failed.
+                shard_->EnqueueWaitListIfMemoryFull(&req);
+                return false;
             }
             write_key = it->first;
 
