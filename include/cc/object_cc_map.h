@@ -470,19 +470,31 @@ public:
             }
             req.SetCcePtr(cce);
 
-            // If record expired in KV, it is possible the the cce reply list is
-            // not empty due to replay command list and cce commit_ts version
-            // mismatch
-            if (cce->HasBufferedCommandList() &&
-                cce->PayloadStatus() == RecordStatus::Deleted &&
-                cce->CommitTs() == 1)
+            if (cce->HasBufferedCommandList())
             {
-                BufferedTxnCmdList &buffered_cmd_list =
-                    cce->BufferedCommandList();
-                int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
-                buffered_cmd_list.Clear();
-                shard_->UpdateBufferedCommandCnt(-buffered_cmd_cnt_old);
-                cce->RecycleKeyLock(*shard_);
+                // If record expired in KV, it is possible that the
+                // BufferedCommandList is not empty due to replay command list
+                // and cce commit_ts version mismatch
+                if (cce->PayloadStatus() == RecordStatus::Deleted &&
+                    cce->CommitTs() == 1)
+                {
+                    BufferedTxnCmdList &buffered_cmd_list =
+                        cce->BufferedCommandList();
+                    int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
+                    buffered_cmd_list.Clear();
+                    shard_->UpdateBufferedCommandCnt(-buffered_cmd_cnt_old);
+                    cce->RecycleKeyLock(*shard_);
+                }
+                else
+                {
+                    // If log replay finishes and there are still buffered
+                    // commands. The cce status must be unknown. Or if it is
+                    // a standby node, the forwarded message from primary node
+                    // might come out of order, causing a temporary buffered
+                    // command list.
+                    assert(cce->PayloadStatus() == RecordStatus::Unknown ||
+                           is_standby_tx);
+                }
             }
 
             // For ON_KEY_OBJECT, we add lock regardless of whether the record
@@ -1074,6 +1086,11 @@ public:
                 cce->SetDirtyPayload(nullptr);
                 cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
                 cce->SetPendingCmd(nullptr);
+                // It's possible that the cce HasBufferedCommandList and is
+                // still in unknown status (because FetchRecord fails) and this
+                // command ignores kv value. Need to clear the buffered
+                // commands.
+                cce->BufferedCommandList().Clear();
 
                 // Set commit ts based on the TxTs since there is no PostWriteCc
                 // if apply_and_commit_.
@@ -1262,6 +1279,12 @@ public:
                 shard_->ForwardStandbyMessage(forward_entry);
             }
             cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
+            // It's possible that the cce HasBufferedCommandList and is still in
+            // unknown status (because FetchRecord fails) and this command
+            // ignores kv value. Need to clear the buffered commands when a new
+            // txn commits on the cce.
+            cce->BufferedCommandList().Clear();
+
             if (last_dirty_commit_ts_ < commit_ts)
             {
                 last_dirty_commit_ts_ = commit_ts;
@@ -1804,7 +1827,7 @@ public:
                 shard_->CheckLagAndResubscribe();
 
                 cce->SetCommitTsPayloadStatus(commit_version, payload_status);
-                if (buffered_cmd_list.IsNull())
+                if (buffered_cmd_list.Empty())
                 {
                     // Recycles the lock if this and prior commands have been
                     // applied and there is no pending command.
@@ -2138,7 +2161,7 @@ public:
                 }
                 continue;
             }
-            if (buffered_cmd_list.IsNull())
+            if (buffered_cmd_list.Empty())
             {
                 // Recycles the lock if this and prior commands have been
                 // applied and there is no pending command.
@@ -2318,7 +2341,7 @@ public:
 
                 // todo: UPDATE LAST COMMIT TS AND SMALLEST TTL
 
-                if (buffered_cmd_list.IsNull())
+                if (buffered_cmd_list.Empty())
                 {
                     // Recycles the lock if all the replay commands have been
                     // applied.

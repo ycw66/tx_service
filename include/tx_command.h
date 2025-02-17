@@ -276,7 +276,7 @@ struct BufferedTxnCmdList
 {
     std::deque<TxnCmd> txn_cmd_list_;
 
-    bool IsNull() const
+    bool Empty() const
     {
         return txn_cmd_list_.empty();
     }

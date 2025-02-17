@@ -498,9 +498,8 @@ public:
 
     bool HasBufferedCommandList()
     {
-        if (!buffered_cmd_list_.IsNull())
+        if (!buffered_cmd_list_.Empty())
         {
-            assert(!buffered_cmd_list_.txn_cmd_list_.empty());
             return true;
         }
         else

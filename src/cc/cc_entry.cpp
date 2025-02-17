@@ -87,8 +87,14 @@ bool LruEntry::IsFree() const
 {
     // As long as all locks are released, the lock associated with this cc entry
     // should be recycled.
+#ifdef ON_KEY_OBJECT
+    assert(cc_lock_and_extra_ == nullptr ||
+           !cc_lock_and_extra_->KeyLock()->IsEmpty() ||
+           cc_lock_and_extra_->HasBufferedCommandList());
+#else
     assert(cc_lock_and_extra_ == nullptr ||
            !cc_lock_and_extra_->KeyLock()->IsEmpty());
+#endif
 
     return cc_lock_and_extra_ == nullptr && IsPersistent();
 }
