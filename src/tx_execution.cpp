@@ -1808,6 +1808,16 @@ void TransactionExecution::Process(ReadOperation &read)
                 key_shard_code = range_ng << 10 | residual;
             }
 #else
+            // Make sure current node is still ng leader since we may visit
+            // bucket info meta data here which is only valid when current node
+            // is still ng leader.
+            if (!CheckLeaderTerm() && !CheckStandbyTerm())
+            {
+                read.hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+                PostProcess(read);
+                return;
+            }
+
             // Find bucket info from cache for get key node group.
             uint64_t key_hash = key.Hash();
             uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
@@ -6079,6 +6089,16 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
             return;
         }
 #else
+        // Make sure current node is still ng leader since we may visit bucket
+        // info meta data here which is only valid when current node is still ng
+        // leader.
+        if (!CheckLeaderTerm() && !CheckStandbyTerm())
+        {
+            obj_cmd_op.hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            PostProcess(obj_cmd_op);
+            return;
+        }
+
         uint64_t key_hash = key.Hash();
         uint32_t residual = key.Hash() & 0x3FF;
         uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
@@ -6456,6 +6476,16 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
         return;
     }
 #else
+    // Make sure current node is still ng leader since we may visit bucket info
+    // meta data here which is only valid when current node is still ng leader.
+    if (!CheckLeaderTerm() && !CheckStandbyTerm())
+    {
+        obj_cmd_op.lock_bucket_result_->SetError(
+            CcErrorCode::TX_NODE_NOT_LEADER);
+        PostProcess(obj_cmd_op);
+        return;
+    }
+
     std::vector<std::pair<uint32_t, uint32_t>> &vct_key_shard_code =
         obj_cmd_op.vct_key_shard_code_;
     assert(vct_key_shard_code.size() == vct_key->size());
