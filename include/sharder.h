@@ -735,6 +735,7 @@ private:
 
     LocalCcShards *local_shards_;
     std::unique_ptr<TxLog> log_agent_;
+    std::atomic<bool> log_agent_interrupt_{false};
 
     // Channel to cc node service of other nodes.
     std::unordered_map<uint32_t, std::shared_ptr<brpc::Channel>>

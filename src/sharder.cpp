@@ -52,6 +52,7 @@ void Sharder::Shutdown()
     cc_stream_server_.Join();
     cc_stream_receiver_ = nullptr;
 
+    log_agent_interrupt_.store(true, std::memory_order_release);
     if (recovery_service_)
     {
         recovery_service_->Shutdown();
@@ -445,11 +446,22 @@ int Sharder::Init(
     }
     else
     {
-        bool retry;
+        bool retry = false;
         uint64_t start_ts;
-        cluster_config_.cc_nodes_.at(node_id_)->OnLeaderStart(
-            1, start_ts, retry);
+        cluster_config_.cc_nodes_.at(native_ng_)
+            ->OnLeaderStart(1, start_ts, retry);
         assert(!retry);
+        // Notify log service to replay log
+        if (log_agent_)
+        {
+            log_agent_->ReplayLog(native_ng_,
+                                  1,
+                                  host_name_,
+                                  GET_LOG_REPLAY_RPC_PORT(port_),
+                                  -1,
+                                  start_ts,
+                                  log_agent_interrupt_);
+        }
     }
 
     return 0;
