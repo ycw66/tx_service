@@ -25,6 +25,7 @@
 #include "template_cc_map.h"
 #include "tx_command.h"
 #include "tx_operation.h"
+#include "tx_record.h"
 #include "type.h"
 
 namespace txservice
@@ -1548,10 +1549,45 @@ public:
             ccp = it.GetPage();
         }
 
+        // If the current node has not initialized the catalog entry, we fetch
+        // the newest catalog from the primary node.
+        if (cce->PayloadStatus() == RecordStatus::Unknown)
+        {
+            const CatalogEntry *catalog_entry =
+                shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+            if (catalog_entry != nullptr && catalog_entry->schema_version_ > 0)
+            {
+                if (catalog_entry->schema_ != nullptr)
+                {
+                    // upload catalog record
+                    cce->payload_ = std::make_unique<CatalogRecord>();
+                    cce->payload_->Set(catalog_entry->schema_,
+                                       catalog_entry->dirty_schema_,
+                                       catalog_entry->schema_version_);
+                    // update commit ts
+                    cce->SetCommitTsPayloadStatus(
+                        catalog_entry->schema_version_, RecordStatus::Normal);
+                }
+                else
+                {
+                    cce->SetCommitTsPayloadStatus(
+                        catalog_entry->schema_version_, RecordStatus::Deleted);
+                }
+            }
+            else
+            {
+                // fetch catalog from primary node
+                shard_->FetchCatalog(table_key->Name(),
+                                     req.NodeGroupId(),
+                                     req.StandbyNodeTerm(),
+                                     &req);
+                return false;
+            }
+        }
+
         if (commit_ts <= cce->CommitTs())
         {
             // discard outdate request
-
             if (shard_->core_id_ + 1 == shard_->core_cnt_)
             {
                 req.SetFinish();

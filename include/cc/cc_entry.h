@@ -368,6 +368,8 @@ public:
 
     void UpdateCcPage(LruPage *page);
 
+    void UpdateBufferedCommandCnt(CcShard *shard, int64_t delta);
+
     /**
      * @brief check whether the entry can be kicked out from ccmap, iff no key
      * lock, no gap lock and not 'dirty' entry (entry which has been
@@ -1359,7 +1361,8 @@ public:
     void UpdateCcEntry(SliceDataItem &data_item,
                        bool enable_mvcc,
                        int32_t &normal_rec_change,
-                       CcPage<KeyT, ValueT> *ccp)
+                       CcPage<KeyT, ValueT> *ccp,
+                       CcShard *shard)
     {
 #ifdef RANGE_PARTITION_ENABLED
         // Initialize the data store size if it is unspecified
@@ -1450,6 +1453,51 @@ public:
             RecordStatus status = data_item.is_deleted_ ? RecordStatus::Deleted
                                                         : RecordStatus::Normal;
             SetCommitTsPayloadStatus(data_item.version_ts_, status);
+
+            if (HasBufferedCommandList())
+            {
+                BufferedTxnCmdList &buffered_cmd_list = BufferedCommandList();
+                auto &cmd_list = buffered_cmd_list.txn_cmd_list_;
+                int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
+
+                uint64_t new_commit_ts = CommitTs();
+                assert(new_commit_ts == data_item.version_ts_);
+
+                // Clear cmds with smaller commit_ts than uploaded version.
+                auto it = cmd_list.begin();
+                while (it != cmd_list.end() &&
+                       it->new_version_ <= new_commit_ts)
+                {
+                    ++it;
+                }
+                cmd_list.erase(cmd_list.begin(), it);
+
+                DLOG(INFO) << "Try commit buffered command on "
+                              "UpdateCcEntry(...)";
+                TryCommitBufferedCommands(
+                    payload_, buffered_cmd_list, new_commit_ts);
+                int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
+                LruEntry::UpdateBufferedCommandCnt(
+                    shard, buffered_cmd_cnt_new - buffered_cmd_cnt_old);
+
+                if (payload_)
+                {
+                    SetCommitTsPayloadStatus(new_commit_ts,
+                                             RecordStatus::Normal);
+                }
+                else
+                {
+                    SetCommitTsPayloadStatus(new_commit_ts,
+                                             RecordStatus::Deleted);
+                }
+
+                if (buffered_cmd_list.Empty())
+                {
+                    // Recycles the lock if all the replay commands have been
+                    // applied.
+                    RecycleKeyLock(*shard);
+                }
+            }
         }
 #endif
         SetCkptTs(data_item.version_ts_);
@@ -1797,7 +1845,8 @@ struct CcPage : public LruPage
         size_t end_index,
         size_t offset,
         bool enable_mvcc,
-        int32_t &normal_rec_change)
+        int32_t &normal_rec_change,
+        CcShard *shard)
     {
         assert(start_index >= 0 && end_index <= Size());
         assert(offset + (end_index - start_index) <= location_infos.size());
@@ -1813,7 +1862,8 @@ struct CcPage : public LruPage
                 new_cc_entry->UpdateCcEntry(slice_items[location_info.first],
                                             enable_mvcc,
                                             normal_rec_change,
-                                            this);
+                                            this,
+                                            shard);
 
                 // emplace new key into page
                 const KeyT *item_key =

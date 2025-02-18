@@ -4,9 +4,11 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "tx_id.h"
 #include "tx_key.h"
 #include "tx_record.h"
 
@@ -363,8 +365,8 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
     {
         if (it->ignore_previous_version_)
         {
-            // If a TxnCmd ignores previous version, the TxnCmds before it must
-            // have been discarded in EmplaceTxnCmd.
+            // If a TxnCmd ignores previous version, the TxnCmds before it
+            // must have been discarded in EmplaceTxnCmd.
             assert(it == txn_cmd_list.begin());
 
             assert(it->obj_version_ >= cur_ver || it->obj_version_ == 1);
@@ -383,8 +385,8 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
 
             // If a command was applied on deleted record, we set
             // `has_overwrite` flag to true in the log. If the first command
-            // doesn't have an overwrite property, we need to create an empty
-            // object.
+            // doesn't have an overwrite property, we need to create an
+            // empty object.
             if (it->ignore_previous_version_ && !first_cmd->IsOverwrite())
             {
                 payload.reset(nullptr);
@@ -397,14 +399,15 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
             if (payload == nullptr)
             {
                 std::unique_ptr<TxRecord> obj_ptr = cmd->CreateObject(nullptr);
-                payload.reset(static_cast<T *>(obj_ptr.release()));
+                payload.reset(reinterpret_cast<T *>(obj_ptr.release()));
             }
-            TxObject *obj_ptr = payload.get();
-            TxObject *new_obj_ptr = cmd->CommitOn(obj_ptr);
+            TxObject *obj_ptr = reinterpret_cast<TxObject *>(payload.get());
+            TxObject *new_obj_ptr =
+                reinterpret_cast<TxObject *>(cmd->CommitOn(obj_ptr));
             if (new_obj_ptr != obj_ptr)
             {
                 // FIXME(lzx): should we use "new_obj_ptr->Clone()" ?
-                payload.reset(static_cast<T *>(new_obj_ptr));
+                payload.reset(reinterpret_cast<T *>(new_obj_ptr));
             }
         }
         cur_ver = it->new_version_;

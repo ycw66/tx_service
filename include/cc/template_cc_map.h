@@ -9186,7 +9186,8 @@ protected:
                                    total_size,               // end index
                                    first_key_index_in_page,  // offset
                                    shard_->EnableMvcc(),
-                                   normal_rec_change);
+                                   normal_rec_change,
+                                   shard_);
 
             shard_->UpdateLruList(target_page, true);
             TryUpdatePageKey(target_iter);
@@ -9240,7 +9241,8 @@ protected:
                                        data_cnt_per_page,
                                        offset,
                                        shard_->EnableMvcc(),
-                                       normal_rec_change);
+                                       normal_rec_change,
+                                       shard_);
 
                 if (page_idx == 0)
                 {
@@ -9302,7 +9304,8 @@ protected:
                         remain_size,
                         page_cnt * data_cnt_per_page,
                         shard_->EnableMvcc(),
-                        normal_rec_change);
+                        normal_rec_change,
+                        shard_);
 
                     target_page->next_page_->last_dirty_commit_ts_ =
                         std::max(target_page->next_page_->last_dirty_commit_ts_,
@@ -9336,7 +9339,8 @@ protected:
                                        remain_size,
                                        page_cnt * data_cnt_per_page,
                                        shard_->EnableMvcc(),
-                                       normal_rec_change);
+                                       normal_rec_change,
+                                       shard_);
 
                 target_page->last_dirty_commit_ts_ =
                     old_page_last_dirty_commit_ts;
@@ -9611,7 +9615,8 @@ protected:
                     ->UpdateCcEntry(slice_items[item_idx],
                                     shard_->EnableMvcc(),
                                     normal_rec_change,
-                                    target_page);
+                                    target_page,
+                                    shard_);
                 item_idx++;
                 key_idx_in_page++;
             }

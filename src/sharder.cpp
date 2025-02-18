@@ -1281,4 +1281,5 @@ void Sharder::ConnectCcStreamSender()
     cc_stream_sender_->UpdateRemoteNodes(nodes_configs);
     cc_stream_sender_->NotifyConnectStream();
 }
+
 }  // namespace txservice
