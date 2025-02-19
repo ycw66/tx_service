@@ -489,7 +489,7 @@ inline static TableName cluster_config_ccm_name{
     TableType::ClusterConfig};
 
 #ifdef ON_KEY_OBJECT
-// Set buckets count to be the same as the slots count.
+// Set buckets count to be the same as the slots count. (16384)
 inline static const uint16_t total_range_buckets = 0x4000;
 #else
 inline static const uint16_t total_range_buckets = 4096;

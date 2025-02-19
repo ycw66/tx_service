@@ -2507,7 +2507,7 @@ private:
                                 TxCommand &cmd)
     {
         assert(payload != nullptr && payload_status == RecordStatus::Normal);
-        auto *obj_ptr = payload.get();
+        TxObject *obj_ptr = payload.get();
         TxObject *new_obj_ptr = cmd.CommitOn(obj_ptr);
         if (new_obj_ptr != obj_ptr)
         {

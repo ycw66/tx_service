@@ -10,6 +10,7 @@
 
 #include "tx_id.h"
 #include "tx_key.h"
+#include "tx_object.h"
 #include "tx_record.h"
 
 namespace txservice
@@ -301,7 +302,7 @@ struct BufferedTxnCmdList
            << ", detailed TxnCmds: ";
         for (const auto &txn_cmd : txn_cmd_list.txn_cmd_list_)
         {
-            os << txn_cmd << " ";
+            os << txn_cmd << " && ";
         }
 
         return os;
@@ -406,8 +407,15 @@ void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
                 reinterpret_cast<TxObject *>(cmd->CommitOn(obj_ptr));
             if (new_obj_ptr != obj_ptr)
             {
+                TxObject *old_payload_obj =
+                    reinterpret_cast<TxObject *>(payload.release());
                 // FIXME(lzx): should we use "new_obj_ptr->Clone()" ?
                 payload.reset(reinterpret_cast<T *>(new_obj_ptr));
+                if (old_payload_obj != nullptr)
+                {
+                    // Explicitly delete the old object to prevent memory leak
+                    delete old_payload_obj;
+                }
             }
         }
         cur_ver = it->new_version_;
