@@ -82,33 +82,61 @@ struct TemplateTxRequest : TxRequest
         return TxRequest::ErrorMessage(ErrorCode());
     }
 
+#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+    void ForceExternalForwardOnce(TransactionExecution *txm)
+    {
+        // Allow the txm to be forwarded both externally and by
+        // TxProcessor leads to complexity. Just let the bthread to
+        // forward the txm itself and don't enlist the txm even if it
+        // fails.
+
+        bool allow_enlist_txm = false;
+        int round = 1;
+        int64_t start_ns = 0;
+        while (tx_result_.status_ == TxResultStatus::Unknown &&
+               !txm->ExternalForward(allow_enlist_txm))
+        {
+            if (round == 1)
+            {
+                start_ns = butil::cpuwide_time_ns();
+            }
+            round++;
+            (*tx_result_.resume_func_)();
+            (*tx_result_.yield_func_)();
+        }
+        if (round != 1)
+        {
+            DLOG(WARNING) << "txm: " << txm
+                          << " ForceExternalForwardOnce round: " << round
+                          << ", takes " << butil::cpuwide_time_ns() - start_ns
+                          << " ns";
+        }
+    }
+#endif
+
     void Wait()
     {
 #if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
         if (tx_result_.yield_func_)
         {
-            CHECK(txm_ != nullptr);
-            txm_->ExternalForward();
-            // WARNING: Must wait here regardless of the tx_result status after
-            // first forward.
-            tx_result_.Wait();
+            assert(txm_ != nullptr);
+            ForceExternalForwardOnce(txm_);
+            // After first forward, the ccrequest must have been sent and could
+            // have already finished, no matter, always wait once so that we
+            // don't need lock and condition variable (which is costly compared
+            // to bthread block and resume).
+            (*tx_result_.yield_func_)();
 
             // No need for lock when accessing tx_result_.status_ since the txm
             // can only be externally forwarded and the reader and writer are
             // the same thread.
-            TxResultStatus &result_status = tx_result_.status_;
-            while (result_status == TxResultStatus::Unknown)
+            if (tx_result_.status_ == TxResultStatus::Unknown)
             {
-                // After Wait() returns, the txm must be forwardable or already
-                // finished.
-                // Allow the txm to be forwarded both externally and by
-                // TxProcessor leads to complexity. Just let the bthread to
-                // forward the txm itself and don't enlist the txm even if it
-                // fails.
-                bool allow_enlist_txm = false;
-                txm_->ExternalForward(allow_enlist_txm);
-                tx_result_.Wait();
+                // Forward the txm again, after the second forward, the tx
+                // result must be finished.
+                ForceExternalForwardOnce(txm_);
             }
+            assert(tx_result_.status_ != TxResultStatus::Unknown);
             return;
         }
 #endif

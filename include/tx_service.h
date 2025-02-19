@@ -56,6 +56,7 @@ namespace txservice
 // the OFFSET_TABLE contains only prime numbers
 inline const size_t OFFSET_TABLE[] = {
 #include "offset_inl.list"
+
 };
 
 /**
@@ -144,10 +145,13 @@ public:
             }
         }
 
-        coordi_ = std::make_shared<TxProcCoordinator>();
+        coordi_ = std::make_shared<TxProcCoordinator>(thd_id, this);
     }
 
-    ~TxProcessor() = default;
+    ~TxProcessor()
+    {
+        coordi_->tx_processor_.store(nullptr);
+    }
 
     metrics::Meter *GetMeter()
     {
@@ -186,9 +190,17 @@ public:
             TxProcessorStatus native_proc_status =
                 tx_proc_status_.load(std::memory_order_relaxed);
 #ifdef EXT_TX_PROC_ENABLED
+            int16_t ext_processor_cnt =
+                coordi_->ext_processor_cnt_.load(std::memory_order_relaxed);
+#ifdef ON_KEY_OBJECT
+            if (ext_processor_cnt == 0)
+            {
+                // New txm task. Notify the external processor directly.
+                coordi_->NotifyExternalProcessor();
+            }
+#endif
             if (native_proc_status == TxProcessorStatus::Sleep ||
-                (coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) ==
-                     0 &&
+                (ext_processor_cnt == 0 &&
                  native_proc_status == TxProcessorStatus::Standby))
             {
                 Notify(coordi_->sleep_mux_, coordi_->sleep_cv_);
@@ -351,46 +363,7 @@ public:
 #ifdef EXT_TX_PROC_ENABLED
             if (is_ext_proc)
             {
-                size_t resume_cnt = resume_tx_queue_.SizeApprox();
-                while (resume_cnt > 0)
-                {
-                    std::array<TransactionExecution *, 100> tx_bulk;
-                    size_t deque_cap = std::min(resume_cnt, tx_bulk.size());
-                    size_t deque_size = resume_tx_queue_.TryDequeueBulk(
-                        tx_bulk.begin(), deque_cap);
-
-                    for (size_t idx = 0; idx < deque_size; ++idx)
-                    {
-                        TransactionExecution *tx_ptr = tx_bulk[idx];
-                        if (tx_ptr->TxStatus() == TxnStatus::Finished)
-                        {
-                            continue;
-                        }
-
-                        TxmStatus txm_status = tx_ptr->Forward();
-                        if (txm_status == TxmStatus::Finished)
-                        {
-                            active_tx_lock_.Lock();
-
-                            auto it = active_tx_map_.find(tx_ptr);
-                            if (it == active_tx_map_.end())
-                            {
-                                active_tx_lock_.Unlock();
-                                continue;
-                            }
-
-                            TransactionExecution::uptr tx_uptr =
-                                std::move(it->second);
-                            active_tx_map_.erase(it);
-                            active_tx_lock_.Unlock();
-                            tx_progress_.erase(tx_uptr.get());
-
-                            free_txs_.enqueue(std::move(tx_uptr));
-                        }
-                    }
-
-                    resume_cnt = resume_tx_queue_.SizeApprox();
-                }
+                CheckResumeTx();
             }
 #endif
 
@@ -511,8 +484,6 @@ public:
                 do
                 {
                     local_round_cnt = round_cnt;
-                    // LOG(INFO) << "native thd yield sleeps, core #" << thd_id_
-                    //           << ", round cnt: " << local_round_cnt;
                     bool no_ext_proc = coordi_->sleep_cv_.wait_for(
                         lk,
                         2s,
@@ -524,10 +495,6 @@ public:
                         });
 
                     round_cnt = one_round_cnt_.load(std::memory_order_relaxed);
-                    // LOG(INFO) << "native thd yield wakes up, core #" <<
-                    // thd_id_
-                    //           << ", no ext proc: " << (int) no_ext_proc
-                    //           << ", round cnt: " << round_cnt;
 
                     // If the round counter is not incremented since last sleep,
                     // it means that there is no external processor, or the
@@ -562,20 +529,17 @@ public:
 
             ++idle_rnd;
 
-            if ((idle_rnd & 0x3FF) == 0)
+            if ((idle_rnd & 0x3F) == 0)
             {
-                // For every 1024 busy wait cycles, checks if the busy wait
-                // window exceeds 1000ms.
+                // For every 64 busy wait cycles, checks if the busy wait
+                // window exceeds 1ms.
                 auto tnow = std::chrono::steady_clock::now();
-                if (tnow - tstart >= 10ms && IsIdle())
+                if (tnow - tstart >= 1ms && IsIdle())
                 {
                     idle_rnd = 0;
 
                     tx_proc_status_.store(TxProcessorStatus::Sleep,
                                           std::memory_order_relaxed);
-
-                    // LOG(INFO) << "native thd long sleeps, core #" << thd_id_
-                    //           << ", round cnt: " << local_round_cnt;
 
                     std::unique_lock<std::mutex> lk(coordi_->sleep_mux_);
                     coordi_->sleep_cv_.wait(lk, [this]() { return !IsIdle(); });
@@ -583,9 +547,6 @@ public:
 #ifdef EXT_TX_PROC_ENABLED
                     local_round_cnt =
                         one_round_cnt_.load(std::memory_order_relaxed);
-                    // LOG(INFO) << "native thd long wakes up, core #" <<
-                    // thd_id_
-                    //           << ", round cnt: " << local_round_cnt;
 #endif
                     tx_proc_status_.store(TxProcessorStatus::Busy,
                                           std::memory_order_relaxed);
@@ -634,45 +595,18 @@ public:
         };
     }
 
-#ifdef ON_KEY_OBJECT
-    std::function<bool(int16_t)> TryUpdateExtProcFunctor()
-    {
-        return [this, coordi = coordi_](int16_t thd_delta) -> bool
-        {
-            if (thd_delta == -1 &&
-                coordi->external_txm_cnt_.load(std::memory_order_relaxed) > 0)
-            {
-                // The external processor is trying to sleep. If there is still
-                // external txms (which are bound to the external TxProcessor),
-                // don't allow it to sleep.
-                return false;
-            }
-            int16_t ext_thd_cnt = coordi->ext_processor_cnt_.fetch_add(
-                thd_delta, std::memory_order_relaxed);
-
-            ext_thd_cnt += thd_delta;
-            assert(ext_thd_cnt >= 0);
-
-            // There is no external thread anymore. Wakes up the native tx
-            // processor.
-            if (ext_thd_cnt == 0)
-            {
-                Notify(coordi->sleep_mux_, coordi->sleep_cv_);
-            }
-            return true;
-        };
-    }
-#endif
-
     std::function<void(int16_t)> UpdateExtProcFunctor()
     {
-        return [this, coordi = coordi_](int16_t thd_delta)
+        return [this, coordi = coordi_](int16_t thd_delta) -> void
         {
             int16_t ext_thd_cnt = coordi->ext_processor_cnt_.fetch_add(
                 thd_delta, std::memory_order_relaxed);
 
             ext_thd_cnt += thd_delta;
             assert(ext_thd_cnt >= 0);
+#ifdef ON_KEY_OBJECT
+            assert(ext_thd_cnt <= 1);
+#else
 
             // There is no external thread anymore. Wakes up the native tx
             // processor.
@@ -680,12 +614,13 @@ public:
             {
                 Notify(coordi->sleep_mux_, coordi->sleep_cv_);
             }
+#endif
         };
     }
 
     std::function<bool(bool)> OverrideShardHeapFunctor()
     {
-        return [this, coordi = coordi_](bool yield)
+        return [this, coordi = coordi_](bool yield) -> bool
         {
             if (yield)
             {
@@ -712,6 +647,22 @@ public:
             return false;
         };
     }
+
+#ifdef ON_KEY_OBJECT
+    std::function<bool()> HasWork()
+    {
+        return [this, coordi = coordi_]() -> bool
+        {
+            if (coordi->external_txm_cnt_.load(std::memory_order_relaxed) > 0)
+            {
+                return true;
+            }
+            TxProcessor *txp =
+                coordi->tx_processor_.load(std::memory_order_relaxed);
+            return txp != nullptr && !txp->IsIdle();
+        };
+    }
+#endif
 
     void EnlistTx(TransactionExecution *txm)
     {
@@ -841,6 +792,48 @@ public:
         }
 
         progress_check_ts_ = now_ts;
+    }
+
+    void CheckResumeTx()
+    {
+        size_t resume_cnt = resume_tx_queue_.SizeApprox();
+        while (resume_cnt > 0)
+        {
+            std::array<TransactionExecution *, 100> tx_bulk{};
+            size_t deque_cap = std::min(resume_cnt, tx_bulk.size());
+            size_t deque_size =
+                resume_tx_queue_.TryDequeueBulk(tx_bulk.begin(), deque_cap);
+
+            for (size_t idx = 0; idx < deque_size; ++idx)
+            {
+                TransactionExecution *tx_ptr = tx_bulk[idx];
+                if (tx_ptr->TxStatus() == TxnStatus::Finished)
+                {
+                    continue;
+                }
+
+                TxmStatus txm_status = tx_ptr->Forward();
+                if (txm_status == TxmStatus::Finished)
+                {
+                    active_tx_lock_.Lock();
+                    auto it = active_tx_map_.find(tx_ptr);
+                    if (it == active_tx_map_.end())
+                    {
+                        active_tx_lock_.Unlock();
+                        continue;
+                    }
+
+                    TransactionExecution::uptr tx_uptr = std::move(it->second);
+                    active_tx_map_.erase(it);
+                    active_tx_lock_.Unlock();
+                    tx_progress_.erase(tx_uptr.get());
+
+                    free_txs_.enqueue(std::move(tx_uptr));
+                }
+            }
+
+            resume_cnt = resume_tx_queue_.SizeApprox();
+        }
     }
 
     void EnlistWaitingTx(TransactionExecution *txm)
@@ -998,6 +991,7 @@ public:
     friend class TxService;
     friend struct txservice::SplitFlushRangeOp;
     friend class TransactionExecution;
+    friend struct TxProcCoordinator;
 };
 
 class TxService
@@ -1249,8 +1243,9 @@ public:
 
 #ifdef ON_KEY_OBJECT
     std::function<std::tuple<std::function<void()>,
-                             std::function<bool(int16_t)>,
-                             std::function<bool(bool)>>(int16_t)>
+                             std::function<void(int16_t)>,
+                             std::function<bool(bool)>,
+                             std::function<bool()>>(int16_t)>
     GetTxProcFunctors()
     {
         return [this](int16_t group_id)
@@ -1258,8 +1253,9 @@ public:
             assert(group_id >= 0);
             int16_t sid = group_id % pool_.size();
             return std::make_tuple(pool_[sid]->TxProcessorFunctor(),
-                                   pool_[sid]->TryUpdateExtProcFunctor(),
-                                   pool_[sid]->OverrideShardHeapFunctor());
+                                   pool_[sid]->UpdateExtProcFunctor(),
+                                   pool_[sid]->OverrideShardHeapFunctor(),
+                                   pool_[sid]->HasWork());
         };
     }
 #else

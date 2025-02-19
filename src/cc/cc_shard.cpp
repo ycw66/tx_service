@@ -1,6 +1,7 @@
 #include "cc/cc_shard.h"
 
 #include <brpc/controller.h>
+#include <bthread/bthread.h>
 #include <bthread/remote_task_queue.h>
 
 #include <chrono>  // std::chrono
@@ -301,29 +302,7 @@ void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
     assert(ret == true);
     (void) ret;
 
-    // Wakes up the tx processor dedicated to this shard when it is asleep. The
-    // notify function internally uses a std::mutex before notifying via the
-    // condition variable. This is to create a barrier such that the prior queue
-    // size update and the enqueue of the cc request precedes notify().
-    TxProcessorStatus tx_proc_status =
-        tx_proc_status_ != nullptr
-            ? tx_proc_status_->load(std::memory_order_relaxed)
-            : TxProcessorStatus::Busy;
-#ifdef EXT_TX_PROC_ENABLED
-    if (tx_proc_status == TxProcessorStatus::Sleep ||
-        (tx_proc_status == TxProcessorStatus::Standby &&
-         tx_coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) == 0))
-    {
-        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
-        tx_coordi_->sleep_cv_.notify_one();
-    }
-#else
-    if (tx_proc_status == TxProcessorStatus::Sleep)
-    {
-        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
-        tx_coordi_->sleep_cv_.notify_one();
-    }
-#endif
+    NotifyTxProcessor();
 }
 
 void CcShard::Enqueue(uint32_t thd_id, uint32_t shard_code, CcRequestBase *req)
@@ -389,29 +368,7 @@ void CcShard::Enqueue(CcRequestBase *req)
     // overhead.
     (void) ret;
 
-    // Wakes up the tx processor dedicated to this shard, when it is asleep. The
-    // notify function internally uses a std::mutex before notifying via the
-    // condition variable. This is to create a barrier such that the prior queue
-    // size update and the enqueue of the cc request precedes notify().
-    TxProcessorStatus tx_proc_status =
-        tx_proc_status_ != nullptr
-            ? tx_proc_status_->load(std::memory_order_relaxed)
-            : TxProcessorStatus::Busy;
-#ifdef EXT_TX_PROC_ENABLED
-    if (tx_proc_status == TxProcessorStatus::Sleep ||
-        (tx_proc_status == TxProcessorStatus::Standby &&
-         tx_coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) == 0))
-    {
-        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
-        tx_coordi_->sleep_cv_.notify_one();
-    }
-#else
-    if (tx_proc_status == TxProcessorStatus::Sleep)
-    {
-        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
-        tx_coordi_->sleep_cv_.notify_one();
-    }
-#endif
+    NotifyTxProcessor();
 }
 
 void CcShard::AbortCcRequests(std::vector<CcRequestBase *> &&reqs,
@@ -2596,6 +2553,46 @@ void CcShard::CheckLagAndResubscribe() const
 bool CcShard::EnableDefragment() const
 {
     return local_shards_.enable_shard_heap_defragment_;
+}
+
+void CcShard::NotifyTxProcessor()
+{
+    if (tx_coordi_ == nullptr)
+    {
+        return;
+    }
+    // Wakes up the tx processor dedicated to this shard when it is asleep. The
+    // notify function internally uses a std::mutex before notifying via the
+    // condition variable. This is to create a barrier such that the prior queue
+    // size update and the enqueue of the cc request precedes notify().
+    TxProcessorStatus tx_proc_status =
+        tx_proc_status_ != nullptr
+            ? tx_proc_status_->load(std::memory_order_relaxed)
+            : TxProcessorStatus::Busy;
+#ifdef EXT_TX_PROC_ENABLED
+    int16_t ext_processor_cnt =
+        tx_coordi_->ext_processor_cnt_.load(std::memory_order_relaxed);
+#ifdef ON_KEY_OBJECT
+    if (ext_processor_cnt == 0)
+    {
+        // Notify the external processor directly.
+        tx_coordi_->NotifyExternalProcessor();
+    }
+#endif
+    if (tx_proc_status == TxProcessorStatus::Sleep ||
+        (tx_proc_status == TxProcessorStatus::Standby &&
+         ext_processor_cnt == 0))
+    {
+        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
+        tx_coordi_->sleep_cv_.notify_one();
+    }
+#else
+    if (tx_proc_status == TxProcessorStatus::Sleep)
+    {
+        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
+        tx_coordi_->sleep_cv_.notify_one();
+    }
+#endif
 }
 
 }  // namespace txservice

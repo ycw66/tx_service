@@ -270,16 +270,15 @@ void TransactionExecution::Enlist()
     }
 }
 
-void TransactionExecution::ExternalForward(bool enlist_txm_if_fails)
+bool TransactionExecution::ExternalForward(bool enlist_txm_if_fails)
 {
-    if (bind_to_ext_proc_)
+    CHECK(bind_to_ext_proc_);
+    bool success = tx_processor_->ForwardTx(this);
+    if (!success && enlist_txm_if_fails)
     {
-        bool success = tx_processor_->ForwardTx(this);
-        if (!success && enlist_txm_if_fails)
-        {
-            tx_processor_->EnlistTx(this);
-        }
+        tx_processor_->EnlistTx(this);
     }
+    return success;
 }
 #endif
 

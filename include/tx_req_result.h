@@ -49,7 +49,6 @@ public:
           resume_func_(resume_fp)
 #if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
           ,
-          allow_yield_call_(yield_fp != nullptr),
           allow_resume_call_(resume_fp != nullptr)
 #endif
     {
@@ -237,9 +236,7 @@ public:
         resume_func_ = resume_fptr;
 
 #ifdef ON_KEY_OBJECT
-        allow_yield_call_ = yield_fptr != nullptr;
         allow_resume_call_ = resume_fptr != nullptr;
-        yield_cnt_ = 0;
 #endif
     }
 
@@ -267,29 +264,6 @@ public:
 
     int Wait()
     {
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        if (yield_func_ != nullptr)
-        {
-            // The yield func and resume func can only be called once each.
-            if (allow_yield_call_)
-            {
-                allow_yield_call_ = false;
-                (*yield_func_)();
-            }
-            else if (status_ == TxResultStatus::Unknown)
-            {
-                // The yield_func already called once. Just yield the bthread
-                // worker.
-                int wait_time_us =
-                    std::min(initial_wait_time_us_ * std::pow(2, yield_cnt_),
-                             static_cast<double>(max_wait_time_us_));
-                bthread_usleep(wait_time_us);
-                yield_cnt_++;
-            }
-            return 0;
-        }
-#endif
-
         if (yield_func_ != nullptr)
         {
             std::unique_lock<bthread::Mutex> lk(mutex_);
@@ -333,10 +307,8 @@ private:
     const std::function<void()> *resume_func_;
 
 #ifdef ON_KEY_OBJECT
-    bool allow_yield_call_{};
     bool allow_resume_call_{};
 
-    int yield_cnt_{};
     inline static int initial_wait_time_us_ = 100;
     inline static int max_wait_time_us_ = 20000;
 #endif

@@ -245,7 +245,12 @@ public:
 
 #ifdef EXT_TX_PROC_ENABLED
     void Enlist();
-    void ExternalForward(bool enlist_txm_if_fails = true);
+    /**
+     *
+     * @param enlist_txm_if_fails
+     * @return Whether successfully forward the txm.
+     */
+    bool ExternalForward(bool enlist_txm_if_fails = true);
 #endif
     void RecoverDataMigration(const ::txlog::BucketMigrateMessage *migrate_msg,
                               size_t cur_idx,

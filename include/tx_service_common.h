@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bthread/bthread.h>
 #include <mimalloc-2.1/mimalloc.h>
 
 #include <atomic>
@@ -8,6 +9,8 @@
 
 namespace txservice
 {
+
+class TxProcessor;
 
 // whether skip write redo log to log_service.
 inline bool txservice_skip_wal = false;
@@ -28,9 +31,27 @@ enum struct TxShardStatus
 
 struct TxProcCoordinator
 {
+    explicit TxProcCoordinator(int32_t core_id,
+                               TxProcessor *processor = nullptr)
+        : core_id_(core_id), tx_processor_(processor)
+    {
+    }
+
+    void NotifyExternalProcessor()
+    {
+#ifdef ON_KEY_OBJECT
+        if (core_id_ != -1)
+        {
+            bthread_notify_worker(core_id_);
+        }
+#endif
+    }
+
+    int32_t core_id_{-1};
     std::mutex sleep_mux_;
     std::condition_variable sleep_cv_;
     std::atomic<TxShardStatus> shard_status_{TxShardStatus::Free};
+    std::atomic<TxProcessor *> tx_processor_{nullptr};
 #ifdef EXT_TX_PROC_ENABLED
 #ifdef ON_KEY_OBJECT
     // The external txm count. If it's not zero, the external processor

@@ -978,6 +978,8 @@ private:
         tx_coordi_ = tx_coordi;
     }
 
+    void NotifyTxProcessor();
+
     size_t memory_usage_round_ = 1;
 
     // heap for cc_map memory allocation
