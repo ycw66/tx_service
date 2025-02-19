@@ -29,7 +29,7 @@ CatalogKey::CatalogKey(const CatalogKey &rhs) : table_name_(rhs.table_name_)
 {
 }
 
-CatalogKey::CatalogKey(const CatalogKey &rhs, const Schema *)
+CatalogKey::CatalogKey(const CatalogKey &rhs, const KeySchema *)
     : table_name_(rhs.table_name_.StringView().data(),
                   rhs.table_name_.StringView().size(),
                   rhs.table_name_.Type())
@@ -116,7 +116,7 @@ size_t CatalogKey::SerializedLength() const
     return sizeof(uint16_t) + table_name_.StringView().size() + sizeof(uint8_t);
 }
 
-void CatalogKey::Deserialize(const char *buf, size_t &offset, const Schema *)
+void CatalogKey::Deserialize(const char *buf, size_t &offset, const KeySchema *)
 {
     // construct table name string_view
     uint16_t *len_ptr = (uint16_t *) (buf + offset);

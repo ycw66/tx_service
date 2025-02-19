@@ -259,8 +259,8 @@ public:
         bool inclusive,
         uint8_t key_parts,
         const std::vector<DataStoreSearchCond> &search_cond,
-        const Schema *key_schema,
-        const Schema *rec_schema,
+        const KeySchema *key_schema,
+        const RecordSchema *rec_schema,
         const KVCatalogInfo *kv_info,
         bool scan_foward) = 0;
 

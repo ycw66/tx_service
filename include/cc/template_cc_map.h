@@ -8618,7 +8618,7 @@ public:
         return nullptr;
     }
 
-    const Schema *RecordSchema() const override
+    const txservice::RecordSchema *RecordSchema() const override
     {
         if ((table_name_.Type() != TableType::Secondary) &&
             (table_schema_ != nullptr))

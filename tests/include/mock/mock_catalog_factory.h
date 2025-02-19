@@ -24,11 +24,6 @@ public:
     {
     }
 
-    Schema::Uptr Clone() const override
-    {
-        return std::make_unique<MockKeySchema>();
-    }
-
     bool CompareKeys(const TxKey &key1,
                      const TxKey &key2,
                      size_t *const column_index) const override
@@ -47,7 +42,7 @@ public:
     }
 };
 
-class MockRecordSchema : public txservice::Schema
+class MockRecordSchema : public txservice::RecordSchema
 {
 public:
     using Uptr = std::unique_ptr<MockRecordSchema>;
@@ -55,23 +50,18 @@ public:
     MockRecordSchema()
     {
     }
-
-    Schema::Uptr Clone() const override
-    {
-        return std::make_unique<MockRecordSchema>();
-    }
 };
 
 struct MockTableSchema : public TableSchema
 {
 public:
     MockTableSchema(const TableName &table_name,
-                    const std::string &catalog_image,
+                    std::string catalog_image,
                     uint64_t version)
         : table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
                       table_name.Type()),
-          schema_image_(catalog_image),
+          schema_image_(std::move(catalog_image)),
           version_(version)
     {
     }
@@ -88,7 +78,7 @@ public:
     {
         return key_schema_.get();
     }
-    const Schema *RecordSchema() const override
+    const txservice::RecordSchema *RecordSchema() const override
     {
         return &record_schema_;
     }
@@ -260,14 +250,14 @@ public:
     }
 
     std::unique_ptr<CcScanner> CreatePkCcmScanner(
-        ScanDirection direction, const Schema *key_schema) override
+        ScanDirection direction, const KeySchema *key_schema) override
     {
         assert(false);
         return nullptr;
     }
 
     std::unique_ptr<CcScanner> CreateSkCcmScanner(
-        ScanDirection direction, const Schema *compound_key_schema) override
+        ScanDirection direction, const KeySchema *compound_key_schema) override
     {
         assert(false);
         return nullptr;
@@ -275,7 +265,7 @@ public:
 
     std::unique_ptr<txservice::CcScanner> CreateRangeCcmScanner(
         txservice::ScanDirection direction,
-        const txservice::Schema *key_schema,
+        const txservice::KeySchema *key_schema,
         const TableName &range_table_name) override
     {
         assert(false);

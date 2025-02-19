@@ -116,7 +116,7 @@ enum struct CleanType
 class CcShard;
 struct TableSchema;
 struct KeySchema;
-struct Schema;
+struct RecordSchema;
 class NonBlockingLock;
 
 class CcMap
@@ -218,7 +218,7 @@ public:
 
     virtual TableType Type() const = 0;
     virtual const txservice::KeySchema *KeySchema() const = 0;
-    virtual const Schema *RecordSchema() const = 0;
+    virtual const txservice::RecordSchema *RecordSchema() const = 0;
 
     uint64_t SchemaTs() const
     {

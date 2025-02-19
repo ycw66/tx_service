@@ -62,7 +62,7 @@ size_t RangeBucketKey::SerializedLength() const
 
 void RangeBucketKey::Deserialize(const char *buf,
                                  size_t &offset,
-                                 const Schema *schema)
+                                 const KeySchema *schema)
 {
     bucket_id_ = *((uint16_t *) (buf + offset));
     offset += sizeof(uint16_t);

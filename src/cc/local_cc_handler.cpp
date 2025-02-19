@@ -913,7 +913,7 @@ void txservice::LocalCcHandler::ScanOpen(
     else
     {
 #ifdef ON_KEY_OBJECT
-        const Schema *key_schema = nullptr;
+        const KeySchema *key_schema = nullptr;
 #else
         const CatalogEntry *catalog_entry =
             local_shard.GetCatalog(table_name, cc_ng_id);
@@ -924,7 +924,7 @@ void txservice::LocalCcHandler::ScanOpen(
             return;
         }
 
-        const Schema *key_schema = catalog_entry->schema_->KeySchema();
+        const KeySchema *key_schema = catalog_entry->schema_->KeySchema();
 #endif
         if (direction == ScanDirection::Forward &&
             pk_forward_scanner_.Size() > 0)
@@ -1137,7 +1137,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     uint32_t shard_code = tx_number >> 32L;
     uint32_t cc_ng_id = shard_code >> 10;
 
-    const Schema *schema = nullptr;
+    const KeySchema *schema = nullptr;
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
     if (table_name.Type() == TableType::RangePartition)
     {

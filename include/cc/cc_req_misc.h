@@ -305,8 +305,8 @@ public:
     LoadRangeSliceRequest() = delete;
 
     LoadRangeSliceRequest(const TableName &tbl_name,
-                          const Schema *key_schema,
-                          const Schema *rec_schema,
+                          const KeySchema *key_schema,
+                          const RecordSchema *rec_schema,
                           uint64_t schema_ts,
                           TxKey start_key,
                           TxKey end_key,
@@ -363,12 +363,12 @@ public:
         return *table_name_;
     }
 
-    const Schema *KeySchema() const
+    const KeySchema *GetKeySchema() const
     {
         return key_schema_;
     }
 
-    const Schema *RecordSchema() const
+    const RecordSchema *GetRecordSchema() const
     {
         return rec_schema_;
     }
@@ -425,8 +425,8 @@ private:
     const TableName *table_name_;
 
     std::deque<SliceDataItem> slice_data_;
-    const Schema *key_schema_;
-    const Schema *rec_schema_;
+    const KeySchema *key_schema_;
+    const RecordSchema *rec_schema_;
     const uint64_t schema_ts_;
     TxKey start_key_;
     TxKey end_key_;
@@ -486,8 +486,8 @@ public:
     FillStoreSliceCc(const TableName &table_name,
                      NodeGroupId cc_ng_id,
                      int64_t cc_ng_term,
-                     const Schema *key_schema,
-                     const Schema *rec_schema,
+                     const KeySchema *key_schema,
+                     const RecordSchema *rec_schema,
                      uint64_t schema_ts,
                      StoreSlice &slice,
                      StoreRange &range,

@@ -147,7 +147,7 @@ struct TemplateScanCache : public ScanCache
 public:
     TemplateScanCache() = delete;
 
-    TemplateScanCache(CcScanner *scanner, const Schema *key_schema)
+    TemplateScanCache(CcScanner *scanner, const KeySchema *key_schema)
         : ScanCache(scanner),
           cache_(ScanCache::ScanBatchSize),
           key_schema_(key_schema)
@@ -275,7 +275,7 @@ public:
 
 private:
     std::vector<TemplateScanTuple<KeyT, ValueT>> cache_;
-    const Schema *const key_schema_;
+    const KeySchema *const key_schema_;
 };
 
 enum struct CcmScannerType
@@ -306,7 +306,7 @@ public:
     virtual ScanCache *AddShard(uint32_t shard_code) = 0;
     virtual void ResetShards(size_t shard_cnt) = 0;
     virtual void ResetCaches() = 0;
-    virtual void Reset(const Schema *key_schema) = 0;
+    virtual void Reset(const KeySchema *key_schema) = 0;
     virtual void Close() = 0;
     virtual void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
                                      *shard_code_and_sizes) const = 0;
@@ -449,7 +449,7 @@ class TemplateCcScanner : public CcScanner
 public:
     TemplateCcScanner(ScanDirection direct,
                       ScanIndexType index_type,
-                      const Schema *schema)
+                      const KeySchema *schema)
         : CcScanner(direct, index_type),
           scans_(),
           curr_shard_code_(0),
@@ -642,7 +642,7 @@ public:
     {
     }
 
-    void Reset(const Schema *key_schema) override
+    void Reset(const KeySchema *key_schema) override
     {
         key_schema_ = key_schema;
         curr_shard_code_ = 0;
@@ -672,7 +672,7 @@ private:
     uint32_t curr_shard_code_;
     const TemplateScanTuple<KeyT, ValueT> *curr_tuple_;
 
-    const Schema *key_schema_;
+    const KeySchema *key_schema_;
     mutable std::mutex mutex_;
 };
 
@@ -682,7 +682,7 @@ class RangePartitionedCcmScanner : public CcScanner
 public:
     RangePartitionedCcmScanner(ScanDirection direct,
                                ScanIndexType index_type,
-                               const Schema *schema)
+                               const KeySchema *schema)
         : CcScanner(direct, index_type), scans_(), key_schema_(schema)
     {
     }
@@ -855,7 +855,7 @@ public:
         return scans_.size();
     }
 
-    void Reset(const Schema *key_schema) override
+    void Reset(const KeySchema *key_schema) override
     {
         key_schema_ = key_schema;
         partition_ng_term_ = -1;
@@ -1147,7 +1147,7 @@ private:
     bool head_occupied_{false};
     CompoundIndex head_index_{Inf()};
 
-    const Schema *key_schema_;
+    const KeySchema *key_schema_;
     /**
      * @brief The term of the cc node group where the range partition resides.
      * When the first slice from the range is scanned, the term is set. The

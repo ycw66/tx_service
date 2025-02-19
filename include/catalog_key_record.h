@@ -32,7 +32,7 @@ public:
     CatalogKey(const CatalogKey &rhs);
     CatalogKey &operator=(CatalogKey &&) = default;
     ~CatalogKey() = default;
-    CatalogKey(const CatalogKey &rhs, const Schema *);
+    CatalogKey(const CatalogKey &rhs, const KeySchema *);
 
     bool operator==(const TxKey &rhs) const;
     bool operator<(const TxKey &rhs) const;
@@ -40,7 +40,7 @@ public:
     void Serialize(std::vector<char> &buf, size_t &offset) const;
     void Serialize(std::string &str) const;
     size_t SerializedLength() const;
-    void Deserialize(const char *buf, size_t &offset, const Schema *);
+    void Deserialize(const char *buf, size_t &offset, const KeySchema *);
 #ifdef ON_KEY_OBJECT
     std::string_view KVSerialize() const
     {

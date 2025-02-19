@@ -245,8 +245,8 @@ public:
 
     template <typename KeyT, typename ValueT>
     void CreateCcTable(const TableName &tabname,
-                       const Schema *key_schema = nullptr,
-                       const Schema *rec_schema = nullptr,
+                       const KeySchema *key_schema = nullptr,
+                       const RecordSchema *rec_schema = nullptr,
                        uint32_t core_id = 0,
                        bool is_all = true)
     {
@@ -269,8 +269,8 @@ public:
 
     template <typename SkT, typename PkT>
     void CreateSkCcTable(const TableName &tabname,
-                         const Schema *sk_schema = nullptr,
-                         const Schema *pk_schema = nullptr,
+                         const KeySchema *sk_schema = nullptr,
+                         const KeySchema *pk_schema = nullptr,
                          uint32_t core_id = 0,
                          bool is_all = true)
     {
@@ -1021,8 +1021,8 @@ public:
         const TableName &table_name,
         NodeGroupId cc_ng_id,
         int64_t cc_ng_term,
-        const Schema *key_schema,
-        const Schema *rec_schema,
+        const KeySchema *key_schema,
+        const RecordSchema *rec_schema,
         uint64_t schema_ts,
         const KVCatalogInfo *kv_info,
         const KeyT &key,
@@ -1119,8 +1119,8 @@ public:
     RangeSliceId PinRangeSlices(const TableName &table_name,
                                 NodeGroupId cc_ng_id,
                                 int64_t cc_ng_term,
-                                const Schema *key_schema,
-                                const Schema *rec_schema,
+                                const KeySchema *key_schema,
+                                const RecordSchema *rec_schema,
                                 uint64_t schema_ts,
                                 const KVCatalogInfo *kv_info,
                                 uint32_t range_id,

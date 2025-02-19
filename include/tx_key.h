@@ -626,7 +626,7 @@ public:
     {
     }
 
-    CompositeKey(const CompositeKey &rhs, const txservice::Schema *schema)
+    CompositeKey(const CompositeKey &rhs, const txservice::KeySchema *schema)
         : fields_(rhs.fields_), field_cnt_(rhs.field_cnt_)
     {
     }
@@ -741,7 +741,7 @@ public:
                    fields_);
     }
 
-    void Deserialize(const char *buf, size_t &offset, const Schema *schema)
+    void Deserialize(const char *buf, size_t &offset, const KeySchema *schema)
     {
         TupleDeserializeHelper(
             fields_, std::index_sequence_for<Types...>{}, buf, offset);
@@ -928,7 +928,9 @@ struct VoidKey
         return 0;
     }
 
-    void Deserialize(const char *buf, size_t &offset, const Schema *key_schema)
+    void Deserialize(const char *buf,
+                     size_t &offset,
+                     const KeySchema *key_schema)
     {
     }
 

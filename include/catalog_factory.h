@@ -131,7 +131,7 @@ struct TableSchema
     virtual ~TableSchema() = default;
     virtual const TableName &GetBaseTableName() const = 0;
     virtual const txservice::KeySchema *KeySchema() const = 0;
-    virtual const Schema *RecordSchema() const = 0;
+    virtual const txservice::RecordSchema *RecordSchema() const = 0;
     virtual const std::string &SchemaImage() const = 0;
     virtual const std::unordered_map<
         uint,
@@ -211,14 +211,14 @@ public:
         std::unique_ptr<StoreRange> slices = nullptr) = 0;
 
     virtual std::unique_ptr<CcScanner> CreatePkCcmScanner(
-        ScanDirection direction, const Schema *key_schema) = 0;
+        ScanDirection direction, const KeySchema *key_schema) = 0;
 
     virtual std::unique_ptr<CcScanner> CreateSkCcmScanner(
-        ScanDirection direction, const Schema *compound_key_schema) = 0;
+        ScanDirection direction, const KeySchema *compound_key_schema) = 0;
 
     virtual std::unique_ptr<CcScanner> CreateRangeCcmScanner(
         ScanDirection direction,
-        const Schema *key_schema,
+        const KeySchema *key_schema,
         const TableName &range_table_name) = 0;
 
     virtual std::unique_ptr<Statistics> CreateTableStatistics(
@@ -239,7 +239,7 @@ public:
     virtual TxKey PositiveInfKey() = 0;
     virtual size_t KeyHash(const char *buf,
                            size_t offset,
-                           const txservice::Schema *key_schema)
+                           const txservice::KeySchema *key_schema) const
     {
         return 0;
     }

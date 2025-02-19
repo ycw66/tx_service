@@ -197,8 +197,8 @@ public:
         bool inclusive,
         uint8_t key_parts,
         const std::vector<DataStoreSearchCond> &search_cond,
-        const txservice::Schema *key_schema,
-        const txservice::Schema *rec_schema,
+        const txservice::KeySchema *key_schema,
+        const txservice::RecordSchema *rec_schema,
         const txservice::KVCatalogInfo *kv_info,
         bool scan_foward) override
     {
