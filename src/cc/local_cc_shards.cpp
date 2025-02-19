@@ -3150,11 +3150,24 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         if (table_name.Type() == TableType::Secondary ||
             table_name.Type() == TableType::UniqueSecondary)
         {
-            if (catalog_rec.DirtySchema() &&
-                !table_schema->IndexKeySchema(table_name))
+            if (is_dirty)
             {
-                assert(is_dirty);
-                table_schema = catalog_rec.CopyDirtySchema();
+                // At the moment when the ckpt worker obtains the table name
+                // snapshot, the index table is in dirty state (new index).
+                // However, if the alter table transaction has been committed,
+                // then at this moment, the index table is no longer in a dirty
+                // state.
+                if (table_schema->IndexKeySchema(table_name))
+                {
+                    // The index table is no longer in dirty state.
+                    is_dirty = false;
+                }
+                else if (catalog_rec.DirtySchema())
+                {
+                    // The base table is in dirty state yet. Try to use the
+                    // dirty schema.
+                    table_schema = catalog_rec.CopyDirtySchema();
+                }
             }
             // For index table, if this table has been dropped, skip it.
             if (!table_schema->IndexKeySchema(table_name))
