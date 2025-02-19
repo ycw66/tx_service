@@ -1542,27 +1542,36 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         // When timeout in RANGE_PARTITION, check deadlock first, then force
         // error.
         DeadLockCheck::RequestCheck();
-        txm->cc_handler_->BlockCcReqCheck(txm->TxNumber(),
-                                          txm->TxTerm(),
-                                          txm->CommandId(),
-                                          lock_range_result_.Value().cce_addr_,
-                                          &slice_hd_result_,
-                                          ResultTemplateType::ReadKeyResult);
 
-        if (retry_num_ > 0 &&
-            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
+        if (slice_hd_result_.Value().is_local_)
         {
-            ReRunOp(txm);
+            // For local request, just rely on the result of the deadlock
+            // checking.
             return;
         }
-        else if (slice_hd_result_.SetResultByTimeoutThread())
+
+        if (slice_hd_result_.SetResultByTimeoutThread())
         {
-            bool force_error = slice_hd_result_.ForceError();
-            if (force_error)
+            if (retry_num_ > 0 &&
+                (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
             {
-                txm->PostProcess(*this);
+                ReRunOp(txm);
+                // Unset timeout status. So the cc_stream_reciver can handle
+                // response.
+                slice_hd_result_.UnsetByTimeoutThread();
+                return;
+            }
+            else
+            {
+                bool force_error = slice_hd_result_.ForceError();
+                if (force_error)
+                {
+                    txm->PostProcess(*this);
+                }
             }
         }
+        // else: the remote response is received.
+
 #else
         bool force_error = hd_result_.ForceError();
         if (force_error)
