@@ -319,16 +319,21 @@ int Sharder::Init(
             if (pid == 0)
             {
                 std::string log_path = local_path + "/tx_service";
-                if (execl(hm_bin_path->c_str(),
-                          "host_manager",
-                          hm_ip_.c_str(),
-                          std::to_string(hm_port_).c_str(),
-                          log_path.c_str(),
-                          enable_brpc_builtin_services ? "Y" : "N",
+
+                if (execl(
+                        hm_bin_path->c_str(),
+                        "host_manager",
+                        ("--hm_ip=" + hm_ip_).c_str(),
+                        ("--hm_port=" + std::to_string(hm_port_)).c_str(),
+                        ("--hm_raft_log_path=" + log_path).c_str(),
+                        ("--enable_brpc_builtin_services=" +
+                         (enable_brpc_builtin_services ? std::string("true")
+                                                       : std::string("false")))
+                            .c_str(),
 #if BRPC_WITH_GLOG
-                          FLAGS_log_dir.c_str(),
+                        ("--log_dir=" + FLAGS_log_dir).c_str(),
 #endif
-                          (char *) 0) == -1)
+                        (char *) 0) == -1)
                 {
                     LOG(ERROR)
                         << "Failed to start host manager process, errno: "
