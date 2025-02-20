@@ -7900,7 +7900,9 @@ public:
         }
 
         bool has_dml_since_ddl = false;
-        bool check_key_version = true;
+        bool check_key_version = (is_dirty && req.StoreRangePtr())
+                                     ? req.StoreRangePtr()->HasDmlSinceDdl()
+                                     : true;
 
         // ScanSliceDeltaSizeCc is running on TxProcessor thread. To avoid
         // blocking other transaction for a long time, we only process
