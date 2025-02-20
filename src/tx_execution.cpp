@@ -272,13 +272,19 @@ void TransactionExecution::Enlist()
 
 bool TransactionExecution::ExternalForward(bool enlist_txm_if_fails)
 {
+#ifdef ON_KEY_OBJECT
     CHECK(bind_to_ext_proc_);
-    bool success = tx_processor_->ForwardTx(this);
-    if (!success && enlist_txm_if_fails)
+#endif
+    if (bind_to_ext_proc_)
     {
-        tx_processor_->EnlistTx(this);
+        bool success = tx_processor_->ForwardTx(this);
+        if (!success && enlist_txm_if_fails)
+        {
+            tx_processor_->EnlistTx(this);
+        }
+        return success;
     }
-    return success;
+    return true;
 }
 #endif
 
