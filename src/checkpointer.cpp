@@ -133,7 +133,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             snapshot_req.set_standby_node_term(candidate_standby_node_term);
             snapshot_req.set_standby_node_id(Sharder::Instance().NodeId());
 
-            std::array<char, 128> buffer;
+            std::array<char, 200> buffer;
             std::string username;
             FILE *output_stream = popen("echo $USER", "r");
             while (fgets(buffer.data(), 200, output_stream) != nullptr)

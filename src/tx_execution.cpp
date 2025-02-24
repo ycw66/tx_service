@@ -7144,8 +7144,8 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         TxRecord &rec = *read_batch[idx].record_;
 
         uint32_t sharding_code = 0;
-        size_t key_hash = key.Hash();
 #ifdef RANGE_PARTITION_ENABLED
+        size_t key_hash = key.Hash();
         sharding_code =
             read_batch[idx].cce_addr_.NodeGroupId() << 10 | (key_hash & 0x3FF);
 #else

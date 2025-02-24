@@ -97,7 +97,7 @@ static inline TxErrorCode TxReadCatalog(TransactionExecution *txm,
 static inline int GetDbIndex(const TableName *table_name)
 {
     std::string_view table_name_sv = table_name->StringView();
-    int db_idx = table_name_sv.back() - '0';
+    unsigned int db_idx = table_name_sv.back() - '0';
     if (table_name_sv[table_name_sv.size() - 2] != '_')
     {
         db_idx = (table_name_sv[table_name_sv.size() - 2] - '0') * 10 + db_idx;
