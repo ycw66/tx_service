@@ -444,9 +444,9 @@ struct ScanState
               bool inclusive,
               SlicePosition position)
         : scanner_(std::move(scanner)),
-          schema_version_(schema_version),
           scan_end_key_(end_key),
           scan_end_inclusive_(end_inclusive),
+          schema_version_(schema_version),
           range_id_(range_id),
           range_ng_(range_ng),
           slice_last_key_(std::move(last_key)),

@@ -269,17 +269,21 @@ public:
                         return false;
                     }
 
-                    if (catalog_entry->schema_ && catalog_entry->dirty_schema_)
+                    // Bind statistics for the dirty schema.
+                    catalog_entry->dirty_schema_->BindStatistics(
+                        catalog_entry->schema_->StatisticsObject());
+                    if (req.OpType() == OperationType::AddIndex)
                     {
                         // For ALTER TABLE, set the dirty index name, and this
                         // info should be clean when commit dirty schema. For
                         // CREATE TABLE, there is no matter that do not set the
                         // dirty index info, because this table is invisible
                         // until create table transaction commit.
-                        std::vector<TableName> new_index_names =
+                        auto new_index_names =
                             catalog_entry->dirty_schema_->IndexNames();
-                        std::vector<TableName> old_index_names =
+                        auto old_index_names =
                             catalog_entry->schema_->IndexNames();
+                        std::vector<TableName> dirty_index_names;
                         for (const TableName &new_index_name : new_index_names)
                         {
                             if (std::find(old_index_names.begin(),
@@ -287,27 +291,10 @@ public:
                                           new_index_name) ==
                                 old_index_names.end())
                             {
-                                catalog_entry->dirty_schema_->AddDirtyIndex(
-                                    new_index_name);
+                                dirty_index_names.emplace_back(
+                                    new_index_name.StringView(),
+                                    new_index_name.Type());
                             }
-                        }
-                    }
-
-                    // Bind statistics for the dirty schema.
-                    catalog_entry->dirty_schema_->BindStatistics(
-                        catalog_entry->schema_->StatisticsObject());
-                    if (req.OpType() == OperationType::AddIndex)
-                    {
-                        auto &new_index_names =
-                            *(catalog_entry->dirty_schema_->DirtyIndexNames());
-                        for (const TableName &new_index_name : new_index_names)
-                        {
-                            catalog_entry->schema_->StatisticsObject()
-                                ->CreateIndex(
-                                    new_index_name,
-                                    catalog_entry->dirty_schema_
-                                        ->IndexKeySchema(new_index_name),
-                                    cc_ng_id_);
                         }
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -315,10 +302,10 @@ public:
                         // simply initialize it with empty range table since we
                         // might have pre-defined range table based on the data
                         // distribution offered by caller.
-                        for (const TableName &new_index_name : new_index_names)
+                        for (const TableName &index_name : dirty_index_names)
                         {
                             TableName index_range_name{
-                                new_index_name.StringView(),
+                                index_name.StringView(),
                                 TableType::RangePartition};
 
                             auto ranges = shard_->GetTableRangesForATable(
@@ -342,7 +329,8 @@ public:
                                                 ->PartitionId(),
                                             req.NodeGroupId())
                                         ->BucketOwner();
-                                if (range_owner == req.NodeGroupId())
+                                if (range_owner == req.NodeGroupId() &&
+                                    range.second->RangeSlices() == nullptr)
                                 {
                                     // The owner this this range, and this is a
                                     // empty range.
@@ -382,6 +370,15 @@ public:
                             }
                         }
 #endif
+
+                        for (const TableName &index_name : dirty_index_names)
+                        {
+                            catalog_entry->schema_->StatisticsObject()
+                                ->CreateIndex(index_name,
+                                              catalog_entry->dirty_schema_
+                                                  ->IndexKeySchema(index_name),
+                                              cc_ng_id_);
+                        }
                     }
                 }
 
@@ -1169,10 +1166,6 @@ public:
                                 return false;
                             }
 
-                            // For ALTER TABLE, set the dirty index name, and
-                            // should clean them when commit dirty schema.
-                            catalog_entry->dirty_schema_->AddDirtyIndex(
-                                new_index_name);
                             catalog_entry->dirty_schema_->StatisticsObject()
                                 ->CreateIndex(
                                     new_index_name,

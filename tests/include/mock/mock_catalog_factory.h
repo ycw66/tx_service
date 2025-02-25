@@ -162,19 +162,6 @@ public:
         assert(false);
         return std::pair(TxKey(), nullptr);
     }
-    void AddDirtyIndex(const TableName &index_name) override
-    {
-        assert(false);
-    }
-    const std::unordered_set<TableName> *DirtyIndexNames() const override
-    {
-        assert(false);
-        return nullptr;
-    }
-    void CleanDirtyInfo() override
-    {
-        assert(false);
-    }
 
 private:
     std::unordered_map<uint, std::pair<TableName, MockKeySchema>>

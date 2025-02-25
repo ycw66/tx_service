@@ -171,9 +171,6 @@ struct TableSchema
     virtual const TableName *GetSequenceTableName() const = 0;
     virtual std::pair<TxKey, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
         const TableName &table_name) const = 0;
-    virtual void AddDirtyIndex(const TableName &index_name) = 0;
-    virtual const std::unordered_set<TableName> *DirtyIndexNames() const = 0;
-    virtual void CleanDirtyInfo() = 0;
 };
 
 class CatalogFactory
