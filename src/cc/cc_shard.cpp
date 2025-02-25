@@ -103,7 +103,11 @@ CcShard::CcShard(
     tail_ccp_.lru_prev_ = &head_ccp_;
     tail_ccp_.lru_next_ = nullptr;
 
-    standby_fwd_vec_.resize(txservice_max_standby_lag);
+    standby_fwd_vec_.reserve(txservice_max_standby_lag);
+    for (uint32_t idx = 0; idx < txservice_max_standby_lag; idx++)
+    {
+        standby_fwd_vec_.emplace_back(std::make_unique<StandbyForwardEntry>());
+    }
     standby_fwded_msg_buffer_.resize(txservice_max_standby_lag, nullptr);
 
     thd_token_.reserve((size_t) core_cnt + 1);
@@ -2145,11 +2149,11 @@ StandbyForwardEntry *CcShard::GetNextStandbyForwardEntry()
     bool found = false;
     while (cnt < standby_fwd_vec_.size())
     {
-        StandbyForwardEntry &ety = standby_fwd_vec_[next_foward_idx_];
+        StandbyForwardEntry *ety = standby_fwd_vec_[next_foward_idx_].get();
         found =
-            (ety.IsFree() && (ety.SequenceId() == UINT64_MAX ||
-                              next_forward_sequence_id_ - ety.SequenceId() >=
-                                  txservice_max_standby_lag));
+            (ety->IsFree() && (ety->SequenceId() == UINT64_MAX ||
+                               next_forward_sequence_id_ - ety->SequenceId() >=
+                                   txservice_max_standby_lag));
 
         if (found)
         {
@@ -2175,18 +2179,22 @@ StandbyForwardEntry *CcShard::GetNextStandbyForwardEntry()
         LOG(INFO) << "Resize standby forward entry container, size:"
                   << standby_fwd_vec_.size() << ",new_size:" << new_size;
         standby_fwd_vec_.resize(new_size);
+        for (uint32_t idx = old_size; idx < new_size; idx++)
+        {
+            standby_fwd_vec_[idx] = std::make_unique<StandbyForwardEntry>();
+        }
 
         // position old_size must be an available slot.
         next_foward_idx_ = old_size;
     }
 
-    StandbyForwardEntry &entry = standby_fwd_vec_.at(next_foward_idx_);
-    entry.Reset();
+    StandbyForwardEntry *entry = standby_fwd_vec_.at(next_foward_idx_).get();
+    entry->Reset();
     ++next_foward_idx_;
     next_foward_idx_ =
         next_foward_idx_ == standby_fwd_vec_.size() ? 0 : next_foward_idx_;
 
-    return &entry;
+    return entry;
 }
 
 void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
@@ -2446,8 +2454,8 @@ void CcShard::ResetStandbySequence()
     next_forward_sequence_id_ = 1;
     for (auto &entry : standby_fwd_vec_)
     {
-        entry.Free();
-        entry.SetSequenceId(UINT64_MAX);
+        entry->Free();
+        entry->SetSequenceId(UINT64_MAX);
     }
     subscribed_standby_nodes_.clear();
     standby_sequence_grps_.clear();

@@ -1040,7 +1040,7 @@ private:
 
     // Standby forward msg related members used on primary node
     // pool of actual standby msgs.
-    std::vector<StandbyForwardEntry> standby_fwd_vec_;
+    std::vector<std::unique_ptr<StandbyForwardEntry>> standby_fwd_vec_;
     // Buffers the last "txservice_max_standby_lag" msgs sent to standby node.
     // It is used to find the missed msg with sequence id.
     std::vector<StandbyForwardEntry *> standby_fwded_msg_buffer_;
