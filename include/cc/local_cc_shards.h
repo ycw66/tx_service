@@ -29,7 +29,7 @@
 #include "data_sync_task.h"
 #include "error_messages.h"
 #include "local_cc_handler.h"
-#include "raft_log.pb.h"
+#include "log.pb.h"
 #include "range_record.h"
 #include "range_slice.h"
 #include "store/data_store_handler.h"

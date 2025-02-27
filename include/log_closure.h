@@ -8,7 +8,7 @@
 #include "cc_request.pb.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault_inject.h"
-#include "raft_log.pb.h"
+#include "log.pb.h"
 #include "type.h"
 
 namespace txservice

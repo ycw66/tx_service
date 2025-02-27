@@ -2,7 +2,7 @@
 
 #include "cc_map.h"
 #include "cluster_config_record.h"
-#include "raft_log.pb.h"
+#include "log.pb.h"
 #include "template_cc_map.h"
 #include "tx_key.h"
 #include "tx_record.h"

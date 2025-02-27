@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "raft_log.pb.h"
+#include "log.pb.h"
 
 namespace txservice
 {

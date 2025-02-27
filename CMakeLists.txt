@@ -146,7 +146,7 @@ execute_process(
 )
 
 set(LOG_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tx-log-protos)
-set(LOG_PROTO_NAME raft_log)
+set(LOG_PROTO_NAME log)
 execute_process(
     COMMAND protoc ./${LOG_PROTO_NAME}.proto --cpp_out=./ --proto_path=./
     WORKING_DIRECTORY ${LOG_PROTO_SRC}

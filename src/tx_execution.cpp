@@ -10,8 +10,8 @@
 #include "cc_protocol.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
+#include "log.pb.h"
 #include "log_type.h"
-#include "raft_log.pb.h"
 #include "scan.h"
 #include "sharder.h"
 #include "statistics.h"

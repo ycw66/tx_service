@@ -9,8 +9,8 @@
 
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
+#include "log.pb.h"
 #include "proto/cc_request.pb.h"
-#include "raft_log.pb.h"
 #include "sharder.h"
 #include "type.h"
 

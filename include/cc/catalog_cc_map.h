@@ -17,9 +17,9 @@
 #include "error_messages.h"  //CcErrorCode
 #include "fault_inject.h"
 #include "local_cc_shards.h"
+#include "log.pb.h"
 #include "log_type.h"
 #include "non_blocking_lock.h"
-#include "raft_log.pb.h"
 #include "range_cc_map.h"
 #include "sharder.h"
 #include "template_cc_map.h"

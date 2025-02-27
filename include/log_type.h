@@ -1,6 +1,6 @@
 #pragma once
 
-#include "raft_log.pb.h"
+#include "log.pb.h"
 #include "type.h"
 
 namespace txlog
