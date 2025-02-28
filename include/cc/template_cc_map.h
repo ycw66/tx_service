@@ -2357,7 +2357,8 @@ public:
             req.SetCcePtrScanType(scan_type);
 
 #ifdef ON_KEY_OBJECT
-            if (FilterRecord(key_ptr,
+            if (scan_type == ScanType::ScanGap ||
+                FilterRecord(key_ptr,
                              cce,
                              req.GetRedisObjectType(),
                              req.GetRedisScanPattern()))
@@ -2414,11 +2415,11 @@ public:
                              req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot);
+                cce_last = cce;
+                ccp_last = ccp;
 #ifdef ON_KEY_OBJECT
             }
 #endif
-            cce_last = cce;
-            ccp_last = ccp;
         }
 
         if (req.direct_ == ScanDirection::Forward)
@@ -2579,6 +2580,7 @@ public:
             ScanTuple *last_tuple =
                 const_cast<ScanTuple *>(typed_cache->LastTuple());
             assert(cce_last->GetLockAddr() != 0);
+            assert(last_tuple != nullptr);
             last_tuple->cce_addr_.SetCceLock(
                 reinterpret_cast<uint64_t>(cce_last->GetLockAddr()));
             if (add_intent)
