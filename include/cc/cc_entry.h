@@ -1563,7 +1563,7 @@ struct CcPage : public LruPage
      * Construct page negative infinity and positive infinity.
      * @param parent
      */
-    explicit CcPage<KeyT, ValueT>(CcMap *parent) : LruPage(parent)
+    explicit CcPage(CcMap *parent) : LruPage(parent)
     {
     }
 
@@ -1573,9 +1573,9 @@ struct CcPage : public LruPage
      * @param prev_page
      * @param next_page
      */
-    CcPage<KeyT, ValueT>(CcMap *parent,
-                         CcPage<KeyT, ValueT> *prev_page,
-                         CcPage<KeyT, ValueT> *next_page)
+    CcPage(CcMap *parent,
+           CcPage<KeyT, ValueT> *prev_page,
+           CcPage<KeyT, ValueT> *next_page)
         : LruPage(parent), prev_page_(prev_page), next_page_(next_page)
     {
         keys_.reserve(split_threshold_);
@@ -1598,12 +1598,11 @@ struct CcPage : public LruPage
      * @param prev_page
      * @param next_page
      */
-    CcPage<KeyT, ValueT>(
-        CcMap *parent,
-        std::vector<KeyT> &&keys,
-        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &&entries,
-        CcPage<KeyT, ValueT> *prev_page,
-        CcPage<KeyT, ValueT> *next_page)
+    CcPage(CcMap *parent,
+           std::vector<KeyT> &&keys,
+           std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &&entries,
+           CcPage<KeyT, ValueT> *prev_page,
+           CcPage<KeyT, ValueT> *next_page)
         : LruPage(parent),
           keys_(std::move(keys)),
           entries_(std::move(entries)),
@@ -1620,7 +1619,7 @@ struct CcPage : public LruPage
         }
     }
 
-    ~CcPage<KeyT, ValueT>()
+    ~CcPage()
     {
         if (prev_page_ != nullptr)
         {
@@ -1632,9 +1631,9 @@ struct CcPage : public LruPage
         }
     }
 
-    CcPage<KeyT, ValueT>(const CcPage<KeyT, ValueT> &page) = delete;
+    CcPage(const CcPage<KeyT, ValueT> &page) = delete;
     CcPage<KeyT, ValueT> operator=(const CcPage<KeyT, ValueT> &page) = delete;
-    CcPage<KeyT, ValueT>(CcPage<KeyT, ValueT> &&page) = delete;
+    CcPage(CcPage<KeyT, ValueT> &&page) = delete;
     CcPage<KeyT, ValueT> operator=(CcPage<KeyT, ValueT> &&page) = delete;
 
     /**
@@ -1848,7 +1847,7 @@ struct CcPage : public LruPage
         int32_t &normal_rec_change,
         CcShard *shard)
     {
-        assert(start_index >= 0 && end_index <= Size());
+        assert(end_index <= Size());
         assert(offset + (end_index - start_index) <= location_infos.size());
 
         offset += (end_index - start_index - 1);

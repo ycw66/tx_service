@@ -654,9 +654,6 @@ CcErrorCode UploadIndexContext::UploadEncodedIndex(UploadIndexTask &upload_task)
                << node_group_id_
                << " with txn: " << acq_range_lock_txm->TxNumber();
 #else
-    size_t hash = 0;
-    uint32_t key_shard_code = 0;
-    NodeGroupId dest_ng_id = 0;
     for (auto table_it = upload_task.table_index_set_.begin();
          table_it != upload_task.table_index_set_.end();
          ++table_it)
@@ -672,18 +669,13 @@ CcErrorCode UploadIndexContext::UploadEncodedIndex(UploadIndexTask &upload_task)
                 std::forward_as_tuple(NGIndexSet()));
             ng_write_entry_it = ins_it.first;
         }
-        auto &ng_table_write_entrys = ng_write_entry_it->second;
+        // auto &ng_table_write_entrys = ng_write_entry_it->second;
         for (auto item_it = table_write_entrys.begin();
              item_it != table_write_entrys.end();
              ++item_it)
         {
-            hash = item_it->key_.Hash();
-            // key_shard_code = Sharder::Instance().ShardCode(hash);
             // TODO(lzx): read bucket to get node group.
             assert(false);
-            dest_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
-            auto ng_it = ng_table_write_entrys.try_emplace(dest_ng_id);
-            ng_it.first->second.push_back(&(*item_it));
         }
     }
 #endif
