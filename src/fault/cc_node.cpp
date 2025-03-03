@@ -402,11 +402,15 @@ bool CcNode::OnLeaderStart(int64_t term,
             uint64_t version;
             bool uninitialized;
             // read ng config from kv store
+            uint32_t retry_cnt = 0;
             while (!local_cc_shards_.store_hd_->ReadClusterConfig(
                 ng_configs, version, uninitialized))
             {
                 ng_configs.clear();
                 assert(!uninitialized);
+                LOG(WARNING) << "Retry to ReadClusterConfig from data store.";
+                retry_cnt++;
+                bthread_usleep(std::min(200000U * retry_cnt, 1000000U));
             }
             std::set<NodeGroupId> ng_ids;
             for (auto &[ng_id, _] : ng_configs)
