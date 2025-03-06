@@ -468,7 +468,10 @@ public:
         auto tstart = std::chrono::steady_clock::now();
 
         size_t idle_rnd = 0;
-        local_cc_shards_.GetCcShard(thd_id_)->InitializeShardHeap();
+        CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
+        shard->InitializeStandbyForwardMsgVec();
+        shard->InitializeLockVector();
+        shard->InitializeShardHeap();
         local_cc_shards_.SetTxProcNotifier(
             thd_id_, &tx_proc_status_, coordi_.get());
 

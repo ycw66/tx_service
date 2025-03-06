@@ -257,6 +257,26 @@ public:
         return shard_data_sync_scan_heap_.get();
     }
 
+    void InitializeStandbyForwardMsgVec()
+    {
+        standby_fwd_vec_.resize(txservice_max_standby_lag);
+        for (size_t i = 0; i < txservice_max_standby_lag; ++i)
+        {
+            standby_fwd_vec_[i] = std::make_unique<StandbyForwardEntry>();
+        }
+
+        assert(standby_fwded_msg_buffer_.empty());
+        standby_fwded_msg_buffer_.resize(txservice_max_standby_lag, nullptr);
+    }
+
+    void InitializeLockVector()
+    {
+        lock_vec_.resize(LOCK_ARRAY_INIT_SIZE);
+        for (size_t i = 0; i < LOCK_ARRAY_INIT_SIZE; ++i)
+        {
+            lock_vec_[i] = std::make_unique<KeyGapLockAndExtraData>();
+        }
+    }
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
      *

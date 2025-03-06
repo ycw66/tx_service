@@ -113,23 +113,10 @@ CcShard::CcShard(
         tx_vec_.emplace_back(idx);
     }
 
-    lock_vec_.reserve(LOCK_ARRAY_INIT_SIZE);
-    for (uint32_t idx = 0; idx < LOCK_ARRAY_INIT_SIZE; ++idx)
-    {
-        lock_vec_.emplace_back(std::make_unique<KeyGapLockAndExtraData>());
-    }
-
     head_ccp_.lru_prev_ = nullptr;
     head_ccp_.lru_next_ = &tail_ccp_;
     tail_ccp_.lru_prev_ = &head_ccp_;
     tail_ccp_.lru_next_ = nullptr;
-
-    standby_fwd_vec_.reserve(txservice_max_standby_lag);
-    for (uint32_t idx = 0; idx < txservice_max_standby_lag; idx++)
-    {
-        standby_fwd_vec_.emplace_back(std::make_unique<StandbyForwardEntry>());
-    }
-    standby_fwded_msg_buffer_.resize(txservice_max_standby_lag, nullptr);
 
     thd_token_.reserve((size_t) core_cnt + 1);
     for (size_t idx = 0; idx < core_cnt; ++idx)
