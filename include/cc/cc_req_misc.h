@@ -626,7 +626,6 @@ public:
                   const TableSchema *tbl_schema,
                   TxKey tx_key,
                   LruEntry *cce,
-                  CcMap *ccm,
                   CcShard &ccs,
                   NodeGroupId cc_ng_id,
                   int64_t cc_ng_term,
@@ -655,7 +654,7 @@ public:
     const TableSchema *table_schema_{nullptr};
     TxKey tx_key_;
     LruEntry *cce_{nullptr};
-    CcMap *ccm_;
+    KeyGapLockAndExtraData *lock_{nullptr};
     uint64_t rec_ts_{0};
     RecordStatus rec_status_{RecordStatus::Unknown};
     std::string rec_str_;

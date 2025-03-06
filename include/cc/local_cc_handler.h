@@ -243,13 +243,9 @@ public:
                   bool is_covering_keys = false,
                   bool is_require_keys = true,
                   bool is_require_recs = true,
-                  bool is_require_sort = true
-#ifdef ON_KEY_OBJECT
-                  ,
+                  bool is_require_sort = true,
                   int32_t obj_type = -1,
-                  const std::string_view &scan_pattern = {}
-#endif
-                  ) override;
+                  const std::string_view &scan_pattern = {}) override;
 
     void ScanOpenLocal(const TableName &table_name,
                        ScanIndexType index_type,
@@ -271,13 +267,9 @@ public:
                        uint16_t command_id,
                        uint64_t start_ts,
                        CcScanner &scanner,
-                       CcHandlerResult<ScanNextResult> &hd_res
-#ifdef ON_KEY_OBJECT
-                       ,
+                       CcHandlerResult<ScanNextResult> &hd_res,
                        int32_t obj_type = -1,
-                       const std::string_view &scan_pattern = {}
-#endif
-                       ) override;
+                       const std::string_view &scan_pattern = {}) override;
 
     void ScanNextBatch(const TableName &tbl_name,
                        const uint64_t schema_version,

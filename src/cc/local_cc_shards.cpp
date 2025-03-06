@@ -3565,13 +3565,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 {
                     auto &rec = scan_cc.DataSyncVec(i)[j];
                     // Clone key
-                    data_sync_vecs[i].emplace_back(rec.Key().Clone(),
-                                                   rec.ReleasePayload(),
-                                                   rec.payload_status_,
-                                                   rec.commit_ts_,
-                                                   rec.cce_,
-                                                   rec.post_flush_size_,
-                                                   range_id);
+                    data_sync_vecs[i].emplace_back(
+                        rec.Key().Clone(),
+                        rec.ReleaseVersionedPayload(),
+                        rec.payload_status_,
+                        rec.commit_ts_,
+                        rec.cce_,
+                        rec.post_flush_size_,
+                        range_id);
                 }
 
                 // Get the minimum end key.
@@ -4358,16 +4359,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                     int32_t part_id = (rec.Key().Hash() >> 10) & 0x3FF;
                     data_sync_vec->emplace_back(rec.Key().Clone(),
 #ifdef ON_KEY_OBJECT
-                                                rec.GetPayload(),
+                                                rec.GetNonVersionedPayload(),
 #else
-                                                rec.ReleasePayload(),
+                                                rec.ReleaseVersionedPayload(),
 #endif
                                                 rec.payload_status_,
                                                 rec.commit_ts_,
                                                 rec.cce_,
-#ifndef ON_KEY_OBJECT
                                                 rec.post_flush_size_,
-#endif
                                                 part_id);
                 }
             }

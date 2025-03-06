@@ -197,8 +197,9 @@ public:
                               txservice::NodeGroupId cc_ng_id) override
     {
         uint64_t schema_ts = table_schema->KeySchema()->SchemaTs();
-        return std::make_unique<
-            txservice::TemplateCcMap<CompositeKey<int>, CompositeRecord<int>>>(
+        return std::make_unique<txservice::TemplateCcMap<CompositeKey<int>,
+                                                         CompositeRecord<int>,
+                                                         true>>(
             shard,
             cc_ng_id,
             table_name,

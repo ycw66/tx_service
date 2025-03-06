@@ -849,14 +849,9 @@ void CcShard::VerifyLruList()
  */
 std::pair<size_t, bool> CcShard::Clean()
 {
-    // See if there's any invalid cce that we can expire
-    CleanUpInvalidCce();
-#ifdef ON_KEY_OBJECT
     LruPage *ccp = !txservice_skip_kv && clean_start_ccp_ ? clean_start_ccp_
                                                           : head_ccp_.lru_next_;
-#else
-    LruPage *ccp = clean_start_ccp_ ? clean_start_ccp_ : head_ccp_.lru_next_;
-#endif
+
     size_t free_cnt = 0;
     bool yield = false;
 
@@ -1349,7 +1344,6 @@ void CcShard::FetchRecord(const TableName &table_name,
                           const TableSchema *tbl_schema,
                           TxKey key,
                           LruEntry *cce,
-                          CcMap *ccm,
                           NodeGroupId cc_ng_id,
                           int64_t cc_ng_term,
                           CcRequestBase *requester,
@@ -1362,7 +1356,6 @@ void CcShard::FetchRecord(const TableName &table_name,
                                                  tbl_schema,
                                                  std::move(key),
                                                  cce,
-                                                 ccm,
                                                  *this,
                                                  cc_ng_id,
                                                  cc_ng_term,

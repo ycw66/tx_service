@@ -735,7 +735,6 @@ public:
                      const TableSchema *tbl_schema,
                      TxKey key,
                      LruEntry *cce,
-                     CcMap *ccm,
                      NodeGroupId cc_ng_id,
                      int64_t cc_ng_term,
                      CcRequestBase *requester,
@@ -894,23 +893,6 @@ public:
     {
         return meter_.get();
     };
-
-    void AddInvalidCce(std::unique_ptr<LruEntry> entry)
-    {
-        entry->SetCommitTsPayloadStatus(0, RecordStatus::Invalid);
-        invalid_cces_.emplace_back(Now(), std::move(entry));
-    }
-
-    void CleanUpInvalidCce()
-    {
-        // free invalid cces after 2 hours
-        auto now = Now();
-        while (!invalid_cces_.empty() &&
-               now - invalid_cces_.front().first > invalid_cce_expire_time_)
-        {
-            invalid_cces_.pop_front();
-        }
-    }
 
     // Called on primary node
     StandbyForwardEntry *GetNextStandbyForwardEntry();
@@ -1154,8 +1136,6 @@ private:
     // The number of active tx reading buckets without adding readlock on
     // ccentry in RangeBucketCcMap.
     uint32_t tx_cnt_reading_naked_buckets_{0};
-
-    std::list<std::pair<uint64_t, std::unique_ptr<LruEntry>>> invalid_cces_;
 
     remote::CcStreamSender *stream_sender_{nullptr};
 

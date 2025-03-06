@@ -60,28 +60,28 @@ namespace txservice
  * @tparam KeyT The type of the table's primary key.
  */
 template <typename KeyT>
-class RangeCcMap : public TemplateCcMap<KeyT, RangeRecord>
+class RangeCcMap : public TemplateCcMap<KeyT, RangeRecord, true>
 {
 public:
     RangeCcMap(const RangeCcMap &rhs) = delete;
 
-    using TemplateCcMap<KeyT, RangeRecord>::Execute;
-    using TemplateCcMap<KeyT, RangeRecord>::FindEmplace;
-    using TemplateCcMap<KeyT, RangeRecord>::Emplace;
+    using TemplateCcMap<KeyT, RangeRecord, true>::Execute;
+    using TemplateCcMap<KeyT, RangeRecord, true>::FindEmplace;
+    using TemplateCcMap<KeyT, RangeRecord, true>::Emplace;
     using CcMap::AcquireCceKeyLock;
     using CcMap::ReleaseCceLock;
-    using TemplateCcMap<KeyT, RangeRecord>::LockHandleForResumedRequest;
-    using TemplateCcMap<KeyT, RangeRecord>::MoveRequest;
-    using TemplateCcMap<KeyT, RangeRecord>::shard_;
-    using TemplateCcMap<KeyT, RangeRecord>::Floor;
-    using TemplateCcMap<KeyT, RangeRecord>::neg_inf_;
-    using TemplateCcMap<KeyT, RangeRecord>::neg_inf_page_;
-    using TemplateCcMap<KeyT, RangeRecord>::pos_inf_;
-    using TemplateCcMap<KeyT, RangeRecord>::table_schema_;
-    using TemplateCcMap<KeyT, RangeRecord>::KeySchema;
-    using TemplateCcMap<KeyT, RangeRecord>::Find;
-    using TemplateCcMap<KeyT, RangeRecord>::Begin;
-    using TemplateCcMap<KeyT, RangeRecord>::End;
+    using TemplateCcMap<KeyT, RangeRecord, true>::LockHandleForResumedRequest;
+    using TemplateCcMap<KeyT, RangeRecord, true>::MoveRequest;
+    using TemplateCcMap<KeyT, RangeRecord, true>::shard_;
+    using TemplateCcMap<KeyT, RangeRecord, true>::Floor;
+    using TemplateCcMap<KeyT, RangeRecord, true>::neg_inf_;
+    using TemplateCcMap<KeyT, RangeRecord, true>::neg_inf_page_;
+    using TemplateCcMap<KeyT, RangeRecord, true>::pos_inf_;
+    using TemplateCcMap<KeyT, RangeRecord, true>::table_schema_;
+    using TemplateCcMap<KeyT, RangeRecord, true>::KeySchema;
+    using TemplateCcMap<KeyT, RangeRecord, true>::Find;
+    using TemplateCcMap<KeyT, RangeRecord, true>::Begin;
+    using TemplateCcMap<KeyT, RangeRecord, true>::End;
 
     /**
      * @brief Construct a new range cc map object. The range cc map has no
@@ -95,20 +95,14 @@ public:
                uint64_t schema_ts,
                CcShard *shard,
                NodeGroupId ng_id)
-        : TemplateCcMap<KeyT, RangeRecord>(
+        : TemplateCcMap<KeyT, RangeRecord, true>(
               shard, ng_id, range_table_name, schema_ts, table_schema, false)
     {
         auto ranges =
             CcMap::shard_->GetTableRangesForATable(range_table_name, ng_id);
         assert(ranges != nullptr);
-#ifndef ON_KEY_OBJECT
-        neg_inf_.payload_ = std::make_shared<RangeRecord>();
-        pos_inf_.payload_ = std::make_shared<RangeRecord>();
-#else
-        assert(false);
-        neg_inf_.payload_ = std::make_unique<RangeRecord>();
-        pos_inf_.payload_ = std::make_unique<RangeRecord>();
-#endif
+        neg_inf_.payload_.cur_payload_ = std::make_shared<RangeRecord>();
+        pos_inf_.payload_.cur_payload_ = std::make_shared<RangeRecord>();
         bucket_ccm_ = static_cast<RangeBucketCcMap *>(
             shard->GetCcm(range_bucket_ccm_name, ng_id));
 
@@ -118,8 +112,8 @@ public:
             const KeyT *start_key = key.template GetKey<KeyT>();
             if (start_key->Type() == KeyType::NegativeInf)
             {
-                neg_inf_.payload_->range_info_ = range_info;
-                neg_inf_.payload_->range_owner_rec_ =
+                neg_inf_.payload_.cur_payload_->range_info_ = range_info;
+                neg_inf_.payload_.cur_payload_->range_owner_rec_ =
                     bucket_ccm_->GetBucketRecord(Sharder::MapRangeIdToBucketId(
                         range_info->PartitionId()));
                 neg_inf_.SetCommitTsPayloadStatus(range_info->version_ts_,
@@ -127,18 +121,14 @@ public:
             }
             else
             {
-                auto it =
-                    TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
-                CcEntry<KeyT, RangeRecord> *cce = it->second;
-#ifndef ON_KEY_OBJECT
-                cce->payload_ = std::make_shared<RangeRecord>();
-#else
-                assert(false);
-                cce->payload_ = std::make_unique<RangeRecord>();
-#endif
-                cce->payload_->range_info_ = range_info;
-                cce->payload_->range_owner_rec_ = bucket_ccm_->GetBucketRecord(
-                    Sharder::MapRangeIdToBucketId(range_info->PartitionId()));
+                auto it = TemplateCcMap<KeyT, RangeRecord, true>::FindEmplace(
+                    *start_key);
+                CcEntry<KeyT, RangeRecord, true> *cce = it->second;
+                cce->payload_.cur_payload_ = std::make_shared<RangeRecord>();
+                cce->payload_.cur_payload_->range_info_ = range_info;
+                cce->payload_.cur_payload_->range_owner_rec_ =
+                    bucket_ccm_->GetBucketRecord(Sharder::MapRangeIdToBucketId(
+                        range_info->PartitionId()));
                 cce->SetCommitTsPayloadStatus(range_info->version_ts_,
                                               RecordStatus::Normal);
             }
@@ -161,8 +151,8 @@ public:
                 for (TxNumber txn : lock->ReadLocks())
                 {
                     auto bucket_cce = static_cast<
-                        CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                        range_cce->payload_->range_owner_rec_);
+                        CcEntry<RangeBucketKey, RangeBucketRecord, true> *>(
+                        range_cce->payload_.cur_payload_->range_owner_rec_);
                     ReleaseCceLock(bucket_cce->GetKeyLock(),
                                    bucket_cce,
                                    txn,
@@ -188,7 +178,7 @@ public:
             });
         TX_TRACE_DUMP(&req);
         req.is_include_floor_cce_ = true;
-        return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
+        return TemplateCcMap<KeyT, RangeRecord, true>::Execute(req);
     }
 
     /**
@@ -259,20 +249,21 @@ public:
         }
 
         auto it = Floor(*look_key);
-        CcEntry<KeyT, RangeRecord> *floor_cce = it->second;
-        CcPage<KeyT, RangeRecord> *range_page = it.GetPage();
+        CcEntry<KeyT, RangeRecord, true> *floor_cce = it->second;
+        CcPage<KeyT, RangeRecord, true> *range_page = it.GetPage();
 
         // When we're acquiring bucket lock and range lock, always acquire
         // bucket lock before range lock to avoid internal dead lock.
         auto bucket_cce =
-            static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                floor_cce->payload_->range_owner_rec_);
+            static_cast<CcEntry<RangeBucketKey, RangeBucketRecord, true> *>(
+                floor_cce->payload_.cur_payload_->range_owner_rec_);
 
         assert(bucket_cce != nullptr);
 
         // Acquire bucket read lock
         std::tie(acquired_lock, err_code) =
             AcquireCceKeyLock(bucket_cce,
+                              bucket_cce->CommitTs(),
                               nullptr,
                               bucket_cce->PayloadStatus(),
                               &req,
@@ -298,6 +289,7 @@ public:
             req.IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
         std::tie(acquired_lock, err_code) =
             AcquireCceKeyLock(floor_cce,
+                              floor_cce->CommitTs(),
                               range_page,
                               floor_cce->PayloadStatus(),
                               &req,
@@ -319,7 +311,7 @@ public:
                                 req.NodeGroupId(),
                                 shard_->LocalCoreId());
             RangeRecord *range_rec = static_cast<RangeRecord *>(req.Record());
-            range_rec->CopyForReadResult(*(floor_cce->payload_));
+            range_rec->CopyForReadResult(*(floor_cce->payload_.cur_payload_));
             hd_result->Value().ts_ = floor_cce->CommitTs();
             hd_result->Value().rec_status_ = RecordStatus::Normal;
             hd_result->Value().lock_type_ = acquired_lock;
@@ -347,16 +339,16 @@ public:
     bool Execute(PostReadCc &req) override
     {
         const CcEntryAddr &cce_addr = *req.CceAddr();
-        CcEntry<KeyT, RangeRecord> &cc_entry =
-            *reinterpret_cast<CcEntry<KeyT, RangeRecord> *>(
+        CcEntry<KeyT, RangeRecord, true> &cc_entry =
+            *reinterpret_cast<CcEntry<KeyT, RangeRecord, true> *>(
                 cce_addr.ExtractCce());
 
         // Release bucket record read lock. This lock was acquried in range
         // cc map read cc, and is not put into readset. So we need to be
         // releasing it here manually.
         auto bucket_cce =
-            static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                cc_entry.payload_->range_owner_rec_);
+            static_cast<CcEntry<RangeBucketKey, RangeBucketRecord, true> *>(
+                cc_entry.payload_.cur_payload_->range_owner_rec_);
         shard_->UpdateLastReadTs(req.CommitTs());
         ReleaseCceLock(bucket_cce->GetKeyLock(),
                        bucket_cce,
@@ -396,7 +388,7 @@ public:
             }
         }
 
-        return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
+        return TemplateCcMap<KeyT, RangeRecord, true>::Execute(req);
     }
 
     /**
@@ -417,7 +409,7 @@ public:
         if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_ ||
             req.CommitType() == PostWriteType::DowngradeLock)
         {
-            return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
+            return TemplateCcMap<KeyT, RangeRecord, true>::Execute(req);
         }
 
         assert(req.CommitType() != PostWriteType::DowngradeLock);
@@ -463,7 +455,8 @@ public:
             req.SetDecodedPayload(std::move(decoded_rec));
         }
 
-        CcEntry<KeyT, RangeRecord> *target_cce = Find(*target_key)->second;
+        CcEntry<KeyT, RangeRecord, true> *target_cce =
+            Find(*target_key)->second;
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
@@ -548,7 +541,7 @@ public:
             // reset on each core since they point to bucket records on
             // different cores.
             upload_range_rec->range_owner_rec_ =
-                target_cce->payload_->range_owner_rec_;
+                target_cce->payload_.cur_payload_->range_owner_rec_;
         }
         else if (req.CommitType() == PostWriteType::PostCommit)
         {
@@ -689,29 +682,25 @@ public:
 
             // add new range entry to range cc map
             auto &new_range_owner_rec =
-                *target_cce->payload_->new_range_owner_rec_;
+                *target_cce->payload_.cur_payload_->new_range_owner_rec_;
             for (uint idx = 0; idx < new_range_entries.size(); idx++)
             {
                 const TemplateRangeInfo<KeyT> *new_range_info =
                     new_range_entries.at(idx)->TypedRangeInfo();
                 const KeyT *start_key = new_range_info->StartKey();
-                auto it =
-                    TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
-                CcEntry<KeyT, RangeRecord> *cce = it->second;
+                auto it = TemplateCcMap<KeyT, RangeRecord, true>::FindEmplace(
+                    *start_key);
+                CcEntry<KeyT, RangeRecord, true> *cce = it->second;
 
                 if (cce->CommitTs() >= new_range_info->version_ts_)
                 {
                     // Skip if the new range entry is already committed.
                     continue;
                 }
-#ifndef ON_KEY_OBJECT
-                cce->payload_ = std::make_shared<RangeRecord>();
-#else
-                assert(false);
-                cce->payload_ = std::make_unique<RangeRecord>();
-#endif
-                cce->payload_->range_info_ = new_range_info;
-                cce->payload_->range_owner_rec_ = new_range_owner_rec.at(idx);
+                cce->payload_.cur_payload_ = std::make_shared<RangeRecord>();
+                cce->payload_.cur_payload_->range_info_ = new_range_info;
+                cce->payload_.cur_payload_->range_owner_rec_ =
+                    new_range_owner_rec.at(idx);
 
                 // update previous cce's end key
                 cce->SetCommitTsPayloadStatus(new_range_info->version_ts_,
@@ -720,7 +709,7 @@ public:
             // range_owner_rec_ needs to be reset on each core since they point
             // to bucket records on different cores.
             upload_range_rec->range_owner_rec_ =
-                target_cce->payload_->range_owner_rec_;
+                target_cce->payload_.cur_payload_->range_owner_rec_;
 
             if (shard_->realtime_sampling_ &&
                 shard_->core_id_ == Statistics::LeaderCore(this->table_name_))
@@ -737,7 +726,7 @@ public:
             }
         }
 
-        return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
+        return TemplateCcMap<KeyT, RangeRecord, true>::Execute(req);
     }
 
     bool Execute(ReplayLogCc &req) override
@@ -810,8 +799,8 @@ public:
         // Restore local_cc_shards state at core 0
         TemplateTableRangeEntry<KeyT> *old_table_range_entry = nullptr;
         const KeyT *old_end_key = nullptr;
-        CcEntry<KeyT, RangeRecord> *old_range_cce = nullptr;
-        CcPage<KeyT, RangeRecord> *old_range_page = nullptr;
+        CcEntry<KeyT, RangeRecord, true> *old_range_cce = nullptr;
+        CcPage<KeyT, RangeRecord, true> *old_range_page = nullptr;
 
         if (ds_split_range_op_msg.range_key_case() ==
             txlog::SplitRangeOpMessage::RangeKeyCase::kRangeKeyNegInf)
@@ -847,7 +836,7 @@ public:
             // not been inserted into ccmap yet.
             const TemplateRangeInfo<KeyT> *old_range_info =
                 static_cast<const TemplateRangeInfo<KeyT> *>(
-                    old_range_cce->payload_->range_info_);
+                    old_range_cce->payload_.cur_payload_->range_info_);
             old_end_key = old_range_info->EndKey();
         }
         else if (stage == ::txlog::SplitRangeOpMessage_Stage_CommitSplit)
@@ -855,10 +844,10 @@ public:
             // Find the next cce of the last new range key, since we
             // don't know if the new range cce has been created or not.
             auto it = Floor(*new_range_keys.back().GetKey<KeyT>());
-            CcEntry<KeyT, RangeRecord> *next_cce = it->second;
+            CcEntry<KeyT, RangeRecord, true> *next_cce = it->second;
             const TemplateRangeInfo<KeyT> *next_range_info =
                 static_cast<const TemplateRangeInfo<KeyT> *>(
-                    next_cce->payload_->range_info_);
+                    next_cce->payload_.cur_payload_->range_info_);
             old_end_key = next_range_info->EndKey();
         }
         else
@@ -1124,23 +1113,18 @@ public:
                 const TemplateRangeInfo<KeyT> *new_range_info =
                     new_range_infos.at(idx);
                 const KeyT *start_key = new_range_info->StartKey();
-                auto it =
-                    TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
-                CcEntry<KeyT, RangeRecord> *cce = it->second;
+                auto it = TemplateCcMap<KeyT, RangeRecord, true>::FindEmplace(
+                    *start_key);
+                CcEntry<KeyT, RangeRecord, true> *cce = it->second;
 
                 if (cce->CommitTs() >= new_range_info->version_ts_)
                 {
                     continue;
                 }
-#ifndef ON_KEY_OBJECT
-                cce->payload_ = std::make_shared<RangeRecord>();
-#else
-                assert(false);
-                cce->payload_ = std::make_unique<RangeRecord>();
-#endif
-                cce->payload_->range_info_ = new_range_info;
+                cce->payload_.cur_payload_ = std::make_shared<RangeRecord>();
+                cce->payload_.cur_payload_->range_info_ = new_range_info;
                 // Link bucket owner record
-                cce->payload_->range_owner_rec_ =
+                cce->payload_.cur_payload_->range_owner_rec_ =
                     bucket_map->GetBucketRecord(Sharder::MapRangeIdToBucketId(
                         new_range_info->PartitionId()));
                 cce->SetCommitTsPayloadStatus(new_range_info->version_ts_,
@@ -1161,6 +1145,7 @@ public:
             // stage, we need to acquire write lock on range no matter
             // what.
             auto lock_pair = AcquireCceKeyLock(old_range_cce,
+                                               old_range_cce->CommitTs(),
                                                old_range_page,
                                                old_range_cce->PayloadStatus(),
                                                &req,
@@ -1189,7 +1174,7 @@ public:
                 new_range_owner_rec->push_back(bucket_map->GetBucketRecord(
                     Sharder::MapRangeIdToBucketId(new_id)));
             }
-            old_range_cce->payload_->SetNewRangeOwnerRec(
+            old_range_cce->payload_.cur_payload_->SetNewRangeOwnerRec(
                 std::move(new_range_owner_rec));
         }
 

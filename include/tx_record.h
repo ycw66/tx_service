@@ -77,7 +77,6 @@ enum struct RecordStatus : uint8_t
 
     Invalid,
 
-#ifdef ON_KEY_OBJECT
     /// <summary>
     /// Used only to indicate the status of temporary object. The temporary
     /// object does not exist.(no dirty_payload, no pending_cmd)
@@ -88,7 +87,6 @@ enum struct RecordStatus : uint8_t
     /// hasn't been created yet.(no dirty_payload, has pending_cmd)
     /// </summary>
     Uncreated,
-#endif
 };
 
 struct TxRecord

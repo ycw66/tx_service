@@ -54,7 +54,7 @@ namespace txservice
 extern bool txservice_skip_kv;
 
 template <typename KeyT, typename ValueT>
-class ObjectCcMap : public TemplateCcMap<KeyT, ValueT>
+class ObjectCcMap : public TemplateCcMap<KeyT, ValueT, false>
 {
 public:
     ObjectCcMap(const ObjectCcMap &rhs) = delete;
@@ -72,12 +72,12 @@ public:
                 uint64_t schema_ts,
                 const TableSchema *table_schema = nullptr,
                 bool ccm_has_full_entries = false)
-        : TemplateCcMap<KeyT, ValueT>(shard,
-                                      cc_ng_id,
-                                      table_name,
-                                      schema_ts,
-                                      table_schema,
-                                      ccm_has_full_entries)
+        : TemplateCcMap<KeyT, ValueT, false>(shard,
+                                             cc_ng_id,
+                                             table_name,
+                                             schema_ts,
+                                             table_schema,
+                                             ccm_has_full_entries)
     {
         DLOG(INFO) << "creating ObjectCcmap on shard: " << shard_->core_id_
                    << ", table name: " << table_name.StringView()
@@ -96,13 +96,13 @@ public:
     using CcMap::shard_;
     using CcMap::table_name_;
     using CcMap::table_schema_;
-    using TemplateCcMap<KeyT, ValueT>::Find;
-    using TemplateCcMap<KeyT, ValueT>::FindEmplace;
-    using typename TemplateCcMap<KeyT, ValueT>::Iterator;
-    using TemplateCcMap<KeyT, ValueT>::KeySchema;
-    using TemplateCcMap<KeyT, ValueT>::RecordSchema;
-    using TemplateCcMap<KeyT, ValueT>::Type;
-    using TemplateCcMap<KeyT, ValueT>::CleanEntry;
+    using TemplateCcMap<KeyT, ValueT, false>::Find;
+    using TemplateCcMap<KeyT, ValueT, false>::FindEmplace;
+    using typename TemplateCcMap<KeyT, ValueT, false>::Iterator;
+    using TemplateCcMap<KeyT, ValueT, false>::KeySchema;
+    using TemplateCcMap<KeyT, ValueT, false>::RecordSchema;
+    using TemplateCcMap<KeyT, ValueT, false>::Type;
+    using TemplateCcMap<KeyT, ValueT, false>::CleanEntry;
 
     bool Execute(ApplyCc &req) override
     {
@@ -130,8 +130,8 @@ public:
         ObjectCommandResult &obj_result = hd_res->Value();
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
         bool &object_modified = obj_result.object_modified_;
-        CcEntry<KeyT, ValueT> *cce = nullptr;
-        CcPage<KeyT, ValueT> *ccp = nullptr;
+        CcEntry<KeyT, ValueT, false> *cce = nullptr;
+        CcPage<KeyT, ValueT, false> *ccp = nullptr;
         const KeyT *look_key = nullptr;
         KeyT decoded_key;
 
@@ -199,8 +199,9 @@ public:
             }
         }
 
-        auto need_fetch_kv = [this, &override_kv_val, &txn, &cmd](
-                                 CcEntry<KeyT, ValueT> *cce, CcOperation cc_op)
+        auto need_fetch_kv =
+            [this, &override_kv_val, &txn, &cmd](
+                CcEntry<KeyT, ValueT, false> *cce, CcOperation cc_op)
         {
             // Check if this cce does not exists in ccmap at all.
             // We need to double check that there is no dirty payload
@@ -262,8 +263,8 @@ public:
         if (req.CcePtr() != nullptr)
         {
             // the request was blocked and is now unblocked and lock acquired
-            cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            ccp = static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+            cce = static_cast<CcEntry<KeyT, ValueT, false> *>(req.CcePtr());
+            ccp = static_cast<CcPage<KeyT, ValueT, false> *>(cce->GetCcPage());
 
             if (req.block_type_ == ApplyCc::ApplyBlockType::BlockOnRead ||
                 req.block_type_ == ApplyCc::ApplyBlockType::BlockOnWriteLock)
@@ -283,7 +284,6 @@ public:
                                         table_schema_,
                                         TxKey(look_key),
                                         cce,
-                                        this,
                                         cc_ng_id_,
                                         ng_term,
                                         &req);
@@ -294,6 +294,7 @@ public:
                 // record is deleted, so just pass RecordStatus::Normal.
                 std::tie(acquired_lock, err_code) =
                     LockHandleForResumedRequest(cce,
+                                                cce->CommitTs(),
                                                 RecordStatus::Normal,
                                                 &req,
                                                 req.NodeGroupId(),
@@ -317,6 +318,7 @@ public:
                 // try to reacquire the write lock
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
+                                      cce->CommitTs(),
                                       ccp,
                                       RecordStatus::Normal,
                                       &req,
@@ -456,23 +458,22 @@ public:
                         }
                     }
                 });
-                // Fetch record from storage
-                shard_->FetchRecord(table_name_,
-                                    table_schema_,
-                                    TxKey(look_key),
-                                    cce,
-                                    this,
-                                    cc_ng_id_,
-                                    ng_term,
-                                    &req);
-
-                req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
                 // Acquire a read intent on this cce with the
                 // special txn to avoid cce being kicked out before
                 // fetch record returns.
                 cce->GetOrCreateKeyLock(shard_, this, ccp)
                     .AcquireReadIntent(
                         FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
+                // Fetch record from storage
+                shard_->FetchRecord(table_name_,
+                                    table_schema_,
+                                    TxKey(look_key),
+                                    cce,
+                                    cc_ng_id_,
+                                    ng_term,
+                                    &req);
+
+                req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
 
                 if (metrics::enable_cache_hit_rate)
                 {
@@ -522,6 +523,7 @@ public:
             // is deleted, so just pass RecordStatus::Normal.
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(cce,
+                                  cce->CommitTs(),
                                   ccp,
                                   RecordStatus::Normal,
                                   &req,
@@ -613,7 +615,8 @@ public:
         }
         else
         {
-            TxObject *obj = static_cast<TxObject *>(cce->payload_.get());
+            TxObject *obj =
+                static_cast<TxObject *>(cce->payload_.cur_payload_.get());
             if (obj != nullptr && obj->HasTTL())
             {
                 ttl = obj->GetTTL();
@@ -725,7 +728,7 @@ public:
                 {
                     assert(cce->PayloadStatus() == RecordStatus::Normal);
                     assert(cce->IsNullPendingCmd());
-                    ValueT &object = *cce->payload_;
+                    ValueT &object = *cce->payload_.cur_payload_;
                     cmd->ExecuteOn(object);
                     obj_result.rec_status_ = cce->PayloadStatus();
                 }
@@ -733,8 +736,8 @@ public:
             else
             {
                 assert(cce->PayloadStatus() == RecordStatus::Normal);
-                assert(cce->payload_ != nullptr);
-                ValueT &object = *cce->payload_;
+                assert(cce->payload_.cur_payload_ != nullptr);
+                ValueT &object = *cce->payload_.cur_payload_;
                 cmd->ExecuteOn(object);
                 obj_result.rec_status_ = cce->PayloadStatus();
             }
@@ -774,6 +777,7 @@ public:
                 // Upgrade to write lock
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
+                                      cce->CommitTs(),
                                       ccp,
                                       RecordStatus::Normal,
                                       &req,
@@ -906,9 +910,9 @@ public:
                 {
                     if (s_obj_exist)
                     {
-                        TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+                        TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_--;
                     }
-                    cce->payload_ = nullptr;
+                    cce->payload_.cur_payload_ = nullptr;
                     const uint64_t commit_ts = std::max(
                         {cce->CommitTs() + 1, req.TxTs(), shard_->Now()});
                     cce->SetCommitTsPayloadStatus(commit_ts,
@@ -989,8 +993,8 @@ public:
             // Execute and copy the command. The command will be committed
             // in PostWriteCc if the txn commits.
             assert(cce->IsNullPendingCmd());
-            assert(cce->payload_ != nullptr);
-            ValueT &object = *cce->payload_;
+            assert(cce->payload_.cur_payload_ != nullptr);
+            ValueT &object = *cce->payload_.cur_payload_;
             exec_rst = cmd->ExecuteOn(object);
             object_modified = (exec_rst == ExecResult::Write);
 
@@ -1095,12 +1099,13 @@ public:
                     dirty_payload_status == RecordStatus::Deleted)
                 {
                     // Dirty payload exists. Use it to replace payload.
-                    cce->payload_ = cce->DirtyPayload();
+                    cce->payload_.PassInCurrentPayload(cce->DirtyPayload());
                     status = dirty_payload_status;
                 }
                 else
                 {
-                    CommitCommandOnPayload(cce->payload_, status, *cmd);
+                    CommitCommandOnPayload(
+                        cce->payload_.cur_payload_, status, *cmd);
                 }
 
                 // Reset the dirty status.
@@ -1141,10 +1146,13 @@ public:
                 {
                     if (status == RecordStatus::Normal)
                     {
-                        if (cce->payload_ && cce->payload_->HasTTL() &&
-                            ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                        if (cce->payload_.cur_payload_ &&
+                            cce->payload_.cur_payload_->HasTTL() &&
+                            ccp->smallest_ttl_ >
+                                cce->payload_.cur_payload_->GetTTL())
                         {
-                            ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                            ccp->smallest_ttl_ =
+                                cce->payload_.cur_payload_->GetTTL();
                         }
                     }
                     else
@@ -1166,17 +1174,17 @@ public:
             obj_result.lock_acquired_ = LockType::NoLock;
             if (object_modified)
             {
-                cce->PopBlockRequest(shard_, cce->payload_.get());
+                cce->PopBlockRequest(shard_, cce->payload_.cur_payload_.get());
             }
 
             if (s_obj_exist && cce->PayloadStatus() != RecordStatus::Normal)
             {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+                TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_--;
             }
             else if (!s_obj_exist &&
                      cce->PayloadStatus() == RecordStatus::Normal)
             {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_++;
             }
         }
 
@@ -1232,8 +1240,9 @@ public:
 
         const CcEntryAddr *cce_addr = req.CceAddr();
 
-        CcEntry<KeyT, ValueT> *cce =
-            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr->ExtractCce());
+        CcEntry<KeyT, ValueT, false> *cce =
+            reinterpret_cast<CcEntry<KeyT, ValueT, false> *>(
+                cce_addr->ExtractCce());
 
         // check that this txn is lock owner
         NonBlockingLock *lk = cce->GetKeyLock();
@@ -1243,8 +1252,8 @@ public:
             return true;
         }
 
-        CcPage<KeyT, ValueT> *ccp =
-            static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+        CcPage<KeyT, ValueT, false> *ccp =
+            static_cast<CcPage<KeyT, ValueT, false> *>(cce->GetCcPage());
         assert(ccp != nullptr);
         bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
 
@@ -1263,7 +1272,7 @@ public:
             {
                 // Dirty payload exists. Use it to replace payload.
                 payload_status = dirty_payload_status;
-                cce->payload_ = cce->DirtyPayload();
+                cce->payload_.PassInCurrentPayload(cce->DirtyPayload());
             }
             else
             {
@@ -1282,9 +1291,10 @@ public:
 
                 if (pending_cmd != nullptr)
                 {
-                    assert(cce->payload_ != nullptr);
-                    CommitCommandOnPayload(
-                        cce->payload_, payload_status, *pending_cmd);
+                    assert(cce->payload_.cur_payload_ != nullptr);
+                    CommitCommandOnPayload(cce->payload_.cur_payload_,
+                                           payload_status,
+                                           *pending_cmd);
                 }
                 else
                 {
@@ -1320,10 +1330,13 @@ public:
             {
                 if (payload_status == RecordStatus::Normal)
                 {
-                    if (cce->payload_ && cce->payload_->HasTTL() &&
-                        ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                    if (cce->payload_.cur_payload_ &&
+                        cce->payload_.cur_payload_->HasTTL() &&
+                        ccp->smallest_ttl_ >
+                            cce->payload_.cur_payload_->GetTTL())
                     {
-                        ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                        ccp->smallest_ttl_ =
+                            cce->payload_.cur_payload_->GetTTL();
                     }
                 }
                 else
@@ -1347,15 +1360,15 @@ public:
 
         if (s_obj_exist && cce->PayloadStatus() != RecordStatus::Normal)
         {
-            TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+            TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_--;
         }
         else if (!s_obj_exist && cce->PayloadStatus() == RecordStatus::Normal)
         {
-            TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+            TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_++;
         }
 
         ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
-        cce->PopBlockRequest(shard_, cce->payload_.get());
+        cce->PopBlockRequest(shard_, cce->payload_.cur_payload_.get());
         if (cce->PayloadStatus() == RecordStatus::Unknown && cce->IsFree())
         {
             // If the finished cmd ignores kv value and the tx aborts, we will
@@ -1403,8 +1416,8 @@ public:
         size_t status_offset = std::get<4>(resume_pos);
         size_t hash = 0;
 
-        CcEntry<KeyT, ValueT> *cce;
-        CcPage<KeyT, ValueT> *cc_page = nullptr;
+        CcEntry<KeyT, ValueT, false> *cce;
+        CcPage<KeyT, ValueT, false> *cc_page = nullptr;
         size_t next_key_offset = 0;
         size_t next_rec_offset = 0;
         size_t next_ts_offset = 0;
@@ -1494,23 +1507,22 @@ public:
             {
                 if (cce->PayloadStatus() != RecordStatus::Normal)
                 {
-                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                    TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_++;
                 }
                 if (object_uptr->HasTTL())
                 {
                     ttl = object_uptr->GetTTL();
                 }
-                cce->payload_.reset(
-                    static_cast<ValueT *>(object_uptr.release()));
+                cce->payload_.PassInCurrentPayload(std::move(object_uptr));
                 object_uptr = nullptr;
             }
             else
             {
                 if (cce->PayloadStatus() == RecordStatus::Normal)
                 {
-                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+                    TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_--;
                 }
-                cce->payload_ = nullptr;
+                cce->payload_.SetCurrentPayload(nullptr);
                 ttl = 0;
             }
 
@@ -1534,14 +1546,13 @@ public:
                 }
                 cmd_list.erase(cmd_list.begin(), it);
 
-                TryCommitBufferedCommands(
-                    cce->payload_, buffered_cmd_list, commit_ts);
+                cce->TryCommitBufferedCommands(commit_ts);
                 int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
                 shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                                  buffered_cmd_cnt_old);
             }
 
-            if (cce->payload_)
+            if (cce->payload_.cur_payload_)
             {
                 cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Normal);
             }
@@ -1600,8 +1611,9 @@ public:
 
         const CcEntryAddr *cce_addr = req.CceAddr();
 
-        CcEntry<KeyT, ValueT> *cce =
-            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr->ExtractCce());
+        CcEntry<KeyT, ValueT, false> *cce =
+            reinterpret_cast<CcEntry<KeyT, ValueT, false> *>(
+                cce_addr->ExtractCce());
 
         // check that this txn is lock owner
         NonBlockingLock *lk = cce->GetKeyLock();
@@ -1615,8 +1627,8 @@ public:
         // Discard cmds that applies on an older version
         if (commit_ts > 0 && cce->CommitTs() <= obj_version)
         {
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+            CcPage<KeyT, ValueT, false> *ccp =
+                static_cast<CcPage<KeyT, ValueT, false> *>(cce->GetCcPage());
 
             std::vector<std::unique_ptr<TxCommand>> cmd_list;
             cmd_list.reserve(cmd_str_list->size());
@@ -1638,23 +1650,18 @@ public:
 
             assert(txn_cmd.new_version_ > commit_version);
             int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
-            EmplaceAndCommitBufferedTxnCommand(cce->payload_,
-                                               buffered_cmd_list,
-                                               txn_cmd,
-                                               commit_version,
-                                               payload_status);
+            cce->EmplaceAndCommitBufferedTxnCommand(txn_cmd);
             int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
             shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                              buffered_cmd_cnt_old);
-            cce->SetCommitTsPayloadStatus(commit_version, payload_status);
 
             if (s_obj_exist && payload_status != RecordStatus::Normal)
             {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+                TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_--;
             }
             else if (!s_obj_exist && payload_status == RecordStatus::Normal)
             {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_++;
             }
 
             // if replay_cmd_list is null, key_lock_extra_data will be recycled
@@ -1678,10 +1685,12 @@ public:
             {
                 if (payload_status == RecordStatus::Normal)
                 {
-                    if (cce->payload_ && cce->payload_->HasTTL())
+                    if (cce->payload_.cur_payload_ &&
+                        cce->payload_.cur_payload_->HasTTL())
                     {
-                        ccp->smallest_ttl_ = std::min(cce->payload_->GetTTL(),
-                                                      ccp->smallest_ttl_);
+                        ccp->smallest_ttl_ =
+                            std::min(cce->payload_.cur_payload_->GetTTL(),
+                                     ccp->smallest_ttl_);
                     }
                 }
                 else if (payload_status == RecordStatus::Deleted)
@@ -1718,8 +1727,8 @@ public:
         const std::vector<std::string_view> *cmd_str_list = req.CommandList();
         assert(commit_ts > 0);
 
-        CcEntry<KeyT, ValueT> *cce = nullptr;
-        CcPage<KeyT, ValueT> *ccp = nullptr;
+        CcEntry<KeyT, ValueT, false> *cce = nullptr;
+        CcPage<KeyT, ValueT, false> *ccp = nullptr;
         KeyT decoded_key;
         const std::string *key_str = req.KeyImage();
         assert(key_str != nullptr);
@@ -1752,18 +1761,17 @@ public:
                     {
                         // Cannot find a cached version in memory. Fetch
                         // it from kv store if kv is synced with primary.
-                        shard_->FetchRecord(table_name_,
-                                            table_schema_,
-                                            TxKey(look_key),
-                                            cce,
-                                            this,
-                                            cc_ng_id_,
-                                            req.StandbyNodeTerm(),
-                                            nullptr);
                         cce->GetOrCreateKeyLock(shard_, this, ccp)
                             .AcquireReadIntent(
                                 FetchRecordCc::GetFetchRecordTxNumber(
                                     cc_ng_id_));
+                        shard_->FetchRecord(table_name_,
+                                            table_schema_,
+                                            TxKey(look_key),
+                                            cce,
+                                            cc_ng_id_,
+                                            req.StandbyNodeTerm(),
+                                            nullptr);
                     }
                 }
                 else
@@ -1783,32 +1791,39 @@ public:
                 {
                     std::unique_ptr<TxCommand> tx_cmd =
                         CreateTxCommand(cmd_str);
-                    if (cce->payload_ == nullptr)
+                    if (cce->payload_.cur_payload_ == nullptr)
                     {
                         std::unique_ptr<TxRecord> obj_ptr =
                             tx_cmd->CreateObject(nullptr);
-                        cce->payload_.reset(
-                            static_cast<ValueT *>(obj_ptr.release()));
+                        cce->payload_.PassInCurrentPayload(std::move(obj_ptr));
                     }
-                    TxObject *obj_ptr = cce->payload_.get();
+                    TxObject *obj_ptr = cce->payload_.cur_payload_.get();
+                    // TODO(liunyl): why are we returning a raw object ptr here?
+                    // Is it the same ptr as the old one? If not, who is the
+                    // owner of the new object pointer?
                     TxObject *new_obj_ptr = tx_cmd->CommitOn(obj_ptr);
                     if (new_obj_ptr != obj_ptr)
                     {
                         // FIXME(lzx): should we use "new_obj_ptr->Clone()" ?
-                        cce->payload_.reset(static_cast<ValueT *>(new_obj_ptr));
+                        std::unique_ptr<TxRecord> new_obj_ptr_uptr;
+                        new_obj_ptr_uptr.reset(
+                            static_cast<TxRecord *>(new_obj_ptr));
+                        cce->payload_.PassInCurrentPayload(
+                            std::move(new_obj_ptr_uptr));
                     }
                 }
-                RecordStatus payload_status = cce->payload_ == nullptr
-                                                  ? RecordStatus::Deleted
-                                                  : RecordStatus::Normal;
+                RecordStatus payload_status =
+                    cce->payload_.cur_payload_ == nullptr
+                        ? RecordStatus::Deleted
+                        : RecordStatus::Normal;
                 cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
                 if (s_obj_exist && payload_status != RecordStatus::Normal)
                 {
-                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+                    TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_--;
                 }
                 else if (!s_obj_exist && payload_status == RecordStatus::Normal)
                 {
-                    TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                    TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_++;
                 }
             }
             else
@@ -1831,15 +1846,8 @@ public:
                     cce->BufferedCommandList();
 
                 // Emplace txn_cmd and try to commit all pending commands.
-                uint64_t commit_version = cce->CommitTs();
-                RecordStatus payload_status = cce->PayloadStatus();
-
                 int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
-                EmplaceAndCommitBufferedTxnCommand(cce->payload_,
-                                                   buffered_cmd_list,
-                                                   txn_cmd,
-                                                   commit_version,
-                                                   payload_status);
+                cce->EmplaceAndCommitBufferedTxnCommand(txn_cmd);
                 int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
                 shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                                  buffered_cmd_cnt_old);
@@ -1847,7 +1855,6 @@ public:
                 // too much.
                 shard_->CheckLagAndResubscribe();
 
-                cce->SetCommitTsPayloadStatus(commit_version, payload_status);
                 if (buffered_cmd_list.Empty())
                 {
                     // Recycles the lock if this and prior commands have been
@@ -1874,10 +1881,11 @@ public:
         {
             if (cce->PayloadStatus() == RecordStatus::Normal)
             {
-                if (cce->payload_ && cce->payload_->HasTTL() &&
-                    ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                if (cce->payload_.cur_payload_ &&
+                    cce->payload_.cur_payload_->HasTTL() &&
+                    ccp->smallest_ttl_ > cce->payload_.cur_payload_->GetTTL())
                 {
-                    ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                    ccp->smallest_ttl_ = cce->payload_.cur_payload_->GetTTL();
                 }
             }
             else
@@ -2058,8 +2066,8 @@ public:
             }
 
             auto it = FindEmplace(key);
-            CcEntry<KeyT, ValueT> *cce = it->second;
-            CcPage<KeyT, ValueT> *ccp = it.GetPage();
+            CcEntry<KeyT, ValueT, false> *cce = it->second;
+            CcPage<KeyT, ValueT, false> *ccp = it.GetPage();
 
             if (cce == nullptr)
             {
@@ -2102,18 +2110,6 @@ public:
 
                 // If kv is skipped then log should always be skipped too.
                 assert(!txservice_skip_kv);
-
-                // load payload asynchronously, pass in null as requester cc
-                // since we will buffer the cmd in replay cmd list so there's no
-                // need to put this req back in queue after record is fetched.
-                shard_->FetchRecord(table_name_,
-                                    table_schema_,
-                                    TxKey(&key),
-                                    cce,
-                                    this,
-                                    cc_ng_id_,
-                                    ng_term,
-                                    nullptr);
                 // Acquire a read intent on this cce with the
                 // special txn to avoid cce being kicked out before
                 // fetch record
@@ -2121,6 +2117,16 @@ public:
                 cce->GetOrCreateKeyLock(shard_, this, ccp)
                     .AcquireReadIntent(
                         FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
+                // load payload asynchronously, pass in null as requester cc
+                // since we will buffer the cmd in replay cmd list so there's no
+                // need to put this req back in queue after record is fetched.
+                shard_->FetchRecord(table_name_,
+                                    table_schema_,
+                                    TxKey(&key),
+                                    cce,
+                                    cc_ng_id_,
+                                    ng_term,
+                                    nullptr);
             }
             // extract command list
             const uint16_t cmd_cnt = *reinterpret_cast<decltype(cmd_cnt) *>(
@@ -2159,15 +2165,10 @@ public:
             if (txn_cmd.new_version_ > current_version)
             {
                 int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
-                EmplaceAndCommitBufferedTxnCommand(cce->payload_,
-                                                   buffered_cmd_list,
-                                                   txn_cmd,
-                                                   current_version,
-                                                   payload_status);
+                cce->EmplaceAndCommitBufferedTxnCommand(txn_cmd);
                 int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
                 shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                                  buffered_cmd_cnt_old);
-                cce->SetCommitTsPayloadStatus(current_version, payload_status);
             }
             else
             {
@@ -2197,11 +2198,11 @@ public:
 
             if (s_obj_exist && payload_status != RecordStatus::Normal)
             {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_--;
+                TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_--;
             }
             else if (!s_obj_exist && payload_status == RecordStatus::Normal)
             {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
+                TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_++;
             }
 
             // Must update dirty_commit_ts. Otherwise, this entry may be
@@ -2219,10 +2220,13 @@ public:
             {
                 if (payload_status == RecordStatus::Normal)
                 {
-                    if (cce->payload_ && cce->payload_->HasTTL() &&
-                        ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                    if (cce->payload_.cur_payload_ &&
+                        cce->payload_.cur_payload_->HasTTL() &&
+                        ccp->smallest_ttl_ >
+                            cce->payload_.cur_payload_->GetTTL())
                     {
-                        ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                        ccp->smallest_ttl_ =
+                            cce->payload_.cur_payload_->GetTTL();
                     }
                 }
                 else if (payload_status == RecordStatus::Deleted)
@@ -2289,8 +2293,8 @@ public:
             return true;
         }
 
-        CcEntry<KeyT, ValueT> *cce =
-            static_cast<CcEntry<KeyT, ValueT> *>(entry);
+        CcEntry<KeyT, ValueT, false> *cce =
+            static_cast<CcEntry<KeyT, ValueT, false> *>(entry);
         LruPage *ccp = cce->GetCcPage();
         // Release the
         // FetchRecordCc::GetFetchRecordTxNumber(Sharder::Instance().NodeId())
@@ -2320,15 +2324,12 @@ public:
 
             if (!rec_str.empty())
             {
-                ValueT tx_obj;
                 size_t offset = 0;
-                cce->payload_.reset(static_cast<ValueT *>(
-                    tx_obj.DeserializeObject(rec_str.data(), offset)
-                        .release()));
+                cce->payload_.DeserializeCurrentPayload(rec_str.data(), offset);
             }
             else
             {
-                assert(cce->payload_ == nullptr);
+                assert(cce->payload_.cur_payload_ == nullptr);
             }
 
             // Check if there's any buffered replay cmds, and try to
@@ -2350,14 +2351,14 @@ public:
                 }
 
                 uint64_t commit_version = commit_ts;
-                TryCommitBufferedCommands(
-                    cce->payload_, buffered_cmd_list, commit_version);
+                cce->TryCommitBufferedCommands(commit_version);
                 int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
                 shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                                  buffered_cmd_cnt_old);
-                RecordStatus commit_status = cce->payload_ == nullptr
-                                                 ? RecordStatus::Deleted
-                                                 : RecordStatus::Normal;
+                RecordStatus commit_status =
+                    cce->payload_.cur_payload_ == nullptr
+                        ? RecordStatus::Deleted
+                        : RecordStatus::Normal;
                 cce->SetCommitTsPayloadStatus(commit_version, commit_status);
 
                 // todo: UPDATE LAST COMMIT TS AND SMALLEST TTL
@@ -2427,11 +2428,12 @@ public:
             }
             if (cce->PayloadStatus() == RecordStatus::Normal)
             {
-                TemplateCcMap<KeyT, ValueT>::normal_obj_sz_++;
-                if (cce->payload_ && cce->payload_->HasTTL() &&
-                    ccp->smallest_ttl_ > cce->payload_->GetTTL())
+                TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_++;
+                if (cce->payload_.cur_payload_ &&
+                    cce->payload_.cur_payload_->HasTTL() &&
+                    ccp->smallest_ttl_ > cce->payload_.cur_payload_->GetTTL())
                 {
-                    ccp->smallest_ttl_ = cce->payload_->GetTTL();
+                    ccp->smallest_ttl_ = cce->payload_.cur_payload_->GetTTL();
                 }
             }
             else
@@ -2446,7 +2448,7 @@ public:
 
     size_t NormalObjectSize() override
     {
-        return TemplateCcMap<KeyT, ValueT>::normal_obj_sz_;
+        return TemplateCcMap<KeyT, ValueT, false>::normal_obj_sz_;
     }
 
 private:
@@ -2477,7 +2479,7 @@ private:
     }
 
     void CreateDirtyPayloadFromPendingCommand(
-        CcEntry<KeyT, ValueT> *cce) override
+        CcEntry<KeyT, ValueT, false> *cce) override
     {
         assert(cce->DirtyPayloadStatus() == RecordStatus::Uncreated);
         auto var_cmd = cce->PendingCmd();
@@ -2498,7 +2500,7 @@ private:
         // created by the last command.
         assert(pending_cmd != nullptr);
         assert(cce->PayloadStatus() == RecordStatus::Normal &&
-               cce->payload_ != nullptr);
+               cce->payload_.cur_payload_ != nullptr);
 
         // If the pending cmd is DEL command, just create Deleted dirty
         // payload.
@@ -2511,7 +2513,8 @@ private:
         else
         {
             std::tie(dirty_payload, dirty_payload_status) =
-                CreateDirtyPayloadFromExistingPayload(cce->payload_.get());
+                CreateDirtyPayloadFromExistingPayload(
+                    cce->payload_.cur_payload_.get());
             assert(dirty_payload_status == RecordStatus::Normal);
 
             // Commit the pending command.
@@ -2579,7 +2582,7 @@ private:
      * false to neglect this record.
      */
     bool FilterRecord(const KeyT *key,
-                      const CcEntry<KeyT, ValueT> *cce,
+                      const CcEntry<KeyT, ValueT, false> *cce,
                       int32_t obj_type,
                       const std::string_view &scan_pattern) override
     {
@@ -2590,8 +2593,8 @@ private:
         {
             return false;
         }
-        if (obj_type >= 0 && cce->payload_ != nullptr &&
-            !cce->payload_->IsMatchType(obj_type))
+        if (obj_type >= 0 && cce->payload_.cur_payload_ != nullptr &&
+            !cce->payload_.cur_payload_->IsMatchType(obj_type))
         {
             return false;
         }
@@ -2602,7 +2605,8 @@ private:
         else
         {
             // if ttl is expired
-            TxObject *obj = static_cast<TxObject *>(cce->payload_.get());
+            TxObject *obj =
+                static_cast<TxObject *>(cce->payload_.cur_payload_.get());
             if (obj != nullptr && obj->HasTTL())
             {
                 if (obj->GetTTL() < shard_->NowInMilliseconds())

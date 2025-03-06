@@ -34,7 +34,8 @@ namespace txservice
 {
 
 void PrepareCcMap(
-    TemplateCcMap<CompositeKey<std::string, int>, CompositeRecord<int>> &cc_map,
+    TemplateCcMap<CompositeKey<std::string, int>, CompositeRecord<int>, true>
+        &cc_map,
     size_t cnt,
     std::string &table_name,
     bool random = true)
@@ -107,8 +108,9 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     const size_t MAP_SIZE = 10000;
     std::vector<std::string> tables;
     std::vector<TableName> table_names;
-    std::vector<std::unique_ptr<
-        TemplateCcMap<CompositeKey<std::string, int>, CompositeRecord<int>>>>
+    std::vector<std::unique_ptr<TemplateCcMap<CompositeKey<std::string, int>,
+                                              CompositeRecord<int>,
+                                              true>>>
         ccmaps;
     std::vector<std::vector<CompositeKey<std::string, int>>> map_keys;
     std::vector<std::vector<CompositeKey<std::string, int> *>> map_key_ptrs;
@@ -119,7 +121,8 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
         table_names.emplace_back(tables[i], TableType::Primary);
         ccmaps.emplace_back(
             std::make_unique<TemplateCcMap<CompositeKey<std::string, int>,
-                                           CompositeRecord<int>>>(
+                                           CompositeRecord<int>,
+                                           true>>(
                 &shard, 0, table_names[i], 1, nullptr, true));
     }
 

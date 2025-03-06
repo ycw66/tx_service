@@ -87,9 +87,9 @@ void RangeRecord::CopyForReadResult(const RangeRecord &other)
     is_read_result_ = true;
 
     range_owner_bucket_ =
-        static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+        static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord, true> *>(
             other.range_owner_rec_)
-            ->payload_->GetBucketInfo();
+            ->payload_.cur_payload_->GetBucketInfo();
 
     if (other.new_range_owner_rec_)
     {
@@ -98,9 +98,10 @@ void RangeRecord::CopyForReadResult(const RangeRecord &other)
         for (auto &entry : *other.new_range_owner_rec_)
         {
             new_range_owner_bucket_->push_back(
-                static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                static_cast<
+                    const CcEntry<RangeBucketKey, RangeBucketRecord, true> *>(
                     entry)
-                    ->payload_->GetBucketInfo());
+                    ->payload_.cur_payload_->GetBucketInfo());
         }
     }
     else

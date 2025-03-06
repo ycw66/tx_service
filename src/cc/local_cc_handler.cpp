@@ -39,10 +39,6 @@
 #include "tx_trace.h"
 #include "type.h"
 
-#ifdef ON_KEY_OBJECT
-DECLARE_bool(auto_redirect);
-#endif
-
 txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
                                           LocalCcShards &shards)
     : thd_id_(thd_id),
@@ -654,7 +650,6 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         return true;
     }
 
-#ifdef ON_KEY_OBJECT
     // Standby transaction only execute local request.
     if (IsStandbyTx(tx_term) && is_for_write)
     {
@@ -662,7 +657,6 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         hres.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
         return true;
     }
-#endif
 
     ReadCc *read_req = read_pool.NextRequest();
     read_req->Reset(&table_name,
@@ -863,13 +857,9 @@ void txservice::LocalCcHandler::ScanOpen(
     bool is_covering_keys,
     bool is_require_keys,
     bool is_require_recs,
-    bool is_require_sort
-#ifdef ON_KEY_OBJECT
-    ,
+    bool is_require_sort,
     int32_t obj_type,
-    const std::string_view &scan_pattern
-#endif
-)
+    const std::string_view &scan_pattern)
 {
     CcShard &local_shard = *cc_shards_.cc_shards_[thd_id_];
     uint32_t shard_code = tx_number >> 32L;
@@ -1072,13 +1062,12 @@ void txservice::LocalCcHandler::ScanOpen(
                            is_for_write,
                            is_ckpt_delta,
                            is_covering_keys,
-                           false
-#ifdef ON_KEY_OBJECT
-                           ,
+                           is_require_keys,
+                           is_require_recs,
+                           is_require_sort,
+                           false,
                            obj_type,
-                           scan_pattern
-#endif
-                );
+                           scan_pattern);
 
                 TX_TRACE_ACTION(this, req);
                 TX_TRACE_DUMP(req);
@@ -1115,13 +1104,12 @@ void txservice::LocalCcHandler::ScanOpen(
                                 proto,
                                 is_for_write,
                                 is_ckpt_delta,
-                                is_covering_keys
-#ifdef ON_KEY_OBJECT
-                                ,
+                                is_covering_keys,
+                                is_require_keys,
+                                is_require_recs,
+                                is_require_sort,
                                 obj_type,
-                                scan_pattern
-#endif
-            );
+                                scan_pattern);
         }
     }
 #endif
@@ -1243,7 +1231,10 @@ void txservice::LocalCcHandler::ScanOpenLocal(
                             scanner_ptr->protocol_,
                             scanner_ptr->is_for_write_,
                             scanner_ptr->is_ckpt_delta_,
-                            scanner_ptr->is_covering_keys_);
+                            scanner_ptr->is_covering_keys_,
+                            scanner_ptr->is_require_keys_,
+                            scanner_ptr->is_require_recs_,
+                            scanner_ptr->is_require_sort_);
 
     TX_TRACE_ACTION(this, scan_open_cc_req);
     TX_TRACE_DUMP(scan_open_cc_req);
@@ -1279,13 +1270,9 @@ void txservice::LocalCcHandler::ScanNextBatch(
     uint16_t command_id,
     uint64_t start_ts,
     CcScanner &scanner,
-    CcHandlerResult<ScanNextResult> &hd_res
-#ifdef ON_KEY_OBJECT
-    ,
+    CcHandlerResult<ScanNextResult> &hd_res,
     int32_t obj_type,
-    const std::string_view &scan_pattern
-#endif
-)
+    const std::string_view &scan_pattern)
 {
     uint32_t shard_code = scanner.BlockedShard();
     ScanCache *blocked_cache = scanner.Cache(shard_code);
@@ -1311,13 +1298,12 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    scanner.protocol_,
                    scanner.is_for_write_,
                    scanner.is_ckpt_delta_,
-                   scanner.is_covering_keys_
-#ifdef ON_KEY_OBJECT
-                   ,
+                   scanner.is_covering_keys_,
+                   scanner.is_require_keys_,
+                   scanner.is_require_recs_,
+                   scanner.is_require_sort_,
                    obj_type,
-                   scan_pattern
-#endif
-        );
+                   scan_pattern);
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
@@ -1338,13 +1324,12 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             scanner.protocol_,
                             scanner.is_for_write_,
                             scanner.is_ckpt_delta_,
-                            scanner.is_covering_keys_
-#ifdef ON_KEY_OBJECT
-                            ,
+                            scanner.is_covering_keys_,
+                            scanner.is_require_keys_,
+                            scanner.is_require_recs_,
+                            scanner.is_require_sort_,
                             obj_type,
-                            scan_pattern
-#endif
-        );
+                            scan_pattern);
     }
 }
 
@@ -1479,7 +1464,10 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
                scanner.protocol_,
                scanner.is_for_write_,
                scanner.is_ckpt_delta_,
-               scanner.is_covering_keys_);
+               scanner.is_covering_keys_,
+               scanner.is_require_keys_,
+               scanner.is_require_recs_,
+               scanner.is_require_sort_);
     TX_TRACE_ACTION(this, req);
     TX_TRACE_DUMP(req);
 #ifdef EXT_TX_PROC_ENABLED
@@ -1887,14 +1875,12 @@ void txservice::LocalCcHandler::ObjectCommand(
     }
     else
     {
-#ifdef ON_KEY_OBJECT
-        if (!FLAGS_auto_redirect)
+        if (!txservice_auto_redirect_redis_cmd)
         {
             DLOG(WARNING) << "!!! DATA_NOT_ON_LOCAL_NODE !!";
             hres.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
             return;
         }
-#endif
         DLOG(WARNING) << "!!!Route to remote node!!";
         // set "cmd_result_" for deserializing the command result returned from
         // remote node.

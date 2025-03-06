@@ -86,7 +86,7 @@ thread_local inline CcRequestPool<ReplayLogCc> replay_cc_pool_;
 thread_local inline CcRequestPool<KeyObjectStandbyForwardCc>
     key_obj_standby_forward_pool_;
 
-template <typename KeyT, typename ValueT>
+template <typename KeyT, typename ValueT, bool VersionedRecord>
 class TemplateCcMap;
 
 template <typename SkT, typename PkT>
@@ -664,11 +664,6 @@ public:
             }
             else
             {
-                const LruEntry *lru_entry = lock->GetCcEntry();
-                if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-                {
-                    return false;
-                }
                 ccm_ = lock->GetCcMap();
             }
 
@@ -1081,11 +1076,6 @@ public:
         }
         else
         {
-            const LruEntry *lru_entry = lock->GetCcEntry();
-            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-            {
-                return false;
-            }
             ccm_ = lock->GetCcMap();
         }
 
@@ -1199,11 +1189,6 @@ public:
             }
             else
             {
-                const LruEntry *lru_entry = lock->GetCcEntry();
-                if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-                {
-                    return false;
-                }
                 ccm_ = lock->GetCcMap();
             }
 
@@ -1546,13 +1531,12 @@ public:
                bool is_for_write,
                bool is_delta,
                bool is_covering_keys,
-               bool is_include_floor_cce = false
-#ifdef ON_KEY_OBJECT
-               ,
+               bool is_require_keys,
+               bool is_require_recs,
+               bool is_require_sort,
+               bool is_include_floor_cce = false,
                int32_t obj_type = -1,
-               const std::string_view &scan_pattern = {}
-#endif
-    )
+               const std::string_view &scan_pattern = {})
     {
         TemplatedCcRequest<ScanOpenBatchCc, ScanOpenResult>::Reset(
             tn, res, ng_id, tx_number, term, protocol, iso_level);
@@ -1568,12 +1552,13 @@ public:
         is_ckpt_delta_ = is_delta;
         is_covering_keys_ = is_covering_keys;
         is_include_floor_cce_ = is_include_floor_cce;
+        is_require_keys_ = is_require_keys;
+        is_require_recs_ = is_require_recs;
+        is_require_sort_ = is_require_sort;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
-#ifdef ON_KEY_OBJECT
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
-#endif
     }
     bool ValidTermCheck() override
     {
@@ -1612,6 +1597,21 @@ public:
     bool IsCoveringKeys() const
     {
         return is_covering_keys_;
+    }
+
+    bool IsRequireKeys() const
+    {
+        return is_require_keys_;
+    }
+
+    bool IsRequireRecs() const
+    {
+        return is_require_recs_;
+    }
+
+    bool IsRequireSort() const
+    {
+        return is_require_sort_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1653,7 +1653,6 @@ public:
     {
         return is_wait_for_post_write_;
     }
-#ifdef ON_KEY_OBJECT
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -1662,7 +1661,6 @@ public:
     {
         return scan_pattern_;
     }
-#endif
 
 private:
     ScanIndexType index_type_{ScanIndexType::Primary};
@@ -1674,6 +1672,9 @@ private:
     ScanCache *scan_cache_{nullptr};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     bool is_ckpt_delta_{false};
     // If always include floor_cce in scan result
     bool is_include_floor_cce_{false};
@@ -1690,12 +1691,10 @@ private:
     LruEntry *cce_ptr_{nullptr};
 
     bool is_wait_for_post_write_{false};
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
     friend class TemplateCcMap;
 
     template <typename SkT, typename PkT>
@@ -1745,11 +1744,6 @@ public:
         }
         else
         {
-            const LruEntry *lru_entry = lock->GetCcEntry();
-            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-            {
-                return false;
-            }
             ccm_ = lock->GetCcMap();
         }
 
@@ -1767,13 +1761,12 @@ public:
                CcProtocol protocol,
                bool is_for_write,
                bool is_delta,
-               bool is_covering_keys
-#ifdef ON_KEY_OBJECT
-               ,
+               bool is_covering_keys,
+               bool is_require_keys,
+               bool is_require_recs,
+               bool is_require_sort,
                int32_t obj_type = -1,
-               const std::string_view &scan_pattern = {}
-#endif
-    )
+               const std::string_view &scan_pattern = {})
     {
         TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(
             nullptr, next_res, ng_id, tx_number, tx_term, protocol, iso_level);
@@ -1783,16 +1776,17 @@ public:
         is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
         is_covering_keys_ = is_covering_keys;
+        is_require_keys_ = is_require_keys;
+        is_require_recs_ = is_require_recs;
+        is_require_sort_ = is_require_sort;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
 
         const ScanTuple *last_tuple = cache->LastTuple();
         cce_addr_ = &last_tuple->cce_addr_;
         ccm_ = nullptr;
-#ifdef ON_KEY_OBJECT
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
-#endif
     }
 
     bool IsForWrite() const
@@ -1803,6 +1797,21 @@ public:
     bool IsCoveringKeys() const
     {
         return is_covering_keys_;
+    }
+
+    bool IsRequireKeys() const
+    {
+        return is_require_keys_;
+    }
+
+    bool IsRequireRecs() const
+    {
+        return is_require_recs_;
+    }
+
+    bool IsRequireSort() const
+    {
+        return is_require_sort_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1840,7 +1849,6 @@ public:
         return is_wait_for_post_write_;
     }
 
-#ifdef ON_KEY_OBJECT
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -1849,7 +1857,6 @@ public:
     {
         return scan_pattern_;
     }
-#endif
 
 private:
     const CcEntryAddr *cce_addr_;
@@ -1859,6 +1866,9 @@ private:
     bool is_for_write_{false};
     bool is_covering_keys_{false};
     bool is_ckpt_delta_{false};
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     // Record the scan type of the blocked cce
     ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
 
@@ -1873,11 +1883,9 @@ private:
 
     bool is_wait_for_post_write_{false};
 
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
     friend class TemplateCcMap;
 
     template <typename SkT, typename PkT>
@@ -3623,7 +3631,7 @@ private:
     // TODO(xxx) general solution for #1130
     const uint64_t schema_version_{0};
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
     friend class TemplateCcMap;
 
     friend std::ostream &operator<<(std::ostream &outs,
@@ -5227,9 +5235,9 @@ public:
         return SetFinish();
     }
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
     bool IsCleanTarget(const KeyT &key,
-                       const CcEntry<KeyT, ValueT> *entry,
+                       const CcEntry<KeyT, ValueT, VersionedRecord> *entry,
                        CcShard *ccs) const
     {
         switch (clean_type_)
@@ -5273,16 +5281,16 @@ public:
             {
                 return true;
             }
-#ifdef ON_KEY_OBJECT
             // Expired object is also treated as deleted object.
-            if (entry->payload_ && entry->payload_->HasTTL())
+            if (entry->payload_.cur_payload_ &&
+                entry->payload_.cur_payload_->HasTTL())
             {
-                if (entry->payload_->GetTTL() < ccs->NowInMilliseconds())
+                if (entry->payload_.cur_payload_->GetTTL() <
+                    ccs->NowInMilliseconds())
                 {
                     return true;
                 }
             }
-#endif
             return false;
         }
         default:
@@ -5291,7 +5299,7 @@ public:
         }
     }
 
-    bool CanBeCleaned(const LruEntry *entry) const
+    bool CanBeCleaned(const LruEntry *entry, bool versioned_cce) const
     {
         switch (clean_type_)
         {
@@ -5301,18 +5309,57 @@ public:
             // All data in the target range/bucket can be cleaned.
             return true;
         case CleanType::CleanForAlterTable:
-            return entry->IsFree() && !entry->GetBeingCkpt();
+        {
+            if (versioned_cce)
+            {
+                const VersionedLruEntry<true> *versioned_entry =
+                    static_cast<const VersionedLruEntry<true> *>(entry);
+                return versioned_entry->IsFree() &&
+                       !versioned_entry->GetBeingCkpt();
+            }
+            else
+            {
+                const VersionedLruEntry<false> *non_versioned_entry =
+                    static_cast<const VersionedLruEntry<false> *>(entry);
+                return non_versioned_entry->IsFree() &&
+                       !non_versioned_entry->GetBeingCkpt();
+            }
+        }
         case CleanType::CleanDeletedData:
         {
             if (txservice_skip_kv)
             {
                 // If no kv is attached, we can evict this entry as long as
                 // there's no one trying to access it.
-                return entry->GetKeyLock() == nullptr;
+                if (versioned_cce)
+                {
+                    const VersionedLruEntry<true> *versioned_entry =
+                        static_cast<const VersionedLruEntry<true> *>(entry);
+                    return versioned_entry->GetKeyLock() == nullptr;
+                }
+                else
+                {
+                    const VersionedLruEntry<false> *non_versioned_entry =
+                        static_cast<const VersionedLruEntry<false> *>(entry);
+                    return non_versioned_entry->GetKeyLock() == nullptr;
+                }
             }
             else
             {
-                return entry->IsFree() && !entry->GetBeingCkpt();
+                if (versioned_cce)
+                {
+                    const VersionedLruEntry<true> *versioned_entry =
+                        static_cast<const VersionedLruEntry<true> *>(entry);
+                    return versioned_entry->IsFree() &&
+                           !versioned_entry->GetBeingCkpt();
+                }
+                else
+                {
+                    const VersionedLruEntry<false> *non_versioned_entry =
+                        static_cast<const VersionedLruEntry<false> *>(entry);
+                    return non_versioned_entry->IsFree() &&
+                           !non_versioned_entry->GetBeingCkpt();
+                }
             }
         }
         default:
@@ -5960,11 +6007,6 @@ public:
         }
         else
         {
-            const LruEntry *lru_entry = lock->GetCcEntry();
-            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-            {
-                return false;
-            }
             ccm_ = lock->GetCcMap();
         }
 

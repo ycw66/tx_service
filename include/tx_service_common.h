@@ -43,6 +43,10 @@ inline uint64_t txservice_max_standby_lag = 400000;
 // off, all data will be cached in memory.
 inline bool txservice_enable_cache_replacement = true;
 
+// Whether to automatically redirect redis command to the leader node when the
+// data is not on the local node.
+inline bool txservice_auto_redirect_redis_cmd = true;
+
 enum struct TxShardStatus
 {
     Free = 0,

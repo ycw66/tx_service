@@ -45,14 +45,14 @@ namespace txservice
  *
  * Mark is done by LocalCcShards::KickoutPage.
  */
-template <typename KeyT, typename ValueT>
+template <typename KeyT, typename ValueT, bool VersionedRecord>
 struct CcPageCleanGuard
 {
 public:
     explicit CcPageCleanGuard(CcShard *cc_shard,
                               NodeGroupId cc_ng_id,
                               const TableName &table_name,
-                              CcPage<KeyT, ValueT> *page)
+                              CcPage<KeyT, ValueT, VersionedRecord> *page)
         : cc_shard_(cc_shard),
           cc_ng_id_(cc_ng_id),
           table_name_(table_name),
@@ -73,8 +73,8 @@ public:
         auto entry_it = page_->entries_.begin();
         uint64_t smallest_ttl = UINT64_MAX;
 
-        CcPage<KeyT, ValueT>::SoftwarePrefetch(
-            CcPage<KeyT, ValueT>::PREFETCH_FLAG_PAYLOAD,
+        CcPage<KeyT, ValueT, VersionedRecord>::SoftwarePrefetch(
+            CcPage<KeyT, ValueT, VersionedRecord>::PREFETCH_FLAG_PAYLOAD,
             page_->entries_.begin(),
             page_->entries_.end());  // Prefetch for TTL
         for (size_t idx = 0; idx < page_->Size(); ++idx)
@@ -84,10 +84,11 @@ public:
                 if (page_->entries_[idx]->PayloadStatus() ==
                     RecordStatus::Normal)
                 {
-                    if (page_->entries_[idx]->payload_ &&
-                        page_->entries_[idx]->payload_->HasTTL())
+                    if (page_->entries_[idx]->payload_.cur_payload_ &&
+                        page_->entries_[idx]->payload_.cur_payload_->HasTTL())
                     {
-                        uint64_t ttl = page_->entries_[idx]->payload_->GetTTL();
+                        uint64_t ttl = page_->entries_[idx]
+                                           ->payload_.cur_payload_->GetTTL();
                         smallest_ttl = ttl < smallest_ttl ? ttl : smallest_ttl;
                     }
                 }
@@ -105,8 +106,8 @@ public:
 
         page_->keys_.erase(key_it, page_->keys_.end());
 
-        CcPage<KeyT, ValueT>::SoftwarePrefetch(
-            CcPage<KeyT, ValueT>::PREFETCH_FLAG_BLOB,
+        CcPage<KeyT, ValueT, VersionedRecord>::SoftwarePrefetch(
+            CcPage<KeyT, ValueT, VersionedRecord>::PREFETCH_FLAG_BLOB,
             page_->entries_.begin(),
             page_->entries_.end());  // Prefetch for mi_free
         page_->entries_.erase(entry_it, page_->entries_.end());
@@ -136,13 +137,11 @@ public:
         return evicted_valid_key_;
     }
 
-#ifdef ON_KEY_OBJECT
     // Number of normal keys freed.
     size_t CleanObjectCount() const
     {
         return clean_obj_cnt_;
     }
-#endif
 
 protected:
     struct CanBeCleanedResult
@@ -151,15 +150,16 @@ protected:
         bool delay_free_;
     };
     virtual CanBeCleanedResult CanBeCleaned(
-        const CcEntry<KeyT, ValueT> *cce
+        const CcEntry<KeyT, ValueT, VersionedRecord> *cce
 #ifdef RANGE_PARTITION_ENABLED
         ,
         const uint64_t *const dirty_range_ts = nullptr
 #endif
     ) const = 0;
 
-    virtual bool IsCleanTarget(const KeyT &key,
-                               const CcEntry<KeyT, ValueT> *cce) const = 0;
+    virtual bool IsCleanTarget(
+        const KeyT &key,
+        const CcEntry<KeyT, ValueT, VersionedRecord> *cce) const = 0;
 
     virtual void Reserve(uint8_t idx, bool is_clean_target) = 0;
 
@@ -208,8 +208,8 @@ protected:
             bool slice_kicked = false;
             bool tried_slice_kick = false;
 
-            CcPage<KeyT, ValueT>::SoftwarePrefetch(
-                CcPage<KeyT, ValueT>::PREFETCH_FLAG_CCENTRY,
+            CcPage<KeyT, ValueT, VersionedRecord>::SoftwarePrefetch(
+                CcPage<KeyT, ValueT, VersionedRecord>::PREFETCH_FLAG_CCENTRY,
                 page_->entries_.begin() + idx_in_page,
                 page_->entries_.begin() + slice_end_idx);
             for (size_t idx = idx_in_page; idx < slice_end_idx; ++idx)
@@ -278,7 +278,8 @@ protected:
     void MarkCleanForOrphanKey(uint8_t idx)
     {
         const KeyT &key = page_->keys_[idx];
-        std::unique_ptr<CcEntry<KeyT, ValueT>> &cce = page_->entries_[idx];
+        std::unique_ptr<CcEntry<KeyT, ValueT, VersionedRecord>> &cce =
+            page_->entries_[idx];
 
         bool is_clean_target = IsCleanTarget(key, cce.get());
         auto [can_be_cleaned, delay_free] = CanBeCleaned(cce.get());
@@ -295,13 +296,12 @@ protected:
 
     void MarkClean(NodeGroupId cc_ng_id, uint8_t idx, bool delay_free)
     {
-        std::unique_ptr<CcEntry<KeyT, ValueT>> &cce = page_->entries_[idx];
+        std::unique_ptr<CcEntry<KeyT, ValueT, VersionedRecord>> &cce =
+            page_->entries_[idx];
 
         if (cce->PayloadStatus() == RecordStatus::Normal)
         {
-#ifdef ON_KEY_OBJECT
             ++clean_obj_cnt_;
-#endif
             if (AffectCacheCompleteness())
             {
                 evicted_valid_key_ = true;
@@ -309,17 +309,6 @@ protected:
         }
 
         cce->ClearLocks(*cc_shard_, cc_ng_id);
-        if (delay_free)
-        {
-            // Do not free this cce directly since it might be visited
-            // by an expired cc req. Put it into the invalid cce pool
-            // and recycle it later.
-            DLOG(WARNING) << "Cleanning up cce that still being referenced, "
-                             "adding it to invalid cce list. cce: "
-                          << cce.get();
-            cc_shard_->AddInvalidCce(std::move(cce));
-        }
-
         clean_set_.set(idx, true);
         ++free_cnt_;
     }
@@ -328,29 +317,31 @@ protected:
     CcShard *cc_shard_{nullptr};
     NodeGroupId cc_ng_id_{0};
     const TableName &table_name_;
-    CcPage<KeyT, ValueT> *page_{nullptr};
+    CcPage<KeyT, ValueT, VersionedRecord> *page_{nullptr};
     uint64_t last_commit_ts_{0};
     uint64_t free_cnt_{0};
     bool evicted_valid_key_{false};
-#ifdef ON_KEY_OBJECT
     uint64_t clean_obj_cnt_{0};
-#endif
 
 private:
-    std::bitset<CcPage<KeyT, ValueT>::split_threshold_> clean_set_;
+    std::bitset<CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_>
+        clean_set_;
 
     friend class LocalCcShards;
 };
 
-template <typename KeyT, typename ValueT>
-struct CcPageCleanGuardWithoutKickoutCc : public CcPageCleanGuard<KeyT, ValueT>
+template <typename KeyT, typename ValueT, bool VersionedRecord>
+struct CcPageCleanGuardWithoutKickoutCc
+    : public CcPageCleanGuard<KeyT, ValueT, VersionedRecord>
 {
 public:
-    explicit CcPageCleanGuardWithoutKickoutCc(CcShard *cc_shard,
-                                              NodeGroupId cc_ng_id,
-                                              const TableName &table_name_,
-                                              CcPage<KeyT, ValueT> *page)
-        : CcPageCleanGuard<KeyT, ValueT>(cc_shard, cc_ng_id, table_name_, page)
+    explicit CcPageCleanGuardWithoutKickoutCc(
+        CcShard *cc_shard,
+        NodeGroupId cc_ng_id,
+        const TableName &table_name_,
+        CcPage<KeyT, ValueT, VersionedRecord> *page)
+        : CcPageCleanGuard<KeyT, ValueT, VersionedRecord>(
+              cc_shard, cc_ng_id, table_name_, page)
     {
     }
 
@@ -362,11 +353,11 @@ public:
     }
 
 private:
-    typename CcPageCleanGuard<KeyT, ValueT>::CanBeCleanedResult CanBeCleaned(
-        const CcEntry<KeyT, ValueT> *cce
+    typename CcPageCleanGuard<KeyT, ValueT, VersionedRecord>::CanBeCleanedResult
+    CanBeCleaned(const CcEntry<KeyT, ValueT, VersionedRecord> *cce
 #ifdef RANGE_PARTITION_ENABLED
-        ,
-        const uint64_t *const dirty_range_ts = nullptr
+                 ,
+                 const uint64_t *const dirty_range_ts = nullptr
 #endif
     ) const override
     {
@@ -388,8 +379,9 @@ private:
 #endif
     }
 
-    bool IsCleanTarget(const KeyT &key,
-                       const CcEntry<KeyT, ValueT> *cce) const override
+    bool IsCleanTarget(
+        const KeyT &key,
+        const CcEntry<KeyT, ValueT, VersionedRecord> *cce) const override
     {
         // If we're just doing regular page clean, all cce is specific clean
         // target.
@@ -419,16 +411,18 @@ private:
     }
 };
 
-template <typename KeyT, typename ValueT>
-struct CcPageCleanGuardWithKickoutCc : public CcPageCleanGuard<KeyT, ValueT>
+template <typename KeyT, typename ValueT, bool VersionedRecord>
+struct CcPageCleanGuardWithKickoutCc
+    : public CcPageCleanGuard<KeyT, ValueT, VersionedRecord>
 {
 public:
     CcPageCleanGuardWithKickoutCc(CcShard *cc_shard,
                                   NodeGroupId cc_ng_id,
                                   const TableName &table_name,
-                                  CcPage<KeyT, ValueT> *page,
+                                  CcPage<KeyT, ValueT, VersionedRecord> *page,
                                   const KickoutCcEntryCc *kickout_cc)
-        : CcPageCleanGuard<KeyT, ValueT>(cc_shard, cc_ng_id, table_name, page),
+        : CcPageCleanGuard<KeyT, ValueT, VersionedRecord>(
+              cc_shard, cc_ng_id, table_name, page),
           kickout_cc_(kickout_cc),
           need_invalidate_lock_term_(
               DeduceNeedInvalidateLockTerm(kickout_cc->GetCleanType())),
@@ -444,7 +438,7 @@ public:
 
     void Compact() override
     {
-        CcPageCleanGuard<KeyT, ValueT>::Compact();
+        CcPageCleanGuard<KeyT, ValueT, VersionedRecord>::Compact();
         CleanType type = kickout_cc_->GetCleanType();
         if (type == CleanType::CleanRangeData ||
             type == CleanType::CleanRangeDataForMigration ||
@@ -482,24 +476,25 @@ private:
     }
 
 private:
-    typename CcPageCleanGuard<KeyT, ValueT>::CanBeCleanedResult CanBeCleaned(
-        const CcEntry<KeyT, ValueT> *cce
+    typename CcPageCleanGuard<KeyT, ValueT, VersionedRecord>::CanBeCleanedResult
+    CanBeCleaned(const CcEntry<KeyT, ValueT, VersionedRecord> *cce
 #ifdef RANGE_PARTITION_ENABLED
-        ,
-        const uint64_t *const dirty_range_ts = nullptr
+                 ,
+                 const uint64_t *const dirty_range_ts = nullptr
 #endif
     ) const override
     {
         // Check if the cce has any locks on it. If so recycle the lock entry
         // before deleting cce.
-        bool can_be_cleaned = kickout_cc_->CanBeCleaned(cce);
+        bool can_be_cleaned = kickout_cc_->CanBeCleaned(cce, VersionedRecord);
         bool delay_free = can_be_cleaned && cce->GetKeyLock() &&
                           !cce->GetKeyLock()->IsEmpty();
         return {can_be_cleaned, delay_free};
     }
 
-    bool IsCleanTarget(const KeyT &key,
-                       const CcEntry<KeyT, ValueT> *cce) const override
+    bool IsCleanTarget(
+        const KeyT &key,
+        const CcEntry<KeyT, ValueT, VersionedRecord> *cce) const override
     {
         return kickout_cc_->IsCleanTarget(key, cce, this->cc_shard_);
     }
@@ -531,7 +526,8 @@ private:
 
     void UpdatePageDirtyCommitTs()
     {
-        CcPage<KeyT, ValueT> *page = CcPageCleanGuard<KeyT, ValueT>::page_;
+        CcPage<KeyT, ValueT, VersionedRecord> *page =
+            CcPageCleanGuard<KeyT, ValueT, VersionedRecord>::page_;
 
         if (!page->Empty())
         {
@@ -539,9 +535,10 @@ private:
             // are still dirty from page. So the max dirty ts might
             // decrease.
             auto commit_ts_less =
-                [](const std::unique_ptr<CcEntry<KeyT, ValueT>> &left,
-                   const std::unique_ptr<CcEntry<KeyT, ValueT>> &right)
-            { return left->CommitTs() < right->CommitTs(); };
+                [](const std::unique_ptr<CcEntry<KeyT, ValueT, VersionedRecord>>
+                       &left,
+                   const std::unique_ptr<CcEntry<KeyT, ValueT, VersionedRecord>>
+                       &right) { return left->CommitTs() < right->CommitTs(); };
 
             uint64_t page_max_commit_ts =
                 (*std::max_element(page->entries_.begin(),

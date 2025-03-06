@@ -33,7 +33,7 @@
 
 namespace txservice
 {
-template <typename KeyT, typename ValueT>
+template <typename KeyT, typename ValueT, bool VersionedRecord>
 class TemplateCcMap;
 
 template <typename SkT, typename PkT>
@@ -257,7 +257,7 @@ private:
     uint64_t commit_ts_{0};
     CcEntryAddr cce_addr_;
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
     friend class ::txservice::TemplateCcMap;
 
     template <typename SkT, typename PkT>
@@ -392,7 +392,6 @@ public:
         return schema_version_;
     }
 
-#ifdef ON_KEY_OBJECT
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -401,8 +400,6 @@ public:
     {
         return scan_pattern_;
     }
-
-#endif
 
 private:
     CcMessage output_msg_;
@@ -420,7 +417,9 @@ private:
     std::atomic<uint32_t> unfinish_cnt_{0};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
-
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     uint64_t snapshot_ts_{0};
     std::vector<bool> is_wait_for_post_write_;
 
@@ -434,12 +433,10 @@ private:
     std::vector<ScanType> cce_ptr_scan_type_;
     uint64_t schema_version_{0};
 
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
     friend class ::txservice::TemplateCcMap;
 
     friend class ::txservice::CcMap;
@@ -503,7 +500,6 @@ public:
         return prior_cce_addr_;
     }
 
-#ifdef ON_KEY_OBJECT
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -512,7 +508,6 @@ public:
     {
         return scan_pattern_;
     }
-#endif
 
 private:
     CcMessage output_msg_;
@@ -536,17 +531,18 @@ private:
     bool is_ckpt_delta_{false};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     bool is_wait_for_post_write_{false};
     // scan type for above cce_ptr_
     ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
     TableType tbl_type_;
 
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
     friend class ::txservice::TemplateCcMap;
 
     friend class ::txservice::CcMap;

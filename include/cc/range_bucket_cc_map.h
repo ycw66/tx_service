@@ -30,24 +30,26 @@
 
 namespace txservice
 {
-class RangeBucketCcMap : public TemplateCcMap<RangeBucketKey, RangeBucketRecord>
+class RangeBucketCcMap
+    : public TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>
 {
 public:
     RangeBucketCcMap(const RangeBucketCcMap &rhs) = delete;
     ~RangeBucketCcMap() = default;
 
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::Execute;
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::FindEmplace;
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::Emplace;
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::Find;
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::AcquireCceKeyLock;
-    using TemplateCcMap<RangeBucketKey,
-                        RangeBucketRecord>::LockHandleForResumedRequest;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::Execute;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::FindEmplace;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::Emplace;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::Find;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::
+        AcquireCceKeyLock;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::
+        LockHandleForResumedRequest;
 
     RangeBucketCcMap(CcShard *shard,
                      NodeGroupId cc_ng_id,
                      const TableName &table_name)
-        : TemplateCcMap<RangeBucketKey, RangeBucketRecord>(
+        : TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>(
               shard, cc_ng_id, table_name, 1, nullptr, true)
     {
         auto bucket_map = shard->GetAllBucketInfos(cc_ng_id);
@@ -56,16 +58,13 @@ public:
         {
             RangeBucketKey bucket_key(bucket.first);
             auto cce_it = FindEmplace(bucket_key);
-            CcEntry<RangeBucketKey, RangeBucketRecord> *cce = cce_it->second;
+            CcEntry<RangeBucketKey, RangeBucketRecord, true> *cce =
+                cce_it->second;
             cce->SetCommitTsPayloadStatus(bucket.second->Version(),
                                           RecordStatus::Normal);
-#ifndef ON_KEY_OBJECT
-            cce->payload_ =
-                std::make_shared<RangeBucketRecord>(bucket.second.get());
-#else
-            cce->payload_ =
+            std::unique_ptr<RangeBucketRecord> bucket_rec =
                 std::make_unique<RangeBucketRecord>(bucket.second.get());
-#endif
+            cce->payload_.PassInCurrentPayload(std::move(bucket_rec));
         }
     }
 
@@ -106,8 +105,8 @@ public:
             static_cast<const RangeBucketKey *>(req.Key());
 
         Iterator it = Find(*bucket_key);
-        CcEntry<RangeBucketKey, RangeBucketRecord> *cce = it->second;
-        CcPage<RangeBucketKey, RangeBucketRecord> *ccp = it.GetPage();
+        CcEntry<RangeBucketKey, RangeBucketRecord, true> *cce = it->second;
+        CcPage<RangeBucketKey, RangeBucketRecord, true> *ccp = it.GetPage();
         assert(cce != nullptr && ccp != nullptr);
         auto hd_result = req.Result();
         LockType acquired_lock;
@@ -121,6 +120,7 @@ public:
                                                  : CcOperation::Read;
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce,
+                                            cce->CommitTs(),
                                             cce->PayloadStatus(),
                                             &req,
                                             req.NodeGroupId(),
@@ -143,6 +143,7 @@ public:
                                                  : CcOperation::Read;
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(cce,
+                                  cce->CommitTs(),
                                   ccp,
                                   cce->PayloadStatus(),
                                   &req,
@@ -178,7 +179,7 @@ public:
 
             RangeBucketRecord *bucket_rec =
                 static_cast<RangeBucketRecord *>(req.Record());
-            *bucket_rec = *(cce->payload_);
+            *bucket_rec = *(cce->payload_.cur_payload_);
             hd_result->Value().ts_ = cce->CommitTs();
             hd_result->Value().rec_status_ = RecordStatus::Normal;
             hd_result->Value().lock_type_ = acquired_lock;
@@ -239,7 +240,7 @@ public:
         }
 
         Iterator it = Find(*target_key);
-        CcEntry<RangeBucketKey, RangeBucketRecord> *cce = it->second;
+        CcEntry<RangeBucketKey, RangeBucketRecord, true> *cce = it->second;
         assert(cce != nullptr);
 
         // Check whether cce key lock holder is the given tx of the
@@ -494,8 +495,8 @@ public:
                     RangeBucketKey key(bucket_process.bucket_id());
                     Iterator it = Find(key);
                     auto bucket_cce = it->second;
-                    CcPage<RangeBucketKey, RangeBucketRecord> *bucket_ccp =
-                        it.GetPage();
+                    CcPage<RangeBucketKey, RangeBucketRecord, true>
+                        *bucket_ccp = it.GetPage();
                     assert(bucket_cce != nullptr && bucket_ccp != nullptr);
                     // We need to set the req txn to the data migrate txn so
                     // that the acquired lock records the correct lock owner tx.
@@ -503,6 +504,7 @@ public:
                     assert(bucket_process.migration_txn() != 0);
                     auto lock_pair =
                         AcquireCceKeyLock(bucket_cce,
+                                          bucket_cce->CommitTs(),
                                           bucket_ccp,
                                           RecordStatus::Normal,
                                           &req,

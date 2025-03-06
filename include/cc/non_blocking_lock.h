@@ -34,16 +34,13 @@
 #include "cc_req_base.h"
 #include "circular_queue.h"
 #include "error_messages.h"
-#include "tx_id.h"
-
-#ifdef ON_KEY_OBJECT
 #include "tx_command.h"
+#include "tx_id.h"
 #include "tx_object.h"
-#endif
 
 namespace txservice
 {
-template <typename KeyT, typename ValueT>
+template <typename KeyT, typename ValueT, bool VersionedRecord>
 struct CcEntry;
 
 class CcMap;
@@ -359,10 +356,12 @@ private:
     // tansactions.
     CircularQueue<LockQueueEntry> blocking_queue_;
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
     friend struct CcEntry;
 };
 
+// TODO(liunyl): Lock structure needs to be separated for versioned and
+// non-versioned payloads.
 /**
  * The lock structure and extra data fields that are accessed with lock
  * acquired. This structure is assigned on-demand to reduce CcEntry's memory
@@ -382,14 +381,12 @@ public:
         page_ = page;
         entry_ = entry;
 
-#ifdef ON_KEY_OBJECT
         dirty_payload_ = nullptr;
         dirty_payload_status_ = RecordStatus::NonExistent;
         pending_cmd_ = nullptr;
         queue_block_cmds_.Reset();
         buffered_cmd_list_.Clear();
         forward_entry_ = nullptr;
-#endif
     }
 
     void SetUsedStatus(bool is_used);
@@ -435,7 +432,6 @@ public:
 
     bool IsEmpty()
     {
-#ifdef ON_KEY_OBJECT
         if (key_lock_.IsEmpty())
         {
             // There must be no pending command and dirty payload if lock is
@@ -453,11 +449,9 @@ public:
         {
             return false;
         }
-#endif
         return key_lock_.IsEmpty();
     }
 
-#ifdef ON_KEY_OBJECT
     std::variant<TxCommand *, std::unique_ptr<TxCommand>> PendingCmd()
     {
         return std::move(pending_cmd_);
@@ -539,16 +533,12 @@ public:
     StandbyForwardEntry *ForwardEntry();
     void SetForwardEntry(StandbyForwardEntry *entry);
 
-#endif
-
     void ClearTx()
     {
-#ifdef ON_KEY_OBJECT
         pending_cmd_ = nullptr;
         dirty_payload_ = nullptr;
         dirty_payload_status_ = RecordStatus::NonExistent;
         forward_entry_ = nullptr;
-#endif
     }
 
 private:
@@ -562,7 +552,6 @@ private:
     LruPage *page_{nullptr};
     LruEntry *entry_{nullptr};
 
-#ifdef ON_KEY_OBJECT
     std::variant<TxCommand *, std::unique_ptr<TxCommand>> pending_cmd_{nullptr};
     // temporary object to process subsequent commands in the same txn
     std::unique_ptr<TxObject> dirty_payload_;
@@ -573,7 +562,6 @@ private:
     CircularQueue<CcRequestBase *> queue_block_cmds_;
     BufferedTxnCmdList buffered_cmd_list_;
     StandbyForwardEntry *forward_entry_;
-#endif
 };
 
 }  // namespace txservice

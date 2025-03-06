@@ -38,6 +38,7 @@ void CcMap::MoveRequest(CcRequestBase *cc_req, uint32_t target_core_id)
 
 std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     LruEntry *cce,
+    uint64_t commit_ts,
     LruPage *page,
     RecordStatus cce_payload_status,
     CcRequestBase *req,
@@ -56,6 +57,7 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
         cc_op, iso_level, protocol, is_covering_keys);
 
     return AcquireCceKeyLock(cce,
+                             commit_ts,
                              page,
                              cce_payload_status,
                              req,
@@ -72,6 +74,7 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
 
 std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     LruEntry *cce,
+    uint64_t commit_ts,
     LruPage *page,
     RecordStatus cce_payload_status,
     CcRequestBase *req,
@@ -87,7 +90,7 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
 {
     if (iso_level == IsolationLevel::Snapshot)
     {
-        if (cc_op == CcOperation::ReadForWrite && read_ts < cce->CommitTs())
+        if (cc_op == CcOperation::ReadForWrite && read_ts < commit_ts)
         {
             LOG(WARNING) << "SI ReadForWrite, latest version not fits the read "
                             "timestamp. tx:"
@@ -258,6 +261,7 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
 
 std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
     LruEntry *cce,
+    uint64_t commit_ts,
     RecordStatus cce_payload_status,
     CcRequestBase *req,
     uint32_t ng_id,
@@ -291,7 +295,7 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
     }
     else if (acquired_lock == LockType::WriteIntent &&
-             iso_level == IsolationLevel::Snapshot && read_ts < cce->CommitTs())
+             iso_level == IsolationLevel::Snapshot && read_ts < commit_ts)
     {
         // The write intent has been acquired. Does not keep the write intent if
         // this tx under Snapshot Isolation (SI) is destined to fail. For

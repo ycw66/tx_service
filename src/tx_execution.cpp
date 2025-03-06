@@ -2270,13 +2270,9 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               is_covering_keys,
                               is_require_keys,
                               is_require_recs,
-                              is_require_sort
-#ifdef ON_KEY_OBJECT
-                              ,
+                              is_require_sort,
                               scan_open.tx_req_->obj_type_,
-                              scan_open.tx_req_->scan_pattern_
-#endif
-        );
+                              scan_open.tx_req_->scan_pattern_);
     }
 
 #ifndef RANGE_PARTITION_ENABLED

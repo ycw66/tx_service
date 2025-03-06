@@ -62,7 +62,6 @@ public:
     void Serialize(std::string &str) const;
     size_t SerializedLength() const;
     void Deserialize(const char *buf, size_t &offset, const KeySchema *);
-#ifdef ON_KEY_OBJECT
     std::string_view KVSerialize() const
     {
         assert(false);
@@ -72,7 +71,6 @@ public:
     {
         assert(false);
     }
-#endif
     TxKey CloneTxKey() const;
     std::string ToString() const;
     void Copy(const CatalogKey &rhs);

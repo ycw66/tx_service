@@ -264,6 +264,7 @@ public:
         return tx_service_;
     }
 
+    // Testing purpose only.
     template <typename KeyT, typename ValueT>
     void CreateCcTable(const TableName &tabname,
                        const KeySchema *key_schema = nullptr,
@@ -277,7 +278,7 @@ public:
             {
                 cc_shards_[id]->native_ccms_.try_emplace(
                     tabname,
-                    std::make_unique<TemplateCcMap<KeyT, ValueT>>(
+                    std::make_unique<TemplateCcMap<KeyT, ValueT, true>>(
                         cc_shards_[id].get(), key_schema, rec_schema));
             }
         }
@@ -1397,14 +1398,15 @@ public:
      *
      * |______._______._______|_______._______._______|_______._______._______|
      */
-    template <typename KeyT, typename ValueT>
-    void KickoutPage(CcPageCleanGuard<KeyT, ValueT> *clean_guard)
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
+    void KickoutPage(
+        CcPageCleanGuard<KeyT, ValueT, VersionedRecord> *clean_guard)
     {
         const TableName &table_name = clean_guard->table_name_;
         TableName range_table_name(table_name.StringView(),
                                    TableType::RangePartition);
         NodeGroupId cc_ng_id = clean_guard->cc_ng_id_;
-        CcPage<KeyT, ValueT> *page = clean_guard->page_;
+        CcPage<KeyT, ValueT, VersionedRecord> *page = clean_guard->page_;
 
         size_t idx = 0;
         size_t page_size = page->Size();
@@ -1464,12 +1466,13 @@ public:
         } while (idx != page_size);
     }
 #else
-    template <typename KeyT, typename ValueT>
-    void KickoutPage(CcPageCleanGuard<KeyT, ValueT> *clean_guard)
+    template <typename KeyT, typename ValueT, bool VersionedRecord>
+    void KickoutPage(
+        CcPageCleanGuard<KeyT, ValueT, VersionedRecord> *clean_guard)
     {
         const TableName &table_name = clean_guard->table_name_;
         NodeGroupId cc_ng_id = clean_guard->cc_ng_id_;
-        CcPage<KeyT, ValueT> *page = clean_guard->page_;
+        CcPage<KeyT, ValueT, VersionedRecord> *page = clean_guard->page_;
 
         size_t page_size = page->Size();
         for (size_t idx = 0; idx < page_size; idx++)

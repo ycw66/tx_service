@@ -71,11 +71,12 @@
 
 namespace txservice
 {
-template <typename KeyT, typename ValueT>
+template <typename KeyT, typename ValueT, bool VersionedRecord>
 class TemplateCcMap : public CcMap
 {
-    using BtreeMapIterator = typename absl::
-        btree_map<KeyT, std::unique_ptr<CcPage<KeyT, ValueT>>>::iterator;
+    using BtreeMapIterator = typename absl::btree_map<
+        KeyT,
+        std::unique_ptr<CcPage<KeyT, ValueT, VersionedRecord>>>::iterator;
 
 public:
     TemplateCcMap() = delete;
@@ -171,8 +172,8 @@ public:
             req.IsLocal() ? hd_res->Value()[req.HandlerResultIndex()]
                           : hd_res->Value()[0];
         CcEntryAddr &cce_addr = acquire_key_result.cce_addr_;
-        CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
-        CcPage<KeyT, ValueT> *ccp = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce_ptr = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *ccp = nullptr;
         bool block_by_lock = req.BlockedByLock();
         const KeyT *target_key = nullptr;
         KeyT decoded_key;
@@ -199,11 +200,13 @@ public:
         if (req.CcePtr() != nullptr)
         {
             // The request was blocked before and is now unblocked.
-            cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            cce_ptr = static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                req.CcePtr());
             if (block_by_lock)
             {
                 std::tie(acquired_lock, err_code) =
                     LockHandleForResumedRequest(cce_ptr,
+                                                cce_ptr->CommitTs(),
                                                 cce_ptr->PayloadStatus(),
                                                 &req,
                                                 req.NodeGroupId(),
@@ -219,7 +222,8 @@ public:
             {
                 // Blocked by key cache add.
                 assert(table_name_.IsBase() && txservice_enable_key_cache);
-                ccp = static_cast<CcPage<KeyT, ValueT> *>(cce_ptr->GetCcPage());
+                ccp = static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    cce_ptr->GetCcPage());
                 auto it = Iterator(cce_ptr, ccp, &neg_inf_);
                 target_key = it->first;
                 auto res = shard_->local_shards_.AddKeyToKeyCache(
@@ -321,13 +325,14 @@ public:
 
         // Cce ptr either points to the cc entry whose gap will accommodate the
         // new insert, or the cc entry whose key will be updated/deleted.
-        CcEntry<KeyT, ValueT> &cc_entry = *cce_ptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> &cc_entry = *cce_ptr;
 
         {
             if (!block_by_lock)
             {
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(&cc_entry,
+                                      cc_entry.CommitTs(),
                                       ccp,
                                       cc_entry.PayloadStatus(),
                                       &req,
@@ -507,9 +512,9 @@ public:
         else
         {
             // upsert and delete branch.
-            CcEntry<KeyT, ValueT> *cce;
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce;
             const KeyT *write_key = nullptr;
-            CcPage<KeyT, ValueT> *cc_page = nullptr;
+            CcPage<KeyT, ValueT, VersionedRecord> *cc_page = nullptr;
 
             if (is_upload)
             {
@@ -551,8 +556,9 @@ public:
             }
             else
             {
-                cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                    cce_addr->ExtractCce());
+                cce =
+                    reinterpret_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                        cce_addr->ExtractCce());
 
                 NonBlockingLock *lk = cce->GetKeyLock();
                 if (lk == nullptr || !lk->HasWriteLock() ||
@@ -562,7 +568,8 @@ public:
                     return true;
                 }
 
-                cc_page = static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+                cc_page = static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    cce->GetCcPage());
                 assert(cc_page != nullptr);
                 write_key = cc_page->KeyOfEntry(cce);
             }
@@ -583,11 +590,10 @@ public:
                     // does not exist at all, or there is an entry with the
                     // Deleted status. In either case, the data store size of
                     // this entry can be set to 0.
-                    cce->data_store_size_ = 0;
+                    cce->entry_info_.data_store_size_ = 0;
                 }
 #endif
 
-#ifndef ON_KEY_OBJECT
                 // for mvcc
                 if (shard_->EnableMvcc())
                 {
@@ -599,7 +605,6 @@ public:
                     cce->KickOutArchiveRecords(recycle_ts);
                     cce->ArchiveBeforeUpdate();
                 }
-#endif
 
                 if (commit_ts < cce->CommitTs())
                 {
@@ -617,40 +622,17 @@ public:
 
                 if (is_del)
                 {
-                    cce->payload_ = nullptr;
+                    cce->payload_.SetCurrentPayload(nullptr);
                 }
                 else if (payload_str == nullptr)
                 {
-#ifndef ON_KEY_OBJECT
-                    if (cce->payload_.use_count() == 1)
-                    {
-                        *(cce->payload_) = *commit_val;
-                    }
-                    else
-                    {
-                        cce->payload_ = std::make_shared<ValueT>(*commit_val);
-                    }
-#else
-                    assert(false);
-                    cce->payload_ = std::make_unique<ValueT>(*commit_val);
-#endif
+                    cce->payload_.SetCurrentPayload(commit_val);
                 }
                 else
                 {
                     size_t offset = 0;
-#ifndef ON_KEY_OBJECT
-                    if (cce->payload_.use_count() != 1)
-                    {
-                        cce->payload_ = std::make_shared<ValueT>();
-                    }
-#else
-                    assert(false);
-                    if (cce->payload_ == nullptr)
-                    {
-                        cce->payload_ = std::make_unique<ValueT>();
-                    }
-#endif
-                    cce->payload_->Deserialize(payload_str->data(), offset);
+                    cce->payload_.DeserializeCurrentPayload(payload_str->data(),
+                                                            offset);
                 }
 
                 RecordStatus cce_old_status = cce->PayloadStatus();
@@ -731,8 +713,8 @@ public:
 
         CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
         AcquireAllResult &acquire_all_result = hd_res->Value();
-        CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
-        CcPage<KeyT, ValueT> *ccp = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce_ptr = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *ccp = nullptr;
         bool resume = false;
         const KeyT *target_key = nullptr;
         bool will_insert = false;
@@ -752,10 +734,11 @@ public:
         {
             // The request was blocked before and is now unblocked.
             resume = true;
-            cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(
+            cce_ptr = static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
                 req.CcePtr(shard_->core_id_));
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce_ptr,
+                                            cce_ptr->CommitTs(),
                                             cce_ptr->PayloadStatus(),
                                             &req,
                                             ng_id,
@@ -883,7 +866,7 @@ public:
 
         // Cce ptr either points to the cc entry whose gap will accommodate the
         // new insert, or the cc entry whose key will be updated/deleted.
-        CcEntry<KeyT, ValueT> &cc_entry = *cce_ptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> &cc_entry = *cce_ptr;
 
         if (will_insert)
         {
@@ -916,6 +899,7 @@ public:
             {
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(&cc_entry,
+                                      cc_entry.CommitTs(),
                                       ccp,
                                       cc_entry.PayloadStatus(),
                                       &req,
@@ -1083,7 +1067,7 @@ public:
         }
 
         const KeyT *key_ptr = nullptr;
-        CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce_ptr = nullptr;
         if (req.OpType() == OperationType::Insert)
         {
             Iterator it = Floor(*target_key);
@@ -1137,25 +1121,17 @@ public:
                 if (commit_ts > 0 &&
                     req.CommitType() != PostWriteType::DowngradeLock)
                 {
-#ifndef ON_KEY_OBJECT
-                    cce_ptr->payload_ = std::make_shared<ValueT>(*payload);
-#else
-                    cce_ptr->payload_ = std::make_unique<ValueT>(*payload);
-#endif
+                    cce_ptr->payload_.SetCurrentPayload(payload);
                     // A prepare commit request only installs the dirty value,
                     // and does not change the record status and commit_ts.
                     if (req.CommitType() != PostWriteType::PrepareCommit)
                     {
-#ifndef ON_KEY_OBJECT
                         RecordStatus status =
                             (req.OpType() == OperationType::Delete ||
                              req.OpType() == OperationType::DropTable)
                                 ? RecordStatus::Deleted
                                 : RecordStatus::Normal;
-#else
-                        // no need to delete catalog
-                        RecordStatus status = RecordStatus::Normal;
-#endif
+
                         cce_ptr->SetCommitTsPayloadStatus(commit_ts, status);
                     }
                 }
@@ -1221,8 +1197,9 @@ public:
     bool Execute(PostReadCc &req) override
     {
         const CcEntryAddr &cce_addr = *req.CceAddr();
-        CcEntry<KeyT, ValueT> &cc_entry =
-            *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.ExtractCce());
+        CcEntry<KeyT, ValueT, VersionedRecord> &cc_entry =
+            *reinterpret_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                cce_addr.ExtractCce());
 
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -1484,8 +1461,8 @@ public:
         }
 
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
-        CcEntry<KeyT, ValueT> *cce = nullptr;
-        CcPage<KeyT, ValueT> *ccp = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *ccp = nullptr;
         const KeyT *look_key = nullptr;
         KeyT decoded_key;
 
@@ -1499,8 +1476,10 @@ public:
                 // The request was blocked before. This is execution resumption
                 // after the request is unblocked. The read lock/intention must
                 // have been acquired.
-                cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-                ccp = static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+                cce = static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                    req.CcePtr());
+                ccp = static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    cce->GetCcPage());
                 look_key = ccp->KeyOfEntry(cce);
 
                 if (req.BlockedBy() == ReadCc::BlockByPostWrite)
@@ -1515,6 +1494,7 @@ public:
                 {
                     std::tie(acquired_lock, err_code) =
                         LockHandleForResumedRequest(cce,
+                                                    cce->CommitTs(),
                                                     cce->PayloadStatus(),
                                                     &req,
                                                     ng_id,
@@ -1661,7 +1641,7 @@ public:
                             cce->SetCommitTsPayloadStatus(
                                 1U, RecordStatus::Deleted);
                             cce->SetCkptTs(1U);
-                            cce->data_store_size_ = 0;
+                            cce->entry_info_.data_store_size_ = 0;
 
                             if (pin_status == RangeSliceOpStatus::Successful)
                             {
@@ -1713,18 +1693,6 @@ public:
                                 }
                                 ccp = it.GetPage();
                             }
-
-                            shard_->FetchRecord(
-                                this->table_name_,
-                                this->table_schema_,
-                                TxKey(look_key),
-                                cce,
-                                this,
-                                this->cc_ng_id_,
-                                ng_term,
-                                &req,
-                                slice_id.Range()->PartitionId());
-
                             // Acquire a read intent on this cce with the
                             // special txn to avoid cce being kicked out before
                             // fetch record returns.
@@ -1732,6 +1700,15 @@ public:
                                 .AcquireReadIntent(
                                     FetchRecordCc::GetFetchRecordTxNumber(
                                         cc_ng_id_));
+                            shard_->FetchRecord(
+                                this->table_name_,
+                                this->table_schema_,
+                                TxKey(look_key),
+                                cce,
+                                this->cc_ng_id_,
+                                ng_term,
+                                &req,
+                                slice_id.Range()->PartitionId());
 
                             return false;
                         }
@@ -1794,21 +1771,20 @@ public:
 
                 if (cce->PayloadStatus() == RecordStatus::Unknown)
                 {
-                    shard_->FetchRecord(this->table_name_,
-                                        this->table_schema_,
-                                        TxKey(look_key),
-                                        cce,
-                                        this,
-                                        this->cc_ng_id_,
-                                        ng_term,
-                                        &req);
-
                     // Acquire a read intent on this cce with the
                     // special txn to avoid cce being kicked out before
                     // fetch record returns.
                     cce->GetOrCreateKeyLock(shard_, this, ccp)
                         .AcquireReadIntent(
                             FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
+                    shard_->FetchRecord(this->table_name_,
+                                        this->table_schema_,
+                                        TxKey(look_key),
+                                        cce,
+                                        this->cc_ng_id_,
+                                        ng_term,
+                                        &req);
+
                     return false;
                 }
 #endif
@@ -1827,6 +1803,7 @@ public:
                 });
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
+                                      cce->CommitTs(),
                                       ccp,
                                       cce->PayloadStatus(),
                                       &req,
@@ -1891,7 +1868,7 @@ public:
             // address is known.
             assert(req.NodeGroupId() == cce_addr.NodeGroupId());
             assert(cce_addr.ExtractCce() != nullptr);
-            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+            cce = reinterpret_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
                 cce_addr.ExtractCce());
         }  //-- end: read outside
 
@@ -1926,11 +1903,10 @@ public:
 
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
-                cce->payload_ = std::move(tmp_payload);
+                cce->payload_.PassInCurrentPayload(std::move(tmp_payload));
                 cce->SetCommitTsPayloadStatus(req.ReadTimestamp(),
                                               tmp_payload_status);
             }
-#ifndef ON_KEY_OBJECT
             else if (shard_->EnableMvcc() &&
                      cce->CommitTs() > req.ReadTimestamp())
             {
@@ -1953,12 +1929,10 @@ public:
             {
                 cce->AddArchiveRecords(*req.ArchivesPtr());
             }
-#endif
         }
 
-        if (is_read_snapshot)
+        if (is_read_snapshot && VersionedRecord)
         {
-#ifndef ON_KEY_OBJECT
             assert(req.Type() == ReadType::Inside);
 
             VersionResultRecord<ValueT> v_rec;
@@ -1992,7 +1966,6 @@ public:
             hd_res->Value().rec_status_ = v_rec.payload_status_;
             hd_res->SetFinished();
             return true;
-#endif
         }
         else if (cce->PayloadStatus() == RecordStatus::Normal &&
                  (req.Type() == ReadType::Inside || cce->CommitTs() > 1))
@@ -2036,12 +2009,12 @@ public:
                 if (req.Record() != nullptr)
                 {
                     ValueT *typed_rec = static_cast<ValueT *>(req.Record());
-                    *typed_rec = *(cce->payload_);
+                    *typed_rec = *(cce->payload_.cur_payload_);
                 }
                 else
                 {
                     assert(req.RecordBlob() != nullptr);
-                    cce->payload_->Serialize(*req.RecordBlob());
+                    cce->payload_.cur_payload_->Serialize(*req.RecordBlob());
                 }
             }
         }
@@ -2087,8 +2060,9 @@ public:
             return true;
         }
 
-        CcEntry<KeyT, ValueT> *cce =
-            reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.ExtractCce());
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+            reinterpret_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                cce_addr.ExtractCce());
 
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
@@ -2096,17 +2070,11 @@ public:
             if (req.RecordStatus() == RecordStatus::Normal)
             {
                 size_t offset = 0;
-#ifndef ON_KEY_OBJECT
-                cce->payload_ = std::make_shared<ValueT>();
-#else
-                assert(false);
-                cce->payload_ = std::make_unique<ValueT>();
-#endif
-                cce->payload_->Deserialize(req.rec_str_->data(), offset);
+                cce->payload_.DeserializeCurrentPayload(req.rec_str_->data(),
+                                                        offset);
             }
             cce->SetCommitTsPayloadStatus(req.CommitTs(), req.RecordStatus());
         }
-#ifndef ON_KEY_OBJECT
         else if (shard_->EnableMvcc() && cce->CommitTs() > req.CommitTs())
         {
             // Trying to insert the record to backfill into archives is needed,
@@ -2148,7 +2116,6 @@ public:
                 cce->AddArchiveRecords(archives);
             }
         }
-#endif
 
         req.Finish();
         return true;
@@ -2160,7 +2127,7 @@ public:
     }
 
     void AddScanTuple(const KeyT *key,
-                      CcEntry<KeyT, ValueT> *cce,
+                      CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                       TemplateScanCache<KeyT, ValueT> *typed_cache,
                       ScanType scan_type,
                       uint32_t ng_id,
@@ -2298,15 +2265,17 @@ public:
         }
 
         const KeyT *key_ptr = nullptr;
-        CcEntry<KeyT, ValueT> *cce_last = nullptr;
-        CcPage<KeyT, ValueT> *ccp_last = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce_last = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *ccp_last = nullptr;
 
         if (req.CcePtr() != nullptr)
         {
-            CcEntry<KeyT, ValueT> *cce =
-                static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                    req.CcePtr());
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(cce, ccp, &neg_inf_);
             key_ptr = scan_ccm_it->first;
@@ -2325,6 +2294,7 @@ public:
                 // Lock has been acquired, UpsertLockHoldingTx
                 auto lock_pair =
                     LockHandleForResumedRequest(cce,
+                                                cce->CommitTs(),
                                                 cce->PayloadStatus(),
                                                 &req,
                                                 ng_id,
@@ -2352,7 +2322,11 @@ public:
                          ng_term,
                          req.Txn(),
                          req.ReadTimestamp(),
-                         is_read_snapshot);
+                         is_read_snapshot,
+                         true,
+                         req.is_ckpt_delta_,
+                         req.is_require_keys_,
+                         req.is_require_recs_);
 
             cce_last = cce;
             ccp_last = ccp;
@@ -2370,24 +2344,23 @@ public:
 
             scan_ccm_it = start_pair.first;
             key_ptr = scan_ccm_it->first;
-            CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-            CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = scan_ccm_it->second;
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp = scan_ccm_it.GetPage();
             ScanType scan_type = start_pair.second;
 
             req.SetCcePtr(cce);
             req.SetCcePtrScanType(scan_type);
 
-#ifdef ON_KEY_OBJECT
             if (scan_type == ScanType::ScanGap ||
                 FilterRecord(key_ptr,
                              cce,
                              req.GetRedisObjectType(),
                              req.GetRedisScanPattern()))
             {
-#endif
                 if (scan_type != ScanType::ScanGap)
                 {
                     auto lock_pair = AcquireCceKeyLock(cce,
+                                                       cce->CommitTs(),
                                                        ccp,
                                                        cce->PayloadStatus(),
                                                        &req,
@@ -2435,12 +2408,14 @@ public:
                              ng_term,
                              req.Txn(),
                              req.ReadTimestamp(),
-                             is_read_snapshot);
+                             is_read_snapshot,
+                             true,
+                             req.is_ckpt_delta_,
+                             req.is_require_keys_,
+                             req.is_require_recs_);
                 cce_last = cce;
                 ccp_last = ccp;
-#ifdef ON_KEY_OBJECT
             }
-#endif
         }
 
         if (req.direct_ == ScanDirection::Forward)
@@ -2452,9 +2427,10 @@ public:
                  ++scan_ccm_it)
             {
                 key_ptr = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
-#ifdef ON_KEY_OBJECT
+                CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                    scan_ccm_it->second;
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
                 if (!FilterRecord(key_ptr,
                                   cce,
                                   req.GetRedisObjectType(),
@@ -2462,11 +2438,11 @@ public:
                 {
                     continue;
                 }
-#endif
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->CommitTs(),
                                                    ccp,
                                                    cce->PayloadStatus(),
                                                    &req,
@@ -2511,7 +2487,9 @@ public:
                              req.ReadTimestamp(),
                              is_read_snapshot,
                              true,
-                             req.is_ckpt_delta_);
+                             req.is_ckpt_delta_,
+                             req.is_require_keys_,
+                             req.is_require_recs_);
 
                 cce_last = cce;
                 ccp_last = ccp;
@@ -2526,9 +2504,10 @@ public:
                  --scan_ccm_it)
             {
                 key_ptr = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
-#ifdef ON_KEY_OBJECT
+                CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                    scan_ccm_it->second;
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
                 if (!FilterRecord(key_ptr,
                                   cce,
                                   req.GetRedisObjectType(),
@@ -2536,11 +2515,11 @@ public:
                 {
                     continue;
                 }
-#endif
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->CommitTs(),
                                                    ccp,
                                                    cce->PayloadStatus(),
                                                    &req,
@@ -2585,7 +2564,9 @@ public:
                              req.ReadTimestamp(),
                              is_read_snapshot,
                              true,
-                             req.is_ckpt_delta_);
+                             req.is_ckpt_delta_,
+                             req.is_require_keys_,
+                             req.is_require_recs_);
 
                 cce_last = cce;
                 ccp_last = ccp;
@@ -2677,15 +2658,17 @@ public:
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
         Iterator scan_ccm_it;
-        CcEntry<KeyT, ValueT> *prior_cce;
-        CcEntry<KeyT, ValueT> *cce_last = nullptr;
-        CcPage<KeyT, ValueT> *ccp_last = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *prior_cce;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce_last = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *ccp_last = nullptr;
 
         if (req.CcePtr() != nullptr)
         {
-            prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
+            prior_cce = static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                req.CcePtr());
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    prior_cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             const KeyT *prior_cce_key = scan_ccm_it->first;
@@ -2704,6 +2687,7 @@ public:
                 // Lock has been acquired, UpsertLockHoldingTx
                 auto lock_pair =
                     LockHandleForResumedRequest(prior_cce,
+                                                prior_cce->CommitTs(),
                                                 prior_cce->PayloadStatus(),
                                                 &req,
                                                 ng_id,
@@ -2733,17 +2717,21 @@ public:
                          req.ReadTimestamp(),
                          is_read_snapshot,
                          true,
-                         req.is_ckpt_delta_);
+                         req.is_ckpt_delta_,
+                         req.is_require_keys_,
+                         req.is_require_recs_);
 
             cce_last = prior_cce;
             ccp_last = ccp;
         }
         else
         {
-            prior_cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                typed_cache->Last()->cce_addr_.ExtractCce());
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
+            prior_cce =
+                reinterpret_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                    typed_cache->Last()->cce_addr_.ExtractCce());
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    prior_cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
 
@@ -2774,8 +2762,10 @@ public:
                  ++scan_ccm_it)
             {
                 const KeyT *key = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                    scan_ccm_it->second;
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
 
                 if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
@@ -2783,7 +2773,6 @@ public:
                     // checkpoint, skips those that have been checkpointed.
                     continue;
                 }
-#ifdef ON_KEY_OBJECT
                 if (!FilterRecord(key,
                                   cce,
                                   req.GetRedisObjectType(),
@@ -2791,12 +2780,12 @@ public:
                 {
                     continue;
                 }
-#endif
 
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->CommitTs(),
                                                    ccp,
                                                    cce->PayloadStatus(),
                                                    &req,
@@ -2842,7 +2831,9 @@ public:
                              req.ReadTimestamp(),
                              is_read_snapshot,
                              true,
-                             req.is_ckpt_delta_);
+                             req.is_ckpt_delta_,
+                             req.is_require_keys_,
+                             req.is_require_recs_);
 
                 cce_last = cce;
                 ccp_last = ccp;
@@ -2855,8 +2846,10 @@ public:
             for (; !typed_cache->Full(); --scan_ccm_it)
             {
                 const KeyT *key = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                    scan_ccm_it->second;
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
                 if (scan_ccm_it == neg_inf_it)
                 {
                     req.SetCcePtr(cce);
@@ -2873,12 +2866,13 @@ public:
                                  req.ReadTimestamp(),
                                  is_read_snapshot,
                                  true,
-                                 req.is_ckpt_delta_);
+                                 req.is_ckpt_delta_,
+                                 req.is_require_keys_,
+                                 req.is_require_recs_);
                     break;
                 }
                 else
                 {
-#ifdef ON_KEY_OBJECT
                     if (!FilterRecord(key,
                                       cce,
                                       req.GetRedisObjectType(),
@@ -2886,11 +2880,11 @@ public:
                     {
                         continue;
                     }
-#endif
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanBoth);
 
                     auto lock_pair = AcquireCceKeyLock(cce,
+                                                       cce->CommitTs(),
                                                        ccp,
                                                        cce->PayloadStatus(),
                                                        &req,
@@ -2935,7 +2929,9 @@ public:
                                  req.ReadTimestamp(),
                                  is_read_snapshot,
                                  true,
-                                 req.is_ckpt_delta_);
+                                 req.is_ckpt_delta_,
+                                 req.is_require_keys_,
+                                 req.is_require_recs_);
 
                     cce_last = cce;
                     ccp_last = ccp;
@@ -2970,7 +2966,7 @@ public:
     }
 
     void AddScanTupleMsg(const KeyT *key,
-                         CcEntry<KeyT, ValueT> *cce,
+                         CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                          RemoteScanCache *remote_cache,
                          ScanType scan_type,
                          int64_t ng_term,
@@ -2978,7 +2974,9 @@ public:
                          uint64_t read_ts,
                          bool is_read_snapshot,
                          bool keep_deleted = true,
-                         bool is_ckpt_delta = false)
+                         bool is_ckpt_delta = false,
+                         bool is_require_keys = true,
+                         bool is_require_recs = true)
     {
         assert(scan_type != ScanType::ScanUnknow);
 
@@ -3003,7 +3001,9 @@ public:
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
-                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
+                is_require_keys,
+                is_require_recs);
             break;
         case ScanType::ScanKey:
             ScanKey(
@@ -3016,7 +3016,9 @@ public:
                 read_ts,
                 is_read_snapshot,
                 keep_deleted,
-                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
+                is_require_keys,
+                is_require_recs);
             break;
         default:
             break;
@@ -3024,7 +3026,7 @@ public:
     }
 
     void AddScanTupleMsg(const KeyT *key,
-                         CcEntry<KeyT, ValueT> *cce,
+                         CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                          RemoteScanSliceCache *remote_cache,
                          ScanType scan_type,
                          int64_t ng_term,
@@ -3157,15 +3159,17 @@ public:
 
         Iterator scan_ccm_it;
         const KeyT *key_ptr = nullptr;
-        CcEntry<KeyT, ValueT> *cce_last = nullptr;
-        CcPage<KeyT, ValueT> *ccp_last = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce_last = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *ccp_last = nullptr;
 
         if (req.CcePtr(shard_->LocalCoreId()) != nullptr)
         {
-            CcEntry<KeyT, ValueT> *cce = static_cast<CcEntry<KeyT, ValueT> *>(
-                req.CcePtr(shard_->LocalCoreId()));
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                    req.CcePtr(shard_->LocalCoreId()));
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(cce, ccp, &neg_inf_);
             key_ptr = scan_ccm_it->first;
@@ -3184,6 +3188,7 @@ public:
                 // Lock has been acquired, UpsertLockHoldingTx
                 auto lock_pair =
                     LockHandleForResumedRequest(cce,
+                                                cce->CommitTs(),
                                                 cce->PayloadStatus(),
                                                 &req,
                                                 ng_id,
@@ -3211,7 +3216,10 @@ public:
                             req.Txn(),
                             req.ReadTimestamp(),
                             is_read_snapshot,
-                            req.is_ckpt_delta_);
+                            true,
+                            req.is_ckpt_delta_,
+                            req.is_require_keys_,
+                            req.is_require_recs_);
             cce_last = cce;
             ccp_last = ccp;
         }
@@ -3225,22 +3233,21 @@ public:
             scan_ccm_it = start_pair.first;
             ScanType scan_type = start_pair.second;
             key_ptr = scan_ccm_it->first;
-            CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-            CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = scan_ccm_it->second;
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp = scan_ccm_it.GetPage();
 
             req.SetCcePtr(cce, shard_->LocalCoreId());
             req.SetCcePtrScanType(scan_type, shard_->LocalCoreId());
 
-#ifdef ON_KEY_OBJECT
             if (FilterRecord(key_ptr,
                              cce,
                              req.GetRedisObjectType(),
                              req.GetRedisScanPattern()))
             {
-#endif
                 if (scan_type != ScanType::ScanGap)
                 {
                     auto lock_pair = AcquireCceKeyLock(cce,
+                                                       cce->CommitTs(),
                                                        ccp,
                                                        cce->PayloadStatus(),
                                                        &req,
@@ -3289,10 +3296,11 @@ public:
                                 req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
-                                req.is_ckpt_delta_);
-#ifdef ON_KEY_OBJECT
+                                true,
+                                req.is_ckpt_delta_,
+                                req.is_require_keys_,
+                                req.is_require_recs_);
             }
-#endif
             cce_last = cce;
             ccp_last = ccp;
         }
@@ -3307,14 +3315,15 @@ public:
                  ++scan_ccm_it)
             {
                 key_ptr = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                    scan_ccm_it->second;
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
 
                 if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
                     continue;
                 }
-#ifdef ON_KEY_OBJECT
                 if (!FilterRecord(key_ptr,
                                   cce,
                                   req.GetRedisObjectType(),
@@ -3322,12 +3331,12 @@ public:
                 {
                     continue;
                 }
-#endif
                 req.SetCcePtr(cce, shard_->LocalCoreId());
                 req.SetCcePtrScanType(ScanType::ScanBoth,
                                       shard_->LocalCoreId());
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->CommitTs(),
                                                    ccp,
                                                    cce->PayloadStatus(),
                                                    &req,
@@ -3363,7 +3372,6 @@ public:
                     return true;
                 }
                 }  //-- end: switch
-
                 AddScanTupleMsg(key_ptr,
                                 cce,
                                 &scan_cache,
@@ -3372,7 +3380,10 @@ public:
                                 req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
-                                req.is_ckpt_delta_);
+                                true,
+                                req.is_ckpt_delta_,
+                                req.is_require_keys_,
+                                req.is_require_recs_);
 
                 cce_last = cce;
                 ccp_last = ccp;
@@ -3388,14 +3399,15 @@ public:
                  --scan_ccm_it)
             {
                 key_ptr = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                    scan_ccm_it->second;
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
 
                 if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
                     continue;
                 }
-#ifdef ON_KEY_OBJECT
                 if (!FilterRecord(key_ptr,
                                   cce,
                                   req.GetRedisObjectType(),
@@ -3403,12 +3415,12 @@ public:
                 {
                     continue;
                 }
-#endif
                 req.SetCcePtr(cce, shard_->LocalCoreId());
                 req.SetCcePtrScanType(ScanType::ScanBoth,
                                       shard_->LocalCoreId());
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->CommitTs(),
                                                    ccp,
                                                    cce->PayloadStatus(),
                                                    &req,
@@ -3453,7 +3465,10 @@ public:
                                 req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
-                                req.is_ckpt_delta_);
+                                true,
+                                req.is_ckpt_delta_,
+                                req.is_require_keys_,
+                                req.is_require_recs_);
 
                 cce_last = cce;
                 ccp_last = ccp;
@@ -3529,16 +3544,18 @@ public:
 
         Iterator scan_ccm_it;
         ScanDirection direction = req.direct_;
-        CcEntry<KeyT, ValueT> *prior_cce = nullptr;
-        CcEntry<KeyT, ValueT> *cce_last = nullptr;
-        CcPage<KeyT, ValueT> *ccp_last = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *prior_cce = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce_last = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *ccp_last = nullptr;
 
         if (req.CcePtr() != nullptr)
         {
-            prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            prior_cce = static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                req.CcePtr());
             ScanType scan_type = req.CcePtrScanType();
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    prior_cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             const KeyT *prior_cce_key = scan_ccm_it->first;
@@ -3556,6 +3573,7 @@ public:
                 // Lock has been acquired, UpsertLockHoldingTx
                 auto lock_pair =
                     LockHandleForResumedRequest(prior_cce,
+                                                prior_cce->CommitTs(),
                                                 prior_cce->PayloadStatus(),
                                                 &req,
                                                 ng_id,
@@ -3583,16 +3601,21 @@ public:
                             req.Txn(),
                             req.ReadTimestamp(),
                             is_read_snapshot,
-                            req.is_ckpt_delta_);
+                            true,
+                            req.is_ckpt_delta_,
+                            req.is_require_keys_,
+                            req.is_require_recs_);
             cce_last = prior_cce;
             ccp_last = ccp;
         }
         else
         {
-            prior_cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                req.PriorCceAddr().ExtractCce());
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(prior_cce->GetCcPage());
+            prior_cce =
+                reinterpret_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                    req.PriorCceAddr().ExtractCce());
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    prior_cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
 
@@ -3619,15 +3642,16 @@ public:
                  ++scan_ccm_it)
             {
                 const KeyT *key = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                    scan_ccm_it->second;
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
 
                 if (req.is_ckpt_delta_ && cce->IsPersistent())
                 {
                     continue;
                 }
 
-#ifdef ON_KEY_OBJECT
                 if (!FilterRecord(key,
                                   cce,
                                   req.GetRedisObjectType(),
@@ -3635,11 +3659,11 @@ public:
                 {
                     continue;
                 }
-#endif
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->CommitTs(),
                                                    ccp,
                                                    cce->PayloadStatus(),
                                                    &req,
@@ -3684,7 +3708,10 @@ public:
                                 req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
-                                req.is_ckpt_delta_);
+                                true,
+                                req.is_ckpt_delta_,
+                                req.is_require_keys_,
+                                req.is_require_recs_);
 
                 cce_last = cce;
                 ccp_last = ccp;
@@ -3698,8 +3725,10 @@ public:
                  --scan_ccm_it)
             {
                 const KeyT *key = scan_ccm_it->first;
-                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                    scan_ccm_it->second;
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
 
                 if (scan_ccm_it == neg_inf_it)
                 {
@@ -3715,13 +3744,15 @@ public:
                                     req.Txn(),
                                     req.ReadTimestamp(),
                                     is_read_snapshot,
-                                    req.is_ckpt_delta_);
+                                    true,
+                                    req.is_ckpt_delta_,
+                                    req.is_require_keys_,
+                                    req.is_require_recs_);
                     cce_last = cce;
                     break;
                 }
                 else
                 {
-#ifdef ON_KEY_OBJECT
                     if (!FilterRecord(key,
                                       cce,
                                       req.GetRedisObjectType(),
@@ -3729,11 +3760,11 @@ public:
                     {
                         continue;
                     }
-#endif
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanBoth);
 
                     auto lock_pair = AcquireCceKeyLock(cce,
+                                                       cce->CommitTs(),
                                                        ccp,
                                                        cce->PayloadStatus(),
                                                        &req,
@@ -3777,7 +3808,10 @@ public:
                                     req.Txn(),
                                     req.ReadTimestamp(),
                                     is_read_snapshot,
-                                    req.is_ckpt_delta_);
+                                    true,
+                                    req.is_ckpt_delta_,
+                                    req.is_require_keys_,
+                                    req.is_require_recs_);
 
                     cce_last = cce;
                     ccp_last = ccp;
@@ -3921,14 +3955,15 @@ public:
                                  : remote_scan_cache->IsFull();
         };
 
-        auto last_cce_of_cache =
-            [&req, scan_cache, remote_scan_cache]() -> CcEntry<KeyT, ValueT> *
+        auto last_cce_of_cache = [&req, scan_cache, remote_scan_cache]()
+            -> CcEntry<KeyT, ValueT, VersionedRecord> *
         {
             if (req.IsLocal())
             {
                 if (scan_cache->Last())
                 {
-                    return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                    return reinterpret_cast<
+                        CcEntry<KeyT, ValueT, VersionedRecord> *>(
                         scan_cache->Last()->cce_ptr_);
                 }
                 else
@@ -3940,7 +3975,8 @@ public:
             {
                 if (remote_scan_cache->Size() > 0)
                 {
-                    return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                    return reinterpret_cast<
+                        CcEntry<KeyT, ValueT, VersionedRecord> *>(
                         remote_scan_cache->LastCce());
                 }
                 else
@@ -4033,7 +4069,7 @@ public:
 
         Iterator scan_ccm_it;
         const KeyT *cce_key = nullptr;
-        CcEntry<KeyT, ValueT> *cce = nullptr;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce = nullptr;
         uint32_t ng_id = req.NodeGroupId();
         int64_t tx_term = req.TxTerm();
 
@@ -4048,8 +4084,8 @@ public:
         auto scan_tuple_func =
             [&, this](
                 const KeyT *cce_key,
-                CcEntry<KeyT, ValueT> *cce,
-                CcPage<KeyT, ValueT> *ccp,
+                CcEntry<KeyT, ValueT, VersionedRecord> *cce,
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp,
                 ScanType scan_type) -> std::pair<ScanReturnType, CcErrorCode>
         {
             bool is_locked = false;
@@ -4058,6 +4094,7 @@ public:
                 req.Isolation() == IsolationLevel::Snapshot)
             {
                 auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->CommitTs(),
                                                    ccp,
                                                    cce->PayloadStatus(),
                                                    &req,
@@ -4144,14 +4181,16 @@ public:
             KeyGapLockAndExtraData *lock =
                 reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
             assert(lock != nullptr && lock->GetCcEntry() != nullptr);
-            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(lock->GetCcEntry());
+            cce = reinterpret_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
+                lock->GetCcEntry());
         }
 
         if (cce != nullptr)
         {
             auto [blocking_type, scan_type] = req.BlockingPair(core_id);
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    cce->GetCcPage());
             assert(ccp != nullptr);
             scan_ccm_it = Iterator(cce, ccp, &neg_inf_);
             cce_key = scan_ccm_it->first;
@@ -4190,6 +4229,7 @@ public:
                     // lock holding tx collection in this shard.
                     auto lock_pair =
                         LockHandleForResumedRequest(cce,
+                                                    cce->CommitTs(),
                                                     cce->PayloadStatus(),
                                                     &req,
                                                     ng_id,
@@ -4371,7 +4411,7 @@ public:
 
             auto scan_batch_func =
                 [&scan_tuple_func](
-                    CcPage<KeyT, ValueT> *ccp,
+                    CcPage<KeyT, ValueT, VersionedRecord> *ccp,
                     size_t start_idx,
                     size_t end_idx) -> std::pair<ScanReturnType, CcErrorCode>
             {
@@ -4380,7 +4420,8 @@ public:
                 for (size_t idx = start_idx; idx < end_idx; ++idx)
                 {
                     const KeyT &key = ccp->keys_[idx];
-                    CcEntry<KeyT, ValueT> *cce = ccp->entries_[idx].get();
+                    CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                        ccp->entries_[idx].get();
                     std::tie(scan_ret, err_code) =
                         scan_tuple_func(&key, cce, ccp, ScanType::ScanBoth);
                     if (scan_ret != ScanReturnType::Success)
@@ -4401,7 +4442,8 @@ public:
                 ScanReturnType scan_ret = ScanReturnType::Success;
                 CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
                 size_t idx_in_page = scan_ccm_it.GetIdxInPage();
 
                 if (ccp == &pos_inf_page_)
@@ -4584,8 +4626,9 @@ public:
                             // in scan cache is invalid, so, should use the cce,
                             // which is valid in any situation, to get the
                             // corresponding key.
-                            CcEntry<KeyT, ValueT> *last_cce =
-                                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                            CcEntry<KeyT, ValueT, VersionedRecord> *last_cce =
+                                reinterpret_cast<
+                                    CcEntry<KeyT, ValueT, VersionedRecord> *>(
                                     scan_cache->Last()->cce_ptr_);
                             while (scan_ccm_it->second != last_cce)
                             {
@@ -4618,8 +4661,9 @@ public:
                             // the slices are still pinned so the cce cannot
                             // be kicked from memory regardless of the lock
                             // type.
-                            CcEntry<KeyT, ValueT> *last_remote_cce =
-                                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                            CcEntry<KeyT, ValueT, VersionedRecord>
+                                *last_remote_cce = reinterpret_cast<
+                                    CcEntry<KeyT, ValueT, VersionedRecord> *>(
                                     remote_scan_cache->LastCce());
                             while (scan_ccm_it->second != last_remote_cce)
                             {
@@ -4680,7 +4724,9 @@ public:
 
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
-            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
+            if (CcEntry<KeyT, ValueT, VersionedRecord> *last_cce =
+                    last_cce_of_cache();
+                last_cce)
             {
                 while (scan_ccm_it->second != last_cce)
                 {
@@ -4748,7 +4794,7 @@ public:
 
             auto scan_batch_func =
                 [&scan_tuple_func](
-                    CcPage<KeyT, ValueT> *ccp,
+                    CcPage<KeyT, ValueT, VersionedRecord> *ccp,
                     ssize_t start_idx,
                     ssize_t end_idx) -> std::pair<ScanReturnType, CcErrorCode>
             {
@@ -4757,7 +4803,8 @@ public:
                 for (ssize_t idx = start_idx; idx > end_idx; --idx)
                 {
                     const KeyT &key = ccp->keys_[idx];
-                    CcEntry<KeyT, ValueT> *cce = ccp->entries_[idx].get();
+                    CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+                        ccp->entries_[idx].get();
                     std::tie(scan_ret, err_code) =
                         scan_tuple_func(&key, cce, ccp, ScanType::ScanBoth);
                     if (scan_ret != ScanReturnType::Success)
@@ -4778,7 +4825,8 @@ public:
                 ScanReturnType scan_ret = ScanReturnType::Success;
                 CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
-                CcPage<KeyT, ValueT> *ccp = scan_ccm_it.GetPage();
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                    scan_ccm_it.GetPage();
                 ssize_t idx_in_page = scan_ccm_it.GetIdxInPage();
 
                 if (ccp == &neg_inf_page_)
@@ -4967,8 +5015,9 @@ public:
                             // in scan cache is invalid, so, should use the cce,
                             // which is valid in any situation, to get the
                             // corresponding key.
-                            CcEntry<KeyT, ValueT> *last_cce =
-                                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                            CcEntry<KeyT, ValueT, VersionedRecord> *last_cce =
+                                reinterpret_cast<
+                                    CcEntry<KeyT, ValueT, VersionedRecord> *>(
                                     scan_cache->Last()->cce_ptr_);
                             while (scan_ccm_it->second != last_cce)
                             {
@@ -5001,8 +5050,9 @@ public:
                             // the slices are still pinned so the cce cannot
                             // be kicked from memory regardless of the lock
                             // type.
-                            CcEntry<KeyT, ValueT> *last_remote_cce =
-                                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                            CcEntry<KeyT, ValueT, VersionedRecord>
+                                *last_remote_cce = reinterpret_cast<
+                                    CcEntry<KeyT, ValueT, VersionedRecord> *>(
                                     remote_scan_cache->LastCce());
                             while (scan_ccm_it->second != last_remote_cce)
                             {
@@ -5063,7 +5113,9 @@ public:
 
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
-            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
+            if (CcEntry<KeyT, ValueT, VersionedRecord> *last_cce =
+                    last_cce_of_cache();
+                last_cce)
             {
                 while (scan_ccm_it->second != last_cce)
                 {
@@ -5078,9 +5130,12 @@ public:
             // acquires the read intent on the last scanned key to prevent
             // if from kicking out. The next scan batch will resume from the
             // last key without searching the cc map.
-            if (CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache(); last_cce)
+            if (CcEntry<KeyT, ValueT, VersionedRecord> *last_cce =
+                    last_cce_of_cache();
+                last_cce)
             {
-                CcPage<KeyT, ValueT> *last_ccp = scan_ccm_it.GetPage();
+                CcPage<KeyT, ValueT, VersionedRecord> *last_ccp =
+                    scan_ccm_it.GetPage();
                 bool add_intent =
                     last_cce->GetOrCreateKeyLock(shard_, this, last_ccp)
                         .AcquireReadIntent(req.Txn());
@@ -5159,7 +5214,7 @@ public:
      *
      */
     inline std::pair<size_t, bool> ExportForCkpt(
-        CcEntry<KeyT, ValueT> *cce,
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce,
         const KeyT &key,
         std::vector<FlushRecord> &ckpt_vec,
         std::vector<FlushRecord> &akv_vec,
@@ -5170,9 +5225,7 @@ public:
         size_t &ckpt_vec_size,
         bool export_base_table_item_if_need,
         bool export_base_table_item_only,
-#ifdef RANGE_PARTITION_ENABLED
         bool export_base_table_key_only,
-#endif
         uint64_t &mem_usage) const
     {
         // This override heap thread call is not necessary, since the thread is
@@ -5201,9 +5254,7 @@ public:
                                    ckpt_vec_size,
                                    export_base_table_item_if_need,
                                    export_base_table_item_only,
-#ifdef RANGE_PARTITION_ENABLED
                                    export_base_table_key_only,
-#endif
                                    mem_usage);
             export_size.second = false;
         }
@@ -5619,7 +5670,7 @@ public:
              ++scan_cnt)
         {
             const KeyT *key = key_it->first;
-            CcEntry<KeyT, ValueT> *cce = key_it->second;
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = key_it->second;
 
             if (shard_->EnableMvcc() && !req.export_base_table_item_only_)
             {
@@ -5629,16 +5680,16 @@ public:
             // Check whether need export this ccentry and fix the data store
             // size.
             bool need_export = slice_pinned || cce->NeedCkpt();
-            if (cce->data_store_size_ == INT32_MAX && slice_pinned)
+            if (cce->entry_info_.data_store_size_ == INT32_MAX && slice_pinned)
             {
                 // Update unknown data store size since slice is already pinned
-                cce->data_store_size_ = 0;
+                cce->entry_info_.data_store_size_ = 0;
             }
 
             // Export this item if need
             if (need_export)
             {
-                assert(cce->data_store_size_ != INT32_MAX);
+                assert(cce->entry_info_.data_store_size_ != INT32_MAX);
                 uint64_t mem_usage = 0;
                 ExportForCkpt(cce,
                               *key,
@@ -5815,15 +5866,15 @@ public:
         }
         else
         {
-            CcEntry<KeyT, ValueT> *pause_entry =
-                static_cast<CcEntry<KeyT, ValueT> *>(
+            CcEntry<KeyT, ValueT, VersionedRecord> *pause_entry =
+                static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
                     pause_pos_and_is_drained.first);
-            CcPage<KeyT, ValueT> *ccp =
-                static_cast<CcPage<KeyT, ValueT> *>(pause_entry->GetCcPage());
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                    pause_entry->GetCcPage());
             if (ccp == nullptr)
             {
-                // the pause_entry may be kicked (moved to
-                // ccshard::invalid_cces_) by other operation such as
+                // the pause_entry may be kicked by other operation such as
                 // KickoutBucketData.
                 req.SetError(CcErrorCode::TASK_EXPIRED);
                 return false;
@@ -5857,7 +5908,8 @@ public:
         Iterator end_it_next_page_it = end_it;
         if (end_it_next_page_it != End())
         {
-            CcPage<KeyT, ValueT> *ccp = end_it_next_page_it.GetPage();
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+                end_it_next_page_it.GetPage();
             assert(ccp != nullptr);
             if (ccp->next_page_ == PagePosInf())
             {
@@ -5881,9 +5933,7 @@ public:
         //
         // indicate if export cce failed due to oom
         bool is_scan_mem_full = false;
-#ifdef ON_KEY_OBJECT
         bool replay_cmds_notnull = false;
-#endif
 
         size_t export_data_cnt = 0;
         auto l_start = std::chrono::high_resolution_clock::now();
@@ -5906,8 +5956,8 @@ public:
             }
 
             const KeyT *key = it->first;
-            CcEntry<KeyT, ValueT> *cce = it->second;
-            CcPage<KeyT, ValueT> *ccp = it.GetPage();
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = it->second;
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp = it.GetPage();
             assert(ccp);
 
             if (ccp->last_dirty_commit_ts_ <= req.previous_ckpt_ts_ &&
@@ -5926,103 +5976,15 @@ public:
                 continue;
             }
 
-#ifndef ON_KEY_OBJECT
-            if (shard_->EnableMvcc())
+            if (VersionedRecord)
             {
-                cce->KickOutArchiveRecords(recycle_ts);
-            }
-
-            if ((!req.filter_lambda_ || req.filter_lambda_(key->Hash())) &&
-                (cce->NeedCkpt() || req.include_persisted_data_))
-            {
-                uint64_t mem_usage = 0;
-                auto export_result =
-                    ExportForCkpt(cce,
-                                  *key,
-                                  req.DataSyncVec(vec_idx),
-                                  req.ArchiveVec(vec_idx),
-                                  req.MoveBaseIdxVec(vec_idx),
-                                  req.data_sync_ts_,
-                                  recycle_ts,
-                                  shard_->EnableMvcc(),
-                                  req.accumulated_scan_cnt_[vec_idx],
-                                  req.include_persisted_data_,
-                                  false,
-                                  mem_usage);
-                req.accumulated_mem_usage_[vec_idx] += mem_usage;
-
-                if (export_result.second)
+                if (shard_->EnableMvcc())
                 {
-                    is_scan_mem_full = true;
-                    break;
+                    cce->KickOutArchiveRecords(recycle_ts);
                 }
-            }
-#else
-            uint64_t key_hash = key->Hash();
-            if (!req.filter_lambda_ || req.filter_lambda_(key_hash))
-            {
-                if (cce->HasBufferedCommandList())
-                {
-                    BufferedTxnCmdList &buffered_cmds =
-                        cce->BufferedCommandList();
-                    if (buffered_cmds.txn_cmd_list_.back().new_version_ >
-                        req.data_sync_ts_)
-                    {
-                        // Forward iterator
-                        it++;
-                        continue;
-                    }
 
-                    // The fetch record may failed when the
-                    // cce is touch at 1st place, so the record status can be
-                    // Unknown. If the data is owned by this ng, fetch the
-                    // record, otherwise only skip this record for now and don't
-                    // truncate redo log.
-                    if (cce->PayloadStatus() == RecordStatus::Unknown)
-                    {
-                        uint16_t bucket_id =
-                            Sharder::Instance().MapKeyHashToBucketId(key_hash);
-                        if (shard_->GetBucketOwner(bucket_id, cc_ng_id_) ==
-                                cc_ng_id_ &&
-                            current_term > 0)
-                        {
-                            TxKey tx_key(key);
-                            shard_->FetchRecord(table_name_,
-                                                table_schema_,
-                                                TxKey(key),
-                                                cce,
-                                                this,
-                                                cc_ng_id_,
-                                                ng_term,
-                                                nullptr);
-                        }
-                        replay_cmds_notnull = true;
-                    }
-                    // If record expired in KV, it is possible the the cce reply
-                    // list is not empty due to version mismatch
-                    else if (cce->PayloadStatus() == RecordStatus::Deleted &&
-                             cce->CommitTs() == 1)
-                    {
-                        BufferedTxnCmdList &buffered_cmd_list =
-                            cce->BufferedCommandList();
-                        int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
-                        buffered_cmd_list.Clear();
-                        shard_->UpdateBufferedCommandCnt(-buffered_cmd_cnt_old);
-                        cce->RecycleKeyLock(*shard_);
-                    }
-                    else
-                    {
-                        LOG(ERROR)
-                            << "ERROR! The data log all processed, but there "
-                               "are still some commands in buffered cmd list.\n"
-                            << "cce payload status: "
-                            << int(cce->PayloadStatus())
-                            << ", cce CommitTs: " << cce->CommitTs() << "\n"
-                            << buffered_cmds;
-                        assert(false);
-                    }
-                }
-                else if (cce->NeedCkpt())
+                if ((!req.filter_lambda_ || req.filter_lambda_(key->Hash())) &&
+                    (cce->NeedCkpt() || req.include_persisted_data_))
                 {
                     uint64_t mem_usage = 0;
                     auto export_result =
@@ -6035,31 +5997,132 @@ public:
                                       recycle_ts,
                                       shard_->EnableMvcc(),
                                       req.accumulated_scan_cnt_[vec_idx],
+                                      req.include_persisted_data_,
                                       false,
                                       false,
                                       mem_usage);
                     req.accumulated_mem_usage_[vec_idx] += mem_usage;
+
                     if (export_result.second)
                     {
                         is_scan_mem_full = true;
                         break;
                     }
-
-                    export_data_cnt++;
                 }
             }
-#endif
+            else
+            {
+                uint64_t key_hash = key->Hash();
+                if (!req.filter_lambda_ || req.filter_lambda_(key_hash))
+                {
+                    if (cce->HasBufferedCommandList())
+                    {
+                        BufferedTxnCmdList &buffered_cmds =
+                            cce->BufferedCommandList();
+                        if (buffered_cmds.txn_cmd_list_.back().new_version_ >
+                            req.data_sync_ts_)
+                        {
+                            // Forward iterator
+                            it++;
+                            continue;
+                        }
+
+                        // The fetch record may failed when the
+                        // cce is touch at 1st place, so the record status can
+                        // be Unknown. If the data is owned by this ng, fetch
+                        // the record, otherwise only skip this record for now
+                        // and don't truncate redo log.
+                        if (cce->PayloadStatus() == RecordStatus::Unknown)
+                        {
+                            uint16_t bucket_id =
+                                Sharder::Instance().MapKeyHashToBucketId(
+                                    key_hash);
+                            if (shard_->GetBucketOwner(bucket_id, cc_ng_id_) ==
+                                    cc_ng_id_ &&
+                                current_term > 0)
+                            {
+                                cce->GetOrCreateKeyLock(shard_, this, ccp)
+                                    .AcquireReadIntent(
+                                        FetchRecordCc::GetFetchRecordTxNumber(
+                                            cc_ng_id_));
+                                TxKey tx_key(key);
+                                shard_->FetchRecord(table_name_,
+                                                    table_schema_,
+                                                    TxKey(key),
+                                                    cce,
+                                                    cc_ng_id_,
+                                                    ng_term,
+                                                    nullptr);
+                            }
+                            replay_cmds_notnull = true;
+                        }
+                        // If record expired in KV, it is possible the the cce
+                        // reply list is not empty due to version mismatch
+                        else if (cce->PayloadStatus() ==
+                                     RecordStatus::Deleted &&
+                                 cce->CommitTs() == 1)
+                        {
+                            BufferedTxnCmdList &buffered_cmd_list =
+                                cce->BufferedCommandList();
+                            int64_t buffered_cmd_cnt_old =
+                                buffered_cmd_list.Size();
+                            buffered_cmd_list.Clear();
+                            shard_->UpdateBufferedCommandCnt(
+                                -buffered_cmd_cnt_old);
+                            cce->RecycleKeyLock(*shard_);
+                        }
+                        else
+                        {
+                            LOG(ERROR)
+                                << "ERROR! The data log all processed, but "
+                                   "there "
+                                   "are still some commands in buffered cmd "
+                                   "list.\n"
+                                << "cce payload status: "
+                                << int(cce->PayloadStatus())
+                                << ", cce CommitTs: " << cce->CommitTs() << "\n"
+                                << buffered_cmds;
+                            assert(false);
+                        }
+                    }
+                    else if (cce->NeedCkpt())
+                    {
+                        uint64_t mem_usage = 0;
+                        auto export_result =
+                            ExportForCkpt(cce,
+                                          *key,
+                                          req.DataSyncVec(vec_idx),
+                                          req.ArchiveVec(vec_idx),
+                                          req.MoveBaseIdxVec(vec_idx),
+                                          req.data_sync_ts_,
+                                          recycle_ts,
+                                          shard_->EnableMvcc(),
+                                          req.accumulated_scan_cnt_[vec_idx],
+                                          false,
+                                          false,
+                                          false,
+                                          mem_usage);
+                        req.accumulated_mem_usage_[vec_idx] += mem_usage;
+                        if (export_result.second)
+                        {
+                            is_scan_mem_full = true;
+                            break;
+                        }
+
+                        export_data_cnt++;
+                    }
+                }
+            }
 
             // Forward iterator
             it++;
         }
 
-#ifdef ON_KEY_OBJECT
         if (replay_cmds_notnull)
         {
+            assert(!VersionedRecord);
             req.SetNotTruncateLog();
         }
-#endif
 
         bool no_more_data = (it == end_it) || (it == end_it_next_page_it);
 
@@ -6174,8 +6237,8 @@ public:
                     KeyT key_clone = key;
 
                     // move out data from the old page,
-                    std::unique_ptr<CcPage<KeyT, ValueT>> old_cc_page_uptr =
-                        std::move(it->second);
+                    std::unique_ptr<CcPage<KeyT, ValueT, VersionedRecord>>
+                        old_cc_page_uptr = std::move(it->second);
                     // remove the old cc page entry
                     it = ccmp_.erase(it);
 
@@ -6193,7 +6256,8 @@ public:
                         it = ccmp_.try_emplace(
                             it,
                             key_clone,
-                            std::make_unique<CcPage<KeyT, ValueT>>(
+                            std::make_unique<
+                                CcPage<KeyT, ValueT, VersionedRecord>>(
                                 this,
                                 std::move(old_cc_page_uptr->keys_),
                                 std::move(old_cc_page_uptr->entries_),
@@ -6318,7 +6382,8 @@ public:
                         heap, current_page->entries_.data());
                     if (entries_utilization < 0.8)
                     {
-                        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
+                        std::vector<std::unique_ptr<
+                            CcEntry<KeyT, ValueT, VersionedRecord>>>
                             new_entries;
                         new_entries.reserve(current_page->entries_.capacity());
                         for (auto &entry : current_page->entries_)
@@ -6593,7 +6658,8 @@ public:
                    *iter->first < *slice_end_key && n < scan_batch_keys)
             {
                 const KeyT &key = *iter->first;
-                const CcEntry<KeyT, ValueT> &cc_entry = *iter->second;
+                const CcEntry<KeyT, ValueT, VersionedRecord> &cc_entry =
+                    *iter->second;
 
                 if (cc_entry.PayloadStatus() == RecordStatus::Normal &&
                     key.Type() == KeyType::Normal)
@@ -6803,8 +6869,8 @@ public:
             }
 
             Iterator it = FindEmplace(key);
-            CcEntry<KeyT, ValueT> *cce = it->second;
-            CcPage<KeyT, ValueT> *ccp = it.GetPage();
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = it->second;
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp = it.GetPage();
 
             if (cce == nullptr)
             {
@@ -6825,7 +6891,7 @@ public:
                 // the next key in the log record.
                 if (shard_->EnableMvcc())
                 {
-#ifndef ON_KEY_OBJECT
+                    assert(VersionedRecord);
                     auto rec_ptr = std::make_unique<ValueT>();
                     RecordStatus rec_status = RecordStatus::Normal;
                     if (op_type == OperationType::Insert ||
@@ -6839,7 +6905,6 @@ public:
                     }
                     cce->AddArchiveRecord(
                         std::move(rec_ptr), rec_status, req.CommitTs());
-#endif
                 }
                 else if (op_type == OperationType::Insert ||
                          op_type == OperationType::Update)
@@ -6849,33 +6914,23 @@ public:
             }
             else
             {
-#ifndef ON_KEY_OBJECT
-                if (shard_->EnableMvcc())
+                if (VersionedRecord && shard_->EnableMvcc())
                 {
                     cce->ArchiveBeforeUpdate();
                 }
-#endif
                 RecordStatus rec_status;
                 if (op_type == OperationType::Insert ||
                     op_type == OperationType::Update)
                 {
-#ifndef ON_KEY_OBJECT
-                    if (cce->payload_.use_count() != 1)
-                    {
-                        cce->payload_ = std::make_shared<ValueT>();
-                    }
-#else
-                    assert(false);
-                    cce->payload_ = std::make_unique<ValueT>();
-#endif
-                    cce->payload_->Deserialize(log_blob.data(), offset);
+                    cce->payload_.DeserializeCurrentPayload(log_blob.data(),
+                                                            offset);
                     rec_status = RecordStatus::Normal;
                 }
                 else
                 {
                     if (Type() != TableType::Secondary)
                     {
-                        cce->payload_ = nullptr;
+                        cce->payload_.SetCurrentPayload(nullptr);
                     }
                     rec_status = RecordStatus::Deleted;
                 }
@@ -6949,7 +7004,7 @@ public:
             const KeyT &key = *typed_key_ptr;
             Iterator it = Find(key);
             const KeyT *cce_key = it->first;
-            CcEntry<KeyT, ValueT> *cce = it->second;
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = it->second;
 
             if (cce != nullptr)
             {
@@ -6974,9 +7029,7 @@ public:
                                   tmp_ckpt_vec_size,
                                   false,
                                   false,
-#ifdef RANGE_PARTITION_ENABLED
                                   false,
-#endif
                                   mem_usage);
 
                     assert(tmp_ckpt_vec_size <= 1);
@@ -7007,9 +7060,7 @@ public:
                 }
                 if (only_archives)
                 {
-#ifndef ON_KEY_OBJECT
                     cce->ClearArchives();
-#endif
                 }
                 else
                 {
@@ -7117,7 +7168,9 @@ public:
                                   map_it != map_end_it;
              map_it++, scan_cnt++)
         {
-            LruEntry *entry = map_it->second;
+            VersionedLruEntry<VersionedRecord> *entry =
+                static_cast<VersionedLruEntry<VersionedRecord> *>(
+                    map_it->second);
             if (entry->PayloadStatus() == RecordStatus::Unknown)
             {
                 // key cache only contains keys that are inserted to ccm. entry
@@ -7245,8 +7298,8 @@ public:
             }
         }
 
-        CcPage<KeyT, ValueT> *ccp =
-            static_cast<CcPage<KeyT, ValueT> *>(lru_page);
+        CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+            static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(lru_page);
 
         auto l_start = std::chrono::high_resolution_clock::now();
 
@@ -7280,7 +7333,8 @@ public:
             auto [freed_cnt, next_page] =
                 CleanPageAndReBalance(ccp, &req, &is_success);
             // Move to next page
-            ccp = static_cast<CcPage<KeyT, ValueT> *>(next_page);
+            ccp =
+                static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(next_page);
             if (!is_success &&
                 req.GetCleanType() != CleanType::CleanDeletedData)
             {
@@ -7388,7 +7442,7 @@ public:
              ++scan_cnt)
         {
             const KeyT *cce_key = key_it->first;
-            CcEntry<KeyT, ValueT> *cce = key_it->second;
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = key_it->second;
             if (cce->PayloadStatus() != RecordStatus::Unknown)
             {
                 assert(cce->PayloadStatus() == RecordStatus::Normal ||
@@ -7456,9 +7510,9 @@ public:
         size_t hash = 0;
 
         Iterator it;
-        CcEntry<KeyT, ValueT> *cce;
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce;
         const KeyT *write_key = nullptr;
-        CcPage<KeyT, ValueT> *cc_page = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *cc_page = nullptr;
         size_t key_idx = 0;
         size_t next_key_offset = 0;
         size_t next_rec_offset = 0;
@@ -7571,39 +7625,28 @@ public:
             // unpack info will not be used for deleted key, we must not
             // change the payload of secondary key ccentry if it is not
             // null.
-            if (Type() != TableType::Secondary || cce->payload_ == nullptr)
+            if (Type() != TableType::Secondary ||
+                cce->payload_.cur_payload_ == nullptr)
             {
                 if (rec_status == RecordStatus::Normal)
                 {
-#ifndef ON_KEY_OBJECT
-                    if (cce->payload_.use_count() == 1)
-                    {
-                        *(cce->payload_) = *commit_val;
-                    }
-                    else
-                    {
-                        cce->payload_ = std::make_shared<ValueT>(*commit_val);
-                    }
-#else
-                    cce->payload_ = std::make_unique<ValueT>(*commit_val);
-                    assert(false);
-#endif
+                    cce->payload_.SetCurrentPayload(commit_val);
                 }
                 else
                 {
-                    cce->payload_ = nullptr;
+                    cce->payload_.SetCurrentPayload(nullptr);
                 }
             }
 
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
             if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
-#ifndef ON_KEY_OBJECT
+#ifdef RANGE_PARTITION_ENABLED
                 uint32_t rec_store_size =
                     rec_status == RecordStatus::Deleted
                         ? 0
                         : write_key->Size() + commit_val->Size();
-                cce->data_store_size_ = rec_store_size;
+                cce->entry_info_.data_store_size_ = rec_store_size;
 #endif
                 cce->SetCkptTs(commit_ts);
             }
@@ -7791,15 +7834,14 @@ public:
         uint64_t now_ts = shard_->Now();
         while (it != end_it)
         {
-            CcEntry<KeyT, ValueT> *cce = it->second;
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = it->second;
             if (txservice_skip_wal)
             {
                 // If wal log is disabled, we need to flush all in memory cache
                 // to overwrite potential newer version in kv.
                 RecordStatus status = cce->PayloadStatus();
                 cce->SetCommitTsPayloadStatus(now_ts, status);
-#ifdef ON_KEY_OBJECT
-                if (cce->HasBufferedCommandList())
+                if (!VersionedRecord && cce->HasBufferedCommandList())
                 {
                     BufferedTxnCmdList &buffered_cmds =
                         cce->BufferedCommandList();
@@ -7807,7 +7849,6 @@ public:
                     buffered_cmds.Clear();
                     shard_->UpdateBufferedCommandCnt(0 - buffered_cmd_cnt_old);
                 }
-#endif
             }
             else
             {
@@ -7870,7 +7911,7 @@ public:
             Iterator it = end_it;
             if (it != End())
             {
-                CcPage<KeyT, ValueT> *ccp = it.GetPage();
+                CcPage<KeyT, ValueT, VersionedRecord> *ccp = it.GetPage();
                 assert(ccp != nullptr);
                 if (ccp->next_page_ == PagePosInf())
                 {
@@ -7936,8 +7977,8 @@ public:
              ++scan_cnt)
         {
             const KeyT *key = key_it->first;
-            CcEntry<KeyT, ValueT> *cce = key_it->second;
-            CcPage<KeyT, ValueT> *ccp = key_it.GetPage();
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = key_it->second;
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp = key_it.GetPage();
             assert(ccp);
 
             if (ccp->last_dirty_commit_ts_ <= req.LastDataSyncTs())
@@ -8012,13 +8053,14 @@ public:
                 }
 
                 bool need_export = true;
-                if (cce->data_store_size_ == INT32_MAX && !check_key_version)
+                if (cce->entry_info_.data_store_size_ == INT32_MAX &&
+                    !check_key_version)
                 {
                     assert(cce->CkptTs() == 0);
-                    cce->data_store_size_ = 0;
+                    cce->entry_info_.data_store_size_ = 0;
                     cce->SetCkptTs(1U);
                 }
-                else if (cce->data_store_size_ == INT32_MAX)
+                else if (cce->entry_info_.data_store_size_ == INT32_MAX)
                 {
                     // Load data store size by pinning the slice. Data store
                     // size is required to decide slice & range update plan.
@@ -8042,12 +8084,12 @@ public:
                     {
                     case RangeSliceOpStatus::Successful:
                     {
-                        if (cce->data_store_size_ == INT32_MAX)
+                        if (cce->entry_info_.data_store_size_ == INT32_MAX)
                         {
                             // If data store size is still unavailable after the
                             // slice is loaded from data store, that means this
                             // entry does not exist in data store.
-                            cce->data_store_size_ = 0;
+                            cce->entry_info_.data_store_size_ = 0;
                         }
                         if (cce->CkptTs() == 0)
                         {
@@ -8123,13 +8165,13 @@ public:
                     }
 
                     // Export the delta size of this cce.
-                    assert(cce->data_store_size_ != INT32_MAX &&
+                    assert(cce->entry_info_.data_store_size_ != INT32_MAX &&
                            curr_slice_delta_size);
                     *curr_slice_delta_size +=
                         (cce->PayloadStatus() != RecordStatus::Deleted
                              ? (key->Size() + cce->PayloadSize() -
-                                cce->data_store_size_)
-                             : (-cce->data_store_size_));
+                                cce->entry_info_.data_store_size_)
+                             : (-cce->entry_info_.data_store_size_));
                 }
             }
 
@@ -8228,7 +8270,7 @@ public:
              ++scan_cnt)
         {
             const KeyT *key = it->first;
-            const CcEntry<KeyT, ValueT> *cce = it->second;
+            const CcEntry<KeyT, ValueT, VersionedRecord> *cce = it->second;
             assert(key);
 
             // sample keys
@@ -8310,17 +8352,19 @@ public:
 
     void CleanEntry(LruEntry *entry, LruPage *page) override
     {
-        assert(entry->IsFree());
-        CcPage<KeyT, ValueT> *ccpage =
-            static_cast<CcPage<KeyT, ValueT> *>(page);
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+            static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(entry);
+        assert(cce->IsFree());
+        CcPage<KeyT, ValueT, VersionedRecord> *ccpage =
+            static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(page);
         auto page_it = ccmp_.end();
-        if (ccpage->Entry(0) == static_cast<CcEntry<KeyT, ValueT> *>(entry))
+        if (ccpage->Entry(0) == cce)
         {
             // The page's first key is cleaned, needs to locate the page
             // position to update the map.
             page_it = ccmp_.find(ccpage->FirstKey());
         }
-        ccpage->Remove(static_cast<CcEntry<KeyT, ValueT> *>(entry));
+        ccpage->Remove(cce);
         RebalancePage(ccpage, page_it, true);
     }
 
@@ -8349,8 +8393,8 @@ public:
         size_t free_cnt = 0;
 
         // clean page
-        CcPage<KeyT, ValueT> *page =
-            static_cast<CcPage<KeyT, ValueT> *>(lru_page);
+        CcPage<KeyT, ValueT, VersionedRecord> *page =
+            static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(lru_page);
         auto page_it = ccmp_.end();
         bool success = CleanPage(page, page_it, free_cnt, kickout_cc);
 
@@ -8370,7 +8414,7 @@ public:
     {
         for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
-            CcPage<KeyT, ValueT> &page = *it->second;
+            CcPage<KeyT, ValueT, VersionedRecord> &page = *it->second;
             if (page.lru_next_ != nullptr)
             {
                 shard_->DetachLru(&page);
@@ -8382,9 +8426,7 @@ public:
             }
         }
 
-#ifdef ON_KEY_OBJECT
         normal_obj_sz_ = 0;
-#endif
         size_ = 0;
         ccmp_.clear();
     }
@@ -8395,7 +8437,7 @@ public:
         auto it = ccmp_.begin();
         while (it != ccmp_.end() && cnt < clean_page_cnt)
         {
-            CcPage<KeyT, ValueT> *page = it->second.get();
+            CcPage<KeyT, ValueT, VersionedRecord> *page = it->second.get();
             if (page->lru_next_ != nullptr)
             {
                 shard_->DetachLru(page);
@@ -8403,12 +8445,11 @@ public:
 
             for (auto &cce : page->entries_)
             {
-#ifdef ON_KEY_OBJECT
-                if (cce->PayloadStatus() == RecordStatus::Normal)
+                if (!VersionedRecord &&
+                    cce->PayloadStatus() == RecordStatus::Normal)
                 {
                     normal_obj_sz_--;
                 }
-#endif
                 cce->ClearLocks(*shard_, cc_ng_id_);
             }
 
@@ -8425,13 +8466,11 @@ public:
         }
 
         assert(size_ == 0);
-#ifdef ON_KEY_OBJECT
-        assert(normal_obj_sz_ == 0);
-#endif
+        assert(VersionedRecord || normal_obj_sz_ == 0);
         return true;
     }
 
-    LruPage *RebalancePage(CcPage<KeyT, ValueT> *page,
+    LruPage *RebalancePage(CcPage<KeyT, ValueT, VersionedRecord> *page,
                            BtreeMapIterator &page_it,
                            bool success,
                            bool use_lru_list = true)
@@ -8465,7 +8504,8 @@ public:
                 TryUpdatePageKey(page_it);
             }
 
-            if (page->Size() >= CcPage<KeyT, ValueT>::merge_threshold_)
+            if (page->Size() >=
+                CcPage<KeyT, ValueT, VersionedRecord>::merge_threshold_)
             {
                 // page is still half full, no redistribution or merge
                 // needed
@@ -8486,24 +8526,24 @@ public:
             else
             {
                 // redistribute or merge page with its siblings
-                CcPage<KeyT, ValueT> *prev = page->prev_page_;
-                CcPage<KeyT, ValueT> *next = page->next_page_;
+                CcPage<KeyT, ValueT, VersionedRecord> *prev = page->prev_page_;
+                CcPage<KeyT, ValueT, VersionedRecord> *next = page->next_page_;
                 bool can_borrow_from_prev =
                     prev != &neg_inf_page_ &&
                     page->Size() + prev->Size() >
-                        CcPage<KeyT, ValueT>::split_threshold_;
+                        CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_;
                 bool can_borrow_from_next =
                     next != &pos_inf_page_ &&
                     page->Size() + next->Size() >
-                        CcPage<KeyT, ValueT>::split_threshold_;
+                        CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_;
                 bool can_merge_with_prev =
                     prev != &neg_inf_page_ &&
                     page->Size() + prev->Size() <=
-                        CcPage<KeyT, ValueT>::split_threshold_;
+                        CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_;
                 bool can_merge_with_next =
                     next != &pos_inf_page_ &&
                     page->Size() + next->Size() <=
-                        CcPage<KeyT, ValueT>::split_threshold_;
+                        CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_;
                 if (can_borrow_from_prev || can_borrow_from_next)
                 {
                     // map needs to be updated through iterator after
@@ -8576,8 +8616,9 @@ public:
                         assert(page2_it != ccmp_.end());
                     }
 
-                    CcPage<KeyT, ValueT> *merged_page = page1_it->second.get();
-                    CcPage<KeyT, ValueT> *discarded_page =
+                    CcPage<KeyT, ValueT, VersionedRecord> *merged_page =
+                        page1_it->second.get();
+                    CcPage<KeyT, ValueT, VersionedRecord> *discarded_page =
                         page2_it->second.get();
 
                     if (use_lru_list && next_page == discarded_page)
@@ -8660,11 +8701,11 @@ public:
     size_t VerifyOrdering() override
     {
         // verify page order in map
-        CcPage<KeyT, ValueT> *prev_page = &neg_inf_page_;
+        CcPage<KeyT, ValueT, VersionedRecord> *prev_page = &neg_inf_page_;
         for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
             const KeyT &page_key = it->first;
-            CcPage<KeyT, ValueT> *page = it->second.get();
+            CcPage<KeyT, ValueT, VersionedRecord> *page = it->second.get();
             if (page_key != page->FirstKey())
             {
                 DLOG(FATAL)
@@ -8720,8 +8761,8 @@ public:
                 assert(false);
                 return false;
             }
-            CcEntry<KeyT, ValueT> *cce = it->second;
-            CcPage<KeyT, ValueT> *ccp = it.GetPage();
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = it->second;
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp = it.GetPage();
             // randomly set ckpt_ts and commit_ts
             cce->SetCommitTsPayloadStatus(distribution(generator),
                                           RecordStatus::Normal);
@@ -8747,7 +8788,8 @@ protected:
     {
         using iterator_category = std::bidirectional_iterator_tag;
         using difference_type = std::ptrdiff_t;
-        using value_type = std::pair<const KeyT *, CcEntry<KeyT, ValueT> *>;
+        using value_type =
+            std::pair<const KeyT *, CcEntry<KeyT, ValueT, VersionedRecord> *>;
         using pointer = value_type *;    // or also value_type*
         using reference = value_type &;  // or also value_type&
 
@@ -8774,18 +8816,18 @@ protected:
             }
         }
 
-        Iterator(CcPage<KeyT, ValueT> *page,
+        Iterator(CcPage<KeyT, ValueT, VersionedRecord> *page,
                  size_t idx,
-                 CcEntry<KeyT, ValueT> *neg_inf_cce)
+                 CcEntry<KeyT, ValueT, VersionedRecord> *neg_inf_cce)
             : neg_inf_cce_(neg_inf_cce), current_page_(page), idx_in_page_(idx)
         {
             assert(current_page_ != nullptr);
             UpdateCurrent();
         }
 
-        Iterator(CcEntry<KeyT, ValueT> *cce,
-                 CcPage<KeyT, ValueT> *cc_page,
-                 CcEntry<KeyT, ValueT> *neg_inf_cce)
+        Iterator(CcEntry<KeyT, ValueT, VersionedRecord> *cce,
+                 CcPage<KeyT, ValueT, VersionedRecord> *cc_page,
+                 CcEntry<KeyT, ValueT, VersionedRecord> *neg_inf_cce)
             : neg_inf_cce_(neg_inf_cce)
         {
             if (cc_page->IsNegInf())
@@ -8851,7 +8893,8 @@ protected:
                 // The iterator points to negative infinity. Increments
                 // the iterator to the first page in the map, if the map
                 // is not empty.
-                CcPage<KeyT, ValueT> *next_page = current_page_->next_page_;
+                CcPage<KeyT, ValueT, VersionedRecord> *next_page =
+                    current_page_->next_page_;
                 if (next_page->IsPosInf())
                 {
                     // If the next page is the positive infinity page, the
@@ -8905,7 +8948,8 @@ protected:
                 // The iterator points to positive infinity. Decrements
                 // the iterator to the last entry in the map, if the map
                 // is not empty.
-                CcPage<KeyT, ValueT> *prev_page = current_page_->prev_page_;
+                CcPage<KeyT, ValueT, VersionedRecord> *prev_page =
+                    current_page_->prev_page_;
                 if (prev_page->IsNegInf())
                 {
                     // If the previous page is the negative infinity page,
@@ -8980,7 +9024,7 @@ protected:
             return lhs.current_.second != rhs.current_.second;
         };
 
-        CcPage<KeyT, ValueT> *GetPage() const
+        CcPage<KeyT, ValueT, VersionedRecord> *GetPage() const
         {
             return current_page_;
         }
@@ -8996,7 +9040,7 @@ protected:
                    idx_in_page_ < current_page_->Size());
 
             KeyT *key = const_cast<KeyT *>(current_.first);
-            CcEntry<KeyT, ValueT> *cce = current_.second;
+            CcEntry<KeyT, ValueT, VersionedRecord> *cce = current_.second;
             NonBlockingLock *key_lock = cce->GetKeyLock();
             NonBlockingLock *gap_lock = cce->GetGapLock();
             RecordStatus record_status = cce->PayloadStatus();
@@ -9050,7 +9094,7 @@ protected:
                 float payload_utilization = 1.0;
                 bool payload_needs_defrag = false;
                 TxRecord *payload =
-                    static_cast<TxRecord *>(cce->payload_.get());
+                    static_cast<TxRecord *>(cce->payload_.cur_payload_.get());
                 if (payload != nullptr)
                 {
                     payload_utilization =
@@ -9063,12 +9107,15 @@ protected:
                     auto &entries = current_page_->entries_;
                     auto it = entries.begin() + idx_in_page_;
                     assert(it != entries.end());
-                    std::unique_ptr<CcEntry<KeyT, ValueT>> old_cce =
-                        std::move(*it);
+                    std::unique_ptr<CcEntry<KeyT, ValueT, VersionedRecord>>
+                        old_cce = std::move(*it);
                     it = entries.erase(it);
                     it = entries.emplace(
-                        it, std::make_unique<CcEntry<KeyT, ValueT>>());
-                    CcEntry<KeyT, ValueT> *cce_clone = it->get();
+                        it,
+                        std::make_unique<
+                            CcEntry<KeyT, ValueT, VersionedRecord>>());
+                    CcEntry<KeyT, ValueT, VersionedRecord> *cce_clone =
+                        it->get();
                     old_cce->CloneForDefragment(cce_clone);
                     defraged = true;
                 }
@@ -9082,10 +9129,9 @@ protected:
                 cce = current_.second;
             }
 
-#ifndef ON_KEY_OBJECT
-            if (cce->archives_ != nullptr)
+            if (VersionedRecord && cce->payload_.GetArchives() != nullptr)
             {
-                auto archives = cce->archives_.get();
+                auto archives = cce->payload_.GetArchives();
                 // To defrag a list, we go through and defrag each node in the
                 // list
                 for (auto it = archives->begin(); it != archives->end(); ++it)
@@ -9104,7 +9150,6 @@ protected:
                     }
                 }
             }
-#endif
 
             if (defraged)
             {
@@ -9123,12 +9168,12 @@ protected:
         }
 
     protected:
-        std::pair<const KeyT *, CcEntry<KeyT, ValueT> *> current_{nullptr,
-                                                                  nullptr};
+        std::pair<const KeyT *, CcEntry<KeyT, ValueT, VersionedRecord> *>
+            current_{nullptr, nullptr};
         // neg_inf_cce_ is necessary for its gap
-        CcEntry<KeyT, ValueT> *neg_inf_cce_{nullptr};
+        CcEntry<KeyT, ValueT, VersionedRecord> *neg_inf_cce_{nullptr};
 
-        CcPage<KeyT, ValueT> *current_page_{nullptr};
+        CcPage<KeyT, ValueT, VersionedRecord> *current_page_{nullptr};
         size_t idx_in_page_{};
     };
 
@@ -9164,7 +9209,7 @@ protected:
         Iterator lb_it = LowerBound(key);
         if (lb_it != End() && *lb_it->first == key)
         {
-            CcPage<KeyT, ValueT> *ccp = lb_it.GetPage();
+            CcPage<KeyT, ValueT, VersionedRecord> *ccp = lb_it.GetPage();
             shard_->UpdateLruList(ccp, false);
             return lb_it;
         }
@@ -9185,7 +9230,7 @@ protected:
 
     std::pair<bool, size_t> ShuffleKeyAndPageSplit(
         BtreeMapIterator &target_iter,
-        CcPage<KeyT, ValueT> *&target_page,
+        CcPage<KeyT, ValueT, VersionedRecord> *&target_page,
         std::deque<SliceDataItem> &slice_items,
         std::vector<std::pair<size_t, bool>> &location_infos,
         size_t new_key_cnt,
@@ -9199,7 +9244,8 @@ protected:
         size_t total_size = target_page->Size() + new_key_cnt;
         assert(total_size == location_infos.size());
 
-        if (total_size <= CcPage<KeyT, ValueT>::split_threshold_)
+        if (total_size <=
+            CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_)
         {
             target_page->keys_.resize(total_size);
             target_page->entries_.resize(total_size);
@@ -9223,8 +9269,9 @@ protected:
         {
             // 0.7
             double fill_factor = 1;
-            size_t data_cnt_per_page =
-                std::ceil(CcPage<KeyT, ValueT>::split_threshold_ * fill_factor);
+            size_t data_cnt_per_page = std::ceil(
+                CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_ *
+                fill_factor);
             assert(data_cnt_per_page <= 64);
 
             size_t page_cnt = total_size / data_cnt_per_page;
@@ -9232,13 +9279,14 @@ protected:
             assert((page_cnt * data_cnt_per_page) + remain_size == total_size);
 
             std::vector<KeyT> old_page_keys = std::move(target_page->keys_);
-            std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
+            std::vector<std::unique_ptr<CcEntry<KeyT, ValueT, VersionedRecord>>>
                 old_page_entries = std::move(target_page->entries_);
             assert(target_page->keys_.empty());
             assert(target_page->entries_.empty());
-            target_page->keys_.reserve(CcPage<KeyT, ValueT>::split_threshold_);
+            target_page->keys_.reserve(
+                CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_);
             target_page->entries_.reserve(
-                CcPage<KeyT, ValueT>::split_threshold_);
+                CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_);
 
             uint64_t old_page_last_dirty_commit_ts =
                 target_page->last_dirty_commit_ts_;
@@ -9246,13 +9294,15 @@ protected:
             for (size_t page_idx = 0; page_idx < page_cnt; ++page_idx)
             {
                 size_t offset = page_idx * data_cnt_per_page;
-                std::unique_ptr<CcPage<KeyT, ValueT>> new_page_owner = nullptr;
+                std::unique_ptr<CcPage<KeyT, ValueT, VersionedRecord>>
+                    new_page_owner = nullptr;
 
                 if (page_idx != 0)
                 {
                     // create new page
-                    new_page_owner = std::make_unique<CcPage<KeyT, ValueT>>(
-                        this, target_page, target_page->next_page_);
+                    new_page_owner =
+                        std::make_unique<CcPage<KeyT, ValueT, VersionedRecord>>(
+                            this, target_page, target_page->next_page_);
                     target_page = new_page_owner.get();
                 }
 
@@ -9298,12 +9348,13 @@ protected:
             if (remain_size > 0)
             {
                 bool need_rebalance =
-                    remain_size < CcPage<KeyT, ValueT>::merge_threshold_;
+                    remain_size <
+                    CcPage<KeyT, ValueT, VersionedRecord>::merge_threshold_;
                 // Insert remaining data to next page.
                 if (need_rebalance &&
                     target_page->next_page_ != &pos_inf_page_ &&
                     target_page->next_page_->Size() + remain_size <=
-                        CcPage<KeyT, ValueT>::split_threshold_)
+                        CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_)
                 {
                     size_t next_page_old_size = target_page->next_page_->Size();
                     target_page->next_page_->keys_.resize(next_page_old_size +
@@ -9349,8 +9400,9 @@ protected:
                 }
 
                 // Create new page.
-                auto new_page_owner = std::make_unique<CcPage<KeyT, ValueT>>(
-                    this, target_page, target_page->next_page_);
+                auto new_page_owner =
+                    std::make_unique<CcPage<KeyT, ValueT, VersionedRecord>>(
+                        this, target_page, target_page->next_page_);
                 target_page = new_page_owner.get();
 
                 target_page->keys_.resize(remain_size);
@@ -9443,7 +9495,7 @@ protected:
 
         int32_t normal_rec_change = 0;
         typename decltype(ccmp_)::iterator target_iter;
-        CcPage<KeyT, ValueT> *target_page = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *target_page = nullptr;
 
         if (ccmp_.begin() == ccmp_.end())
         {
@@ -9451,10 +9503,10 @@ protected:
             // ccmap is empty, insert a page
             const KeyT *search_key = static_cast<const KeyT *>(
                 slice_items[first_index].key_.KeyPtr());
-            std::tie(target_iter, inserted) =
-                ccmp_.try_emplace(*search_key,
-                                  std::make_unique<CcPage<KeyT, ValueT>>(
-                                      this, &neg_inf_page_, &pos_inf_page_));
+            std::tie(target_iter, inserted) = ccmp_.try_emplace(
+                *search_key,
+                std::make_unique<CcPage<KeyT, ValueT, VersionedRecord>>(
+                    this, &neg_inf_page_, &pos_inf_page_));
             assert(inserted);
         }
         else
@@ -9486,8 +9538,9 @@ protected:
         // false means the key come from target_page.
         // <key_idx_in_page, false>, <slice_items_idx, true>
         std::vector<std::pair<size_t, bool>> location_infos;
-        location_infos.reserve(CcPage<KeyT, ValueT>::split_threshold_ +
-                               FillStoreSliceCc::MaxScanBatchSize);
+        location_infos.reserve(
+            CcPage<KeyT, ValueT, VersionedRecord>::split_threshold_ +
+            FillStoreSliceCc::MaxScanBatchSize);
 
         // keys before `key_idx_in_page` are come from target_page. So set all
         // values to false
@@ -9544,9 +9597,10 @@ protected:
                                    new_key_cnt,
                                    first_key_index_in_page,
                                    normal_rec_change);
-#ifdef ON_KEY_OBJECT
-            normal_obj_sz_ += normal_rec_change;
-#endif
+            if (!VersionedRecord)
+            {
+                normal_obj_sz_ += normal_rec_change;
+            }
             size_ += (end_idx - first_index);
 
             return true;
@@ -9675,9 +9729,10 @@ protected:
             size_ += new_key_cnt;
         }
 
-#ifdef ON_KEY_OBJECT
-        normal_obj_sz_ += normal_rec_change;
-#endif
+        if (!VersionedRecord)
+        {
+            normal_obj_sz_ += normal_rec_change;
+        }
 
         return true;
     }
@@ -9752,10 +9807,10 @@ protected:
                 return End();
             }
             // ccmap is empty, insert a page
-            auto [it, inserted] =
-                ccmp_.try_emplace(key,
-                                  std::make_unique<CcPage<KeyT, ValueT>>(
-                                      this, &neg_inf_page_, &pos_inf_page_));
+            auto [it, inserted] = ccmp_.try_emplace(
+                key,
+                std::make_unique<CcPage<KeyT, ValueT, VersionedRecord>>(
+                    this, &neg_inf_page_, &pos_inf_page_));
             assert(inserted);
             // This silences the -Wunused-but-set-variable warning
             // without any runtime overhead.
@@ -9772,7 +9827,8 @@ protected:
             --target_it;
             assert(target_it->first <= key);
         }
-        CcPage<KeyT, ValueT> *target_page = target_it->second.get();
+        CcPage<KeyT, ValueT, VersionedRecord> *target_page =
+            target_it->second.get();
 
         size_t idx_in_page = target_page->Find(key);
         if (idx_in_page < target_page->Size())
@@ -9803,7 +9859,7 @@ protected:
                     target_it = ccmp_.try_emplace(
                         target_it,
                         key,
-                        std::make_unique<CcPage<KeyT, ValueT>>(
+                        std::make_unique<CcPage<KeyT, ValueT, VersionedRecord>>(
                             this, target_page, target_page->next_page_));
                 }
             }
@@ -9816,7 +9872,7 @@ protected:
                     target_it = ccmp_.try_emplace(
                         target_it,
                         key,
-                        std::make_unique<CcPage<KeyT, ValueT>>(
+                        std::make_unique<CcPage<KeyT, ValueT, VersionedRecord>>(
                             this, target_page->prev_page_, target_page));
                 }
                 else
@@ -9831,7 +9887,7 @@ protected:
         {
             // split this page
             std::vector<KeyT> new_page_keys;
-            std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
+            std::vector<std::unique_ptr<CcEntry<KeyT, ValueT, VersionedRecord>>>
                 new_page_entries;
             uint64_t new_last_commit_ts = 0;
             uint64_t new_smallest_ttl = UINT64_MAX;
@@ -9842,16 +9898,17 @@ protected:
 
             const KeyT &key_of_new_page = *new_page_keys.begin();
 
-            auto new_page_it =
-                ccmp_.try_emplace(target_it,
-                                  key_of_new_page,
-                                  std::make_unique<CcPage<KeyT, ValueT>>(
-                                      this,
-                                      std::move(new_page_keys),
-                                      std::move(new_page_entries),
-                                      target_page,
-                                      target_page->next_page_));
-            CcPage<KeyT, ValueT> *new_page = new_page_it->second.get();
+            auto new_page_it = ccmp_.try_emplace(
+                target_it,
+                key_of_new_page,
+                std::make_unique<CcPage<KeyT, ValueT, VersionedRecord>>(
+                    this,
+                    std::move(new_page_keys),
+                    std::move(new_page_entries),
+                    target_page,
+                    target_page->next_page_));
+            CcPage<KeyT, ValueT, VersionedRecord> *new_page =
+                new_page_it->second.get();
             assert(new_page_it->first == new_page->FirstKey());
             new_page->last_dirty_commit_ts_ = new_last_commit_ts;
             new_page->smallest_ttl_ = new_smallest_ttl;
@@ -9910,10 +9967,11 @@ protected:
                   RecordStatus status,
                   std::string &rec_str) override
     {
-        CcEntry<KeyT, ValueT> *cce =
-            static_cast<CcEntry<KeyT, ValueT> *>(entry);
-        CcPage<KeyT, ValueT> *ccp =
-            static_cast<CcPage<KeyT, ValueT> *>(cce->GetCcPage());
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce =
+            static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(entry);
+        CcPage<KeyT, ValueT, VersionedRecord> *ccp =
+            static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
+                cce->GetCcPage());
         assert(ccp != nullptr);
         if (status == RecordStatus::Unknown)
         {
@@ -9965,23 +10023,15 @@ protected:
 
             if (status == RecordStatus::Deleted)
             {
-                cce->payload_ = nullptr;
+                cce->payload_.SetCurrentPayload(nullptr);
             }
             else
             {
                 size_t offset = 0;
-#ifndef ON_KEY_OBJECT
-                if (cce->payload_.use_count() != 1)
-                {
-                    cce->payload_ = std::make_shared<ValueT>();
-                }
-#else
-                assert(false);
-#endif
-                cce->payload_->Deserialize(rec_str.c_str(), offset);
+                cce->payload_.DeserializeCurrentPayload(rec_str.c_str(),
+                                                        offset);
             }
         }
-#ifndef ON_KEY_OBJECT
         else if (cce_version > 1 && commit_ts < cce_version &&
                  shard_->EnableMvcc())
         {
@@ -9993,14 +10043,14 @@ protected:
             payload->Deserialize(rec_str.c_str(), offset);
             cce->AddArchiveRecord(payload, status, commit_ts);
         }
-#endif
 #ifdef RANGE_PARTITION_ENABLED
-        if (cce->data_store_size_ == INT32_MAX)
+        if (cce->entry_info_.data_store_size_ == INT32_MAX)
         {
-            cce->data_store_size_ =
+            cce->entry_info_.data_store_size_ =
                 status == RecordStatus::Deleted
                     ? 0
-                    : cce->payload_->Size() + ccp->KeyOfEntry(cce)->Size();
+                    : cce->payload_.cur_payload_->Size() +
+                          ccp->KeyOfEntry(cce)->Size();
         }
 #endif
 
@@ -10059,8 +10109,8 @@ protected:
         // ccmp_ key is each page's smallest key, so the lower bound of
         // `key` might fall into either of two adjacent pages
         auto lb_it = ccmp_.lower_bound(key);
-        CcPage<KeyT, ValueT> *page1 = nullptr;
-        CcPage<KeyT, ValueT> *page2 = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *page1 = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *page2 = nullptr;
         auto pg_it1 = lb_it;
         auto pg_it2 = lb_it;
         if (pg_it2 != ccmp_.end())
@@ -10109,8 +10159,8 @@ protected:
         // ccmp_ key is each page's smallest key, so the upper bound of
         // `key` might fall into either of two adjacent pages
         auto ub_it = ccmp_.upper_bound(key);
-        CcPage<KeyT, ValueT> *page1 = nullptr;
-        CcPage<KeyT, ValueT> *page2 = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *page1 = nullptr;
+        CcPage<KeyT, ValueT, VersionedRecord> *page2 = nullptr;
         auto pg_it1 = ub_it;
         auto pg_it2 = ub_it;
         if (pg_it2 != ccmp_.end())
@@ -10315,7 +10365,7 @@ protected:
     }
 
     void ScanKey(const KeyT *key,
-                 CcEntry<KeyT, ValueT> *cce,
+                 CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                  TemplateScanCache<KeyT, ValueT> *typed_cache,
                  bool include_gap,
                  uint32_t ng_id,
@@ -10333,7 +10383,7 @@ protected:
 
         if (is_read_snapshot)
         {
-#ifndef ON_KEY_OBJECT
+            assert(VersionedRecord);
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
 
@@ -10380,11 +10430,9 @@ protected:
 
             tuple->key_ts_ = v_rec.commit_ts_;
             tuple->rec_status_ = v_rec.payload_status_;
-#endif
         }
         else
         {
-#ifdef ON_KEY_OBJECT
             NonBlockingLock *lk = cce->GetKeyLock();
             bool check_dirty_status =
                 lk != nullptr && lk->HasWriteLock(txn) &&
@@ -10392,8 +10440,8 @@ protected:
 
             if (check_dirty_status)
             {
+                assert(!VersionedRecord);
                 tuple = typed_cache->AddScanTuple();
-
                 if (is_require_keys)
                 {
                     tuple->KeyObj().Copy(*key);
@@ -10423,12 +10471,10 @@ protected:
                 {
                     assert(false && "Unknown dirty record status");
                 }
-
                 tuple->key_ts_ = cce->CommitTs() + 1;
             }
             else
             {
-#endif
                 const RecordStatus rec_status = cce->PayloadStatus();
 #ifdef RANGE_PARTITION_ENABLED
                 if (rec_status == RecordStatus::Normal ||
@@ -10441,7 +10487,7 @@ protected:
                     return;
                 }
 #else
-            tuple = typed_cache->AddScanTuple();
+                tuple = typed_cache->AddScanTuple();
 #endif
                 if (is_require_keys)
                 {
@@ -10451,32 +10497,29 @@ protected:
 
                 if (is_require_recs)
                 {
+                    // Redis KEYS command doesn't need value. But
+                    // ObjectCcMap doesn't override ScanKey() on
+                    // local ccmap. Thus, TemplateCcMap::ScanKey() on
+                    // local ccmp may be called, and it need not set
+                    // record.
+                    assert(VersionedRecord);
                     if (rec_status == RecordStatus::Normal ||
                         (is_ckpt_delta && rec_status == RecordStatus::Deleted))
                     {
-                        if (cce->payload_ != nullptr)
+                        if (cce->payload_.cur_payload_ != nullptr)
                         {
-#ifndef ON_KEY_OBJECT
-                            tuple->SetRecord(cce->payload_);
-#else
-                        // Redis KEYS command doesn't need value. But
-                        // ObjectCcMap doesn't override ScanKey() on local
-                        // ccmap. Thus, TemplateCcMap::ScanKey() on local
-                        // ccmp may be called, and it need not set record.
-#endif
                             // We're only copying the shared_ptr here so we
                             // exclude the actual payload size.
+                            tuple->SetRecord(
+                                cce->payload_.VersionedCurrentPayload());
                         }
                     }
                 }
 
                 tuple->rec_status_ = rec_status;
                 tuple->key_ts_ = cce->CommitTs();
-#ifdef ON_KEY_OBJECT
             }
-#endif
         }
-
         tuple->gap_ts_ = 0;
         tuple->cce_ptr_ = cce;
         tuple->cce_addr_.SetCceLock(
@@ -10489,7 +10532,7 @@ protected:
     }
 
     void ScanKey(const KeyT *key,
-                 CcEntry<KeyT, ValueT> *cce,
+                 CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                  RemoteScanSliceCache *remote_cache,
                  bool include_gap,
                  int64_t ng_term,
@@ -10505,15 +10548,13 @@ protected:
         // skipping when deserializing.
         static KeyT empty_key;
         static ValueT empty_val;
-#ifndef ON_KEY_OBJECT
         const ValueT *payload = &empty_val;
-#endif
 
         uint32_t tuple_size = RemoteScanSliceCache::MetaDataSize;
 
         if (is_read_snapshot)
         {
-#ifndef ON_KEY_OBJECT
+            assert(VersionedRecord);
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
 
@@ -10559,7 +10600,6 @@ protected:
                 remote::ToRemoteType::ConvertRecordStatus(
                     v_rec.payload_status_));
             remote_cache->key_ts_.push_back(v_rec.commit_ts_);
-#endif
         }
         else
         {
@@ -10579,15 +10619,19 @@ protected:
             key->Serialize(remote_cache->keys_);
             tuple_size += key->SerializedLength();
 
-#ifndef ON_KEY_OBJECT
             if (is_require_recs)
             {
+                // Redis KEYS command doesn't need value. But
+                // ObjectCcMap doesn't override ScanKey() on local
+                // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
+                // may be called, and it need not set record.
+                assert(VersionedRecord);
                 if (rec_status == RecordStatus::Normal ||
                     (is_ckpt_delta && rec_status == RecordStatus::Deleted))
                 {
-                    if (cce->payload_ != nullptr)
+                    if (cce->payload_.cur_payload_ != nullptr)
                     {
-                        payload = cce->payload_.get();
+                        payload = cce->payload_.cur_payload_.get();
                     }
                 }
             }
@@ -10595,12 +10639,6 @@ protected:
             remote_cache->rec_off_vec_.push_back(remote_cache->records_.size());
             payload->Serialize(remote_cache->records_);
             tuple_size += payload->SerializedLength();
-#else
-            // Redis KEYS command doesn't need value. But
-            // ObjectCcMap doesn't override ScanKey() on local
-            // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
-            // may be called, and it need not set record.
-#endif
 
             remote_cache->rec_status_.push_back(
                 remote::ToRemoteType::ConvertRecordStatus(rec_status));
@@ -10628,7 +10666,7 @@ protected:
     }
 
     void ScanKey(const KeyT *key,
-                 CcEntry<KeyT, ValueT> *cce,
+                 CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                  RemoteScanCache *remote_cache,
                  bool include_gap,
                  int64_t ng_term,
@@ -10636,19 +10674,19 @@ protected:
                  uint64_t read_ts,
                  bool is_read_snapshot,
                  bool keep_deleted,
-                 bool is_ckpt_delta = false)
+                 bool is_ckpt_delta = false,
+                 bool is_require_keys = true,
+                 bool is_require_recs = true)
     {
         static ValueT empty_val;
-#ifndef ON_KEY_OBJECT
         const ValueT *payload = &empty_val;
-#endif
 
         remote::ScanTuple_msg *tuple = nullptr;
         uint32_t tuple_size = 0;
 
         if (is_read_snapshot)
         {
-#ifndef ON_KEY_OBJECT
+            assert(VersionedRecord);
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
 
@@ -10670,19 +10708,24 @@ protected:
 #else
             tuple = remote_cache->cache_msg_->add_scan_tuple();
 #endif
-            key->Serialize(*tuple->mutable_key());
-            tuple_size += key->Size();
-
-            if (v_rec.payload_status_ == RecordStatus::Normal ||
-                (is_ckpt_delta &&
-                 v_rec.payload_status_ == RecordStatus::Deleted))
+            if (is_require_keys)
             {
-                if (v_rec.payload_ptr_ != nullptr)
-                {
-                    payload = v_rec.payload_ptr_.get();
-                }
+                key->Serialize(*tuple->mutable_key());
+                tuple_size += key->Size();
             }
 
+            if (is_require_recs)
+            {
+                if (v_rec.payload_status_ == RecordStatus::Normal ||
+                    (is_ckpt_delta &&
+                     v_rec.payload_status_ == RecordStatus::Deleted))
+                {
+                    if (v_rec.payload_ptr_ != nullptr)
+                    {
+                        payload = v_rec.payload_ptr_.get();
+                    }
+                }
+            }
             tuple->clear_record();
             payload->Serialize(*tuple->mutable_record());
             tuple_size += payload->Size();
@@ -10690,11 +10733,9 @@ protected:
             tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
                 v_rec.payload_status_));
             tuple->set_key_ts(v_rec.commit_ts_);
-#endif
         }
         else
         {
-#ifdef ON_KEY_OBJECT
             NonBlockingLock *lk = cce->GetKeyLock();
             bool check_dirty_status =
                 lk != nullptr && lk->HasWriteLock(txn) &&
@@ -10702,6 +10743,7 @@ protected:
 
             if (check_dirty_status)
             {
+                assert(!VersionedRecord);
                 tuple = remote_cache->cache_msg_->add_scan_tuple();
 
                 key->Serialize(*tuple->mutable_key());
@@ -10742,7 +10784,6 @@ protected:
             }
             else
             {
-#endif
                 const RecordStatus rec_status = cce->PayloadStatus();
 #ifdef RANGE_PARTITION_ENABLED
                 if (rec_status == RecordStatus::Normal ||
@@ -10755,38 +10796,40 @@ protected:
                     return;
                 }
 #else
-            tuple = remote_cache->cache_msg_->add_scan_tuple();
+                tuple = remote_cache->cache_msg_->add_scan_tuple();
 #endif
-                key->Serialize(*tuple->mutable_key());
-                tuple_size += key->Size();
-
-#ifndef ON_KEY_OBJECT
-                if (rec_status == RecordStatus::Normal ||
-                    (is_ckpt_delta && rec_status == RecordStatus::Deleted))
+                if (is_require_keys)
                 {
-                    if (cce->payload_ != nullptr)
+                    key->Serialize(*tuple->mutable_key());
+                    tuple_size += key->Size();
+                }
+
+                if (is_require_recs)
+                {
+                    // Redis KEYS command doesn't need value. But
+                    // ObjectCcMap doesn't override ScanKey() on local
+                    // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
+                    // may be called, and it need not set record.
+                    assert(VersionedRecord);
+                    if (rec_status == RecordStatus::Normal ||
+                        (is_ckpt_delta && rec_status == RecordStatus::Deleted))
                     {
-                        payload = cce->payload_.get();
+                        if (cce->payload_.cur_payload_ != nullptr)
+                        {
+                            payload = cce->payload_.cur_payload_.get();
+                        }
                     }
                 }
 
                 tuple->clear_record();
                 payload->Serialize(*tuple->mutable_record());
                 tuple_size += payload->Size();
-#else
-            // Redis KEYS command doesn't need value. But
-            // ObjectCcMap doesn't override ScanKey() on local
-            // ccmap. Thus, TemplateCcMap::ScanKey() on local ccmp
-            // may be called, and it need not set record.
-#endif
 
                 tuple->set_rec_status(
                     remote::ToRemoteType::ConvertRecordStatus(rec_status));
                 tuple->set_key_ts(cce->CommitTs());
             }
-#ifdef ON_KEY_OBJECT
         }
-#endif
 
         if (include_gap)
         {
@@ -10810,7 +10853,7 @@ protected:
     }
 
     void ScanGap(const KeyT *key,
-                 CcEntry<KeyT, ValueT> *cce,
+                 CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                  TemplateScanTuple<KeyT, ValueT> *tuple,
                  uint32_t ng_id,
                  int64_t ng_term) const
@@ -10826,7 +10869,7 @@ protected:
     }
 
     void ScanGap(const KeyT *key,
-                 CcEntry<KeyT, ValueT> *cce,
+                 CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                  remote::ScanTuple_msg *tuple,
                  int64_t ng_term) const
     {
@@ -10844,7 +10887,7 @@ protected:
     }
 
     void ScanGap(const KeyT *key,
-                 CcEntry<KeyT, ValueT> *cce,
+                 CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                  RemoteScanSliceCache *cache,
                  int64_t ng_term) const
     {
@@ -10893,24 +10936,22 @@ protected:
      * return false to neglect this record.
      */
     virtual bool FilterRecord(const KeyT *key,
-                              const CcEntry<KeyT, ValueT> *cce,
+                              const CcEntry<KeyT, ValueT, VersionedRecord> *cce,
                               int32_t obj_type,
                               const std::string_view &scan_pattern)
     {
         return true;
     }
 
-#ifdef ON_KEY_OBJECT
     virtual void CreateDirtyPayloadFromPendingCommand(
-        CcEntry<KeyT, ValueT> *cce)
+        CcEntry<KeyT, ValueT, VersionedRecord> *cce)
     {
         assert(false);
     }
-#endif
 
     void TryUpdatePageKey(BtreeMapIterator &page_it)
     {
-        CcPage<KeyT, ValueT> &page = *page_it->second;
+        CcPage<KeyT, ValueT, VersionedRecord> &page = *page_it->second;
         if (page_it->first != page.FirstKey())
         {
             auto node_handle = ccmp_.extract(page_it);
@@ -10936,17 +10977,21 @@ protected:
      * clean_type is CleanForSplitRange and CleanForAlterTable care this
      * status.
      */
-    bool CleanPage(CcPage<KeyT, ValueT> *page,
+    bool CleanPage(CcPage<KeyT, ValueT, VersionedRecord> *page,
                    BtreeMapIterator &page_it,
                    size_t &free_cnt,
                    KickoutCcEntryCc *kickout_cc = nullptr)
     {
         bool success;
 
-        CcPageCleanGuard<KeyT, ValueT> *clean_guard;  // Allocate it on stack.
-        constexpr size_t buffer_size =
-            std::max(sizeof(CcPageCleanGuardWithKickoutCc<KeyT, ValueT>),
-                     sizeof(CcPageCleanGuardWithoutKickoutCc<KeyT, ValueT>));
+        CcPageCleanGuard<KeyT, ValueT, VersionedRecord>
+            *clean_guard;  // Allocate it on stack.
+        constexpr size_t buffer_size = std::max(
+            sizeof(
+                CcPageCleanGuardWithKickoutCc<KeyT, ValueT, VersionedRecord>),
+            sizeof(CcPageCleanGuardWithoutKickoutCc<KeyT,
+                                                    ValueT,
+                                                    VersionedRecord>));
         char buffer[buffer_size] = {};
         if (kickout_cc)
         {
@@ -10973,9 +11018,10 @@ protected:
             clean_guard->Compact();
             free_cnt += clean_guard->FreedCount();
         }
-#ifdef ON_KEY_OBJECT
-        normal_obj_sz_ -= clean_guard->CleanObjectCount();
-#endif
+        if (!VersionedRecord)
+        {
+            normal_obj_sz_ -= clean_guard->CleanObjectCount();
+        }
         size_ -= clean_guard->FreedCount();
         if (clean_guard->EvictedValidKeys())
         {
@@ -11003,8 +11049,8 @@ protected:
     void RedistributeBetweenPages(BtreeMapIterator &page1_it,
                                   BtreeMapIterator &page2_it)
     {
-        CcPage<KeyT, ValueT> &page1 = *page1_it->second;
-        CcPage<KeyT, ValueT> &page2 = *page2_it->second;
+        CcPage<KeyT, ValueT, VersionedRecord> &page1 = *page1_it->second;
+        CcPage<KeyT, ValueT, VersionedRecord> &page2 = *page2_it->second;
         assert(page1.next_page_ == &page2 && &page1 == page2.prev_page_);
         assert(page1_it->first == page1.FirstKey());
         assert(page2_it->first == page2.FirstKey());
@@ -11146,21 +11192,23 @@ protected:
      */
     void MergePages(BtreeMapIterator &page1_it, BtreeMapIterator &page2_it)
     {
-        CcPage<KeyT, ValueT> *page1 = page1_it->second.get();
-        CcPage<KeyT, ValueT> *page2 = page2_it->second.get();
+        CcPage<KeyT, ValueT, VersionedRecord> *page1 = page1_it->second.get();
+        CcPage<KeyT, ValueT, VersionedRecord> *page2 = page2_it->second.get();
 
         auto merged_page_it = page1_it;
         auto discarded_page_it = page2_it;
-        CcPage<KeyT, ValueT> *merged_page = merged_page_it->second.get();
-        CcPage<KeyT, ValueT> *discarded_page = discarded_page_it->second.get();
+        CcPage<KeyT, ValueT, VersionedRecord> *merged_page =
+            merged_page_it->second.get();
+        CcPage<KeyT, ValueT, VersionedRecord> *discarded_page =
+            discarded_page_it->second.get();
 
         // merge the key vector and entry vector
         std::vector<KeyT> merged_keys = std::move(page1->keys_);
         merged_keys.insert(merged_keys.end(),
                            std::make_move_iterator(page2->keys_.begin()),
                            std::make_move_iterator(page2->keys_.end()));
-        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> merged_entries =
-            std::move(page1->entries_);
+        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT, VersionedRecord>>>
+            merged_entries = std::move(page1->entries_);
 
         for (auto it = page2->entries_.begin(); it != page2->entries_.end();
              ++it)
@@ -11189,8 +11237,8 @@ protected:
             }());
 
         // Update the page order list.
-        CcPage<KeyT, ValueT> *map_prev = page1->prev_page_;
-        CcPage<KeyT, ValueT> *map_next = page2->next_page_;
+        CcPage<KeyT, ValueT, VersionedRecord> *map_prev = page1->prev_page_;
+        CcPage<KeyT, ValueT, VersionedRecord> *map_next = page2->next_page_;
         merged_page->prev_page_ = map_prev;
         merged_page->next_page_ = map_next;
         map_prev->next_page_ = merged_page;
@@ -11255,24 +11303,26 @@ protected:
         ccmp_.erase(discarded_page_it);
     }
 
-    CcPage<KeyT, ValueT> *PageNegInf()
+    CcPage<KeyT, ValueT, VersionedRecord> *PageNegInf()
     {
         return &neg_inf_page_;
     }
 
-    CcPage<KeyT, ValueT> *PagePosInf()
+    CcPage<KeyT, ValueT, VersionedRecord> *PagePosInf()
     {
         return &pos_inf_page_;
     }
 
-    absl::btree_map<KeyT, std::unique_ptr<CcPage<KeyT, ValueT>>> ccmp_;
-    CcPage<KeyT, ValueT> neg_inf_page_, pos_inf_page_;
-    CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
-    size_t size_{};
+    absl::btree_map<KeyT,
+                    std::unique_ptr<CcPage<KeyT, ValueT, VersionedRecord>>>
+        ccmp_;
+    CcPage<KeyT, ValueT, VersionedRecord> neg_inf_page_, pos_inf_page_;
+    CcEntry<KeyT, ValueT, VersionedRecord> neg_inf_, pos_inf_;
 
     TemplateCcMapSamplePool<KeyT> *sample_pool_;
-#ifdef ON_KEY_OBJECT
-    size_t normal_obj_sz_{0};  // The count of all normal status objects
-#endif
+    size_t
+        size_{};  // The count of all records, including ones in deleted status.
+    size_t normal_obj_sz_{
+        0};  // The count of all normal status objects, only used for redis
 };
 }  // namespace txservice

@@ -46,7 +46,7 @@ namespace txservice
 struct DataSyncTask;
 struct FetchRangeSlicesReq;
 struct LruEntry;
-template <typename KeyT, typename ValueT>
+template <typename KeyT, typename ValueT, bool VersionedRecord>
 struct CcEntry;
 
 // struct that stores range related info that we read from

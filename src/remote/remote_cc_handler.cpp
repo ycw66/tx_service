@@ -484,13 +484,12 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     CcProtocol proto,
     bool is_for_write,
     bool is_ckpt,
-    bool is_covering_keys
-#ifdef ON_KEY_OBJECT
-    ,
+    bool is_covering_keys,
+    bool is_require_keys,
+    bool is_require_recs,
+    bool is_require_sort,
     int32_t obj_type,
-    const std::string_view &scan_pattern
-#endif
-)
+    const std::string_view &scan_pattern)
 {
     CcMessage send_msg;
 
@@ -530,11 +529,12 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_is_for_write(is_for_write);
     scan_open->set_ckpt(is_ckpt);
     scan_open->set_is_covering_keys(is_covering_keys);
-#ifdef ON_KEY_OBJECT
+    scan_open->set_is_require_keys(is_require_keys);
+    scan_open->set_is_require_recs(is_require_recs);
+    scan_open->set_is_require_sort(is_require_sort);
     scan_open->set_obj_type(obj_type);
     scan_open->set_scan_pattern(std::string(scan_pattern));
     scan_open->set_schema_version(schema_version);
-#endif
 
     stream_sender_.SendMessageToNg(node_group_id, send_msg, &hd_res);
 }
@@ -552,13 +552,12 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     CcProtocol proto,
     bool is_for_write,
     bool is_ckpt,
-    bool is_covering_keys
-#ifdef ON_KEY_OBJECT
-    ,
+    bool is_covering_keys,
+    bool is_require_keys,
+    bool is_require_recs,
+    bool is_require_sort,
     int32_t obj_type,
-    const std::string_view &scan_pattern
-#endif
-)
+    const std::string_view &scan_pattern)
 {
     CcMessage send_msg;
 
@@ -587,11 +586,11 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_is_for_write(is_for_write);
     scan_next->set_ckpt(is_ckpt);
     scan_next->set_is_covering_keys(is_covering_keys);
-
-#ifdef ON_KEY_OBJECT
+    scan_next->set_is_require_keys(is_require_keys);
+    scan_next->set_is_require_recs(is_require_recs);
+    scan_next->set_is_require_sort(is_require_sort);
     scan_next->set_obj_type(obj_type);
     scan_next->set_scan_pattern(std::string(scan_pattern));
-#endif
 
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hd_res);
 }

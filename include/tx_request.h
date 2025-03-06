@@ -435,13 +435,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                       bool is_read_local = false,
                       const std::function<void()> *yield_fptr = nullptr,
                       const std::function<void()> *resume_fptr = nullptr,
-                      TransactionExecution *txm = nullptr
-#ifdef ON_KEY_OBJECT
-                      ,
+                      TransactionExecution *txm = nullptr,
                       int32_t obj_type = -1,
-                      std::string_view scan_pattern = {}
-#endif
-                      )
+                      std::string_view scan_pattern = {})
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           tab_name_(tabname),
           indx_type_(index_type),
@@ -459,12 +455,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           is_require_sort_(is_require_sort),
           read_local_(is_read_local),
           scan_alias_(UINT64_MAX),
-          schema_version_(schema_version)
-#ifdef ON_KEY_OBJECT
-          ,
+          schema_version_(schema_version),
           obj_type_(obj_type),
           scan_pattern_(scan_pattern)
-#endif
     {
     }
 
@@ -486,13 +479,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                bool is_read_local = false,
                const std::function<void()> *yield_fptr = nullptr,
                const std::function<void()> *resume_fptr = nullptr,
-               TransactionExecution *txm = nullptr
-#ifdef ON_KEY_OBJECT
-               ,
+               TransactionExecution *txm = nullptr,
                int32_t obj_type = -1,
-               std::string_view scan_pattern = {}
-#endif
-    )
+               std::string_view scan_pattern = {})
     {
         tx_result_.Reset(yield_fptr, resume_fptr);
         txm_ = txm;
@@ -513,10 +502,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         read_local_ = is_read_local;
         scan_alias_ = UINT64_MAX;
         schema_version_ = schema_version;
-#ifdef ON_KEY_OBJECT
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
-#endif
     }
 
     const TxKey *StartKey() const
@@ -547,10 +534,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     uint64_t scan_alias_{UINT64_MAX};
     uint64_t schema_version_{0};
 
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
 };
 
 struct ScanBatchTuple

@@ -735,7 +735,6 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              const TableSchema *tbl_schema,
                              TxKey tx_key,
                              LruEntry *cce,
-                             CcMap *ccm,
                              CcShard &ccs,
                              NodeGroupId cc_ng_id,
                              int64_t cc_ng_term,
@@ -746,7 +745,7 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
       table_schema_(tbl_schema),
       tx_key_(std::move(tx_key)),
       cce_(cce),
-      ccm_(ccm),
+      lock_(cce->GetKeyGapLockAndExtraData()),
       range_id_(range_id),
       fetch_from_primary_(fetch_from_primary),
       retry_cnt_(0)
@@ -793,9 +792,13 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                 req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
             }
         }
+        ccs.RemoveFetchRecordRequest(cce_);
+        return false;
     }
-    else if (cce_->PayloadStatus() != RecordStatus::Invalid)
+    if (lock_->GetCcEntry() != nullptr)
     {
+        assert(lock_->GetCcMap() != nullptr);
+        assert(lock_->GetCcEntry() == cce_);
         if (handle_resp_)
         {
             handle_resp_(ccs);
@@ -803,7 +806,8 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         // if the referenced cce is already invalid, we do not need to care
         // about the fetch result and pending reqs since they are all
         // invalid.
-        bool succ = ccm_->BackFill(cce_, rec_ts_, rec_status_, rec_str_);
+        bool succ =
+            lock_->GetCcMap()->BackFill(cce_, rec_ts_, rec_status_, rec_str_);
         if (!succ)
         {
             // Retry if backfill failed.
@@ -885,13 +889,18 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
     {
 #ifdef RANGE_PARTITION_ENABLED
         FlushRecord *ref = records[index];
-        ref->cce_->SetCkptTs(ref->commit_ts_);
-        ref->cce_->data_store_size_ = ref->post_flush_size_;
+        assert(ref->HoldsVersionedPayload());
+        VersionedLruEntry<true> *v_entry =
+            static_cast<VersionedLruEntry<true> *>(ref->cce_);
+        v_entry->entry_info_.data_store_size_ = ref->post_flush_size_;
 #else
         FlushRecord *ref = &records[index];
-        ref->cce_->SetCkptTs(ref->commit_ts_);
+        assert(!ref->HoldsVersionedPayload());
+        VersionedLruEntry<false> *v_entry =
+            static_cast<VersionedLruEntry<false> *>(ref->cce_);
 #endif
-        ref->cce_->ClearBeingCkpt();
+        v_entry->SetCkptTs(ref->commit_ts_);
+        v_entry->ClearBeingCkpt();
     }
 
     if (index == records.size())

@@ -304,6 +304,7 @@ protected:
      */
     std::pair<LockType, CcErrorCode> AcquireCceKeyLock(
         LruEntry *cce,
+        uint64_t commit_ts,
         LruPage *page,
         RecordStatus cce_payload_status,
         CcRequestBase *req,
@@ -319,6 +320,7 @@ protected:
 
     std::pair<LockType, CcErrorCode> AcquireCceKeyLock(
         LruEntry *cce,
+        uint64_t commit_ts,
         LruPage *page,
         RecordStatus cce_payload_status,
         CcRequestBase *req,
@@ -339,6 +341,7 @@ protected:
      */
     std::pair<LockType, CcErrorCode> LockHandleForResumedRequest(
         LruEntry *cce,
+        uint64_t commit_ts,
         RecordStatus cce_payload_status,
         CcRequestBase *req,
         uint32_t ng_id,

@@ -644,7 +644,6 @@ bool KeyGapLockAndExtraData::SafeToRecycle() const
                recycle_interval_us_;
 }
 
-#ifdef ON_KEY_OBJECT
 void KeyGapLockAndExtraData::PopBlockRequest(CcShard *ccs,
                                              txservice::TxObject *object)
 {
@@ -695,5 +694,4 @@ StandbyForwardEntry *KeyGapLockAndExtraData::ForwardEntry()
 {
     return forward_entry_;
 }
-#endif
 }  // namespace txservice

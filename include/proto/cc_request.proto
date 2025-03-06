@@ -959,6 +959,9 @@ message ScanOpenRequest {
     int32 obj_type = 16; // Only used for redis scan command
     string scan_pattern = 17; // Only used for redis scan command
     uint64 schema_version = 18;
+    bool is_require_keys = 19;
+    bool is_require_recs = 20;
+    bool is_require_sort = 21;
 }
 
 message ScanCache_msg {
@@ -985,6 +988,9 @@ message ScanNextRequest {
     bool is_covering_keys = 11;
     int32 obj_type = 12; // Only used for redis scan command
     string scan_pattern = 13; // Only used for redis scan command
+    bool is_require_keys = 14;
+    bool is_require_recs = 15;
+    bool is_require_sort = 16;
 }
 
 message ScanNextResponse {

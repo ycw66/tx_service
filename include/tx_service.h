@@ -1033,6 +1033,7 @@ public:
         bool skip_wal = false,
         bool skip_kv = false,  // only used in eloqkv
         bool enable_cache_replacement = true,
+        bool auto_redirect = true,
         metrics::MetricsRegistry *metrics_registry = nullptr,
         metrics::CommonLabels common_labels = {},
         std::unordered_map<TableName, std::string> *prebuilt_tables = nullptr,
@@ -1090,6 +1091,7 @@ public:
         txservice_skip_wal = skip_wal;
         txservice_skip_kv = skip_kv;
         txservice_enable_cache_replacement = enable_cache_replacement;
+        txservice_auto_redirect_redis_cmd = auto_redirect;
 
         if (conf.find("enable_key_cache") != conf.end())
         {

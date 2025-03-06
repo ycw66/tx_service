@@ -51,7 +51,7 @@
 
 namespace txservice
 {
-class CatalogCcMap : public TemplateCcMap<CatalogKey, CatalogRecord>
+class CatalogCcMap : public TemplateCcMap<CatalogKey, CatalogRecord, true>
 {
 public:
     CatalogCcMap(const CatalogCcMap &rhs) = delete;
@@ -66,7 +66,7 @@ public:
     CatalogCcMap(CcShard *shard,
                  NodeGroupId cc_ng_id,
                  const TableName &table_name)
-        : TemplateCcMap<CatalogKey, CatalogRecord>(
+        : TemplateCcMap<CatalogKey, CatalogRecord, true>(
               shard, cc_ng_id, table_name, 1, nullptr, false)
     {
     }
@@ -175,8 +175,8 @@ public:
         }
 
         Iterator it =
-            TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key);
-        CcEntry<CatalogKey, CatalogRecord> *cce_ptr = it->second;
+            TemplateCcMap<CatalogKey, CatalogRecord, true>::Find(*table_key);
+        CcEntry<CatalogKey, CatalogRecord, true> *cce_ptr = it->second;
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before applying change.
@@ -479,10 +479,10 @@ public:
                     catalog_entry->RejectDirtySchema();
                 }
 
-                if (cce_ptr->payload_)
+                if (cce_ptr->payload_.cur_payload_)
                 {
-                    cce_ptr->payload_->ClearDirtySchema();
-                    cce_ptr->payload_->SetDirtySchemaImage("");
+                    cce_ptr->payload_.cur_payload_->ClearDirtySchema();
+                    cce_ptr->payload_.cur_payload_->SetDirtySchemaImage("");
                 }
                 return TemplateCcMap::Execute(req);
             }
@@ -968,7 +968,7 @@ public:
             static_cast<const CatalogKey *>(req.Key());
         bool emplace = false;
         Iterator it = FindEmplace(*table_key, emplace, true, false);
-        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+        CcEntry<CatalogKey, CatalogRecord, true> *cce = it->second;
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             const CatalogEntry *catalog_entry =
@@ -998,10 +998,12 @@ public:
                     }
 
                     // upload catalog record
-                    cce->payload_ = std::make_unique<CatalogRecord>();
-                    cce->payload_->Set(catalog_entry->schema_,
-                                       catalog_entry->dirty_schema_,
-                                       catalog_entry->schema_version_);
+                    cce->payload_.PassInCurrentPayload(
+                        std::make_unique<CatalogRecord>());
+                    cce->payload_.cur_payload_->Set(
+                        catalog_entry->schema_,
+                        catalog_entry->dirty_schema_,
+                        catalog_entry->schema_version_);
                     cce->SetCommitTsPayloadStatus(
                         catalog_entry->schema_version_, RecordStatus::Normal);
                 }
@@ -1062,7 +1064,7 @@ public:
         {
             CatalogKey table_key(table_name);
             Iterator it = Find(table_key);
-            CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+            CcEntry<CatalogKey, CatalogRecord, true> *cce = it->second;
             if (cce != nullptr)
             {
                 req.SetFinish();
@@ -1281,8 +1283,8 @@ public:
 
         CatalogKey table_key(table_name);
         Iterator it = FindEmplace(table_key);
-        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
-        CcPage<CatalogKey, CatalogRecord> *ccp = it.GetPage();
+        CcEntry<CatalogKey, CatalogRecord, true> *cce = it->second;
+        CcPage<CatalogKey, CatalogRecord, true> *ccp = it.GetPage();
 
         if (cce == nullptr)
         {
@@ -1347,6 +1349,7 @@ public:
         if (lock_type == LockType::WriteIntent)
         {
             auto lock_pair = AcquireCceKeyLock(cce,
+                                               cce->CommitTs(),
                                                ccp,
                                                cce->PayloadStatus(),
                                                &req,
@@ -1367,6 +1370,7 @@ public:
         else if (lock_type == LockType::WriteLock)
         {
             auto lock_pair = AcquireCceKeyLock(cce,
+                                               cce->CommitTs(),
                                                ccp,
                                                cce->PayloadStatus(),
                                                &req,
@@ -1387,13 +1391,14 @@ public:
             (void) lock_pair;
         }
 
-        if (cce->payload_ == nullptr)
+        if (cce->payload_.cur_payload_ == nullptr)
         {
-            cce->payload_ = std::make_unique<CatalogRecord>();
+            cce->payload_.PassInCurrentPayload(
+                std::make_unique<CatalogRecord>());
         }
-        cce->payload_->Set(catalog_entry->schema_,
-                           catalog_entry->dirty_schema_,
-                           catalog_entry->schema_version_);
+        cce->payload_.cur_payload_->Set(catalog_entry->schema_,
+                                        catalog_entry->dirty_schema_,
+                                        catalog_entry->schema_version_);
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {
@@ -1447,7 +1452,7 @@ public:
                                   TableType::Primary);
         CatalogKey table_key(base_table_name);
         Iterator it = FindEmplace(table_key);
-        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+        CcEntry<CatalogKey, CatalogRecord, true> *cce = it->second;
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             const CatalogEntry *catalog_entry =
@@ -1469,10 +1474,12 @@ public:
 #endif
 
                     // upload catalog record
-                    cce->payload_ = std::make_unique<CatalogRecord>();
-                    cce->payload_->Set(catalog_entry->schema_,
-                                       catalog_entry->dirty_schema_,
-                                       catalog_entry->schema_version_);
+                    cce->payload_.PassInCurrentPayload(
+                        std::make_unique<CatalogRecord>());
+                    cce->payload_.cur_payload_->Set(
+                        catalog_entry->schema_,
+                        catalog_entry->dirty_schema_,
+                        catalog_entry->schema_version_);
                     cce->SetCommitTsPayloadStatus(
                         catalog_entry->schema_version_, RecordStatus::Normal);
                 }
@@ -1506,16 +1513,17 @@ public:
             assert(statistics_entry && statistics_entry->statistics_);
             const auto table_schema = [&req, cce]() -> const TableSchema *
             {
-                if (cce->payload_->Schema() &&
-                    cce->payload_->Schema()->Version() == req.SchemaVersion())
+                if (cce->payload_.cur_payload_->Schema() &&
+                    cce->payload_.cur_payload_->Schema()->Version() ==
+                        req.SchemaVersion())
                 {
-                    return cce->payload_->Schema();
+                    return cce->payload_.cur_payload_->Schema();
                 }
-                else if (cce->payload_->DirtySchema() &&
-                         cce->payload_->DirtySchema()->Version() ==
+                else if (cce->payload_.cur_payload_->DirtySchema() &&
+                         cce->payload_.cur_payload_->DirtySchema()->Version() ==
                              req.SchemaVersion())
                 {
-                    return cce->payload_->DirtySchema();
+                    return cce->payload_.cur_payload_->DirtySchema();
                 }
                 else
                 {
@@ -1547,13 +1555,13 @@ public:
         decoded_key->Deserialize(key_str->data(), offset, KeySchema());
         table_key = decoded_key.get();
 
-        CcEntry<CatalogKey, CatalogRecord> *cce;
-        CcPage<CatalogKey, CatalogRecord> *ccp;
+        CcEntry<CatalogKey, CatalogRecord, true> *cce;
+        CcPage<CatalogKey, CatalogRecord, true> *ccp;
         if (req.CcePtr())
         {
-            cce =
-                static_cast<CcEntry<CatalogKey, CatalogRecord> *>(req.CcePtr());
-            ccp = static_cast<CcPage<CatalogKey, CatalogRecord> *>(
+            cce = static_cast<CcEntry<CatalogKey, CatalogRecord, true> *>(
+                req.CcePtr());
+            ccp = static_cast<CcPage<CatalogKey, CatalogRecord, true> *>(
                 cce->GetCcPage());
         }
         else
@@ -1574,10 +1582,12 @@ public:
                 if (catalog_entry->schema_ != nullptr)
                 {
                     // upload catalog record
-                    cce->payload_ = std::make_unique<CatalogRecord>();
-                    cce->payload_->Set(catalog_entry->schema_,
-                                       catalog_entry->dirty_schema_,
-                                       catalog_entry->schema_version_);
+                    cce->payload_.PassInCurrentPayload(
+                        std::make_unique<CatalogRecord>());
+                    cce->payload_.cur_payload_->Set(
+                        catalog_entry->schema_,
+                        catalog_entry->dirty_schema_,
+                        catalog_entry->schema_version_);
                     // update commit ts
                     cce->SetCommitTsPayloadStatus(
                         catalog_entry->schema_version_, RecordStatus::Normal);
@@ -1645,6 +1655,7 @@ public:
                 // resumed req.
                 std::tie(acquired_lock, err_code) = LockHandleForResumedRequest(
                     cce,
+                    cce->CommitTs(),
                     cce->PayloadStatus(),
                     &req,
                     Sharder::Instance().NativeNodeGroup(),
@@ -1663,6 +1674,7 @@ public:
             {
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
+                                      cce->CommitTs(),
                                       ccp,
                                       cce->PayloadStatus(),
                                       &req,
@@ -1797,13 +1809,15 @@ public:
             // Install new schema image in record and release the lock
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
-                cce->payload_ = std::make_unique<CatalogRecord>();
+                cce->payload_.PassInCurrentPayload(
+                    std::make_unique<CatalogRecord>());
             }
             CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
             catalog_entry->CommitDirtySchema();
 
-            cce->payload_->Set(catalog_entry->schema_, nullptr, commit_ts);
+            cce->payload_.cur_payload_->Set(
+                catalog_entry->schema_, nullptr, commit_ts);
             cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Normal);
             // clean up data in ccm
             CcMap *ccm = shard_->GetCcm(table_key->Name(), cc_ng_id_);
@@ -1855,8 +1869,8 @@ public:
         const TableName &base_table_name = *req.invalidate_table_name_;
         CatalogKey catalog_key(base_table_name);
         Iterator it =
-            TemplateCcMap<CatalogKey, CatalogRecord>::Find(catalog_key);
-        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+            TemplateCcMap<CatalogKey, CatalogRecord, true>::Find(catalog_key);
+        CcEntry<CatalogKey, CatalogRecord, true> *cce = it->second;
         assert(cce->GetKeyLock()->HasWriteLock(req.Txn()));
 
         if (cce->PayloadStatus() == RecordStatus::Unknown)
@@ -1867,10 +1881,11 @@ public:
             {
                 assert(catalog_entry->schema_);
                 // upload catalog record
-                cce->payload_ = std::make_unique<CatalogRecord>();
-                cce->payload_->Set(catalog_entry->schema_,
-                                   catalog_entry->dirty_schema_,
-                                   catalog_entry->schema_version_);
+                cce->payload_.PassInCurrentPayload(
+                    std::make_unique<CatalogRecord>());
+                cce->payload_.cur_payload_->Set(catalog_entry->schema_,
+                                                catalog_entry->dirty_schema_,
+                                                catalog_entry->schema_version_);
                 cce->SetCommitTsPayloadStatus(catalog_entry->schema_version_,
                                               RecordStatus::Normal);
             }
@@ -1882,7 +1897,7 @@ public:
             }
         }
 
-        CatalogRecord *catalog_rec = cce->payload_.get();
+        CatalogRecord *catalog_rec = cce->payload_.cur_payload_.get();
         const TableSchema *table_schema = catalog_rec->Schema();
 
         TableName base_range_name(base_table_name.StringView(),
@@ -1945,8 +1960,8 @@ public:
             TxKey catalog_tx_key(&table_key);
             auto it = FindEmplace(table_key);
 
-            CcEntry<CatalogKey, CatalogRecord> *catalog_cce = it->second;
-            CcPage<CatalogKey, CatalogRecord> *catalog_ccp = it.GetPage();
+            CcEntry<CatalogKey, CatalogRecord, true> *catalog_cce = it->second;
+            CcPage<CatalogKey, CatalogRecord, true> *catalog_ccp = it.GetPage();
 
             const CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key.Name(), node_group_id);
@@ -1978,10 +1993,12 @@ public:
             {
                 assert(schema_version == new_lock_it->second.second);
                 // upload catalog record
-                catalog_cce->payload_ = std::make_unique<CatalogRecord>();
-                catalog_cce->payload_->Set(catalog_entry->schema_,
-                                           catalog_entry->dirty_schema_,
-                                           schema_version);
+                catalog_cce->payload_.PassInCurrentPayload(
+                    std::make_unique<CatalogRecord>());
+                catalog_cce->payload_.cur_payload_->Set(
+                    catalog_entry->schema_,
+                    catalog_entry->dirty_schema_,
+                    schema_version);
                 catalog_cce->SetCommitTsPayloadStatus(schema_version,
                                                       RecordStatus::Normal);
             }

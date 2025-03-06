@@ -29,7 +29,6 @@
 #include <vector>
 
 #include "catalog_factory.h"
-#include "cc/cc_entry.h"
 #include "cc_handler_result.h"
 #include "cc_req_base.h"
 #include "cc_req_misc.h"  // FetchRangeSlicesReq
@@ -53,6 +52,7 @@ struct SliceDataItem;
 class StoreSlice;
 struct LoadRangeSliceRequest;
 struct FetchRecordCc;
+struct FlushRecord;
 
 namespace store
 {
