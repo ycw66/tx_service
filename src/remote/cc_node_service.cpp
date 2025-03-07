@@ -41,6 +41,7 @@
 #include "tx_operation_result.h"
 #include "tx_request.h"
 #include "tx_service.h"
+#include "tx_util.h"
 #include "type.h"
 #include "util.h"
 
