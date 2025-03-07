@@ -77,7 +77,7 @@ public:
 
     bool IsError() const
     {
-        return error_code_.load(std::memory_order_relaxed) !=
+        return error_code_.load(std::memory_order_acquire) !=
                CcErrorCode::NO_ERROR;
     }
 

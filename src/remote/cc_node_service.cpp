@@ -26,6 +26,7 @@
 #include <bthread/mutex.h>
 
 #include <mutex>
+#include <utility>
 
 #include "cc/local_cc_shards.h"
 #include "cc_handler_result.h"
@@ -40,7 +41,6 @@
 #include "tx_operation_result.h"
 #include "tx_request.h"
 #include "tx_service.h"
-#include "tx_util.h"  // BackupUtil
 #include "type.h"
 #include "util.h"
 
@@ -888,6 +888,10 @@ void CcNodeService::GenerateSkFromPk(
     size_t scanned_pk_items_count = 0;
     CcErrorCode task_res = CcErrorCode::NO_ERROR;
     PackSkError pack_sk_err;
+    std::vector<bool> new_indexes_multikey;
+    new_indexes_multikey.reserve(new_indexes_name.size());
+    std::vector<std::string> new_indexes_multikey_paths;
+    new_indexes_multikey_paths.reserve(new_indexes_name.size());
     std::vector<int64_t> ng_terms_vec;
     std::thread worker_thd = std::thread(
         [&base_table_name,
@@ -903,6 +907,8 @@ void CcNodeService::GenerateSkFromPk(
          &scanned_pk_items_count,
          &task_res,
          &pack_sk_err,
+         &new_indexes_multikey,
+         &new_indexes_multikey_paths,
          &ng_terms_vec,
          tx_number,
          tx_term]()
@@ -985,7 +991,18 @@ void CcNodeService::GenerateSkFromPk(
 
             std::unique_lock<bthread::Mutex> lk(bthd_mux);
             task_res = cc_err;
-            if (task_res == CcErrorCode::PACK_SK_ERR)
+            if (task_res == CcErrorCode::NO_ERROR)
+            {
+                for (uint16_t idx = 0; idx < new_indexes_name.size(); ++idx)
+                {
+                    // The multikey attribute in SkGenerator is accumulated.
+                    new_indexes_multikey.push_back(
+                        sk_generator->IsMultiKey(idx));
+                    new_indexes_multikey_paths.push_back(
+                        sk_generator->SerializeMultiKeyPaths(idx));
+                }
+            }
+            else if (task_res == CcErrorCode::PACK_SK_ERR)
             {
                 pack_sk_err = std::move(sk_generator->GetPackSkError());
             }
@@ -1009,15 +1026,22 @@ void CcNodeService::GenerateSkFromPk(
 
     response->set_error_code(static_cast<int>(task_res));
     response->set_pk_items_count(scanned_pk_items_count);
-    if (task_res == CcErrorCode::PACK_SK_ERR)
+    if (task_res == CcErrorCode::NO_ERROR)
+    {
+        for (uint16_t idx = 0; idx < new_indexes_name.size(); ++idx)
+        {
+            remote::MultiKeyAttr *e = response->add_indexes_multikey_attr();
+            e->set_multikey(new_indexes_multikey[idx]);
+            e->set_multikey_paths(std::move(new_indexes_multikey_paths[idx]));
+        }
+    }
+    else if (task_res == CcErrorCode::PACK_SK_ERR)
     {
         response->set_pack_err_code(pack_sk_err.code_);
         response->set_pack_err_msg(pack_sk_err.message_);
     }
-    for (size_t idx = 0; idx < ng_terms_vec.size(); ++idx)
-    {
-        response->add_ng_terms(ng_terms_vec.at(idx));
-    }
+    response->mutable_ng_terms()->Add(ng_terms_vec.cbegin(),
+                                      ng_terms_vec.cend());
 
     worker_thd.join();
     DLOG(INFO) << "CcNodeService GenerateSkFromPk RPC of ng#" << ng_id

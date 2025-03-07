@@ -110,8 +110,8 @@ struct SkEncoder
     virtual ~SkEncoder() = default;
     /**
      * @brief Generate packed secondary key using TxKey and TxRecord.
-     * @note It is a non-const method, and subclass should call SetError() to
-     * store self-defined exception.
+     * @note It is a non-const method. Subclass should call SetError() to store
+     * self-defined exception, and call ClearError() to clean error status.
      */
     virtual bool AppendPackedSk(const TxKey *pk,
                                 const TxRecord *record,
@@ -120,8 +120,22 @@ struct SkEncoder
 
     virtual void Reset()
     {
-        err_.code_ = 0;
-        err_.message_.clear();
+        ClearError();
+    }
+
+    virtual bool IsMultiKey() const
+    {
+        return false;
+    }
+
+    virtual const txservice::MultiKeyPaths *MultiKeyPaths() const
+    {
+        return nullptr;
+    }
+
+    virtual std::string SerializeMultiKeyPaths() const
+    {
+        return "";
     }
 
     const PackSkError &GetError() const
@@ -141,6 +155,11 @@ protected:
         err_.message_ = std::move(message);
     }
 
+    void ClearError()
+    {
+        err_.Reset();
+    }
+
 private:
     PackSkError err_;
 };
@@ -150,12 +169,13 @@ struct TableSchema
     using uptr = std::unique_ptr<TableSchema>;
 
     virtual ~TableSchema() = default;
+    virtual TableSchema::uptr Clone() const = 0;
     virtual const TableName &GetBaseTableName() const = 0;
     virtual const txservice::KeySchema *KeySchema() const = 0;
     virtual const txservice::RecordSchema *RecordSchema() const = 0;
     virtual const std::string &SchemaImage() const = 0;
     virtual const std::unordered_map<
-        uint,
+        uint16_t,
         std::pair<txservice::TableName, txservice::SecondaryKeySchema>>
         *GetIndexes() const = 0;
     virtual KVCatalogInfo *GetKVCatalogInfo() const = 0;
@@ -166,6 +186,7 @@ struct TableSchema
     virtual size_t IndexesSize() const = 0;
     virtual const SecondaryKeySchema *IndexKeySchema(
         const TableName &index_name) const = 0;
+    virtual uint16_t IndexOffset(const TableName &index_name) const = 0;
     virtual void BindStatistics(std::shared_ptr<Statistics> statistics) = 0;
     virtual std::shared_ptr<Statistics> StatisticsObject() const = 0;
 
@@ -192,6 +213,10 @@ struct TableSchema
     virtual const TableName *GetSequenceTableName() const = 0;
     virtual std::pair<TxKey, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
         const TableName &table_name) const = 0;
+
+    // Rebuild table schema image by setting multikey.
+    virtual void IndexesSetMultiKeyAttr(
+        const std::vector<MultiKeyAttr> &indexes){};
 };
 
 class CatalogFactory

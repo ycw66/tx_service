@@ -520,6 +520,10 @@ public:
                                      const std::string &catalog_image,
                                      uint64_t commit_ts);
 
+    void UpdateDirtyCatalog(const TableName &table_name,
+                            const std::string &catalog_image,
+                            CatalogEntry *catalog_entry);
+
     /**
      * Returns false if catalog entry of higher version already exists.
      * @param table_name

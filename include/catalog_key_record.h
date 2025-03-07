@@ -178,7 +178,7 @@ struct CatalogEntry
                         uint64_t dirty_version_ts)
     {
         std::unique_lock<std::shared_mutex> lk(s_mux_);
-        if (dirty_version_ts > dirty_schema_version_ &&
+        if (dirty_version_ts >= dirty_schema_version_ &&
             dirty_version_ts > schema_version_)
         {
             dirty_schema_ = std::move(dirty_schema);

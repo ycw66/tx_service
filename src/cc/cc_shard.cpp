@@ -976,6 +976,14 @@ CatalogEntry *CcShard::CreateDirtyCatalog(const TableName &table_name,
         table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
+void CcShard::UpdateDirtyCatalog(const TableName &table_name,
+                                 const std::string &catalog_image,
+                                 CatalogEntry *catalog_entry)
+{
+    return local_shards_.UpdateDirtyCatalog(
+        table_name, catalog_image, catalog_entry);
+}
+
 void CcShard::CommitDirtyCatalog(const TableName &table_name,
                                  NodeGroupId cc_ng_id)
 {

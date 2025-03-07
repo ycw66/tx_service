@@ -760,7 +760,8 @@ struct UpsertTableTxRequest
     txservice::OperationType op_type_;
     const std::string *alter_table_info_image_;
 
-    // Available when create index raise pack sk error.
+    // Available when create index raise pack sk error. Alloctes a PackSkError
+    // object to store error message raised by SkGenerator.
     std::unique_ptr<PackSkError> pack_sk_err_;
 };
 

@@ -605,6 +605,10 @@ public:
                                      const std::string &catalog_image,
                                      uint64_t commit_ts);
 
+    void UpdateDirtyCatalog(const TableName &table_name,
+                            const std::string &catalog_image,
+                            CatalogEntry *catalog_entry);
+
     std::pair<bool, const CatalogEntry *> CreateReplayCatalog(
         const TableName &table_name,
         NodeGroupId cc_ng_id,

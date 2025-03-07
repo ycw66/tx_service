@@ -68,6 +68,7 @@ void SkGenerator::Reset(const TxKey *start_key,
     upload_index_ctx_.Reset(node_group_id_);
     scan_batch_size_ = LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE;
     task_result_ = CcErrorCode::NO_ERROR;
+    pack_sk_err_.Reset();
     scanned_items_count_ = 0;
     table_schema_ = nullptr;
 }
@@ -109,6 +110,7 @@ void SkGenerator::Reset(const std::string &start_key_str,
     upload_index_ctx_.Reset(node_group_id_);
     scan_batch_size_ = LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE;
     task_result_ = CcErrorCode::NO_ERROR;
+    pack_sk_err_.Reset();
     scanned_items_count_ = 0;
     table_schema_ = nullptr;
 }
@@ -415,12 +417,12 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
              tbl_name_it != new_indexes_name_->cend();
              ++tbl_name_it)
         {
-            auto &index_set =
+            std::vector<WriteEntry> &index_set =
                 new_index_set
                     .emplace(std::piecewise_construct,
                              std::forward_as_tuple(tbl_name_it->StringView(),
                                                    tbl_name_it->Type()),
-                             std::forward_as_tuple(std::vector<WriteEntry>()))
+                             std::forward_as_tuple())
                     .first->second;
             index_set.reserve(reserve_size);
 
@@ -466,7 +468,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
 #endif
                         return;
                     }
-
                 } /* End of each key */
 
                 if (tbl_name_it == new_indexes_name_->cbegin())

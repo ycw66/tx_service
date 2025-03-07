@@ -470,6 +470,18 @@ CatalogEntry *LocalCcShards::CreateDirtyCatalog(
     return &catalog_entry;
 }
 
+void LocalCcShards::UpdateDirtyCatalog(const TableName &table_name,
+                                       const std::string &catalog_image,
+                                       CatalogEntry *catalog_entry)
+{
+    assert(catalog_entry && !catalog_image.empty());
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    catalog_entry->SetDirtySchema(
+        catalog_factory_->CreateTableSchema(
+            table_name, catalog_image, catalog_entry->dirty_schema_version_),
+        catalog_entry->dirty_schema_version_);
+}
+
 void LocalCcShards::CommitDirtyCatalog(const TableName &table_name,
                                        NodeGroupId cc_ng_id)
 {

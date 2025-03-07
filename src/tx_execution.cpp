@@ -1451,6 +1451,26 @@ void TransactionExecution::ProcessTxRequest(
                     index_op_->is_last_finished_key_str_ = true;
                 }
 
+                // - Recovery catalog_rec_ to rebuild dirty schema image.
+                // - Recovery catalog_rec_ to update image inside kv-storage.
+                TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
+                    schema_op_msg.table_type());
+                std::string_view table_name_sv{schema_op_msg.table_name_str()};
+                TableName table_name{table_name_sv, table_type};
+                CatalogEntry *catalog_entry =
+                    local_shards->GetCatalog(table_name, TxCcNodeId());
+                index_op_->catalog_rec_.Set(catalog_entry->schema_,
+                                            catalog_entry->dirty_schema_,
+                                            catalog_entry->schema_version_);
+                index_op_->catalog_rec_.SetSchemaImage(
+                    catalog_entry->schema_->SchemaImage());
+                index_op_->catalog_rec_.SetDirtySchemaImage(
+                    catalog_entry->dirty_schema_->SchemaImage());
+
+                // Recovery indexes_multikey_attr_.
+                index_op_->RecoveryIndexesMultiKeyAttr(
+                    catalog_entry->dirty_schema_.get());
+
                 index_op_->op_ = &index_op_->prepare_data_log_op_;
                 index_op_->prepare_data_log_op_.hd_result_.SetFinished();
             }
@@ -1460,7 +1480,9 @@ void TransactionExecution::ProcessTxRequest(
                        ::txlog::SchemaOpMessage::Stage::
                            SchemaOpMessage_Stage_CommitSchema);
 
-                // extract table schema and dirty schema from schema_op_msg
+                // - Recovery catalog_rec_ to rollback kv-storage
+                // - Recovery catalog_rec_ to drop index from kv-storage.
+                // - Recovery catalog_rec_ to update image inside kv-storage.
                 TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
                     schema_op_msg.table_type());
                 std::string_view table_name_sv{schema_op_msg.table_name_str()};
@@ -1483,6 +1505,13 @@ void TransactionExecution::ProcessTxRequest(
 
                 index_op_->catalog_rec_.Set(
                     schema_ptr, dirty_schema_ptr, schema_ts);
+                index_op_->catalog_rec_.SetSchemaImage(
+                    schema_ptr->SchemaImage());
+                index_op_->catalog_rec_.SetDirtySchemaImage(
+                    dirty_schema_ptr->SchemaImage());
+
+                // Recovery indexes_multikey_attr_.
+                index_op_->RecoveryIndexesMultiKeyAttr(dirty_schema_ptr.get());
 
                 index_op_->commit_log_op_.hd_result_.SetFinished();
                 index_op_->op_ = &index_op_->commit_log_op_;
@@ -5789,7 +5818,7 @@ void TransactionExecution::Process(AsyncOp<ResultType> &ds_op)
 template void TransactionExecution::Process(AsyncOp<Void> &ds_op);
 template void TransactionExecution::Process(AsyncOp<PostProcessResult> &ds_op);
 template void TransactionExecution::Process(
-    AsyncOp<PackSkError> &generate_sk_parallel_op);
+    AsyncOp<GenerateSkParallelResult> &generate_sk_parallel_op);
 
 template <typename ResultType>
 void TransactionExecution::PostProcess(AsyncOp<ResultType> &ds_op)
@@ -5811,7 +5840,7 @@ template void TransactionExecution::PostProcess(AsyncOp<Void> &ds_op);
 template void TransactionExecution::PostProcess(
     AsyncOp<PostProcessResult> &ds_op);
 template void TransactionExecution::PostProcess(
-    AsyncOp<PackSkError> &generate_sk_parallel_op);
+    AsyncOp<GenerateSkParallelResult> &generate_sk_parallel_op);
 
 void TransactionExecution::Process(NoOp &no_op)
 {

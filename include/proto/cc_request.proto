@@ -141,16 +141,23 @@ message GenerateSkFromPkRequest
     repeated CcTableType new_sk_type = 10;
 }
 
+
+message MultiKeyAttr {
+  bool multikey = 1;
+  string multikey_paths = 2;
+}
+
 message GenerateSkFromPkResponse
 {
     uint32 error_code = 1;
     uint32 pk_items_count = 2;
- 
+
     // Available if CcErrorCode::PACK_SK_ERR
     int32 pack_err_code = 3;
     string pack_err_msg = 4;
 
     repeated int64 ng_terms = 5;
+    repeated MultiKeyAttr indexes_multikey_attr = 6;
 }
 
 enum UploadBatchKind 
@@ -737,6 +744,7 @@ enum CommitType {
     PostCommit = 1;
     Commit = 2;
 	DowngradeLock = 3;
+    UpdateDirty = 4;
 }
 
 enum CcTableType {

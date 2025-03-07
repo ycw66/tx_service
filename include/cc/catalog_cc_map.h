@@ -417,6 +417,63 @@ public:
 
             break;
         }
+        case PostWriteType::UpdateDirty:
+        {
+            assert(req.OpType() == OperationType::AddIndex);
+            if (shard_->core_id_ == 0)
+            {
+                // For update dirty, retrieves the current and dirty schema pair
+                // from the current shard.
+                if (req.Payload() != nullptr)
+                {
+                    // When the request comes from a tx in the same node, the
+                    // request references a schema record in the tx's space.
+                    schema_rec = static_cast<CatalogRecord *>(req.Payload());
+                }
+                else
+                {
+                    assert(req.PayloadStr() != nullptr);
+                    // When the request comes from a remote tx, allocates a
+                    // schema record, which acts as a container referencing the
+                    // current and dirty schema pair.
+                    std::unique_ptr<CatalogRecord> decoded_rec =
+                        std::make_unique<CatalogRecord>();
+                    size_t offset = 0;
+                    decoded_rec->Deserialize(req.PayloadStr()->data(), offset);
+
+                    schema_rec = decoded_rec.get();
+                    req.SetDecodedPayload(std::move(decoded_rec));
+                }
+
+                catalog_entry =
+                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+                if (catalog_entry->dirty_schema_->SchemaImage() !=
+                    schema_rec->DirtySchemaImage())
+                {
+                    assert(catalog_entry->dirty_schema_version_ ==
+                           req.CommitTs());
+                    std::shared_ptr<TableSchema> old_dirty_schema =
+                        catalog_entry->dirty_schema_;
+                    shard_->UpdateDirtyCatalog(table_key->Name(),
+                                               schema_rec->DirtySchemaImage(),
+                                               catalog_entry);
+                    catalog_entry->dirty_schema_->BindStatistics(
+                        old_dirty_schema->StatisticsObject());
+                }
+
+                schema_rec->Set(catalog_entry->schema_,
+                                catalog_entry->dirty_schema_,
+                                catalog_entry->schema_version_);
+            }
+            else
+            {
+                assert(req.Payload() != nullptr);
+                schema_rec = static_cast<CatalogRecord *>(req.Payload());
+                catalog_entry =
+                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+            }
+            break;
+        }
         case PostWriteType::PostCommit:
         {
             catalog_entry =
@@ -859,6 +916,39 @@ public:
                     }
                 }
             }
+        }
+        else if (req.CommitType() == PostWriteType::UpdateDirty)
+        {
+            assert(req.OpType() == OperationType::AddIndex);
+            shard_->CreateOrUpdatePkCcMap(
+                table_key->Name(), new_schema, req.NodeGroupId(), false);
+            std::vector<TableName> new_index_names = new_schema->IndexNames();
+            for (const TableName &new_index_name : new_index_names)
+            {
+                shard_->CreateOrUpdateSkCcMap(
+                    new_index_name, new_schema, req.NodeGroupId(), false);
+            }
+#ifdef RANGE_PARTITION_ENABLED
+            TableName base_range_table_name{table_key->Name().StringView(),
+                                            TableType::RangePartition};
+            shard_->CreateOrUpdateRangeCcMap(
+                base_range_table_name,
+                new_schema,
+                req.NodeGroupId(),
+                catalog_entry->dirty_schema_version_,
+                false);
+            for (const TableName &new_index_name : new_index_names)
+            {
+                TableName index_range_table_name{new_index_name.StringView(),
+                                                 TableType::RangePartition};
+                shard_->CreateOrUpdateRangeCcMap(
+                    index_range_table_name,
+                    new_schema,
+                    req.NodeGroupId(),
+                    catalog_entry->dirty_schema_version_,
+                    false);
+            }
+#endif
         }
 
         if (req.CommitType() == PostWriteType::PostCommit &&

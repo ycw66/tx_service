@@ -25,6 +25,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "type.h"
 
@@ -33,11 +34,28 @@ namespace txservice
 class TxKey;
 struct TxRecord;
 
+struct KeySchema;
 struct RecordSchema
 {
 public:
     using Uptr = std::unique_ptr<RecordSchema>;
     virtual ~RecordSchema() = default;
+};
+
+struct MultiKeyPaths
+{
+    using Uptr = std::unique_ptr<MultiKeyPaths>;
+    virtual ~MultiKeyPaths() = default;
+
+    // Prototype Pattern. KeySchema or SkEncoder returns a pointer to the
+    // abstract class, which can be used to create a new instance.
+    virtual MultiKeyPaths::Uptr Clone() const = 0;
+
+    virtual std::string Serialize(const KeySchema *key_schema) const = 0;
+    virtual bool Deserialize(const KeySchema *key_schema,
+                             const std::string &str) = 0;
+    virtual bool Contain(const MultiKeyPaths &rhs) const = 0;
+    virtual bool MergeWith(const MultiKeyPaths &rhs) = 0;
 };
 
 struct KeySchema
@@ -50,6 +68,20 @@ struct KeySchema
 
     virtual uint16_t ExtendKeyParts() const = 0;
     virtual uint64_t SchemaTs() const = 0;
+
+    virtual bool IsMultiKey() const
+    {
+        return false;
+    }
+
+    /**
+     * @return Return an valid object if the index type support multikey index.
+     * @return Return nullptr if the index type doesn't support multikey index.
+     */
+    virtual const txservice::MultiKeyPaths *MultiKeyPaths() const
+    {
+        return nullptr;
+    };
 };
 
 struct SecondaryKeySchema : public KeySchema
@@ -233,4 +265,23 @@ struct TableKeySchemaTs
     std::unordered_map<txservice::TableName, uint64_t> sk_schemas_ts_;
 };
 
+struct MultiKeyAttr
+{
+    MultiKeyAttr(const TableName *index_name,
+                 bool multikey,
+                 MultiKeyPaths::Uptr multikey_paths)
+        : index_name_(index_name),
+          multikey_(multikey),
+          multikey_paths_(std::move(multikey_paths))
+    {
+    }
+
+    const TableName *index_name_{nullptr};
+    bool multikey_{false};
+
+    // Points to nullptr if:
+    // - The calculation engine has no multikey index concept.
+    // - The multikey attribute is false.
+    MultiKeyPaths::Uptr multikey_paths_{nullptr};
+};
 }  // namespace txservice

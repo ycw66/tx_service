@@ -28,6 +28,7 @@
 #include <functional>
 #include <iterator>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -490,6 +491,9 @@ enum class PostWriteType
     // DowngradeLock is used to downgrade write lock to write intent. We use
     // this flag to resolve deadlock problem on DDL.
     DowngradeLock,
+    // Update dirty value. Takes no effect on lock. An optional medium stage
+    // between PrepareCommit and PostCommit.
+    UpdateDirty,
 };
 
 inline static std::string_view empty_sv{"__empty"};

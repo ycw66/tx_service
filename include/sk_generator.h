@@ -181,6 +181,21 @@ public:
         return task_result_;
     }
 
+    bool IsMultiKey(uint16_t idx) const
+    {
+        return sk_encoder_vec_[idx]->IsMultiKey();
+    }
+
+    const txservice::MultiKeyPaths *MultiKeyPaths(uint16_t idx) const
+    {
+        return sk_encoder_vec_[idx]->MultiKeyPaths();
+    }
+
+    std::string SerializeMultiKeyPaths(uint16_t idx) const
+    {
+        return sk_encoder_vec_[idx]->SerializeMultiKeyPaths();
+    }
+
     const PackSkError &GetPackSkError() const
     {
         return pack_sk_err_;

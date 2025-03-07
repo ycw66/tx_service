@@ -1150,7 +1150,8 @@ public:
                         DowngradeCceKeyWriteLock(cce_ptr, txn);
                     }
                 }
-                else
+                else if (req.CommitType() == PostWriteType::Commit ||
+                         req.CommitType() == PostWriteType::PostCommit)
                 {
                     assert(req.CommitType() == PostWriteType::Commit ||
                            req.CommitType() == PostWriteType::PostCommit);
@@ -1176,6 +1177,11 @@ public:
                                    req.NodeGroupId(),
                                    lk_type);
 #endif
+                }
+                else
+                {
+                    assert(req.CommitType() == PostWriteType::UpdateDirty &&
+                           req.OpType() == OperationType::AddIndex);
                 }
             }
         }

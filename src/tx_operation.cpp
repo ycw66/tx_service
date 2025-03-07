@@ -2055,10 +2055,6 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
                                "in kv store";
 
                 txm->upsert_resp_->SetErrorCode(TxErrorCode::DATA_STORE_ERROR);
-
-                // Set txm->commit_ts_ to 0 to indicate there is a flush
-                // error during upsert_kv_table_op_.
-                txm->commit_ts_ = tx_op_failed_ts_;
                 txm->PostProcess(*this);
             }
             else if (retry_num_ > 0)
@@ -2516,8 +2512,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 }
                 else
                 {
-                    /*
+                    // Set txm->commit_ts_ to 0 to indicate there is a flush
+                    // error during upsert_kv_table_op_.
+                    txm->commit_ts_ = tx_op_failed_ts_;
 
+                    /*
                     After upsert kv fails, we need to flush a commit log to
                     indicate this error.
 
@@ -3397,7 +3396,7 @@ void AsyncOp<ResultType>::Reset()
 
 template struct AsyncOp<PostProcessResult>;
 template struct AsyncOp<Void>;
-template struct AsyncOp<PackSkError>;
+template struct AsyncOp<GenerateSkParallelResult>;
 
 CompositeTransactionOperation::CompositeTransactionOperation() : op_(nullptr)
 {

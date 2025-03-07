@@ -224,5 +224,5 @@ template class CcHandlerResult<std::string>;
 template class CcHandlerResult<ObjectCommandResult>;
 template class CcHandlerResult<std::vector<int64_t>>;
 template class CcHandlerResult<UploadBatchResult>;
-template class CcHandlerResult<PackSkError>;
+template class CcHandlerResult<GenerateSkParallelResult>;
 }  // namespace txservice

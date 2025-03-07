@@ -25,6 +25,7 @@
 #include <memory>  //unique_ptr
 #include <shared_mutex>
 #include <utility>
+#include <vector>
 
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
@@ -648,4 +649,139 @@ struct UploadBatchResult
     NodeGroupId node_group_id_{0};
 };
 
+struct GenerateSkParallelResult
+{
+    GenerateSkParallelResult() = default;
+    GenerateSkParallelResult(const GenerateSkParallelResult &rhs) = delete;
+    GenerateSkParallelResult(GenerateSkParallelResult &&rhs) noexcept = default;
+
+    GenerateSkParallelResult &operator=(GenerateSkParallelResult &&rhs) =
+        default;
+
+    void Reset()
+    {
+        indexes_multikey_attr_.clear();
+        pack_sk_error_.Reset();
+    }
+
+    void IndexesMergeMultiKeyAttr(
+        const std::vector<TableName> &indexes_name,
+        const std::vector<bool> &indexes_multikey,
+        const std::vector<const MultiKeyPaths *> &indexes_multikey_paths)
+    {
+        if (indexes_multikey_attr_.empty())
+        {
+            indexes_multikey_attr_.reserve(indexes_name.size());
+            for (uint16_t idx = 0; idx < indexes_name.size(); ++idx)
+            {
+                const TableName *index_name = &indexes_name[idx];
+                bool multikey = indexes_multikey[idx];
+                if (multikey)
+                {
+                    const MultiKeyPaths *multikey_paths =
+                        indexes_multikey_paths[idx];
+                    assert(multikey_paths);
+                    indexes_multikey_attr_.emplace_back(
+                        index_name, true, multikey_paths->Clone());
+                }
+                else
+                {
+                    indexes_multikey_attr_.emplace_back(
+                        index_name, false, nullptr);
+                }
+            }
+        }
+        else
+        {
+            for (uint16_t idx = 0; idx < indexes_name.size(); ++idx)
+            {
+                assert(*indexes_multikey_attr_[idx].index_name_ ==
+                       indexes_name[idx]);
+
+                bool multikey = indexes_multikey[idx];
+                if (multikey)
+                {
+                    indexes_multikey_attr_[idx].multikey_ = true;
+
+                    const MultiKeyPaths *multikey_paths =
+                        indexes_multikey_paths[idx];
+                    assert(multikey_paths);
+                    if (indexes_multikey_attr_[idx].multikey_paths_)
+                    {
+                        indexes_multikey_attr_[idx].multikey_paths_->MergeWith(
+                            *multikey_paths);
+                    }
+                    else
+                    {
+                        indexes_multikey_attr_[idx].multikey_paths_ =
+                            multikey_paths->Clone();
+                    }
+                }
+            }
+        }
+    }
+
+    void IndexesMergeMultiKeyAttr(
+        const std::vector<TableName> &indexes_name,
+        const std::vector<bool> &indexes_multikey,
+        std::vector<MultiKeyPaths::Uptr> &indexes_multikey_paths)
+    {
+        if (indexes_multikey_attr_.empty())
+        {
+            indexes_multikey_attr_.reserve(indexes_name.size());
+            for (uint16_t idx = 0; idx < indexes_name.size(); ++idx)
+            {
+                const TableName *index_name = &indexes_name[idx];
+                bool multikey = indexes_multikey[idx];
+                if (multikey)
+                {
+                    MultiKeyPaths::Uptr &multikey_paths =
+                        indexes_multikey_paths[idx];
+                    assert(multikey_paths);
+                    indexes_multikey_attr_.emplace_back(
+                        index_name, true, std::move(multikey_paths));
+                }
+                else
+                {
+                    indexes_multikey_attr_.emplace_back(
+                        index_name, false, nullptr);
+                }
+            }
+        }
+        else
+        {
+            for (uint16_t idx = 0; idx < indexes_name.size(); ++idx)
+            {
+                assert(*indexes_multikey_attr_[idx].index_name_ ==
+                       indexes_name[idx]);
+
+                bool multikey = indexes_multikey[idx];
+                if (multikey)
+                {
+                    indexes_multikey_attr_[idx].multikey_ = true;
+
+                    MultiKeyPaths::Uptr &multikey_paths =
+                        indexes_multikey_paths[idx];
+                    assert(multikey_paths);
+                    if (indexes_multikey_attr_[idx].multikey_paths_)
+                    {
+                        indexes_multikey_attr_[idx].multikey_paths_->MergeWith(
+                            *multikey_paths);
+                    }
+                    else
+                    {
+                        indexes_multikey_attr_[idx].multikey_paths_ =
+                            std::move(multikey_paths);
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<MultiKeyAttr> indexes_multikey_attr_;
+
+    // When creating index violates some constraint, reports the concrete reason
+    // to calculation engine.
+    PackSkError pack_sk_error_;
+};
 }  // namespace txservice

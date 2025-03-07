@@ -69,6 +69,12 @@ public:
     {
     }
 
+    TableSchema::uptr Clone() const
+    {
+        return std::make_unique<MockTableSchema>(
+            table_name_, schema_image_, version_);
+    }
+
     const TableName &GetBaseTableName() const override
     {
         return table_name_;
@@ -88,7 +94,7 @@ public:
     }
 
     const std::unordered_map<
-        uint,
+        uint16_t,
         std::pair<txservice::TableName, txservice::SecondaryKeySchema>>
         *GetIndexes() const override
     {
@@ -133,6 +139,11 @@ public:
     {
         assert(false);
         return nullptr;
+    }
+    uint16_t IndexOffset(const TableName &index_name) const override
+    {
+        assert(false);
+        return UINT16_MAX;
     }
     KVCatalogInfo *GetKVCatalogInfo() const override
     {
