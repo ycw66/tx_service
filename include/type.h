@@ -615,10 +615,10 @@ struct hash<txservice::TableName>
 
 namespace txservice
 {
-template <typename KeyT>
+template <typename T>
 struct Copy
 {
-    constexpr void operator()(KeyT &lhs, const KeyT &rhs) const
+    constexpr void operator()(T &lhs, const T &rhs) const
     {
         lhs = rhs;
     }
