@@ -80,6 +80,8 @@ inline const size_t OFFSET_TABLE[] = {
 
 };
 
+class TxServiceModule;
+
 /**
  * @brief TxProcessor is a worker processing concurrency control (cc) requests
  * on one cc shard (identified by the thread/core ID), advances tx state
@@ -208,25 +210,30 @@ public:
         // Wakes up the tx processor thread if it is asleep.
         if (prev_tx_cnt == 0)
         {
-            TxProcessorStatus native_proc_status =
-                tx_proc_status_.load(std::memory_order_relaxed);
 #ifdef EXT_TX_PROC_ENABLED
-            int16_t ext_processor_cnt =
-                coordi_->ext_processor_cnt_.load(std::memory_order_relaxed);
 #ifdef ON_KEY_OBJECT
-            if (ext_processor_cnt == 0)
+            if (!coordi_->ext_processor_running_.load(
+                    std::memory_order_relaxed))
             {
-                // New txm task. Notify the external processor directly.
+                // New txm task. Notify the external processor directly. After
+                // the external processor wakes up, it will wake up the native
+                // processor to stand by.
                 coordi_->NotifyExternalProcessor();
             }
-#endif
+#else
+            TxProcessorStatus native_proc_status =
+                tx_proc_status_.load(std::memory_order_relaxed);
             if (native_proc_status == TxProcessorStatus::Sleep ||
-                (ext_processor_cnt == 0 &&
-                 native_proc_status == TxProcessorStatus::Standby))
+                (native_proc_status == TxProcessorStatus::Standby &&
+                 coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) ==
+                     0))
             {
                 Notify(coordi_->sleep_mux_, coordi_->sleep_cv_);
             }
+#endif
 #else
+            TxProcessorStatus native_proc_status =
+                tx_proc_status_.load(std::memory_order_relaxed);
             if (native_proc_status == TxProcessorStatus::Sleep)
             {
                 Notify(coordi_->sleep_mux_, coordi_->sleep_cv_);
@@ -489,8 +496,13 @@ public:
             ++local_round_cnt;
 
             size_t round_cnt = one_round_cnt_.load(std::memory_order_relaxed);
+#ifdef ON_KEY_OBJECT
+            bool has_ext_proc =
+                coordi_->ext_processor_running_.load(std::memory_order_relaxed);
+#else
             bool has_ext_proc =
                 coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) > 0;
+#endif
             bool is_ext_proc_active = local_round_cnt != round_cnt;
 
             if (yield ||
@@ -513,8 +525,16 @@ public:
                         2s,
                         [this]()
                         {
-                            return coordi_->ext_processor_cnt_.load(
-                                       std::memory_order_relaxed) == 0 ||
+#ifdef ON_KEY_OBJECT
+                            bool has_ext_proc =
+                                coordi_->ext_processor_running_.load(
+                                    std::memory_order_relaxed);
+#else
+                            bool has_ext_proc =
+                                coordi_->ext_processor_cnt_.load(
+                                    std::memory_order_relaxed) > 0;
+#endif
+                            return !has_ext_proc ||
                                    terminated_.load(std::memory_order_relaxed);
                         });
 
@@ -911,6 +931,13 @@ public:
 #endif
     }
 
+    TxProcCoordinator *GetTxProcCoordinator() const
+    {
+        return coordi_.get();
+    }
+
+    int NotifyExternalProcessor() const;
+
 private:
     /**
      * @brief Notifies the tx processor that a tx or a cc request waits to be
@@ -1016,7 +1043,94 @@ public:
     friend struct txservice::SplitFlushRangeOp;
     friend class TransactionExecution;
     friend struct TxProcCoordinator;
+    friend class TxServiceModule;
 };
+
+class TxServiceModule : public eloq::EloqModule
+{
+public:
+    TxServiceModule() = default;
+    explicit TxServiceModule(
+        std::vector<std::unique_ptr<TxProcessor>> *tx_processors)
+        : tx_processors_(tx_processors)
+    {
+        coordinators_.reserve(tx_processors_->size());
+        for (const auto &txp : *tx_processors_)
+        {
+            coordinators_.emplace_back(txp->GetTxProcCoordinator());
+        }
+    }
+    ~TxServiceModule() override = default;
+
+    void ExtThdStart(int thd_id) override
+    {
+#ifdef EXT_TX_PROC_ENABLED
+#ifdef ON_KEY_OBJECT
+        assert(thd_id < coordinators_.size());
+        TxProcCoordinator *coordi = coordinators_[thd_id].get();
+        coordi->ext_processor_running_.store(true);
+        TxProcessor *txp = tx_processors_->at(thd_id).get();
+        TxProcessorStatus native_proc_status =
+            txp->tx_proc_status_.load(std::memory_order_relaxed);
+        if (native_proc_status == TxProcessorStatus::Sleep)
+        {
+            txp->Notify(coordi->sleep_mux_, coordi->sleep_cv_);
+        }
+#endif
+#endif
+    }
+
+    void ExtThdEnd(int thd_id) override
+    {
+#ifdef EXT_TX_PROC_ENABLED
+#ifdef ON_KEY_OBJECT
+        assert(thd_id < coordinators_.size());
+        coordinators_[thd_id]->ext_processor_running_.store(false);
+#endif
+#endif
+    }
+
+    void Process(int thd_id) override
+    {
+#ifdef EXT_TX_PROC_ENABLED
+#ifdef ON_KEY_OBJECT
+        assert(thd_id < coordinators_.size());
+        TxProcCoordinator *coord = coordinators_[thd_id].get();
+        size_t active_cnt = 0, req_cnt = 0;
+        bool yield = false;
+        TxProcessor *txp = tx_processors_->at(thd_id).get();
+        txp->RunOneRound(
+            active_cnt, req_cnt, yield, coord->shard_status_, true);
+#endif
+#endif
+    }
+
+    bool HasTask(int thd_id) const override
+    {
+#ifdef EXT_TX_PROC_ENABLED
+        assert(thd_id < coordinators_.size());
+        TxProcCoordinator *coord = coordinators_[thd_id].get();
+#ifdef ON_KEY_OBJECT
+        if (coord->external_txm_cnt_.load(std::memory_order_relaxed) > 0)
+        {
+            return true;
+        }
+#endif
+        TxProcessor *txp = tx_processors_->at(thd_id).get();
+        return !txp->IsIdle();
+#endif
+        return false;
+    }
+
+    std::vector<std::unique_ptr<TxProcessor>> *tx_processors_{};
+
+    std::vector<std::shared_ptr<TxProcCoordinator>> coordinators_;
+};
+
+inline int TxProcessor::NotifyExternalProcessor() const
+{
+    return TxServiceModule::NotifyWorker(thd_id_);
+}
 
 class TxService
 {
@@ -1182,8 +1296,10 @@ public:
             thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
         }
 #if defined(EXT_TX_PROC_ENABLED) && defined(ON_KEY_OBJECT)
-        // set ext_tx_prc_func to brpc
-        bthread_set_ext_tx_prc_func(GetTxProcFunctors());
+        // Register TxServiceModule into brpc so that the brpc workers can
+        // process TxService tasks.
+        module_ = TxServiceModule(&pool_);
+        register_module(&module_);
 #endif
 
         // Start cc stream receiver server.
@@ -1230,6 +1346,10 @@ public:
         {
             thd_idx.join();
         }
+
+#if defined(EXT_TX_PROC_ENABLED) && defined(ON_KEY_OBJECT)
+        unregister_module(&module_);
+#endif
 
         // Maybe there has remote request in cache, so here close stream sender
         // after TxProcessor terminated.
@@ -1309,8 +1429,19 @@ public:
     std::vector<std::unique_ptr<TxProcessor>> pool_;
     std::vector<std::thread> thd_pool_;
     Checkpointer ckpt_;
+    TxServiceModule module_;
 
     friend class txservice::fault::RecoveryService;
 };
+
+inline void TxProcCoordinator::NotifyExternalProcessor() const
+{
+#ifdef ON_KEY_OBJECT
+    if (core_id_ != -1)
+    {
+        TxServiceModule::NotifyWorker(core_id_);
+    }
+#endif
+}
 
 }  // namespace txservice

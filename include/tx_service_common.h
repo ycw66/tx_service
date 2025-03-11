@@ -62,15 +62,7 @@ struct TxProcCoordinator
     {
     }
 
-    void NotifyExternalProcessor()
-    {
-#ifdef ON_KEY_OBJECT
-        if (core_id_ != -1)
-        {
-            bthread_notify_worker(core_id_);
-        }
-#endif
-    }
+    void NotifyExternalProcessor() const;
 
     int32_t core_id_{-1};
     std::mutex sleep_mux_;
@@ -88,6 +80,7 @@ struct TxProcCoordinator
     // This is only set when external tx processor occupies the shard,
     // and only should be access after occupying shard_status_.
     mi_heap_t *ext_tx_proc_heap_{nullptr};
+    std::atomic<bool> ext_processor_running_{false};
 #endif
 };
 }  // namespace txservice

@@ -2582,32 +2582,39 @@ void CcShard::NotifyTxProcessor()
     // notify function internally uses a std::mutex before notifying via the
     // condition variable. This is to create a barrier such that the prior queue
     // size update and the enqueue of the cc request precedes notify().
-    TxProcessorStatus tx_proc_status =
-        tx_proc_status_ != nullptr
-            ? tx_proc_status_->load(std::memory_order_relaxed)
-            : TxProcessorStatus::Busy;
 #ifdef EXT_TX_PROC_ENABLED
-    int16_t ext_processor_cnt =
-        tx_coordi_->ext_processor_cnt_.load(std::memory_order_relaxed);
 #ifdef ON_KEY_OBJECT
-    if (ext_processor_cnt == 0)
+    if (!tx_coordi_->ext_processor_running_.load(std::memory_order_relaxed))
     {
-        // Notify the external processor directly.
+        // Notify the external processor directly. After the external processor
+        // wakes up, it will wake up the native processor to stand by.
         tx_coordi_->NotifyExternalProcessor();
     }
-#endif
-    if (tx_proc_status == TxProcessorStatus::Sleep ||
-        (tx_proc_status == TxProcessorStatus::Standby &&
-         ext_processor_cnt == 0))
-    {
-        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
-        tx_coordi_->sleep_cv_.notify_one();
-    }
 #else
-    if (tx_proc_status == TxProcessorStatus::Sleep)
+    if (tx_proc_status_ != nullptr)
     {
-        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
-        tx_coordi_->sleep_cv_.notify_one();
+        TxProcessorStatus tx_proc_status =
+            tx_proc_status_->load(std::memory_order_relaxed);
+        if (tx_proc_status == TxProcessorStatus::Sleep ||
+            (tx_proc_status == TxProcessorStatus::Standby &&
+             tx_coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) ==
+                 0))
+        {
+            std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
+            tx_coordi_->sleep_cv_.notify_one();
+        }
+    }
+#endif
+#else
+    if (tx_proc_status_ != nullptr)
+    {
+        TxProcessorStatus tx_proc_status =
+            tx_proc_status_->load(std::memory_order_relaxed);
+        if (tx_proc_status == TxProcessorStatus::Sleep)
+        {
+            std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
+            tx_coordi_->sleep_cv_.notify_one();
+        }
     }
 #endif
 }
