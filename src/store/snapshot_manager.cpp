@@ -21,6 +21,8 @@
  */
 #include "store/snapshot_manager.h"
 
+#include <vector>
+
 #include "cc/local_cc_shards.h"
 
 namespace txservice
@@ -436,7 +438,26 @@ void SnapshotManager::HandleBackupTask(
 
     if (store_hd_->IsSharedStorage())
     {
+#if (defined(ROCKSDB_CLOUD_FS_TYPE) && (ROCKSDB_CLOUD_FS_TYPE == 1 /*S3*/ || \
+                                        ROCKSDB_CLOUD_FS_TYPE == 2 /*GCS*/))
+        // For shared storage with cloud filesystem enabled, create snapshot
+        std::vector<std::string> snapshot_files;
+        bool res =
+            store_hd_->CreateSnapshotForBackup(backup_name, snapshot_files);
+        if (!res)
+        {
+            LOG(ERROR) << "Failed to create snapshot for backup in shared "
+                          "storage mode";
+            this->UpdateBackupTaskStatus(
+                task_ptr, txservice::remote::BackupTaskStatus::Failed);
+            store_hd_->RemoveBackupSnapshot(backup_name);
+            return;
+        }
+        LOG(INFO) << "Backup finished with snapshot creation, name:"
+                  << backup_name;
+#else
         LOG(INFO) << "Backup finished, name:" << backup_name;
+#endif
         this->UpdateBackupTaskStatus(
             task_ptr, txservice::remote::BackupTaskStatus::Finished);
         return;
@@ -512,7 +533,6 @@ void SnapshotManager::HandleBackupTask(
 
         bool send_result = store_hd_->SendSnapshotToRemote(
             node_group, leader_term, snapshot_files, remote_dest);
-
         if (send_result)
         {
             LOG(INFO) << "Backup task is finished, backup name: " << backup_name
@@ -530,7 +550,9 @@ void SnapshotManager::HandleBackupTask(
         }
 
         // remove local temporary store directory of backup files.
-        if (store_hd_->RemoveBackupSnapshot(backup_name))
+        bool remove_bucket_result =
+            store_hd_->RemoveBackupSnapshot(backup_name);
+        if (remove_bucket_result)
         {
             LOG(INFO) << "Removed local temporary store directory of "
                          "backup files , backup name:"
