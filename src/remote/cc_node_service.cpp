@@ -2009,18 +2009,15 @@ void CcNodeService::NotifyShutdownCkpt(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count();
-    for (uint32_t ng_id : Sharder::Instance().LocalNodeGroups())
-    {
-        if (Sharder::Instance().LeaderTerm(ng_id) < 0)
-        {
-            LOG(WARNING) << "This node is no longer leader.";
-            response->set_trigger_ckpt_ts(0);
-            response->set_status(ShutdownStatus::ShutdownFailed);
-            return;
-        }
 
-        assert(Sharder::Instance().LeaderNodeId(ng_id) ==
-               Sharder::Instance().NodeId());
+    uint32_t native_ng_id = Sharder::Instance().NativeNodeGroup();
+    if (Sharder::Instance().LeaderTerm(native_ng_id) < 0)
+    {
+        LOG(WARNING) << "This node is no longer leader. ng_id: "
+                     << native_ng_id;
+        response->set_trigger_ckpt_ts(0);
+        response->set_status(ShutdownStatus::ShutdownFailed);
+        return;
     }
 
     local_shards_.GetTxService()->ckpt_.Terminate();
@@ -2037,21 +2034,20 @@ void CcNodeService::CheckCkptStatus(
 {
     brpc::ClosureGuard done_guard(done);
 
-    for (uint32_t ng_id : Sharder::Instance().LocalNodeGroups())
+    uint32_t native_ng_id = Sharder::Instance().NativeNodeGroup();
+    if (Sharder::Instance().LeaderTerm(native_ng_id) < 0)
     {
-        if (Sharder::Instance().LeaderTerm(ng_id) < 0)
-        {
-            LOG(WARNING) << "Leader transfer during shutdown checkpoint.";
-            response->set_status(CkptStatus::CkptFailed);
-            return;
-        }
+        LOG(WARNING) << "This node is no longer leader. ng_id: "
+                     << native_ng_id;
+        response->set_status(CkptStatus::CkptFailed);
+        return;
+    }
 
-        if (Sharder::Instance().GetNodeGroupCkptTs(ng_id) <=
-            request->trigger_ckpt_ts())
-        {
-            response->set_status(CkptStatus::CkptRunning);
-            return;
-        }
+    if (Sharder::Instance().GetNodeGroupCkptTs(native_ng_id) <=
+        request->trigger_ckpt_ts())
+    {
+        response->set_status(CkptStatus::CkptRunning);
+        return;
     }
 
     response->set_status(CkptStatus::CkptFinished);
