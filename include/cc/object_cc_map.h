@@ -98,6 +98,7 @@ public:
     using CcMap::table_schema_;
     using TemplateCcMap<KeyT, ValueT, false>::Find;
     using TemplateCcMap<KeyT, ValueT, false>::FindEmplace;
+    using TemplateCcMap<KeyT, ValueT, false>::End;
     using typename TemplateCcMap<KeyT, ValueT, false>::Iterator;
     using TemplateCcMap<KeyT, ValueT, false>::KeySchema;
     using TemplateCcMap<KeyT, ValueT, false>::RecordSchema;
@@ -387,10 +388,32 @@ public:
                 look_key = &decoded_key;
             }
 
-            // DEL existing keys only decreases memory utilization therefore
-            // considered readonly here.
-            auto it = FindEmplace(
-                *look_key, false, req.IsReadOnly() || req.IsDelete());
+            Iterator it = End();
+            // If all data is in memory and deleted objects should be
+            // skipped, use Find instead of Emplace to avoid inserting a
+            // deleted CCE that would need removal.
+            // ReadIntent needs to be acquired even the object does not exist
+            // under RepeatableRead isolation level (WATCH command).
+            if (ccm_has_full_entries_ &&
+                req.Isolation() != IsolationLevel::RepeatableRead &&
+                (req.IsReadOnly() || !cmd->ProceedOnNonExistentObject()))
+            {
+                it = Find(*look_key);
+                if (it == End())
+                {
+                    obj_result.rec_status_ = RecordStatus::Deleted;
+                    obj_result.commit_ts_ = 1;
+                    hd_res->SetFinished();
+                    return true;
+                }
+            }
+            else
+            {
+                // DEL existing keys only decreases memory utilization therefore
+                // considered readonly here.
+                it = FindEmplace(
+                    *look_key, false, req.IsReadOnly() || req.IsDelete());
+            }
             cce = it->second;
             ccp = it.GetPage();
 
