@@ -253,7 +253,8 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
         if (!fault_inject)
         {
-            if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+            if (!hd_result_.Value().is_local_ && txm->IsTimeOut() &&
+                hd_result_.SetResultByTimeoutThread())
             {
                 timeout = true;
             }
@@ -5136,6 +5137,7 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
                 }
 
                 atm_block_cnt_.fetch_sub(1, std::memory_order_relaxed);
+
                 atm_cnt_.fetch_sub(1, std::memory_order_release);
             };
 

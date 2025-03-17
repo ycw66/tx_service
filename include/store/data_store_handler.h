@@ -218,11 +218,10 @@ public:
             &sample_pool_map,
         uint64_t version) = 0;
 
-    virtual DataStoreOpStatus LoadRangeSlice(
-        const TableName &table_name,
-        const KVCatalogInfo *kv_info,
-        uint32_t partition_id,
-        LoadRangeSliceRequest *load_slice_req)
+    virtual DataStoreOpStatus LoadRangeSlice(const TableName &table_name,
+                                             const KVCatalogInfo *kv_info,
+                                             uint32_t partition_id,
+                                             FillStoreSliceCc *load_slice_req)
     {
         return DataStoreOpStatus::Error;
     }

@@ -1610,8 +1610,10 @@ public:
                                     // Key cache is invalidated due to
                                     // collision. Try to add the cached slices
                                     // back to the key cache.
-                                    range->InitKeyCache(
-                                        &table_name_, cc_ng_id_, ng_term);
+                                    range->InitKeyCache(shard_,
+                                                        &table_name_,
+                                                        cc_ng_id_,
+                                                        ng_term);
                                 }
                                 else if (res == RangeSliceOpStatus::Retry)
                                 {
@@ -7101,14 +7103,14 @@ public:
         if (index == slice_vec.size())
         {
             slice_vec.clear();
-            req.SetFinish();
+            return req.SetFinish(shard_);
         }
         else
         {
             req.SetNextIndex(shard_->core_id_, index);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
+            return false;
         }
-        return false;
     }
 
     bool Execute(InitKeyCacheCc &req) override
@@ -7122,8 +7124,7 @@ public:
             if (req.Slice().IsValidInKeyCache(shard_->core_id_))
             {
                 // No need to init key cache.
-                req.SetFinish(shard_->core_id_, true);
-                return false;
+                return req.SetFinish(shard_->core_id_, true);
             }
             req.Slice().SetLoadingKeyCache(shard_->core_id_, true);
             start_key = req.Slice().StartTxKey().GetKey<KeyT>();
@@ -7189,14 +7190,13 @@ public:
             if (ret == RangeSliceOpStatus::Error)
             {
                 // Stop immediately if one of the add key fails.
-                req.SetFinish(shard_->core_id_, false);
-                return false;
+                return req.SetFinish(shard_->core_id_, false);
             }
         }
 
         if (map_it == map_end_it)
         {
-            req.SetFinish(shard_->core_id_, true);
+            return req.SetFinish(shard_->core_id_, true);
         }
         else
         {
@@ -7204,8 +7204,8 @@ public:
             TxKey pause_key(map_it->first);
             req.SetPauseKey(pause_key, shard_->core_id_);
             shard_->Enqueue(&req);
+            return false;
         }
-        return false;
     }
 
     bool Execute(KickoutCcEntryCc &req) override

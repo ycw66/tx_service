@@ -997,6 +997,16 @@ public:
         }
     }
 
+    FillStoreSliceCc *NewFillStoreSliceCc()
+    {
+        return fill_store_slice_cc_pool_.NextRequest();
+    }
+
+    InitKeyCacheCc *NewInitKeyCacheCc()
+    {
+        return init_key_cache_cc_pool_.NextRequest();
+    }
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
@@ -1045,6 +1055,9 @@ private:
 
     // For concurrency execution of cpu-bound tasks.
     CcRequestPool<RunOnTxProcessorCc> run_on_tx_processor_cc_pool_;
+
+    CcRequestPool<FillStoreSliceCc> fill_store_slice_cc_pool_;
+    CcRequestPool<InitKeyCacheCc> init_key_cache_cc_pool_;
 
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;

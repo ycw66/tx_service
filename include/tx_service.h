@@ -747,6 +747,13 @@ public:
         // Override default heap since we're accessing txm in cc shard.
         CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
         CcShardHeap *shard_heap = shard->GetShardHeap();
+        if (shard_heap == nullptr)
+        {
+            coordi_->shard_status_.store(TxShardStatus::Free,
+                                         std::memory_order_release);
+            return false;
+        }
+
         shard->OverrideHeapThread();
         coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
 

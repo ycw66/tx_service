@@ -614,8 +614,10 @@ public:
                         auto new_store_range = new_range->TypedStoreRange();
                         if (new_store_range)
                         {
-                            new_store_range->InitKeyCache(
-                                &this->table_name_, this->cc_ng_id_, ng_term);
+                            new_store_range->InitKeyCache(shard_,
+                                                          &this->table_name_,
+                                                          this->cc_ng_id_,
+                                                          ng_term);
                         }
                     }
 
@@ -627,8 +629,11 @@ public:
                     auto old_store_range = old_entry->TypedStoreRange();
                     if (old_store_range)
                     {
-                        old_store_range->InitKeyCache(
-                            &this->table_name_, this->cc_ng_id_, ng_term, true);
+                        old_store_range->InitKeyCache(shard_,
+                                                      &this->table_name_,
+                                                      this->cc_ng_id_,
+                                                      ng_term,
+                                                      true);
                     }
                 }
 

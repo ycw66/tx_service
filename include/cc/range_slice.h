@@ -458,14 +458,15 @@ public:
         return cache_validity_[core_id] & (1 << 1);
     }
 
-    void InitKeyCache(StoreRange *range,
+    void InitKeyCache(CcShard *cc_shard,
+                      StoreRange *range,
                       const TableName *tbl_name,
                       NodeGroupId ng_id,
                       int64_t term);
 
     InitKeyCacheCc *InitKeyCacheRequest()
     {
-        return init_key_cache_cc_.get();
+        return init_key_cache_cc_;
     }
 
 protected:
@@ -487,8 +488,8 @@ protected:
     uint16_t pins_{0};
     bool to_alter_{false};
 
-    std::unique_ptr<FillStoreSliceCc> fetch_slice_cc_{nullptr};
-    std::unique_ptr<InitKeyCacheCc> init_key_cache_cc_{nullptr};
+    FillStoreSliceCc *fetch_slice_cc_{nullptr};
+    InitKeyCacheCc *init_key_cache_cc_{nullptr};
 
     /**
      * @brief A queue of cc requests waiting for the slice to be loaded into
@@ -1704,7 +1705,8 @@ public:
         }
     }
 
-    void InitKeyCache(const TableName *tbl_name,
+    void InitKeyCache(CcShard *cc_shard,
+                      const TableName *tbl_name,
                       NodeGroupId ng_id,
                       int64_t term,
                       bool force = false)
@@ -1718,7 +1720,7 @@ public:
         std::shared_lock<std::shared_mutex> lk(mux_);
         for (auto &slice : slices_)
         {
-            slice->InitKeyCache(this, tbl_name, ng_id, term);
+            slice->InitKeyCache(cc_shard, this, tbl_name, ng_id, term);
         }
     }
 
