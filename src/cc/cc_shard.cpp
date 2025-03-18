@@ -1540,7 +1540,9 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
 #endif
 
         std::vector<TableName> index_names = curr_schema->IndexNames();
-        CreateOrUpdatePkCcMap(base_table_name, curr_schema, cc_ng_id);
+        bool ccm_has_full_entries = txservice_skip_kv;
+        CreateOrUpdatePkCcMap(
+            base_table_name, curr_schema, cc_ng_id, true, ccm_has_full_entries);
 
         for (const TableName &index_name : index_names)
         {
