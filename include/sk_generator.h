@@ -157,7 +157,7 @@ public:
                int32_t partition_id,
                uint64_t tx_number,
                int64_t tx_term,
-               std::vector<TableName> &new_indexes_name);
+               const std::vector<TableName> &new_indexes_name);
 
     void Reset(const std::string &start_key_str,
                const std::string &end_key_str,
@@ -167,7 +167,7 @@ public:
                int32_t partition_id,
                uint64_t tx_number,
                int64_t tx_term,
-               std::vector<TableName> &new_indexes_name);
+               const std::vector<TableName> &new_indexes_name);
 
     void ProcessTask();
 

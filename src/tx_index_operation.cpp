@@ -2275,7 +2275,7 @@ void UpsertTableIndexOp::HandleRangeTask(
                         indexes_multikey_paths.reserve(sk_names.size());
                         for (uint16_t idx = 0; idx < sk_names.size(); ++idx)
                         {
-                            // The multikey attribute in SkGenerator is
+                            // The multikey attribute in SkGenerator has
                             // accumulated.
                             indexes_multikey.push_back(
                                 sk_generator->IsMultiKey(idx));

@@ -76,8 +76,7 @@ void txservice::LocalCcHandler::AcquireWrite(
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
-        acquire_result.remote_hd_result_is_set_->store(
-            true, std::memory_order_relaxed);
+        acquire_result.SetRemoteHdResult(true, std::memory_order_relaxed);
         AcquireCc *req = acquire_pool.NextRequest();
         req->Reset(&table_name,
                    schema_version,
@@ -99,8 +98,7 @@ void txservice::LocalCcHandler::AcquireWrite(
     else
     {
         acquire_result.remote_ack_cnt_->fetch_add(1, std::memory_order_relaxed);
-        acquire_result.remote_hd_result_is_set_->store(
-            false, std::memory_order_relaxed);
+        acquire_result.SetRemoteHdResult(false, std::memory_order_relaxed);
         remote_hd_.AcquireWrite(cc_shards_.node_id_,
                                 ng_id,
                                 table_name,

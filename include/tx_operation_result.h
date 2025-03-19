@@ -60,7 +60,7 @@ struct AcquireKeyResult
         commit_ts_ = 0;
         cce_addr_ = {};
         remote_ack_cnt_ = nullptr;
-        remote_hd_result_is_set_ = nullptr;
+        remote_hd_result_is_set_ = false;
     }
 
     uint64_t last_vali_ts_{0};
@@ -73,10 +73,28 @@ struct AcquireKeyResult
     // blocked. An acknowledgement is a special response notifying the sender
     // the address and the term of the cc entry on which the request is blocked.
     std::atomic<int32_t> *remote_ack_cnt_{nullptr};
-    // Use this flag to indicate wheatear the hd_result of remote request has
-    // been called SetFinish()/SetError(). Local request always set this flag to
-    // `true`.
-    std::unique_ptr<std::atomic<bool>> remote_hd_result_is_set_{nullptr};
+
+    bool IsRemoteHdResultSet(std::memory_order order) const
+    {
+        return reinterpret_cast<const std::atomic<bool> &>(
+                   remote_hd_result_is_set_)
+            .load(order);
+    }
+
+    void SetRemoteHdResult(bool value, std::memory_order order)
+    {
+        reinterpret_cast<std::atomic<bool> &>(remote_hd_result_is_set_)
+            .store(value, order);
+    }
+
+private:
+    // Use this atomic flag to indicate whether the hd_result of remote request
+    // has been called SetFinish()/SetError(). Local request always set this
+    // flag to `true`.
+    //
+    // std::vector<std::atomic<T>>.resize() compiles error. C++17 lack of
+    // std::atomic_ref<T>. Wrap load/store operation as member methods.
+    bool remote_hd_result_is_set_{false};
 };
 
 struct AcquireAllResult

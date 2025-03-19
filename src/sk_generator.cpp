@@ -39,7 +39,7 @@ void SkGenerator::Reset(const TxKey *start_key,
                         int32_t partition_id,
                         uint64_t tx_number,
                         int64_t tx_term,
-                        std::vector<TableName> &new_indexes_name)
+                        const std::vector<TableName> &new_indexes_name)
 {
     base_table_name_ = &base_table_name;
     task_status_ = nullptr;
@@ -81,7 +81,7 @@ void SkGenerator::Reset(const std::string &start_key_str,
                         int32_t partition_id,
                         uint64_t tx_number,
                         int64_t tx_term,
-                        std::vector<TableName> &new_indexes_name)
+                        const std::vector<TableName> &new_indexes_name)
 {
     base_table_name_ = &base_table_name;
     task_status_ = nullptr;
@@ -385,7 +385,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                 // Reset the paused key.
                 for (size_t i = 0; i < core_cnt; ++i)
                 {
-                    auto &paused_key = scan_req.PausePos(i).first;
+                    const TxKey &paused_key = scan_req.PausePos(i).first;
                     if (!scan_req.IsDrained(i))
                     {
 #ifdef RANGE_PARTITION_ENABLED

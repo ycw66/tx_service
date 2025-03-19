@@ -514,7 +514,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         const CceAddr_msg &cce_addr_res = cc_res.cce_addr();
         AcquireKeyResult &acq_res = hd_res->Value()[cc_res.vec_idx()];
 
-        if (acq_res.remote_hd_result_is_set_->load(std::memory_order_acquire))
+        if (acq_res.IsRemoteHdResultSet(std::memory_order_acquire))
         {
             msg_pool_.enqueue(std::move(msg));
             hd_res->DecreaseCurrentHandlingResponse();
@@ -528,8 +528,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.remote_ack_cnt_->fetch_sub(1);
             }
 
-            acq_res.remote_hd_result_is_set_->store(true,
-                                                    std::memory_order_release);
+            acq_res.SetRemoteHdResult(true, std::memory_order_release);
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
             hd_res->DecreaseCurrentHandlingResponse();
@@ -562,8 +561,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_res.commit_ts_ = cc_res.commit_ts();
-                acq_res.remote_hd_result_is_set_->store(
-                    true, std::memory_order_release);
+                acq_res.SetRemoteHdResult(true, std::memory_order_release);
 
                 hd_res->SetFinished();
             }
@@ -1654,7 +1652,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             auto &acq_key_result_vec = hd_res->Value();
             if (acq_key_result_vec.at(resp.acq_key_result_vec_idx())
-                    .remote_hd_result_is_set_->load(std::memory_order_acquire))
+                    .IsRemoteHdResultSet(std::memory_order_acquire))
             {
                 msg_pool_.enqueue(std::move(msg));
                 hd_res->DecreaseCurrentHandlingResponse();
@@ -1662,8 +1660,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
 
             acq_key_result_vec.at(resp.acq_key_result_vec_idx())
-                .remote_hd_result_is_set_->store(true,
-                                                 std::memory_order_release);
+                .SetRemoteHdResult(true, std::memory_order_release);
 
             AckStatus status = (AckStatus) resp.req_status();
             if (status == AckStatus::ErrorTerm)

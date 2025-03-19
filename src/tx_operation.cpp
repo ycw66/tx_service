@@ -442,8 +442,6 @@ void AcquireWriteOperation::Reset(size_t acquire_write_cnt, size_t wentry_cnt)
     for (size_t idx = old_size; idx < acquire_write_cnt; ++idx)
     {
         acquire_key_vec[idx].remote_ack_cnt_ = &remote_ack_cnt_;
-        acquire_key_vec[idx].remote_hd_result_is_set_ =
-            std::make_unique<std::atomic<bool>>(false);
     }
 
     remote_ack_cnt_.store(0, std::memory_order_relaxed);
@@ -618,8 +616,7 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
             {
                 AcquireKeyResult &akr = vct_akr[i];
 
-                if (akr.remote_hd_result_is_set_->load(
-                        std::memory_order_acquire) == false &&
+                if (!akr.IsRemoteHdResultSet(std::memory_order_acquire) &&
                     akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
                 {
                     txm->cc_handler_->BlockCcReqCheck(
@@ -5492,8 +5489,6 @@ void CmdForwardAcquireWriteOp::Reset(size_t acquire_write_cnt)
     for (size_t idx = old_size; idx < acquire_write_cnt; ++idx)
     {
         acquire_key_vec[idx].remote_ack_cnt_ = &remote_ack_cnt_;
-        acquire_key_vec[idx].remote_hd_result_is_set_ =
-            std::make_unique<std::atomic<bool>>(false);
     }
 
     remote_ack_cnt_.store(0, std::memory_order_relaxed);
@@ -5578,8 +5573,7 @@ void CmdForwardAcquireWriteOp::Forward(TransactionExecution *txm)
             {
                 AcquireKeyResult &akr = vct_akr[i];
 
-                if (akr.remote_hd_result_is_set_->load(
-                        std::memory_order_acquire) == false &&
+                if (!akr.IsRemoteHdResultSet(std::memory_order_acquire) &&
                     akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
                 {
                     txm->cc_handler_->BlockCcReqCheck(

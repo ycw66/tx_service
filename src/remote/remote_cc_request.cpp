@@ -1997,10 +1997,10 @@ txservice::remote::RemoteDbSizeCc::RemoteDbSizeCc()
 
         const DBSizeRequest &req = input_msg_->dbsize_req();
         DBSizeResponse *resp = output_msg_.mutable_db_size_resp();
-        for (size_t idx = 0; idx < total_obj_sizes_.size(); ++idx)
+        for (size_t idx = 0; idx < TotalObjSizesCount(); ++idx)
         {
             resp->add_node_obj_size(
-                total_obj_sizes_[idx]->load(std::memory_order_relaxed));
+                TotalObjSizesLoad(idx, std::memory_order_relaxed));
         }
 
         resp->set_dbsize_term(req.dbsize_term());
@@ -2056,8 +2056,8 @@ bool txservice::remote::RemoteDbSizeCc::Execute(CcShard &ccs)
         CcMap *map = ccs.GetCcm(table_names_->at(idx), vct_ng_id_[0]);
         if (map != nullptr)
         {
-            total_obj_sizes_[idx]->fetch_add(map->NormalObjectSize(),
-                                             std::memory_order_relaxed);
+            TotalObjSizesFetchAdd(
+                idx, map->NormalObjectSize(), std::memory_order_relaxed);
         }
     }
 

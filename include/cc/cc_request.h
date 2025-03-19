@@ -7297,11 +7297,7 @@ public:
 
         total_ref_cnt_ = local_ref_cnt + remote_ref_cnt;
         remote_ref_cnt_ = remote_ref_cnt;
-        for (size_t idx = 0; idx < table_names_->size(); ++idx)
-        {
-            total_obj_sizes_.push_back(
-                std::make_unique<std::atomic<int64_t>>(0));
-        }
+        total_obj_sizes_.resize(table_names_->size(), 0);
     }
 
     bool Execute(CcShard &ccs) override
@@ -7315,8 +7311,9 @@ public:
                 CcMap *map = ccs.GetCcm(table_names_->at(idx), ng_id);
                 if (map != nullptr)
                 {
-                    total_obj_sizes_[idx]->fetch_add(map->NormalObjectSize(),
-                                                     std::memory_order_relaxed);
+                    TotalObjSizesFetchAdd(idx,
+                                          map->NormalObjectSize(),
+                                          std::memory_order_relaxed);
                 }
             }
         }
@@ -7336,7 +7333,7 @@ public:
         for (size_t idx = 0; idx < total_obj_sizes_.size(); ++idx)
         {
             results.push_back(
-                total_obj_sizes_[idx]->load(std::memory_order_relaxed));
+                TotalObjSizesLoad(idx, std::memory_order_relaxed));
         }
 
         return results;
@@ -7357,8 +7354,8 @@ public:
 
         for (size_t idx = 0; idx < total_obj_sizes.size(); ++idx)
         {
-            total_obj_sizes_[idx]->fetch_add(total_obj_sizes[idx],
-                                             std::memory_order_relaxed);
+            TotalObjSizesFetchAdd(
+                idx, total_obj_sizes[idx], std::memory_order_relaxed);
         }
 
         std::unique_lock lk(mux_);
@@ -7406,11 +7403,33 @@ public:
         }
     }
 
+    void TotalObjSizesFetchAdd(size_t idx,
+                               int64_t size,
+                               std::memory_order order)
+    {
+        reinterpret_cast<std::atomic_int64_t &>(total_obj_sizes_[idx])
+            .fetch_add(size, order);
+    }
+
+    int64_t TotalObjSizesLoad(size_t idx, std::memory_order order) const
+    {
+        return reinterpret_cast<const std::atomic_int64_t &>(
+                   total_obj_sizes_[idx])
+            .load(order);
+    }
+
+    size_t TotalObjSizesCount() const
+    {
+        return total_obj_sizes_.size();
+    }
+
     bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
+private:
+    std::vector<int64_t /*atomic*/> total_obj_sizes_;
+
 protected:
-    std::vector<std::unique_ptr<std::atomic<int64_t>>> total_obj_sizes_;
     size_t total_ref_cnt_{0};
     size_t remote_ref_cnt_{0};
     int32_t term_{0};
