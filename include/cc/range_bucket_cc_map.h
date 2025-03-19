@@ -39,7 +39,6 @@ public:
 
     using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::Execute;
     using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::FindEmplace;
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::Emplace;
     using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::Find;
     using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true>::
         AcquireCceKeyLock;
@@ -54,18 +53,22 @@ public:
     {
         auto bucket_map = shard->GetAllBucketInfos(cc_ng_id);
         assert(bucket_map != nullptr);
-        for (auto &bucket : *bucket_map)
+
+        // Fill bucket keys as slice items to batch load bucket records
+        std::deque<SliceDataItem> slice_items;
+        std::vector<RangeBucketKey> bucket_keys;
+        bucket_keys.reserve(bucket_map->size());
+        for (size_t i = 0; i < bucket_map->size(); ++i)
         {
-            RangeBucketKey bucket_key(bucket.first);
-            auto cce_it = FindEmplace(bucket_key);
-            CcEntry<RangeBucketKey, RangeBucketRecord, true> *cce =
-                cce_it->second;
-            cce->SetCommitTsPayloadStatus(bucket.second->Version(),
-                                          RecordStatus::Normal);
-            std::unique_ptr<RangeBucketRecord> bucket_rec =
-                std::make_unique<RangeBucketRecord>(bucket.second.get());
-            cce->payload_.PassInCurrentPayload(std::move(bucket_rec));
+            auto &bucket = bucket_map->at(i);
+            bucket_keys.emplace_back(i);
+            slice_items.emplace_back(
+                TxKey(&bucket_keys.back()),
+                std::make_unique<RangeBucketRecord>(bucket.get()),
+                bucket->Version(),
+                false);
         }
+        BatchFillSlice(slice_items, true, 0, slice_items.size());
     }
 
     bool Execute(ReadCc &req) override
