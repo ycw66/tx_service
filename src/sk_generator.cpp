@@ -375,6 +375,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
             if (scan_res == CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
                 scan_res == CcErrorCode::NG_TERM_CHANGED)
             {
+                task_result_ = scan_res;
                 break;
             }
             else if (scan_res == CcErrorCode::OUT_OF_MEMORY ||
