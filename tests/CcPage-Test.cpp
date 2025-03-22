@@ -94,6 +94,7 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
                   nullptr,
                   &ng_configs,
                   2);
+    shard.Init();
     std::string raft_path("");
     Sharder::Instance(0,
                       &ng_configs,

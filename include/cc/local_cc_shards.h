@@ -771,6 +771,11 @@ public:
         return new_range_entries;
     }
 
+    void FreeCcShard(size_t idx)
+    {
+        cc_shards_[idx] = nullptr;
+    }
+
     /**
      * @brief Create a new table range entry and fill current range info with
      * given partition id and start key.

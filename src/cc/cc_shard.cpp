@@ -107,31 +107,16 @@ CcShard::CcShard(
     log_limit_ = (uint64_t) MB(node_log_limit_mb);
     log_limit_ /= core_cnt_;
 
-    tx_vec_.reserve(128);
-    for (int idx = 0; idx < 128; ++idx)
-    {
-        tx_vec_.emplace_back(idx);
-    }
-
     head_ccp_.lru_prev_ = nullptr;
     head_ccp_.lru_next_ = &tail_ccp_;
     tail_ccp_.lru_prev_ = &head_ccp_;
     tail_ccp_.lru_next_ = nullptr;
 
-    thd_token_.reserve((size_t) core_cnt + 1);
-    for (size_t idx = 0; idx < core_cnt; ++idx)
+    thd_token_.reserve((size_t) core_cnt_ + 1);
+    for (size_t idx = 0; idx < core_cnt_; ++idx)
     {
         thd_token_.emplace_back(moodycamel::ProducerToken(cc_queue_));
     }
-
-    native_ccms_.try_emplace(
-        catalog_ccm_name,
-        std::make_unique<CatalogCcMap>(this, ng_id_, catalog_ccm_name));
-
-    // range bucket map is replicated on every core
-    native_ccms_.try_emplace(range_bucket_ccm_name,
-                             std::make_unique<RangeBucketCcMap>(
-                                 this, ng_id_, range_bucket_ccm_name));
 
     // cluster config map is only created on core 0.
     if (core_id_ == 0)
@@ -190,6 +175,41 @@ CcShard::CcShard(
 
     retry_fwd_msg_cc_ = std::make_unique<RetryFailedStandbyMsgCc>();
     shard_clean_cc_ = std::make_unique<ShardCleanCc>();
+}
+
+void CcShard::Init()
+{
+    InitializeShardHeap();
+    mi_heap_t *prev_heap = shard_heap_->SetAsDefaultHeap();
+    lock_vec_.resize(LOCK_ARRAY_INIT_SIZE);
+    for (size_t i = 0; i < LOCK_ARRAY_INIT_SIZE; ++i)
+    {
+        lock_vec_[i] = std::make_unique<KeyGapLockAndExtraData>();
+    }
+    standby_fwd_vec_.resize(txservice_max_standby_lag);
+    for (size_t i = 0; i < txservice_max_standby_lag; ++i)
+    {
+        standby_fwd_vec_[i] = std::make_unique<StandbyForwardEntry>();
+    }
+
+    assert(standby_fwded_msg_buffer_.empty());
+    standby_fwded_msg_buffer_.resize(txservice_max_standby_lag, nullptr);
+
+    tx_vec_.reserve(128);
+    for (int idx = 0; idx < 128; ++idx)
+    {
+        tx_vec_.emplace_back(idx);
+    }
+
+    native_ccms_.try_emplace(
+        catalog_ccm_name,
+        std::make_unique<CatalogCcMap>(this, ng_id_, catalog_ccm_name));
+
+    // range bucket map is replicated on every core
+    native_ccms_.try_emplace(range_bucket_ccm_name,
+                             std::make_unique<RangeBucketCcMap>(
+                                 this, ng_id_, range_bucket_ccm_name));
+    mi_heap_set_default(prev_heap);
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
@@ -873,9 +893,6 @@ std::pair<size_t, bool> CcShard::Clean()
 
     yield = ccp != &tail_ccp_;
 #else
-    // tx_service ctest does not call tx_service->Start(), so shard_heap_ is not
-    // initialized.
-    assert(shard_heap_ == nullptr);
     ccp = head_ccp_.lru_next_;
     while (ccp != &tail_ccp_)
     {

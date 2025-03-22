@@ -49,7 +49,8 @@ inline bool txservice_auto_redirect_redis_cmd = true;
 
 enum struct TxShardStatus
 {
-    Free = 0,
+    Uninitialized = 0,
+    Free,
     Occupied,
     Deconstructed
 };
@@ -67,7 +68,7 @@ struct TxProcCoordinator
     int32_t core_id_{-1};
     std::mutex sleep_mux_;
     std::condition_variable sleep_cv_;
-    std::atomic<TxShardStatus> shard_status_{TxShardStatus::Free};
+    std::atomic<TxShardStatus> shard_status_{TxShardStatus::Uninitialized};
     std::atomic<TxProcessor *> tx_processor_{nullptr};
 #ifdef EXT_TX_PROC_ENABLED
 #ifdef ON_KEY_OBJECT

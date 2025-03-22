@@ -476,9 +476,12 @@ public:
 
         size_t idle_rnd = 0;
         CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
-        shard->InitializeStandbyForwardMsgVec();
-        shard->InitializeLockVector();
-        shard->InitializeShardHeap();
+        shard->Init();
+        // Set shard status to free so that the tx processor can start to run.
+        assert(coordi_->shard_status_.load(std::memory_order_relaxed) ==
+               TxShardStatus::Uninitialized);
+        coordi_->shard_status_.store(TxShardStatus::Free,
+                                     std::memory_order_release);
         local_cc_shards_.SetTxProcNotifier(
             thd_id_, &tx_proc_status_, coordi_.get());
 
@@ -597,6 +600,10 @@ public:
                 }
             }
         }
+
+        assert(coordi_->shard_status_.load(std::memory_order_relaxed) ==
+               TxShardStatus::Deconstructed);
+        local_cc_shards_.FreeCcShard(thd_id_);
     }
 
     void InitializeLocalHandler()
@@ -753,7 +760,6 @@ public:
                                          std::memory_order_release);
             return false;
         }
-
         shard->OverrideHeapThread();
         coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
 
@@ -920,8 +926,8 @@ public:
     bool IsIdle()
     {
         return active_tx_cnt_.load(std::memory_order_relaxed) == 0 &&
-               local_cc_shards_.IsIdle(thd_id_) &&
-               !terminated_.load(std::memory_order_relaxed);
+               !terminated_.load(std::memory_order_relaxed) &&
+               local_cc_shards_.IsIdle(thd_id_);
     }
 
     bool AllTxFinished()
@@ -938,9 +944,9 @@ public:
 #endif
     }
 
-    TxProcCoordinator *GetTxProcCoordinator() const
+    std::shared_ptr<TxProcCoordinator> GetTxProcCoordinator() const
     {
-        return coordi_.get();
+        return coordi_;
     }
 
     int NotifyExternalProcessor() const;
@@ -1064,7 +1070,7 @@ public:
         coordinators_.reserve(tx_processors_->size());
         for (const auto &txp : *tx_processors_)
         {
-            coordinators_.emplace_back(txp->GetTxProcCoordinator());
+            coordinators_.push_back(std::move(txp->GetTxProcCoordinator()));
         }
     }
     ~TxServiceModule() override = default;
