@@ -656,6 +656,10 @@ public:
 
     brpc::Channel *GetHostManagerChannel()
     {
+        if (!hm_channel_init_.load(std::memory_order_acquire))
+        {
+            return nullptr;
+        }
         return &hm_channel_;
     }
 
@@ -767,6 +771,7 @@ private:
     std::string hm_ip_{""};
     uint16_t hm_port_{0};
     brpc::Channel hm_channel_;
+    std::atomic<bool> hm_channel_init_{false};
 
     // To stop the cluster, it should perform a checkpoint before any node is
     // terminated (as the final checkpoint will fail if the majority of nodes

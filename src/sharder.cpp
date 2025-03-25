@@ -469,6 +469,8 @@ int Sharder::Init(
             LOG(ERROR) << "Failed to notify host manager on node start.";
             return -1;
         }
+
+        hm_channel_init_.store(true, std::memory_order_release);
     }
     else
     {
