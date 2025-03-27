@@ -295,7 +295,7 @@ public:
      * @brief Copy record from base/sk table to mvcc_archives.
      */
     virtual bool CopyBaseToArchive(
-        std::vector<TxKey> &batch,
+        std::vector<std::pair<TxKey, int32_t>> &batch,
         uint32_t node_group,
         const txservice::TableName &table_name,
         const txservice::TableSchema *table_schema) = 0;

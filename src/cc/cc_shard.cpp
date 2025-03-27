@@ -2244,18 +2244,16 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
     {
         bool write_succ = false;
         uint64_t &last_sent_seq_id = last_sent_seq_id_and_term.first;
+
+        CODE_FAULT_INJECTOR("discard_forward_standby_message", {
+            LOG(INFO) << "FaultInject  "
+                         "discard_forward_standby_message, seq_id:"
+                      << seq_id;
+            continue;
+        });
+
         if (last_sent_seq_id == seq_id - 1)
         {
-            CODE_FAULT_INJECTOR("discard_forward_standby_message", {
-                if (seq_id % 2 == 0)
-                {
-                    LOG(INFO) << "FaultInject  "
-                                 "discard_forward_standby_message, seq_id:"
-                              << seq_id;
-                    last_sent_seq_id++;
-                    continue;
-                }
-            });
             CODE_FAULT_INJECTOR("forward_standby_message_eagain", {
                 if (seq_id % 2 == 0)
                 {

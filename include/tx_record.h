@@ -464,6 +464,7 @@ struct BlobTxRecord : public TxRecord
     {
         assert(false);
     }
+
     void Serialize(std::string &str) const override
     {
         str.append(value_);
@@ -496,6 +497,7 @@ struct BlobTxRecord : public TxRecord
      */
     size_t SerializedLength() const override
     {
+        assert(false);
         return value_.size();
     };
 
@@ -522,6 +524,26 @@ struct BlobTxRecord : public TxRecord
     uint64_t GetTTL() const override
     {
         return ttl_;
+    }
+
+    const char *EncodedBlobData() const override
+    {
+        return value_.data();
+    }
+
+    size_t EncodedBlobSize() const override
+    {
+        return value_.size();
+    }
+
+    size_t UnpackInfoSize() const override
+    {
+        return 0;
+    }
+
+    size_t Length() const override
+    {
+        return value_.size();
     }
 
     std::string value_;

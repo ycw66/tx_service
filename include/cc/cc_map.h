@@ -226,7 +226,7 @@ public:
     virtual bool BackFill(LruEntry *cce,
                           uint64_t commit_ts,
                           RecordStatus status,
-                          std::string &rec_str)
+                          const std::string &rec_str)
     {
         assert(false);
         return false;

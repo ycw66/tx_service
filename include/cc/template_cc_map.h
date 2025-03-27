@@ -1785,13 +1785,16 @@ public:
                     cce->GetOrCreateKeyLock(shard_, this, ccp)
                         .AcquireReadIntent(
                             FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
+
+                    int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
                     shard_->FetchRecord(this->table_name_,
                                         this->table_schema_,
                                         TxKey(look_key),
                                         cce,
                                         this->cc_ng_id_,
                                         ng_term,
-                                        &req);
+                                        &req,
+                                        part_id);
 
                     return false;
                 }
@@ -6054,13 +6057,15 @@ public:
                                         FetchRecordCc::GetFetchRecordTxNumber(
                                             cc_ng_id_));
                                 TxKey tx_key(key);
+                                int32_t part_id = (key->Hash() >> 10) & 0x3FF;
                                 shard_->FetchRecord(table_name_,
                                                     table_schema_,
                                                     TxKey(key),
                                                     cce,
                                                     cc_ng_id_,
                                                     ng_term,
-                                                    nullptr);
+                                                    nullptr,
+                                                    part_id);
                             }
                             replay_cmds_notnull = true;
                         }
@@ -9971,7 +9976,7 @@ protected:
     bool BackFill(LruEntry *entry,
                   uint64_t commit_ts,
                   RecordStatus status,
-                  std::string &rec_str) override
+                  const std::string &rec_str) override
     {
         CcEntry<KeyT, ValueT, VersionedRecord> *cce =
             static_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(entry);

@@ -3445,14 +3445,15 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // The data sync worker thread is the owner of those vectors.
 
     // Sort output vectors in key sorting order.
-    auto key_greater = [](const TxKey &r1, const TxKey &r2) -> bool
-    { return r2 < r1; };
+    auto key_greater = [](const std::pair<TxKey, int32_t> &r1,
+                          const std::pair<TxKey, int32_t> &r2) -> bool
+    { return r2.first < r1.first; };
     auto rec_greater = [](const FlushRecord &r1, const FlushRecord &r2) -> bool
     { return r2.Key() < r1.Key(); };
 
     std::vector<std::vector<FlushRecord>> data_sync_vecs;
     std::vector<std::vector<FlushRecord>> archive_vecs;
-    std::vector<std::vector<TxKey>> mv_base_vecs;
+    std::vector<std::vector<std::pair<TxKey, int32_t>>> mv_base_vecs;
 
     // Add an extra vector as a remaining vector to store the remaining keys
     // of the current batch of FlushRecords.
@@ -3604,7 +3605,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 {
                     size_t key_idx = scan_cc.MoveBaseIdxVec(i)[j];
                     TxKey key_raw = data_sync_vecs[i][key_idx].Key();
-                    mv_base_vecs[i].emplace_back(std::move(key_raw));
+                    mv_base_vecs[i].emplace_back(std::move(key_raw), range_id);
                 }
 
                 // Move the bucket into the tank
@@ -3619,8 +3620,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 std::make_unique<std::vector<FlushRecord>>();
             std::unique_ptr<std::vector<FlushRecord>> archive_vec =
                 std::make_unique<std::vector<FlushRecord>>();
-            std::unique_ptr<std::vector<TxKey>> mv_base_vec =
-                std::make_unique<std::vector<TxKey>>();
+            std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>>
+                mv_base_vec =
+                    std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
 
             MergeSortedVectors(
                 std::move(mv_base_vecs), *mv_base_vec, key_greater, false);
@@ -3674,12 +3676,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 archive_vec->erase(archive_iter, archive_vec->end());
 
                 // mv base vector
-                auto mv_base_iter =
-                    std::upper_bound(mv_base_vec->begin(),
-                                     mv_base_vec->end(),
-                                     min_scanned_end_key,
-                                     [](const TxKey &t_key, const TxKey &key)
-                                     { return t_key < key; });
+                auto mv_base_iter = std::upper_bound(
+                    mv_base_vec->begin(),
+                    mv_base_vec->end(),
+                    min_scanned_end_key,
+                    [](const TxKey &t_key,
+                       const std::pair<TxKey, int32_t> &key_and_partition_id)
+                    { return t_key < key_and_partition_id.first; });
                 auto &mv_base_remaining_vec = mv_base_vecs[cc_shards_.size()];
                 mv_base_remaining_vec.clear();
                 mv_base_remaining_vec.insert(
@@ -4110,7 +4113,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
     auto data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
     auto archive_vec = std::make_unique<std::vector<FlushRecord>>();
-    auto mv_base_vec = std::make_unique<std::vector<TxKey>>();
+    auto mv_base_vec =
+        std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
     uint64_t vec_mem_usage = 0;
 
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
@@ -4395,7 +4399,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             {
                 size_t key_idx = scan_cc.MoveBaseIdxVec(0)[j];
                 TxKey key_raw = (*data_sync_vec)[key_idx].Key();
-                mv_base_vec->emplace_back(std::move(key_raw));
+
+                int32_t part_id = (key_raw.Hash() >> 10) & 0x3FF;
+                mv_base_vec->emplace_back(std::move(key_raw), part_id);
             }
 
             std::move(scan_cc.ArchiveVec(0).begin(),
@@ -4440,7 +4446,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             archive_vec = std::make_unique<std::vector<FlushRecord>>();
 
-            mv_base_vec = std::make_unique<std::vector<TxKey>>();
+            mv_base_vec =
+                std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
 
             vec_mem_usage = 0;
 
@@ -4974,7 +4981,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     size_t scan_task_worker_idx = cur_work->scan_task_worker_idx_;
     std::vector<FlushRecord> *data_sync_vec = cur_work->data_sync_vec_.get();
     std::vector<FlushRecord> *archive_vec = cur_work->archive_vec_.get();
-    std::vector<TxKey> *mv_base_vec = cur_work->mv_base_vec_.get();
+    std::vector<std::pair<TxKey, int32_t>> *mv_base_vec =
+        cur_work->mv_base_vec_.get();
 
     std::shared_ptr<DataSyncTask> data_sync_task = cur_work->data_sync_task_;
     uint32_t node_group = data_sync_task->node_group_id_;

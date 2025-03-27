@@ -2375,14 +2375,15 @@ private:
     struct FlushDataTask
     {
     public:
-        FlushDataTask(std::shared_ptr<DataSyncTask> data_sync_task,
-                      std::shared_ptr<const TableSchema> schema,
-                      std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
-                      std::unique_ptr<std::vector<FlushRecord>> archive_vec,
-                      std::unique_ptr<std::vector<TxKey>> mv_base_vec,
-                      uint64_t vec_mem_usage,
-                      TransactionExecution *data_sync_txm,
-                      size_t scan_task_worker_idx)
+        FlushDataTask(
+            std::shared_ptr<DataSyncTask> data_sync_task,
+            std::shared_ptr<const TableSchema> schema,
+            std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
+            std::unique_ptr<std::vector<FlushRecord>> archive_vec,
+            std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> mv_base_vec,
+            uint64_t vec_mem_usage,
+            TransactionExecution *data_sync_txm,
+            size_t scan_task_worker_idx)
             : schema_(schema),
               data_sync_vec_(std::move(data_sync_vec)),
               archive_vec_(std::move(archive_vec)),
@@ -2397,7 +2398,8 @@ private:
         std::shared_ptr<const TableSchema> schema_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
-        std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
+        std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> mv_base_vec_{
+            nullptr};
         uint64_t vec_mem_usage_{0};
         size_t scan_task_worker_idx_{0};
         // Increased by worker after finishing the retrieved work.

@@ -285,6 +285,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
                             .append(",\"term\":")
                             .append(std::to_string(txm->TxTerm()));
                     }));
+
             // For non-blocking concurrency control protocols, the read
             // request is expected to return instantly. For lock-based
             // protocols, if the read request is blocked, the cc node will

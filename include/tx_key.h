@@ -1076,6 +1076,7 @@ struct VoidKey
 class TxKeyFactory
 {
     using CreateTxKeyFunc = TxKey (*)(const char *, size_t);
+    using CreateDefaultTxKeyFunc = TxKey (*)();
 
 public:
     static void RegisterNegInfTxKey(const TxKey *neg_inf_tx_key)
@@ -1127,6 +1128,19 @@ public:
         return Instance().create_tx_key_func_(data, size);
     }
 
+    static void RegisterCreateDefaultTxKeyFunc(
+        CreateDefaultTxKeyFunc create_default_tx_key_func)
+    {
+        assert(Instance().create_default_tx_key_func_ == nullptr);
+        Instance().create_default_tx_key_func_ = create_default_tx_key_func;
+    }
+
+    static TxKey CreateDefaultTxKey()
+    {
+        assert(Instance().create_default_tx_key_func_ != nullptr);
+        return Instance().create_default_tx_key_func_();
+    }
+
 private:
     static TxKeyFactory &Instance()
     {
@@ -1135,6 +1149,7 @@ private:
     }
 
     CreateTxKeyFunc create_tx_key_func_{nullptr};
+    CreateDefaultTxKeyFunc create_default_tx_key_func_{nullptr};
 
     const TxKey *neg_inf_tx_key_{nullptr};
     const TxKey *pos_inf_tx_key_{nullptr};

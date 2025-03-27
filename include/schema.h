@@ -40,6 +40,28 @@ struct RecordSchema
 public:
     using Uptr = std::unique_ptr<RecordSchema>;
     virtual ~RecordSchema() = default;
+
+    virtual int AutoIncrementIndex() const
+    {
+        // The index for auto increment field. -1 if not exist,
+        return -1;
+    }
+
+#if defined(KV_DATA_STORE_TYPE_CASSANDRA)
+    virtual void EncodeToSerializeFormat(const txservice::TableName &table_name,
+                                         const void *row,
+                                         std::string &buf) const
+    {
+        assert(false);
+    }
+
+    virtual void EncodeToTxRecord(const txservice::TableName &table_name,
+                                  const void *row,
+                                  TxRecord &tx_record) const
+    {
+        assert(false);
+    }
+#endif
 };
 
 struct MultiKeyPaths

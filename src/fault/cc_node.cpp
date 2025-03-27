@@ -19,6 +19,8 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+#include "fault/cc_node.h"
+
 #include <brpc/controller.h>
 #include <brpc/errno.pb.h>
 #include <bthread/bthread.h>
@@ -33,10 +35,6 @@
 #include "cc_node_service.h"
 #include "cc_req_misc.h"
 #include "cc_request.pb.h"
-#ifdef KV_DATA_STORE_TYPE
-#include "kv_store.h"
-#endif
-#include "fault/cc_node.h"
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "tx_service.h"

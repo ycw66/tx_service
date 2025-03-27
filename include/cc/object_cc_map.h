@@ -281,13 +281,16 @@ public:
                     // Fetch record from storage
                     //(req acquired lock, no need to add ReadIntent for
                     // FetchRecord)
+
+                    int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
                     shard_->FetchRecord(table_name_,
                                         table_schema_,
                                         TxKey(look_key),
                                         cce,
                                         cc_ng_id_,
                                         ng_term,
-                                        &req);
+                                        &req,
+                                        part_id);
                     return false;
                 }
 
@@ -488,13 +491,15 @@ public:
                     .AcquireReadIntent(
                         FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
                 // Fetch record from storage
+                int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
                 shard_->FetchRecord(table_name_,
                                     table_schema_,
                                     TxKey(look_key),
                                     cce,
                                     cc_ng_id_,
                                     ng_term,
-                                    &req);
+                                    &req,
+                                    part_id);
 
                 req.block_type_ = ApplyCc::ApplyBlockType::BlockOnFetch;
 
@@ -1788,13 +1793,15 @@ public:
                             .AcquireReadIntent(
                                 FetchRecordCc::GetFetchRecordTxNumber(
                                     cc_ng_id_));
+                        int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
                         shard_->FetchRecord(table_name_,
                                             table_schema_,
                                             TxKey(look_key),
                                             cce,
                                             cc_ng_id_,
                                             req.StandbyNodeTerm(),
-                                            nullptr);
+                                            nullptr,
+                                            part_id);
                     }
                 }
                 else
@@ -2143,13 +2150,16 @@ public:
                 // load payload asynchronously, pass in null as requester cc
                 // since we will buffer the cmd in replay cmd list so there's no
                 // need to put this req back in queue after record is fetched.
+
+                int32_t part_id = (key.Hash() >> 10) & 0x3FF;
                 shard_->FetchRecord(table_name_,
                                     table_schema_,
                                     TxKey(&key),
                                     cce,
                                     cc_ng_id_,
                                     ng_term,
-                                    nullptr);
+                                    nullptr,
+                                    part_id);
             }
             // extract command list
             const uint16_t cmd_cnt = *reinterpret_cast<decltype(cmd_cnt) *>(
@@ -2307,7 +2317,7 @@ public:
     bool BackFill(LruEntry *entry,
                   uint64_t commit_ts,
                   RecordStatus status,
-                  std::string &rec_str) override
+                  const std::string &rec_str) override
     {
         if (commit_ts > 1 && commit_ts < schema_ts_)
         {
