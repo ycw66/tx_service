@@ -112,25 +112,11 @@ struct TemplateTxRequest : TxRequest
         // fails.
 
         bool allow_enlist_txm = false;
-        int round = 1;
-        int64_t start_ns = 0;
         while (tx_result_.status_ == TxResultStatus::Unknown &&
                !txm->ExternalForward(allow_enlist_txm))
         {
-            if (round == 1)
-            {
-                start_ns = butil::cpuwide_time_ns();
-            }
-            round++;
             (*tx_result_.resume_func_)();
             (*tx_result_.yield_func_)();
-        }
-        if (round != 1)
-        {
-            DLOG(WARNING) << "txm: " << txm
-                          << " ForceExternalForwardOnce round: " << round
-                          << ", takes " << butil::cpuwide_time_ns() - start_ns
-                          << " ns";
         }
     }
 #endif

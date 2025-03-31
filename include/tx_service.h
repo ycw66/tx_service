@@ -1078,7 +1078,6 @@ public:
     void ExtThdStart(int thd_id) override
     {
 #ifdef EXT_TX_PROC_ENABLED
-#ifdef ON_KEY_OBJECT
         assert(thd_id < coordinators_.size());
         TxProcCoordinator *coordi = coordinators_[thd_id].get();
         coordi->ext_processor_running_.store(true);
@@ -1090,23 +1089,27 @@ public:
             txp->Notify(coordi->sleep_mux_, coordi->sleep_cv_);
         }
 #endif
-#endif
     }
 
     void ExtThdEnd(int thd_id) override
     {
 #ifdef EXT_TX_PROC_ENABLED
-#ifdef ON_KEY_OBJECT
         assert(thd_id < coordinators_.size());
-        coordinators_[thd_id]->ext_processor_running_.store(false);
-#endif
+        TxProcCoordinator *coordi = coordinators_[thd_id].get();
+        coordi->ext_processor_running_.store(false);
+        TxProcessor *txp = tx_processors_->at(thd_id).get();
+        TxProcessorStatus native_proc_status =
+            txp->tx_proc_status_.load(std::memory_order_relaxed);
+        if (native_proc_status == TxProcessorStatus::Standby)
+        {
+            txp->Notify(coordi->sleep_mux_, coordi->sleep_cv_);
+        }
 #endif
     }
 
     void Process(int thd_id) override
     {
 #ifdef EXT_TX_PROC_ENABLED
-#ifdef ON_KEY_OBJECT
         assert(thd_id < coordinators_.size());
         TxProcCoordinator *coord = coordinators_[thd_id].get();
         size_t active_cnt = 0, req_cnt = 0;
@@ -1114,7 +1117,6 @@ public:
         TxProcessor *txp = tx_processors_->at(thd_id).get();
         txp->RunOneRound(
             active_cnt, req_cnt, yield, coord->shard_status_, true);
-#endif
 #endif
     }
 
