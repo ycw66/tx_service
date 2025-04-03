@@ -899,7 +899,8 @@ public:
                 forward_req->set_table_type(
                     remote::ToRemoteType::ConvertTableType(table_name_.Type()));
                 forward_req->set_table_engine(
-                    remote::ToRemoteType::ConvertTableEngine(table_name_.Engine()));
+                    remote::ToRemoteType::ConvertTableEngine(
+                        table_name_.Engine()));
                 forward_req->set_key_shard_code(req.key_shard_code_);
                 std::string key_str;
 

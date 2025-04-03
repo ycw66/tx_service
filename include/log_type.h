@@ -101,7 +101,6 @@ public:
             return txservice::TableEngine::None;
         }
     }
-    
 };
 
 }  // namespace txlog

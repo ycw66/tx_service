@@ -37,16 +37,13 @@ namespace txservice
 {
 extern bool txservice_skip_wal;
 
-
 class CommandSet
 {
     static const uint32_t MaxWriteSetBytesCnt = 62 * 1024 * 1024;
 
 public:
     CommandSet()
-        : cmd_set_(),
-          cce_with_writelock_size_(0),
-          need_forward_cmd_cnt_(0)
+        : cmd_set_(), cce_with_writelock_size_(0), need_forward_cmd_cnt_(0)
     {
     }
 
@@ -56,7 +53,6 @@ public:
         cce_with_writelock_size_ = 0;
         need_forward_cmd_cnt_ = 0;
     }
-
 
     void AddObjectCommand(const TableName &table_name,
                           const CcEntryAddr &cce_addr,
@@ -183,4 +179,3 @@ private:
     uint32_t need_forward_cmd_cnt_{0};
 };
 }  // namespace txservice
-

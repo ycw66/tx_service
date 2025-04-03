@@ -180,7 +180,9 @@ void SkGenerator::ProcessTask()
     });
 
     const TableName &range_table_name =
-        TableName(base_table_name_->StringView(), TableType::RangePartition, base_table_name_->Engine());
+        TableName(base_table_name_->StringView(),
+                  TableType::RangePartition,
+                  base_table_name_->Engine());
     TransactionExecution *acq_range_lock_txm =
         txservice::NewTxInit(cc_shards->GetTxService(),
                              IsolationLevel::RepeatableRead,
@@ -930,7 +932,9 @@ CcErrorCode UploadIndexContext::AcquireRangeReadLocks(
          ++table_it)
     {
         const TableName &range_table_name =
-            TableName(table_it->first.StringView(), TableType::RangePartition, table_it->first.Engine());
+            TableName(table_it->first.StringView(),
+                      TableType::RangePartition,
+                      table_it->first.Engine());
 
         auto &table_write_entrys = table_it->second;
         auto [it, inserted] = ng_index_set.try_emplace(table_it->first);
