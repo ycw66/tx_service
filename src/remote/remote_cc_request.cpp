@@ -103,8 +103,10 @@ void txservice::remote::RemoteAcquire::Reset(
 
     std::string_view table_name_sv{req.table_name_str()};
     // Need to parse the string if not include table type in protobuf
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     AcquireCc::Reset(&remote_table_name_,
                      req.schema_version(),
@@ -201,8 +203,10 @@ void txservice::remote::RemoteAcquireAll::Reset(
 
     const AcquireAllRequest &req = input_msg->acquire_all_req();
     std::string_view table_name_sv{req.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     if (req.acq_all_key_case() == AcquireAllRequest::AcqAllKeyCase::kNegInf)
     {
@@ -405,8 +409,10 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
 
     const ReadRequest &req = input_msg->read_req();
     std::string_view table_name_sv{req.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     ReadType read_type = ReadType::Inside;
     switch (req.read_type())
@@ -581,7 +587,8 @@ void txservice::remote::RemotePostWrite::Reset(
         std::string_view table_name_sv{post_commit.table_name_str()};
         remote_table_name_ = TableName(
             table_name_sv,
-            ToLocalType::ConvertCcTableType(post_commit.table_type()));
+            ToLocalType::ConvertCcTableType(post_commit.table_type()),
+            ToLocalType::ConvertTableEngine(post_commit.table_engine()));
         OperationType op_type =
             static_cast<OperationType>(post_commit.operation_type());
         PostWriteCc::Reset(&remote_table_name_,
@@ -644,9 +651,10 @@ void txservice::remote::RemotePostWriteAll::Reset(
     const PostWriteAllRequest &post_write_all = input_msg->post_write_all_req();
 
     std::string_view table_name_sv{post_write_all.table_name_str()};
-    remote_table_name_ =
-        TableName(table_name_sv,
-                  ToLocalType::ConvertCcTableType(post_write_all.table_type()));
+    remote_table_name_ = TableName(
+        table_name_sv,
+        ToLocalType::ConvertCcTableType(post_write_all.table_type()),
+        ToLocalType::ConvertTableEngine(post_write_all.table_engine()));
 
     uint64_t commit_ts = post_write_all.commit_ts();
     const std::string *rec_str =
@@ -773,8 +781,10 @@ void txservice::remote::RemoteScanOpen::Reset(
     const ScanOpenRequest &scan_open = input_msg->scan_open_req();
 
     std::string_view table_name_sv{scan_open.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(scan_open.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(scan_open.table_type()),
+                  ToLocalType::ConvertTableEngine(scan_open.table_engine()));
 
     node_group_id_ = scan_open.shard_id();
     table_name_ = &remote_table_name_;
@@ -1132,9 +1142,10 @@ void txservice::remote::RemoteScanSlice::Reset(
 
     const ScanSliceRequest &scan_slice_req = input_msg->scan_slice_req();
     std::string_view tbl_name_view(scan_slice_req.table_name_str());
-    remote_tbl_name_ =
-        TableName(tbl_name_view,
-                  ToLocalType::ConvertCcTableType(scan_slice_req.table_type()));
+    remote_tbl_name_ = TableName(
+        tbl_name_view,
+        ToLocalType::ConvertCcTableType(scan_slice_req.table_type()),
+        ToLocalType::ConvertTableEngine(scan_slice_req.table_engine()));
 
     ScanSliceCc::Set(remote_tbl_name_,
                      scan_slice_req.schema_version(),
@@ -1338,7 +1349,8 @@ void txservice::remote::RemoteBroadcastStatisticsCc::Reset(
         input_msg->broadcast_statistics_req();
     remote_table_name_ =
         TableName(req.table_name_str(),
-                  ToLocalType::ConvertCcTableType(req.table_type()));
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     BroadcastStatisticsCc::Reset(req.node_group_id(),
                                  &remote_table_name_,
@@ -1392,8 +1404,10 @@ void txservice::remote::RemoteAnalyzeTableAllCc::Reset(
 
     const AnalyzeTableAllRequest &req = input_msg->analyze_table_all_req();
     std::string_view table_name_sv(req.table_name_str());
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     AnalyzeTableAllCc::Reset(&remote_table_name_,
                              req.node_group_id(),
@@ -1448,8 +1462,10 @@ void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
 
     const CleanCcEntryForTestRequest &req = input_msg->clean_cc_entry_req();
     std::string_view table_name_sv{req.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     CleanCcEntryForTestCc::Reset(&remote_table_name_,
                                  &req.key(),
@@ -1764,8 +1780,11 @@ void txservice::remote::RemoteKickoutCcEntry::Reset(
     const KickoutDataRequest &req = input_msg->kickout_data_req();
 
     std::string_view table_name_sv{req.table_name_str()};
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(req.table_engine());
     table_name_ = TableName(table_name_sv,
-                            ToLocalType::ConvertCcTableType(req.table_type()));
+                            ToLocalType::ConvertCcTableType(req.table_type()),
+                            table_engine);
 
     size_t core_cnt = 0;
     if (req.clean_type() == remote::CleanType::CleanCcm)
@@ -1860,8 +1879,10 @@ void txservice::remote::RemoteApplyCc::Reset(
 
     const ApplyRequest &req = input_msg->apply_cc_req();
     std::string_view table_name_sv{req.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     cc_res_.Value().cce_addr_.SetCceLock(0, -1, req.key_shard_code() >> 10, 0);
 
@@ -2030,7 +2051,8 @@ void txservice::remote::RemoteDbSizeCc::Reset(
         std::string_view table_name_sv{cmds_req.table_name_str(idx)};
         redis_table_names_.emplace_back(
             table_name_sv,
-            ToLocalType::ConvertCcTableType(cmds_req.table_type(idx)));
+            ToLocalType::ConvertCcTableType(cmds_req.table_type(idx)),
+            ToLocalType::ConvertTableEngine(cmds_req.table_engine(idx)));
     }
 
     DbSizeCc::Reset(&redis_table_names_, core_cnt, 0);
@@ -2117,8 +2139,10 @@ void txservice::remote::RemoteInvalidateTableCacheCc::Reset(
     const InvalidateTableCacheRequest &req =
         input_msg->invalidate_table_cache_req();
     std::string_view table_name_sv(req.table_name_str());
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     InvalidateTableCacheCc::Reset(&remote_table_name_,
                                   req.node_group_id(),

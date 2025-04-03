@@ -46,11 +46,9 @@
 #include "tx_util.h"
 #include "type.h"
 
-#ifdef ON_KEY_OBJECT
 DEFINE_bool(cmd_read_catalog,
             true,
             "First read catalog when executing commands");
-#endif
 
 namespace txservice
 {
@@ -137,20 +135,19 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
 
 void TransactionExecution::Reset()
 {
-#ifdef ON_KEY_OBJECT
     // Skip releasing catalogs read if the tx is not started.
     if (FLAGS_cmd_read_catalog && init_txn_.hd_result_.IsFinished() &&
         !init_txn_.hd_result_.IsError())
     {
         ReleaseCatalogsRead();
     }
-#endif
     cache_miss_read_cce_addr_.SetCceLock(0, -1, 0, 0);
     state_stack_.clear();
     txid_.Reset();
     commit_ts_ = UINT64_MAX;
     commit_ts_bound_ = 0;
     rw_set_.Reset();
+    cmd_set_.Reset();
     wset_iters_.clear();
     wset_reverse_iters_.clear();
     scans_.clear();
@@ -544,7 +541,7 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
 
 bool TransactionExecution::CommitTx(CommitTxRequest &commit_req)
 {
-    if (rw_set_.WriteSetSize() == 0 && rw_set_.ObjectCntWithWriteLock() == 0 &&
+    if (rw_set_.WriteSetSize() == 0 && cmd_set_.ObjectCntWithWriteLock() == 0 &&
         rw_set_.ReadSetSize() == 0)
     {
         commit_tx_req_->Reset();
@@ -789,8 +786,10 @@ void TransactionExecution::ProcessTxRequest(ScanBatchTxRequest &scan_batch_req)
     scan_next_.tx_req_ = &scan_batch_req;
     scan_next_.alias_ = scan_batch_req.alias_;
 #ifdef RANGE_PARTITION_ENABLED
-    scan_next_.range_table_name_ = TableName(
-        scan_batch_req.table_name_.StringView(), TableType::RangePartition);
+    scan_next_.range_table_name_ =
+        TableName(scan_batch_req.table_name_.StringView(),
+                  TableType::RangePartition,
+                  scan_batch_req.table_name_.Engine());
 #endif
     PushOperation(&scan_next_);
     Process(scan_next_);
@@ -917,6 +916,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
             std::unique_ptr<UpsertTableOp> table_op = nullptr;
             table_op =
                 std::make_unique<UpsertTableOp>(req.table_name_->StringView(),
+                                                req.table_name_->Engine(),
                                                 *req.curr_image_,
                                                 req.curr_schema_ts_,
                                                 *req.dirty_image_,
@@ -931,6 +931,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
             local_shards->table_schema_op_pool_.pop_back();
 
             schema_op_->Reset(req.table_name_->StringView(),
+                              req.table_name_->Engine(),
                               *req.curr_image_,
                               req.curr_schema_ts_,
                               *req.dirty_image_,
@@ -950,6 +951,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
             std::unique_ptr<UpsertTableIndexOp> index_op =
                 std::make_unique<UpsertTableIndexOp>(
                     req.table_name_->StringView(),
+                    req.table_name_->Engine(),
                     *req.curr_image_,
                     req.curr_schema_ts_,
                     *req.dirty_image_,
@@ -967,6 +969,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
             local_shards->table_index_op_pool_.pop_back();
 
             index_op_->Reset(req.table_name_->StringView(),
+                             req.table_name_->Engine(),
                              *req.curr_image_,
                              req.curr_schema_ts_,
                              *req.dirty_image_,
@@ -1305,9 +1308,13 @@ void TransactionExecution::ProcessTxRequest(
                     .GetLocalCcShards()
                     ->table_schema_op_pool_.empty())
             {
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        schema_op_msg.table_engine());
                 std::unique_ptr<UpsertTableOp> table_op = nullptr;
                 table_op = std::make_unique<UpsertTableOp>(
                     schema_op_msg.table_name_str(),
+                    table_engine,
                     schema_op_msg.old_catalog_blob(),
                     schema_op_msg.catalog_ts(),
                     schema_op_msg.new_catalog_blob(),
@@ -1327,7 +1334,11 @@ void TransactionExecution::ProcessTxRequest(
                     .GetLocalCcShards()
                     ->table_schema_op_pool_.pop_back();
 
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        schema_op_msg.table_engine());
                 schema_op_->Reset(schema_op_msg.table_name_str(),
+                                  table_engine,
                                   schema_op_msg.old_catalog_blob(),
                                   schema_op_msg.catalog_ts(),
                                   schema_op_msg.new_catalog_blob(),
@@ -1352,8 +1363,11 @@ void TransactionExecution::ProcessTxRequest(
                 // extract table schema and dirty schema from schema_op_msg
                 TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
                     schema_op_msg.table_type());
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        schema_op_msg.table_engine());
                 std::string_view table_name_sv{schema_op_msg.table_name_str()};
-                TableName table_name{table_name_sv, table_type};
+                TableName table_name{table_name_sv, table_type, table_engine};
                 uint64_t schema_ts = schema_op_msg.catalog_ts();
                 std::shared_ptr<TableSchema> schema_ptr =
                     Sharder::Instance()
@@ -1387,9 +1401,13 @@ void TransactionExecution::ProcessTxRequest(
 
             if (local_shards->table_index_op_pool_.empty())
             {
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        schema_op_msg.table_engine());
                 std::unique_ptr<UpsertTableIndexOp> index_op =
                     std::make_unique<UpsertTableIndexOp>(
                         schema_op_msg.table_name_str(),
+                        table_engine,
                         schema_op_msg.old_catalog_blob(),
                         schema_op_msg.catalog_ts(),
                         schema_op_msg.new_catalog_blob(),
@@ -1406,8 +1424,12 @@ void TransactionExecution::ProcessTxRequest(
                 index_op_ =
                     std::move(local_shards->table_index_op_pool_.back());
                 local_shards->table_index_op_pool_.pop_back();
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        schema_op_msg.table_engine());
 
                 index_op_->Reset(schema_op_msg.table_name_str(),
+                                 table_engine,
                                  schema_op_msg.old_catalog_blob(),
                                  schema_op_msg.catalog_ts(),
                                  schema_op_msg.new_catalog_blob(),
@@ -1452,8 +1474,11 @@ void TransactionExecution::ProcessTxRequest(
                 // - Recovery catalog_rec_ to update image inside kv-storage.
                 TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
                     schema_op_msg.table_type());
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        schema_op_msg.table_engine());
                 std::string_view table_name_sv{schema_op_msg.table_name_str()};
-                TableName table_name{table_name_sv, table_type};
+                TableName table_name{table_name_sv, table_type, table_engine};
                 CatalogEntry *catalog_entry =
                     local_shards->GetCatalog(table_name, TxCcNodeId());
                 index_op_->catalog_rec_.Set(catalog_entry->schema_,
@@ -1482,8 +1507,11 @@ void TransactionExecution::ProcessTxRequest(
                 // - Recovery catalog_rec_ to update image inside kv-storage.
                 TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
                     schema_op_msg.table_type());
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        schema_op_msg.table_engine());
                 std::string_view table_name_sv{schema_op_msg.table_name_str()};
-                TableName table_name{table_name_sv, table_type};
+                TableName table_name{table_name_sv, table_type, table_engine};
                 uint64_t schema_ts = schema_op_msg.catalog_ts();
                 std::shared_ptr<TableSchema> schema_ptr =
                     Sharder::Instance()
@@ -1538,10 +1566,13 @@ void TransactionExecution::ProcessTxRequest(
 
     const TableName range_table_name =
         TableName{recover_req.ds_split_range_op_msg_.table_name(),
-                  TableType::RangePartition};
+                  TableType::RangePartition,
+                  ::txlog::ToLocalType::ConvertTableEngine(
+                      recover_req.ds_split_range_op_msg_.table_engine())};
     const TableName table_name =
         TableName{range_table_name.StringView(),
-                  TableName::Type(range_table_name.StringView())};
+                  TableName::Type(range_table_name.StringView()),
+                  range_table_name.Engine()};
 
     std::vector<std::pair<TxKey, int32_t>> new_range_info;
     for (size_t i = 0; i < recover_req.new_range_keys_.size(); i++)
@@ -1832,7 +1863,8 @@ void TransactionExecution::Process(ReadOperation &read)
                 lock_range_result_.Reset();
 
                 lock_range_op_.Reset(TableName(table_name.StringView(),
-                                               TableType::RangePartition),
+                                               TableType::RangePartition,
+                                               table_name.Engine()),
                                      &key,
                                      &range_rec_,
                                      &lock_range_result_);
@@ -1893,7 +1925,8 @@ void TransactionExecution::Process(ReadOperation &read)
                 // "bucket_tx_key_" has been set point to bucket_key_
                 lock_bucket_op_.Reset(TableName(range_bucket_ccm_name_sv.data(),
                                                 range_bucket_ccm_name_sv.size(),
-                                                TableType::RangeBucket),
+                                                TableType::RangeBucket,
+                                                TableEngine::None),
                                       &bucket_tx_key_,
                                       &bucket_rec_,
                                       &lock_bucket_result_);
@@ -2800,12 +2833,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 // "key_ts_ == 0", means the lock is added on gap. Now, gap
                 // lock is not used when do scan operation.
                 if (scan_tuple_lock_type != LockType::NoLock &&
-                    cc_scan_tuple->key_ts_ != 0
-#ifdef ON_KEY_OBJECT
-                    && !rw_set_.FindObjectCommand(table_name,
-                                                  cc_scan_tuple->cce_addr_)
-#endif
-                )
+                    cc_scan_tuple->key_ts_ != 0 &&
+                    !cmd_set_.FindObjectCommand(table_name,
+                                                cc_scan_tuple->cce_addr_))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         this,
@@ -3030,12 +3060,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 // "key_ts_ == 0", means the lock is added on gap. Now, gap
                 // lock is not used when do scan operation.
                 if (scan_tuple_lock_type != LockType::NoLock &&
-                    cc_scan_tuple->key_ts_ != 0
-#ifdef ON_KEY_OBJECT
-                    && !rw_set_.FindObjectCommand(table_name,
-                                                  cc_scan_tuple->cce_addr_)
-#endif
-                )
+                    cc_scan_tuple->key_ts_ != 0 &&
+                    !cmd_set_.FindObjectCommand(table_name,
+                                                cc_scan_tuple->cce_addr_))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         this,
@@ -3297,11 +3324,8 @@ void TransactionExecution::ScanClose(
                 scanner->DeduceScanTupleLockType(last_tuple->rec_status_);
             // key ts == 0 means the lock is on the gap. So the read intent is
             // acquired on the last cce during last scan batch.
-            if ((lk_type == LockType::NoLock || last_tuple->key_ts_ == 0)
-#ifdef ON_KEY_OBJECT
-                && !rw_set_.FindObjectCommand(table_name, last_tuple->cce_addr_)
-#endif
-            )
+            if ((lk_type == LockType::NoLock || last_tuple->key_ts_ == 0) &&
+                !cmd_set_.FindObjectCommand(table_name, last_tuple->cce_addr_))
             {
                 drain_batch_.emplace_back(last_tuple->cce_addr_,
                                           last_tuple->key_ts_);
@@ -3381,8 +3405,8 @@ void TransactionExecution::Commit()
         tx_status_.store(TxnStatus::Committing, std::memory_order_relaxed);
     }
 
-#ifdef ON_KEY_OBJECT
-    if (rw_set_.ObjectCountToForwardWrite() > 0)
+#ifndef RANGE_PARTITION_ENABLED
+    if (cmd_set_.ObjectCountToForwardWrite() > 0)
     {
         assert(txlog_ != nullptr && !txservice_skip_wal);
         PushOperation(&cmd_forward_write_);
@@ -3450,8 +3474,9 @@ void TransactionExecution::Abort()
     {
         // No need to update txn status since we did not assign
         // TEntry for recovering tx.
-        uint32_t acquire_write_cnt =
-            rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
+        uint32_t acquire_write_cnt = rw_set_.WriteSetSize() +
+                                     rw_set_.ForwardWriteCnt() +
+                                     cmd_set_.ObjectCntWithWriteLock();
         if (acquire_write_cnt > 0 && acquire_write_.hd_result_.IsError())
         {
             std::vector<AcquireKeyResult> &acquire_key_vec =
@@ -3473,9 +3498,6 @@ void TransactionExecution::Abort()
         }
 #endif
 
-#ifdef ON_KEY_OBJECT
-        acquire_write_cnt += rw_set_.ObjectCntWithWriteLock();
-#endif
         post_process_.Reset(acquire_write_cnt,
                             rw_set_.ReadSetSize(),
                             rw_set_.CatalogRangeSetSize(),
@@ -3512,8 +3534,8 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
     lock_write_ranges.is_running_ = true;
 
     const TableName &tbl_name = lock_write_ranges.table_it_->first;
-    lock_write_ranges.range_table_name_ =
-        TableName(tbl_name.StringView(), TableType::RangePartition);
+    lock_write_ranges.range_table_name_ = TableName(
+        tbl_name.StringView(), TableType::RangePartition, tbl_name.Engine());
 
     bool finished =
         cc_handler_->ReadLocal(lock_write_ranges.range_table_name_,
@@ -3555,7 +3577,8 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
     const ReadKeyResult &read_res =
         lock_write_ranges.lock_range_result_->Value();
     const TableName &tbl_name = lock_write_ranges.table_it_->first;
-    TableName range_tbl_name(tbl_name.StringView(), TableType::RangePartition);
+    TableName range_tbl_name(
+        tbl_name.StringView(), TableType::RangePartition, tbl_name.Engine());
     rw_set_.AddRead(read_res.cce_addr_, read_res.ts_, &range_tbl_name);
 
     assert(
@@ -3877,6 +3900,7 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
     uint64_t candidate = commit_ts_bound_;
 
     set_ts.hd_result_.Reset();
@@ -3889,10 +3913,9 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
         candidate = std::max(candidate, acquire_key.commit_ts_ + 1);
     }
 
-#ifdef ON_KEY_OBJECT
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        *cmd_set = rw_set_.ObjectCommandSet();
+        *cmd_set = cmd_set_.ObjectCommandSet();
     for (const auto &[table_name, cce_set] : *cmd_set)
     {
         for (const auto &[cce_addr, cmd_set_entry] : cce_set)
@@ -3901,7 +3924,6 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
             candidate = std::max(candidate, cmd_set_entry.object_version_ + 1);
         }
     }
-#endif
 
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, ReadSetEntry>>
@@ -3952,7 +3974,8 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
         else
         {
             bool needs_write_log =
-                !txservice_skip_wal && rw_set_.ObjectModified();
+                !txservice_skip_wal &&
+                (cmd_set_.ObjectModified() || rw_set_.WriteSetSize() > 0);
             if (txlog_ != nullptr && needs_write_log)
             {
                 bool prepare_log_success = false;
@@ -3984,10 +4007,8 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
                     // No need to update txn status since we did not assign
                     // TEntry for recovering tx.
                     uint32_t acquire_write_cnt =
-                        rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
-#ifdef ON_KEY_OBJECT
-                    acquire_write_cnt += rw_set_.ObjectCntWithWriteLock();
-#endif
+                        rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt() +
+                        cmd_set_.ObjectCntWithWriteLock();
                     post_process_.Reset(acquire_write_cnt,
                                         0,
                                         rw_set_.CatalogRangeSetSize(),
@@ -4121,7 +4142,6 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
             bool_resp_->SetErrorCode(
                 ConvertCcError(validate.hd_result_.ErrorCode()));
         }
-#ifdef ON_KEY_OBJECT
         else if (rec_resp_ != nullptr)
         {
             // auto committed ObjectCommandTxRequest
@@ -4136,7 +4156,6 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
                 ConvertCcError(validate.hd_result_.ErrorCode()));
             vct_rec_resp_ = nullptr;
         }
-#endif
 
         // Clear read set so that Abort won't try to release the read locks
         // again.
@@ -4146,7 +4165,9 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     }
     else
     {
-        bool needs_write_log = !txservice_skip_wal && rw_set_.ObjectModified();
+        bool needs_write_log =
+            !txservice_skip_wal &&
+            (cmd_set_.ObjectModified() || rw_set_.WriteSetSize() > 0);
         if (txlog_ != nullptr && needs_write_log)
         {
             bool prepare_log_success = false;
@@ -4178,7 +4199,8 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
             // there is no need to wait PostWrite in this case because PostWrite
             // is only used for releasing lock. Notifies early before
             // post-processing.
-            if (bool_resp_ != nullptr && !rw_set_.ObjectModified())
+            if (bool_resp_ != nullptr &&
+                !(cmd_set_.ObjectModified() || rw_set_.WriteSetSize() > 0))
             {
                 bool_resp_->Finish(true);
                 bool_resp_ = nullptr;
@@ -4189,7 +4211,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
                 // for recovering tx.
                 post_process_.Reset(rw_set_.WriteSetSize() +
                                         rw_set_.ForwardWriteCnt() +
-                                        rw_set_.ObjectCntWithWriteLock(),
+                                        cmd_set_.ObjectCntWithWriteLock(),
                                     0,
                                     rw_set_.CatalogRangeSetSize(),
                                     need_update_tentry);
@@ -4269,7 +4291,8 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
             auto rec_vec_it = table_rec_set.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(table_name.StringView(),
-                                      table_name.Type()),
+                                      table_name.Type(),
+                                      table_name.Engine()),
                 std::forward_as_tuple());
 
             rec_vec_it.first->second.emplace_back(&write_key, &wset_entry);
@@ -4291,7 +4314,8 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 auto rec_vec_it = table_rec_set.emplace(
                     std::piecewise_construct,
                     std::forward_as_tuple(table_name.StringView(),
-                                          table_name.Type()),
+                                          table_name.Type(),
+                                          table_name.Engine()),
                     std::forward_as_tuple());
                 rec_vec_it.first->second.emplace_back(&write_key, &wset_entry);
             }
@@ -4330,6 +4354,9 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
             const char *ptr = reinterpret_cast<const char *>(&tabname_len);
             log_ng_blob->append(ptr, sizeof(uint8_t));
             log_ng_blob->append(table_name.StringView().data(), tabname_len);
+            // 1 byte integer for table engine
+            ptr = reinterpret_cast<const char *>(&table_name.Engine());
+            log_ng_blob->append(ptr, sizeof(uint8_t));
             // 1 byte integer for table type
             ptr = reinterpret_cast<const char *>(&table_name.Type());
             log_ng_blob->append(ptr, sizeof(uint8_t));
@@ -4417,7 +4444,7 @@ bool TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
 
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        &tx_cmd_set = *rw_set_.ObjectCommandSet();
+        &tx_cmd_set = *cmd_set_.ObjectCommandSet();
 
     // organize by node group
     std::unordered_map<
@@ -4499,6 +4526,10 @@ bool TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
             const char *ptr = reinterpret_cast<const char *>(&tabname_len);
             log_ng_blob.append(ptr, sizeof(uint8_t));
             log_ng_blob.append(table_name.StringView().data(), tabname_len);
+
+            uint8_t table_engine = static_cast<uint8_t>(table_name.Engine());
+            log_ng_blob.append(reinterpret_cast<const char *>(&table_engine),
+                               sizeof(uint8_t));
 
             // The start position of the 4-byte integer for the length of
             // serialized key and object commands.
@@ -4692,7 +4723,6 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                     bool_resp_->Finish(false);
                     bool_resp_ = nullptr;
                 }
-#ifdef ON_KEY_OBJECT
                 else if (rec_resp_ != nullptr)
                 {
                     // auto committed ObjectCommandTxRequest
@@ -4707,7 +4737,6 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                         TxErrorCode::LOG_SERVICE_UNREACHABLE);
                     vct_rec_resp_ = nullptr;
                 }
-#endif
                 tx_status_.store(TxnStatus::Unknown, std::memory_order_release);
             }
             else
@@ -4721,7 +4750,6 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                     bool_resp_->Finish(false);
                     bool_resp_ = nullptr;
                 }
-#ifdef ON_KEY_OBJECT
                 else if (rec_resp_ != nullptr)
                 {
                     // auto committed ObjectCommandTxRequest
@@ -4734,33 +4762,31 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                     vct_rec_resp_->FinishError(TxErrorCode::WRITE_LOG_FAIL);
                     vct_rec_resp_ = nullptr;
                 }
-#endif
 
                 tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             }
         }
 
-        uint32_t acquire_write_cnt =
-            rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
+        uint32_t acquire_write_cnt = rw_set_.WriteSetSize() +
+                                     rw_set_.ForwardWriteCnt() +
+                                     cmd_set_.ObjectCntWithWriteLock();
         TxnStatus status = TxStatus();
         if (status == TxnStatus::Committed)
         {
             // The tx is committed. The tx must have finished validation.
             // Post-processing includes both primary keys that have locks and
             // secondary keys without locks.
-            post_process_.Reset(
-                acquire_write_cnt + rw_set_.ObjectCntWithWriteLock(),
-                0,
-                rw_set_.CatalogRangeSetSize(),
-                need_update_tentry);
+            post_process_.Reset(acquire_write_cnt,
+                                0,
+                                rw_set_.CatalogRangeSetSize(),
+                                need_update_tentry);
         }
         else if (status == TxnStatus::Aborted)
         {
-            post_process_.Reset(
-                acquire_write_cnt + rw_set_.ObjectCntWithWriteLock(),
-                rw_set_.ReadSetSize(),
-                rw_set_.CatalogRangeSetSize(),
-                need_update_tentry);
+            post_process_.Reset(acquire_write_cnt,
+                                rw_set_.ReadSetSize(),
+                                rw_set_.CatalogRangeSetSize(),
+                                need_update_tentry);
         }
         else if (status == TxnStatus::Unknown)
         {
@@ -4828,7 +4854,6 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
 
         bool_resp_ = nullptr;
     }
-#ifdef ON_KEY_OBJECT
     else if (rec_resp_ != nullptr)
     {
         // auto committed ObjectCommandTxRequest
@@ -4848,7 +4873,6 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         vct_rec_resp_->Finish(std::move(vct_rec));
         vct_rec_resp_ = nullptr;
     }
-#endif
     // transaction can be recycled and put into free list.
     tx_status_.store(TxnStatus::Finished, std::memory_order_release);
 
@@ -4913,10 +4937,9 @@ void TransactionExecution::Process(PostProcessOp &post_process)
             }
         }
 
-#ifdef ON_KEY_OBJECT
         const std::unordered_map<TableName,
                                  std::unordered_map<CcEntryAddr, CmdSetEntry>>
-            *cmd_cce_set = rw_set_.ObjectCommandSet();
+            *cmd_cce_set = cmd_set_.ObjectCommandSet();
         assert(cmd_cce_set != nullptr);
 
         for (const auto &[table_name, cce_set] : *cmd_cce_set)
@@ -4954,7 +4977,6 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 }
             }
         }
-#endif
 
         if (idx == 0)
         {
@@ -5019,11 +5041,10 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 }
             }
 
-#ifdef ON_KEY_OBJECT
             const std::unordered_map<
                 TableName,
                 std::unordered_map<CcEntryAddr, CmdSetEntry>> *cmd_cce_set =
-                rw_set_.ObjectCommandSet();
+                cmd_set_.ObjectCommandSet();
             assert(cmd_cce_set != nullptr);
 
             for (const auto &[table_name, cce_set] : *cmd_cce_set)
@@ -5058,7 +5079,6 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                     }
                 }
             }
-#endif
         }
 
         const std::unordered_map<TableName,
@@ -5179,7 +5199,6 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
             }
             bool_resp_ = nullptr;
         }
-#ifdef ON_KEY_OBJECT
         else if (rec_resp_ != nullptr)
         {
             // auto committed ObjectCommandTxRequest
@@ -5199,7 +5218,6 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
             vct_rec_resp_->Finish(std::move(vct_rec));
             vct_rec_resp_ = nullptr;
         }
-#endif
         // transaction can be recycled and put into free list.
         tx_status_.store(TxnStatus::Finished, std::memory_order_release);
 
@@ -5448,14 +5466,12 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
         });
     ds_upsert_table_op.Reset();
     ds_upsert_table_op.is_running_ = true;
-#ifdef ON_KEY_OBJECT
     if (txservice_skip_kv)
     {
         ds_upsert_table_op.hd_result_.SetFinished();
         PostProcess(ds_upsert_table_op);
         return;
     }
-#endif
 
 #ifdef EXT_TX_PROC_ENABLED
     ds_upsert_table_op.hd_result_.SetToBlock();
@@ -6036,7 +6052,6 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
 
     if (!obj_cmd_op.is_running_)
     {
-#ifdef ON_KEY_OBJECT
         if (FLAGS_cmd_read_catalog && !obj_cmd_op.catalog_read_success_)
         {
             if (locked_db_[db_idx].first == nullptr)
@@ -6069,7 +6084,8 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
 
                     read_catalog_op_.Reset(TableName(catalog_ccm_name_sv.data(),
                                                      catalog_ccm_name_sv.size(),
-                                                     TableType::Catalog),
+                                                     TableType::Catalog,
+                                                     TableEngine::None),
                                            &catalog_tx_key_,
                                            &read_catalog_record_,
                                            &read_catalog_result_);
@@ -6098,7 +6114,6 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
             }
         }
         assert(locked_db_[db_idx].second > 0);
-#endif
 
 #ifdef RANGE_PARTITION_ENABLED
         if (lock_range_result_.IsFinished())
@@ -6126,7 +6141,8 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
             lock_range_op_.key_ = &key;
             lock_range_op_.table_name_ =
                 TableName(obj_cmd_op.table_name_->StringView(),
-                          TableType::RangePartition);
+                          TableType::RangePartition,
+                          obj_cmd_op.table_name_->Engine());
             lock_range_op_.rec_ = &range_rec_;
             lock_range_op_.hd_result_ = &lock_range_result_;
 
@@ -6203,7 +6219,8 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
 
             lock_bucket_op_.Reset(TableName(range_bucket_ccm_name_sv.data(),
                                             range_bucket_ccm_name_sv.size(),
-                                            TableType::RangeBucket),
+                                            TableType::RangeBucket,
+                                            TableEngine::None),
                                   &bucket_tx_key_,
                                   &bucket_rec_,
                                   &lock_bucket_result_);
@@ -6312,16 +6329,16 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             {
                 auto retire_command =
                     obj_cmd_.command_->RetireExpiredTTLObjectCommand();
-                rw_set_.AddObjectCommand(*table_name,
-                                         cce_addr,
-                                         obj_status,
-                                         commit_ts,
-                                         last_vali_ts,
-                                         obj_cmd_.key_,
-                                         retire_command.get()
+                cmd_set_.AddObjectCommand(*table_name,
+                                          cce_addr,
+                                          obj_status,
+                                          commit_ts,
+                                          last_vali_ts,
+                                          obj_cmd_.key_,
+                                          retire_command.get()
 #ifndef RANGE_PARTITION_ENABLED
-                                             ,
-                                         obj_cmd_op.forward_key_shard_
+                                              ,
+                                          obj_cmd_op.forward_key_shard_
 #endif
                 );
             }
@@ -6330,16 +6347,16 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                 // write a recover obj cmd to log
                 auto recover_command =
                     obj_cmd_.command_->RecoverTTLObjectCommand();
-                rw_set_.AddObjectCommand(*table_name,
-                                         cce_addr,
-                                         obj_status,
-                                         commit_ts,
-                                         last_vali_ts,
-                                         obj_cmd_.key_,
-                                         recover_command.get()
+                cmd_set_.AddObjectCommand(*table_name,
+                                          cce_addr,
+                                          obj_status,
+                                          commit_ts,
+                                          last_vali_ts,
+                                          obj_cmd_.key_,
+                                          recover_command.get()
 #ifndef RANGE_PARTITION_ENABLED
-                                             ,
-                                         obj_cmd_op.forward_key_shard_
+                                              ,
+                                          obj_cmd_op.forward_key_shard_
 #endif
                 );
             }
@@ -6347,7 +6364,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             // The command modifies the object. Put it into the command set
             // for writing log and post-processing. If the command fails, only
             // to release the write lock.
-            rw_set_.AddObjectCommand(
+            cmd_set_.AddObjectCommand(
                 *table_name,
                 cce_addr,
                 obj_status,
@@ -6378,7 +6395,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             }
         }
         else if (lock_acquired != LockType::NoLock &&
-                 !rw_set_.FindObjectCommand(*table_name, cce_addr))
+                 !cmd_set_.FindObjectCommand(*table_name, cce_addr))
         {
             // Read lock is acquired under locking protocol. Add the cce to
             // read set for later PostRead.
@@ -6442,7 +6459,6 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 
     if (!obj_cmd_op.is_running_)
     {
-#ifdef ON_KEY_OBJECT
         if (FLAGS_cmd_read_catalog && !obj_cmd_op.catalog_read_success_)
         {
             assert(db_idx >= 0 && db_idx < 16);
@@ -6475,7 +6491,8 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 
                     read_catalog_op_.Reset(TableName(catalog_ccm_name_sv.data(),
                                                      catalog_ccm_name_sv.size(),
-                                                     TableType::Catalog),
+                                                     TableType::Catalog,
+                                                     TableEngine::None),
                                            &catalog_tx_key_,
                                            &read_catalog_record_,
                                            &read_catalog_result_);
@@ -6504,7 +6521,6 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
                 obj_cmd_op.catalog_read_success_ = true;
             }
         }
-#endif
     }
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -6515,7 +6531,8 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
         lock_range_result_.Reset();
 
         lock_range_op_.Reset(TableName(req->table_name_->StringView(),
-                                       TableType::RangePartition),
+                                       TableType::RangePartition,
+                                       req->table_name_->Engine()),
                              &vct_key->at(obj_cmd_op.range_lock_cur_),
                              &range_rec_,
                              &lock_range_result_);
@@ -6596,7 +6613,8 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 
             lock_bucket_op_.Reset(TableName(range_bucket_ccm_name_sv.data(),
                                             range_bucket_ccm_name_sv.size(),
-                                            TableType::RangeBucket),
+                                            TableType::RangeBucket,
+                                            TableEngine::None),
                                   &bucket_tx_key_,
                                   &bucket_rec_,
                                   &lock_bucket_result_);
@@ -6714,17 +6732,17 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
             // Add the locked objects into read write set for future unlock.
             if (cmd_res.lock_acquired_ == LockType::WriteLock)
             {
-                rw_set_.AddObjectCommand(*req->table_name_,
-                                         cmd_res.cce_addr_,
-                                         cmd_res.rec_status_,
-                                         cmd_res.commit_ts_,
-                                         cmd_res.last_vali_ts_,
-                                         &vct_key->at(i),
-                                         nullptr);
+                cmd_set_.AddObjectCommand(*req->table_name_,
+                                          cmd_res.cce_addr_,
+                                          cmd_res.rec_status_,
+                                          cmd_res.commit_ts_,
+                                          cmd_res.last_vali_ts_,
+                                          &vct_key->at(i),
+                                          nullptr);
             }
             else if (cmd_res.lock_acquired_ != LockType::NoLock &&
-                     !rw_set_.FindObjectCommand(*req->table_name_,
-                                                cmd_res.cce_addr_))
+                     !cmd_set_.FindObjectCommand(*req->table_name_,
+                                                 cmd_res.cce_addr_))
             {
                 rw_set_.AddRead(
                     cmd_res.cce_addr_, cmd_res.commit_ts_, req->table_name_);
@@ -6770,7 +6788,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     {
                         auto retire_command =
                             vct_cmd->at(i)->RetireExpiredTTLObjectCommand();
-                        rw_set_.AddObjectCommand(
+                        cmd_set_.AddObjectCommand(
                             *req->table_name_,
                             cmd_res.cce_addr_,
                             cmd_res.rec_status_,
@@ -6787,7 +6805,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     // The command modifies the object. Put it into the command
                     // set for writing log and post-processing. If the command
                     // fails, only to release the write lock.
-                    rw_set_.AddObjectCommand(
+                    cmd_set_.AddObjectCommand(
                         *req->table_name_,
                         cmd_res.cce_addr_,
                         cmd_res.rec_status_,
@@ -6821,8 +6839,8 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     }
                 }
                 else if (cmd_res.lock_acquired_ != LockType::NoLock &&
-                         !rw_set_.FindObjectCommand(*req->table_name_,
-                                                    cmd_res.cce_addr_))
+                         !cmd_set_.FindObjectCommand(*req->table_name_,
+                                                     cmd_res.cce_addr_))
                 {
                     // Read lock is acquired under locking protocol. Add the cce
                     // to read set for later PostRead.
@@ -6875,7 +6893,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
 void TransactionExecution::Process(CmdForwardAcquireWriteOp &forward_acquire)
 {
-    forward_acquire.Reset(rw_set_.ObjectCountToForwardWrite());
+    forward_acquire.Reset(cmd_set_.ObjectCountToForwardWrite());
     forward_acquire.is_running_ = true;
 
     uint64_t current_ts =
@@ -6884,7 +6902,7 @@ void TransactionExecution::Process(CmdForwardAcquireWriteOp &forward_acquire)
     size_t res_idx = 0, entry_idx = 0;
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        &tx_cmd_set = *rw_set_.ObjectCommandSet();
+        &tx_cmd_set = *cmd_set_.ObjectCommandSet();
     for (const auto &[table_name, obj_cmd_set] : tx_cmd_set)
     {
         int db_idx = GetDbIndex(&table_name);
@@ -7147,11 +7165,12 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         lock_range_result_.Value().Reset();
         lock_range_result_.Reset();
 
-        lock_range_op_.Reset(
-            TableName(table_name.StringView(), TableType::RangePartition),
-            &batch_read_op.lock_it_->key_,
-            &range_rec_,
-            &lock_range_result_);
+        lock_range_op_.Reset(TableName(table_name.StringView(),
+                                       TableType::RangePartition,
+                                       table_name.Engine()),
+                             &batch_read_op.lock_it_->key_,
+                             &range_rec_,
+                             &lock_range_result_);
         PushOperation(&lock_range_op_);
         Process(lock_range_op_);
         return;

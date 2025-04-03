@@ -334,7 +334,8 @@ void ReadOperation::Forward(TransactionExecution *txm)
 void ReadLocalOperation::Reset()
 {
     key_ = nullptr;
-    table_name_ = TableName{empty_sv, TableType::RangePartition};
+    table_name_ =
+        TableName{empty_sv, TableType::RangePartition, TableEngine::None};
     rec_ = nullptr;
     hd_result_ = nullptr;
     execute_immediately_ = true;
@@ -1361,7 +1362,8 @@ void ScanNextOperation::Reset()
     alias_ = 0;
     scan_state_ = nullptr;
 #ifdef RANGE_PARTITION_ENABLED
-    range_table_name_ = TableName(empty_sv, TableType::RangePartition);
+    range_table_name_ =
+        TableName(empty_sv, TableType::RangePartition, TableEngine::None);
 #endif
     op_start_ = metrics::TimePoint::max();
     ResetResult();
@@ -2070,12 +2072,15 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
 }
 
 SchemaOp::SchemaOp(const std::string_view table_name_sv,
+                   TableEngine table_engine,
                    const std::string &current_image,
                    const std::string &dirty_image,
                    uint64_t schema_ts,
                    OperationType op_type)
-    : table_key_(TableName(
-          table_name_sv.data(), table_name_sv.size(), TableType::Primary))
+    : table_key_(TableName(table_name_sv.data(),
+                           table_name_sv.size(),
+                           TableType::Primary,
+                           table_engine))
 {
     catalog_rec_.SetSchemaImage(current_image);
     catalog_rec_.SetDirtySchemaImage(dirty_image);
@@ -2104,6 +2109,8 @@ void SchemaOp::FillPrepareLogRequestCommon(TransactionExecution *txm,
     prepare_schema_msg->set_table_name_str(table_key_.Name().String());
     prepare_schema_msg->set_table_type(
         ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
+    prepare_schema_msg->set_table_engine(
+        ::txlog::ToRemoteType::ConvertTableEngine(table_key_.Name().Engine()));
     prepare_schema_msg->set_old_catalog_blob(catalog_rec_.SchemaImage());
     prepare_schema_msg->set_catalog_ts(curr_schema_ts_);
     prepare_schema_msg->set_new_catalog_blob(catalog_rec_.DirtySchemaImage());
@@ -2164,13 +2171,18 @@ void SchemaOp::FillCleanLogRequestCommon(TransactionExecution *txm,
 }
 
 UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
+                             TableEngine table_engine,
                              const std::string &current_image,
                              uint64_t curr_schema_ts,
                              const std::string &dirty_image,
                              OperationType op_type,
                              TransactionExecution *txm)
-    : SchemaOp(
-          table_name_str, current_image, dirty_image, curr_schema_ts, op_type),
+    : SchemaOp(table_name_str,
+               table_engine,
+               current_image,
+               dirty_image,
+               curr_schema_ts,
+               op_type),
       lock_cluster_config_op_(),
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
@@ -2191,8 +2203,9 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
            op_type_ == OperationType::TruncateTable ||
            op_type_ == OperationType::Update);
 
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
@@ -2566,7 +2579,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             clean_ccm_names.emplace_back(
                 table_old_schema->GetBaseTableName().StringView().data(),
                 table_old_schema->GetBaseTableName().StringView().size(),
-                table_old_schema->GetBaseTableName().Type());
+                table_old_schema->GetBaseTableName().Type(),
+                table_old_schema->GetBaseTableName().Engine());
             clean_ccm_op_.table_names_ = std::move(clean_ccm_names);
 
             clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
@@ -2854,7 +2868,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     clean_ccm_op_.table_names_.emplace_back(
                         table_key_.Name().StringView().data(),
                         table_key_.Name().StringView().size(),
-                        table_key_.Name().Type());
+                        table_key_.Name().Type(),
+                        table_key_.Name().Engine());
                     clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
                     clean_ccm_op_.commit_ts_ = txm->CommitTs();
 
@@ -3089,6 +3104,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 }
 
 void UpsertTableOp::Reset(const std::string_view table_name_str,
+                          TableEngine table_engine,
                           const std::string &current_image,
                           uint64_t curr_schema_ts,
                           const std::string &dirty_image,
@@ -3105,8 +3121,10 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     is_running_ = false;
 
     // reset SchemaOp
-    table_key_.Name() = TableName(
-        table_name_str.data(), table_name_str.size(), TableType::Primary);
+    table_key_.Name() = TableName(table_name_str.data(),
+                                  table_name_str.size(),
+                                  TableType::Primary,
+                                  table_engine);
     catalog_rec_.SetSchemaImage(current_image);
     catalog_rec_.SetDirtySchemaImage(dirty_image);
     image_str_ = current_image;
@@ -3122,8 +3140,9 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
     prepare_log_op_.Reset();
@@ -3556,8 +3575,10 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     bool is_dirty)
     : CompositeTransactionOperation(),
       table_schema_(std::move(table_schema)),
-      table_name_(table_name.String(), table_name.Type()),
-      range_table_name_(table_name_.StringView(), TableType::RangePartition),
+      table_name_(table_name.String(), table_name.Type(), table_name.Engine()),
+      range_table_name_(table_name_.StringView(),
+                        TableType::RangePartition,
+                        table_name_.Engine()),
       read_cluster_result_(txm),
       range_entry_(range_entry),
       new_range_info_(std::move(new_range_info)),
@@ -3588,8 +3609,9 @@ SplitFlushRangeOp::SplitFlushRangeOp(
 
     range_record_ = std::make_unique<RangeRecord>(range_info_.get(), nullptr);
 
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
@@ -3652,10 +3674,12 @@ void SplitFlushRangeOp::Reset(
     op_ = nullptr;
 
     // Reset SplitFlushRangeOp
-    table_name_ = TableName(table_name.String(), table_name.Type());
+    table_name_ =
+        TableName(table_name.String(), table_name.Type(), table_name.Engine());
     table_schema_ = std::move(table_schema);
-    range_table_name_ =
-        TableName(table_name_.StringView(), TableType::RangePartition);
+    range_table_name_ = TableName(table_name_.StringView(),
+                                  TableType::RangePartition,
+                                  table_name_.Engine());
 
     range_entry_ = range_entry;
     range_info_ = range_entry_->GetRangeInfo()->Clone();
@@ -3710,8 +3734,9 @@ void SplitFlushRangeOp::Reset(
     read_cluster_result_.ResetTxm(txm);
     cluster_conf_rec_.Reset();
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
 
@@ -4528,6 +4553,8 @@ void SplitFlushRangeOp::FillPrepareLogRequest(TransactionExecution *txm)
     ::txlog::SplitRangeOpMessage *prepare_split_msg =
         prepare_log_rec->mutable_log_content()->mutable_split_range_log();
     prepare_split_msg->set_table_name(range_table_name_.String());
+    prepare_split_msg->set_table_engine(
+        ::txlog::ToRemoteType::ConvertTableEngine(range_table_name_.Engine()));
     prepare_split_msg->set_stage(
         ::txlog::SplitRangeOpMessage_Stage_PrepareSplit);
     // Set range info for splitting range
@@ -5516,7 +5543,7 @@ void CmdForwardAcquireWriteOp::AggregateAcquiredKeys(TransactionExecution *txm)
         {
             assert(forward_entry->cce_addr_.Empty());
             forward_entry->cce_addr_ = addr;
-            txm_->rw_set_.IncreaseObjectCntWithWriteLock();
+            txm_->cmd_set_.IncreaseObjectCntWithWriteLock();
         }
     }
 }
@@ -7437,7 +7464,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         // name need to keep consistent
         CODE_FAULT_INJECTOR("add_dropped_table_for_test", {
             std::string t1_table_name = "./test/t1";
-            TableName t1_tbl(t1_table_name, TableType::Primary);
+            TableName t1_tbl(
+                t1_table_name, TableType::Primary, TableEngine::EloqSql);
             for (auto id : status_->bucket_ids_[migrate_bucket_idx_])
             {
                 if (id == 1109)
@@ -7474,8 +7502,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             {
                 type = TableType::Secondary;
             }
-            kickout_table_ =
-                TableName{kickout_tbl_it_->first.StringView(), type};
+            kickout_table_ = TableName{kickout_tbl_it_->first.StringView(),
+                                       type,
+                                       kickout_tbl_it_->first.Engine()};
             kickout_data_op_.table_name_ = &kickout_table_;
             // All data in this range is clean target.
             kickout_data_op_.clean_type_ =
@@ -7522,7 +7551,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                         type = TableType::Secondary;
                     }
                     kickout_table_ =
-                        TableName{kickout_tbl_it_->first.StringView(), type};
+                        TableName{kickout_tbl_it_->first.StringView(),
+                                  type,
+                                  kickout_tbl_it_->first.Engine()};
                     kickout_data_op_.table_name_ = &kickout_table_;
                     kickout_range_it_ = kickout_tbl_it_->second.cbegin();
                 }
@@ -7626,8 +7657,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             {
                 type = TableType::Secondary;
             }
-            kickout_table_ =
-                TableName{kickout_tbl_it_->first.StringView(), type};
+            kickout_table_ = TableName{kickout_tbl_it_->first.StringView(),
+                                       type,
+                                       kickout_tbl_it_->first.Engine()};
             kickout_data_op_.table_name_ = &kickout_table_;
             kickout_range_it_ = kickout_tbl_it_->second.cbegin();
         }
@@ -7672,8 +7704,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 {
                     type = TableType::Secondary;
                 }
-                kickout_table_ =
-                    TableName{kickout_tbl_it_->first.StringView(), type};
+                kickout_table_ = TableName{kickout_tbl_it_->first.StringView(),
+                                           type,
+                                           kickout_tbl_it_->first.Engine()};
                 kickout_data_op_.table_name_ = &kickout_table_;
                 kickout_range_it_ = kickout_tbl_it_->second.cbegin();
             }

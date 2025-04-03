@@ -46,6 +46,24 @@ public:
             return CcTableType::Primary;
         }
     }
+
+    static TableEngine ConvertTableEngine(txservice::TableEngine table_engine)
+    {
+        switch (table_engine)
+        {
+        case txservice::TableEngine::None:
+            return TableEngine::None;
+        case txservice::TableEngine::EloqSql:
+            return TableEngine::EloqSql;
+        case txservice::TableEngine::EloqDoc:
+            return TableEngine::EloqDoc;
+        case txservice::TableEngine::EloqKv:
+            return TableEngine::EloqKv;
+        default:
+            assert(false);
+            return TableEngine::None;
+        }
+    }
 };
 
 class ToLocalType
@@ -65,6 +83,25 @@ public:
             return txservice::TableType::RangePartition;
         }
     }
+
+    static txservice::TableEngine ConvertTableEngine(TableEngine table_engine)
+    {
+        switch (table_engine)
+        {
+        case TableEngine::None:
+            return txservice::TableEngine::None;
+        case TableEngine::EloqSql:
+            return txservice::TableEngine::EloqSql;
+        case TableEngine::EloqKv:
+            return txservice::TableEngine::EloqKv;
+        case TableEngine::EloqDoc:
+            return txservice::TableEngine::EloqDoc;
+        default:
+            assert(false);
+            return txservice::TableEngine::None;
+        }
+    }
+    
 };
 
 }  // namespace txlog

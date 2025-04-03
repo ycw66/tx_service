@@ -476,7 +476,7 @@ public:
     {
         assert(tbl_name.IsBase());
         // key cache is only used on primary table
-        tbl_name_ = TableName(tbl_name.String(), TableType::Primary);
+        tbl_name_ = TableName(tbl_name.String(), TableType::Primary, tbl_name.Engine());
         term_ = term;
         ng_id_ = ng_id;
         range_ = range;
@@ -495,7 +495,7 @@ public:
     TxKey &PauseKey(uint16_t core_id);
 
 private:
-    TableName tbl_name_{std::string(""), TableType::Primary};
+    TableName tbl_name_{std::string(""), TableType::Primary, TableEngine::None};
     int64_t term_;
     NodeGroupId ng_id_;
     StoreRange *range_;

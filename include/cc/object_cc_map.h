@@ -898,6 +898,8 @@ public:
                 forward_req->set_table_name(table_name_.String());
                 forward_req->set_table_type(
                     remote::ToRemoteType::ConvertTableType(table_name_.Type()));
+                forward_req->set_table_engine(
+                    remote::ToRemoteType::ConvertTableEngine(table_name_.Engine()));
                 forward_req->set_key_shard_code(req.key_shard_code_);
                 std::string key_str;
 
@@ -1828,9 +1830,6 @@ public:
                         cce->payload_.PassInCurrentPayload(std::move(obj_ptr));
                     }
                     TxObject *obj_ptr = cce->payload_.cur_payload_.get();
-                    // TODO(liunyl): why are we returning a raw object ptr here?
-                    // Is it the same ptr as the old one? If not, who is the
-                    // owner of the new object pointer?
                     TxObject *new_obj_ptr = tx_cmd->CommitOn(obj_ptr);
                     if (new_obj_ptr != obj_ptr)
                     {

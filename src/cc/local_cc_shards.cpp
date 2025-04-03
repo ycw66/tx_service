@@ -42,6 +42,7 @@
 #include "cc_request.h"
 #include "cc_request.pb.h"
 #include "error_messages.h"
+#include "log_type.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "range_slice.h"
@@ -554,7 +555,8 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                     std::piecewise_construct,
                     std::forward_as_tuple(base_table_name.StringView().data(),
                                           base_table_name.StringView().size(),
-                                          base_table_name.Type()),
+                                          base_table_name.Type(),
+                                          base_table_name.Engine()),
                     std::forward_as_tuple(false));
                 assert(ins_it.second);
                 (void) ins_it;
@@ -566,7 +568,8 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                                        std::forward_as_tuple(
                                            index_table_name.StringView().data(),
                                            index_table_name.StringView().size(),
-                                           index_table_name.Type()),
+                                           index_table_name.Type(),
+                                           index_table_name.Engine()),
                                        std::forward_as_tuple(false));
                     assert(ins_it.second);
                     // This silences the -Wunused-but-set-variable warning
@@ -595,7 +598,8 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                                 std::forward_as_tuple(
                                     index_table_name.StringView().data(),
                                     index_table_name.StringView().size(),
-                                    index_table_name.Type()),
+                                    index_table_name.Type(),
+                                    index_table_name.Engine()),
                                 std::forward_as_tuple(true));
                             assert(ins_it.second);
                             // This silences the -Wunused-but-set-variable
@@ -708,13 +712,20 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             // Mark the table as sync in progress to avoid concurrent data sync
             // before range split tx finishes if this is the first started range
             // split.
+            TableEngine table_engine = ::txlog::ToLocalType::ConvertTableEngine(
+                ds_split_range_op_msg.table_engine());
             TableName table_name =
                 TableName(ds_split_range_op_msg.table_name(),
-                          TableName::Type(ds_split_range_op_msg.table_name()));
-            const TableName range_table_name = TableName{
-                ds_split_range_op_msg.table_name(), TableType::RangePartition};
-            const TableName base_table_name = TableName{
-                range_table_name.GetBaseTableNameSV(), TableType::Primary};
+                          TableName::Type(ds_split_range_op_msg.table_name()),
+                          table_engine);
+            const TableName range_table_name =
+                TableName{ds_split_range_op_msg.table_name(),
+                          TableType::RangePartition,
+                          table_engine};
+            const TableName base_table_name =
+                TableName{range_table_name.GetBaseTableNameSV(),
+                          TableType::Primary,
+                          table_engine};
             TableRangeEntry *range_entry =
                 const_cast<TableRangeEntry *>(GetTableRangeEntry(
                     range_table_name, node_group_id, partition_id));
@@ -819,6 +830,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                                                    tx_term,
                                                    table_name.StringView(),
                                                    table_name.Type(),
+                                                   table_name.Engine(),
                                                    partition_id);
         // Checkpoint cannot start at `tx_term` until recover is finished,
         // we should be the only one trying to sync the range.
@@ -1298,7 +1310,8 @@ TableRangeEntry *LocalCcShards::GetTableRangeEntry(const TableName &table_name,
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     return GetTableRangeEntryInternal(range_table_name, ng_id, key);
 }
 
@@ -1309,7 +1322,8 @@ LocalCcShards::GetTableRangeKeys(const TableName &table_name,
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     TableRangeEntry *range_entry =
         GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
 
@@ -1333,7 +1347,8 @@ bool LocalCcShards::CheckRangeVersion(const TableName &table_name,
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     TableRangeEntry *range_entry =
         GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
 
@@ -1350,7 +1365,8 @@ const TableRangeEntry *LocalCcShards::GetTableRangeEntry(
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     return GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
 }
 
@@ -1358,7 +1374,8 @@ const TableRangeEntry *LocalCcShards::GetTableRangeEntryNoLocking(
     const TableName &table_name, const NodeGroupId ng_id, const TxKey &key)
 {
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     return GetTableRangeEntryInternal(range_table_name, ng_id, key);
 }
 
@@ -1368,7 +1385,8 @@ StoreRange *LocalCcShards::FindRange(const TableName &table_name,
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
 
     TableRangeEntry *entry =
         GetTableRangeEntryInternal(range_table_name, ng_id, key);
@@ -1388,7 +1406,8 @@ StoreRange *LocalCcShards::FindRange(const TableName &table_name,
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
 
     TableRangeEntry *entry =
         GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
@@ -1415,7 +1434,8 @@ uint64_t LocalCcShards::CountRangesLockless(const TableName &table_name,
                                             const NodeGroupId key_ng_id) const
 {
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     auto range_ngs = table_ranges_.find(range_table_name);
     if (range_ngs == table_ranges_.end())
     {
@@ -1455,7 +1475,8 @@ uint64_t LocalCcShards::CountSlices(const TableName &table_name,
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     assert(Sharder::Instance().LeaderTerm(local_ng_id) >= 0 ||
            Sharder::Instance().CandidateLeaderTerm(local_ng_id) >= 0);
 
@@ -1537,7 +1558,8 @@ std::shared_ptr<TableSchema> LocalCcShards::GetSharedDirtyTableSchema(
     const TableName &table_name, NodeGroupId ng_id)
 {
     TableName base_table_name(table_name.GetBaseTableNameSV(),
-                              TableType::Primary);
+                              TableType::Primary,
+                              table_name.Engine());
     std::shared_lock<std::shared_mutex> shards_lk(meta_data_mux_);
 
     auto ng_catalog_it = table_catalogs_.find(base_table_name);
@@ -2028,9 +2050,10 @@ LocalCcShards::GetRangesInBucket(uint16_t bucket_id, NodeGroupId ng_id)
             }
             if (!tbl_snapshot.empty())
             {
-                snapshot.try_emplace(
-                    TableName{tbl_name.StringView(), tbl_name.Type()},
-                    std::move(tbl_snapshot));
+                snapshot.try_emplace(TableName{tbl_name.StringView(),
+                                               tbl_name.Type(),
+                                               tbl_name.Engine()},
+                                     std::move(tbl_snapshot));
             }
         }
     }
@@ -2124,7 +2147,8 @@ std::pair<TableRangeEntry *, StoreRange *> LocalCcShards::PinStoreRange(
     // other process will update table ranges for this table, so we don't need
     // meta data shared lock here.
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
 
     TableRangeEntry *range_entry =
         GetTableRangeEntryInternal(range_table_name, ng_id, start_key);
@@ -2175,6 +2199,7 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                                                ng_term,
                                                table_name.StringView(),
                                                table_name.Type(),
+                                               table_name.Engine(),
                                                range_info->PartitionId());
 
         std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
@@ -2395,8 +2420,12 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
     bool send_cache_for_migration,
     std::function<bool(size_t)> filter_lambda)
 {
-    auto task_limiter_key = TaskLimiterKey(
-        ng_id, ng_term, table_name.StringView(), table_name.Type(), core_idx);
+    auto task_limiter_key = TaskLimiterKey(ng_id,
+                                           ng_term,
+                                           table_name.StringView(),
+                                           table_name.Type(),
+                                           table_name.Engine(),
+                                           core_idx);
     std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
     auto iter = task_limiters_.find(task_limiter_key);
     bool enqueued_task = false;
@@ -2569,7 +2598,8 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
 #else
 
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     auto ranges = GetTableRangesForATableInternal(range_table_name, ng_id);
     if (ranges == nullptr)
     {
@@ -2653,7 +2683,8 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
         {
             type = TableType::Secondary;
         }
-        TableName table_name(range_table_name.StringView(), type);
+        TableName table_name(
+            range_table_name.StringView(), type, range_table_name.Engine());
         for (int32_t range_id : range_ids)
         {
             uint64_t last_sync_ts = 0;
@@ -2989,7 +3020,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
 
         TableName range_tbl_name{table_name.StringView(),
-                                 TableType::RangePartition};
+                                 TableType::RangePartition,
+                                 table_name.Engine()};
         range_entry =
             GetTableRangeEntryInternal(range_tbl_name, ng_id, range_id);
         if (range_entry == nullptr)
@@ -3011,6 +3043,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                        expected_ng_term,
                                        table_name.StringView(),
                                        table_name.Type(),
+                                       table_name.Engine(),
                                        range_id);
                     std::lock_guard<std::mutex> task_limiter_lk(
                         task_limiter_mux_);
@@ -3120,7 +3153,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         // If table_name has been dropped at this point, read lock would
         // not be acquired.
         const TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                        TableType::Primary};
+                                        TableType::Primary,
+                                        table_name.Engine()};
 
         CatalogKey table_key(base_table_name);
         TxKey tbl_tx_key{&table_key};
@@ -3847,7 +3881,9 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                 std::shared_lock<std::shared_mutex> meta_data_lk(
                     meta_data_mux_);
                 const TableName base_table_name{
-                    task->table_name_.GetBaseTableNameSV(), TableType::Primary};
+                    task->table_name_.GetBaseTableNameSV(),
+                    TableType::Primary,
+                    task->table_name_.Engine()};
                 CatalogEntry *catalog_entry =
                     GetCatalogInternal(base_table_name, task->node_group_id_);
                 if (catalog_entry && task->data_sync_ts_ != UINT64_MAX &&
@@ -3936,7 +3972,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     bool need_process = false;
 
     const TableName primary_base_table_name{table_name.GetBaseTableNameSV(),
-                                            TableType::Primary};
+                                            TableType::Primary,
+                                            table_name.Engine()};
     CatalogEntry *catalog_entry =
         GetCatalogInternal(primary_base_table_name, ng_id);
 
@@ -3954,6 +3991,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                                    expected_ng_term,
                                                    table_name.StringView(),
                                                    table_name.Type(),
+                                                   table_name.Engine(),
                                                    worker_idx);
             std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
             auto iter = task_limiters_.find(task_limiter_key);
@@ -4058,7 +4096,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // If table_name has been dropped at this point, read lock would
     // not be acquired.
     const TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                    TableType::Primary};
+                                    TableType::Primary,
+                                    table_name.Engine()};
 
     CatalogKey table_key(base_table_name);
     TxKey tbl_tx_key(&table_key);
@@ -4268,6 +4307,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                             req_ptr->set_table_type(
                                 remote::ToRemoteType::ConvertTableType(
                                     table_name.Type()));
+                            req_ptr->set_table_engine(
+                                remote::ToRemoteType::ConvertTableEngine(
+                                    table_name.Engine()));
                             req_ptr->set_kind(
                                 remote::UploadBatchKind::DIRTY_BUCKET_DATA);
                             req_ptr->set_batch_size(0);
@@ -4521,11 +4563,19 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
 {
     assert(!table_name.IsMeta());
 #ifdef RANGE_PARTITION_ENABLED
-    auto task_limiter_key = TaskLimiterKey(
-        ng_id, ng_term, table_name.StringView(), table_name.Type(), range_id);
+    auto task_limiter_key = TaskLimiterKey(ng_id,
+                                           ng_term,
+                                           table_name.StringView(),
+                                           table_name.Type(),
+                                           table_name.Engine(),
+                                           range_id);
 #else
-    auto task_limiter_key = TaskLimiterKey(
-        ng_id, ng_term, table_name.StringView(), TableType::Primary, core_idx);
+    auto task_limiter_key = TaskLimiterKey(ng_id,
+                                           ng_term,
+                                           table_name.StringView(),
+                                           TableType::Primary,
+                                           table_name.Engine(),
+                                           core_idx);
 #endif
 
     std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
@@ -4568,11 +4618,19 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
     assert(!table_name.IsMeta());
 
 #ifdef RANGE_PARTITION_ENABLED
-    auto task_limiter_key = TaskLimiterKey(
-        ng_id, ng_term, table_name.StringView(), table_name.Type(), range_id);
+    auto task_limiter_key = TaskLimiterKey(ng_id,
+                                           ng_term,
+                                           table_name.StringView(),
+                                           table_name.Type(),
+                                           table_name.Engine(),
+                                           range_id);
 #else
-    auto task_limiter_key = TaskLimiterKey(
-        ng_id, ng_term, table_name.StringView(), TableType::Primary, core_idx);
+    auto task_limiter_key = TaskLimiterKey(ng_id,
+                                           ng_term,
+                                           table_name.StringView(),
+                                           TableType::Primary,
+                                           table_name.Engine(),
+                                           core_idx);
 #endif
 
     std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
@@ -4858,8 +4916,8 @@ void LocalCcShards::SplitFlushRange(
     std::shared_ptr<DataSyncTask> &data_sync_task =
         range_split_task->data_sync_task_;
     const TableName &table_name = data_sync_task->table_name_;
-    const TableName range_table_name{table_name.String(),
-                                     TableType::RangePartition};
+    const TableName range_table_name{
+        table_name.String(), TableType::RangePartition, table_name.Engine()};
     auto &split_keys = range_split_task->split_keys_;
     std::shared_ptr<const TableSchema> &table_schema =
         range_split_task->schema_;
@@ -5398,7 +5456,9 @@ void LocalCcShards::SyncTableStatisticsWorker()
                         continue;
                     }
                     const TableName base_table_name{
-                        table_name.GetBaseTableNameSV(), TableType::Primary};
+                        table_name.GetBaseTableNameSV(),
+                        TableType::Primary,
+                        table_name.Engine()};
 
                     CatalogKey table_key(base_table_name);
                     TxKey tbl_tx_key{&table_key};
@@ -5914,6 +5974,8 @@ void LocalCcShards::RangeCacheSender::AppendSliceDataRequest(
             batch_req_ptr->set_table_name_str(table_name_.String());
             batch_req_ptr->set_table_type(
                 remote::ToRemoteType::ConvertTableType(table_name_.Type()));
+            batch_req_ptr->set_table_engine(
+                remote::ToRemoteType::ConvertTableEngine(table_name_.Engine()));
             batch_req_ptr->set_node_group_id(new_range_owner_);
             // The term will be fixed when send the request.
             batch_req_ptr->set_node_group_term(INIT_TERM);
@@ -6015,6 +6077,8 @@ void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
     req.set_node_group_id(new_range_owner_);
     req.set_ng_term(ng_term);
     req.set_table_name_str(table_name_.String());
+    req.set_table_engine(
+        remote::ToRemoteType::ConvertTableEngine(table_name_.Engine()));
     req.set_old_partition_id(old_range_id_);
     req.set_version_ts(version_ts_);
     req.set_new_partition_id(new_range_id_);

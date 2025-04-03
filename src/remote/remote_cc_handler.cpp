@@ -75,6 +75,8 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_src_node_id(src_id);
     acq->set_table_name_str(table_name.String());
     acq->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
+    acq->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     acq->clear_key();
     key.Serialize(*acq->mutable_key());
 
@@ -115,6 +117,8 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     acq_all->set_src_node_id(src_node_id);
     acq_all->set_table_name_str(table_name.String());
     acq_all->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
+    acq_all->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     switch (key.Type())
     {
     case KeyType::NegativeInf:
@@ -220,6 +224,8 @@ void txservice::remote::RemoteCcHandler::UploadRecord(
     post_commit->set_table_name_str(table_name.String());
     post_commit->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    post_commit->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     post_commit->clear_record();
     if (commit_ts > 0 && operation_type != OperationType::Delete)
     {
@@ -266,6 +272,8 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     post_write_all->set_table_name_str(table_name.String());
     post_write_all->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    post_write_all->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     post_write_all->set_node_group_id(ng_id);
 
     switch (key.Type())
@@ -373,6 +381,8 @@ void txservice::remote::RemoteCcHandler::Read(
     read->set_src_node_id(src_node_id);
     read->set_table_name_str(table_name.String());
     read->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
+    read->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     read->clear_key();
     key.Serialize(*read->mutable_key());
     read->set_key_shard_code(key_shard_code);
@@ -505,6 +515,8 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_table_name_str(table_name.String());
     scan_open->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    scan_open->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     scan_open->set_shard_id(node_group_id);
 
     switch (start_key.Type())
@@ -630,6 +642,8 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_slice->set_cc_ng_term(cc_ng_term);
     scan_slice->set_table_name_str(tbl_name.StringView().data());
     scan_slice->set_table_type(ToRemoteType::ConvertTableType(tbl_name.Type()));
+    scan_slice->set_table_engine(
+        ToRemoteType::ConvertTableEngine(tbl_name.Engine()));
     scan_slice->set_schema_version(schema_version);
     scan_slice->set_range_id(range_id);
     scan_slice->clear_start_key();
@@ -757,6 +771,8 @@ void txservice::remote::RemoteCcHandler::AnalyzeTableAll(
     analyze_req->set_table_name_str(table_name.String());
     analyze_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    analyze_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
 
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
 }
@@ -787,6 +803,8 @@ void txservice::remote::RemoteCcHandler::BroadcastStatistics(
     broadcast_stat_req->set_node_group_id(ng_id);
     broadcast_stat_req->set_table_type(
         remote::ToRemoteType::ConvertTableType(table_name.Type()));
+    broadcast_stat_req->set_table_engine(
+        remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
     broadcast_stat_req->set_table_name_str(table_name.String());
     broadcast_stat_req->set_schema_version(schema_ts);
     broadcast_stat_req->mutable_node_group_sample_pool()->CopyFrom(sample_pool);
@@ -825,6 +843,8 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     clean_req->set_table_name_str(table_name.String());
     clean_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    clean_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     clean_req->clear_key();
     key.Serialize(*clean_req->mutable_key());
     clean_req->set_key_shard_code(key_shard_code);
@@ -942,6 +962,8 @@ void txservice::remote::RemoteCcHandler::KickoutData(
     kickout_data_req->set_table_name_str(table_name.String());
     kickout_data_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    kickout_data_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     kickout_data_req->set_node_group_id(ng_id);
     kickout_data_req->set_clean_ts(clean_ts);
     kickout_data_req->clear_start_key();
@@ -991,6 +1013,8 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
     apply_req->set_table_name_str(table_name.String());
     apply_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    apply_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     apply_req->clear_key();
     key.Serialize(*apply_req->mutable_key());
     apply_req->set_key_shard_code(key_shard_code);
@@ -1095,5 +1119,7 @@ void txservice::remote::RemoteCcHandler::InvalidateTableCache(
     invalidate_req->set_table_name_str(table_name.String());
     invalidate_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    invalidate_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
 }

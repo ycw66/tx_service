@@ -70,12 +70,6 @@ public:
         wset_bytes_cnt_ = 0;
         data_rset_cnt_ = 0;
         forward_write_cnt_ = 0;
-
-#ifdef ON_KEY_OBJECT
-        cmd_set_.clear();
-        cce_with_writelock_size_ = 0;
-        need_forward_cmd_cnt_ = 0;
-#endif
     }
 
     /**
@@ -149,7 +143,8 @@ public:
             auto insert_it =
                 rset_.emplace(std::piecewise_construct,
                               std::forward_as_tuple(table_name->StringView(),
-                                                    table_name->Type()),
+                                                    table_name->Type(),
+                                                    table_name->Engine()),
                               std::forward_as_tuple());
             iter = insert_it.first;
         }
@@ -320,7 +315,8 @@ public:
             auto insert_it = wset_.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(table_name.StringView(),
-                                      table_name.Type()),
+                                      table_name.Type(),
+                                      table_name.Engine()),
                 std::forward_as_tuple(schema_version, TableWriteSet()));
             iter = insert_it.first;
         }
@@ -515,7 +511,8 @@ public:
 
 #ifdef RANGE_PARTITION_ENABLED
         TableName range_tbl_name(table_name.StringView(),
-                                 TableType::RangePartition);
+                                 TableType::RangePartition,
+                                 table_name.Engine());
         tbl_it = rset_.find(range_tbl_name);
         if (tbl_it != rset_.end())
         {
@@ -555,142 +552,9 @@ public:
         return read_cnt;
     }
 
-    void AddObjectCommand(const TableName &table_name,
-                          const CcEntryAddr &cce_addr,
-                          RecordStatus payload_status,
-                          uint64_t cce_version,
-                          uint64_t last_vali_ts,
-                          const TxKey *key,
-                          const TxCommand *cmd,
-                          uint32_t forward_key_shard = UINT32_MAX)
-    {
-#ifdef ON_KEY_OBJECT
-        auto [table_it, success] = cmd_set_.try_emplace(table_name);
-        auto &table_cmd_set = table_it->second;
-
-        auto cce_it = table_cmd_set.find(cce_addr);
-        if (cce_it == table_cmd_set.end())
-        {
-            std::string key_str;
-            key->Serialize(key_str);
-            bool inserted = false;
-            bool cmd_apply_on_deleted =
-                (payload_status == RecordStatus::Deleted);
-
-            std::tie(cce_it, inserted) =
-                table_cmd_set.try_emplace(cce_addr,
-                                          cce_version,
-                                          last_vali_ts,
-                                          std::move(key_str),
-                                          cmd_apply_on_deleted);
-            assert(inserted);
-            cce_with_writelock_size_++;
-        }
-
-        CmdSetEntry &entry = cce_it->second;
-        assert(cce_version >= entry.object_version_);
-        entry.object_version_ = cce_version;
-        if (cmd != nullptr)
-        {
-            entry.object_modified_ = true;
-            // The command modifies the object and wal is enabled. Put it
-            // into the command set for writing log and post-processing. If
-            // the command fails, only to release the write lock.
-            if (!txservice_skip_wal)
-            {
-                entry.AddCommand(cmd);
-            }
-
-            if (forward_key_shard != UINT32_MAX &&
-                entry.forward_entry_ == nullptr)
-            {
-                assert(cmd != nullptr);
-                entry.forward_entry_ = std::make_unique<CmdForwardEntry>(
-                    key->Clone(), forward_key_shard);
-                need_forward_cmd_cnt_++;
-            }
-        }
-#endif
-    }
-
-    const CmdSetEntry *FindObjectCommand(const TableName &table_name,
-                                         const CcEntryAddr &cce_addr) const
-    {
-        const CmdSetEntry *obj_cmd_entry = nullptr;
-#ifdef ON_KEY_OBJECT
-        const auto iter = cmd_set_.find(table_name);
-        if (iter != cmd_set_.end())
-        {
-            const auto &[table_name, obj_cmd_set] = *iter;
-            const auto it = obj_cmd_set.find(cce_addr);
-            if (it != obj_cmd_set.end())
-            {
-                obj_cmd_entry = &it->second;
-            }
-        }
-#endif
-        return obj_cmd_entry;
-    }
-
-    const std::unordered_map<TableName,
-                             std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        *ObjectCommandSet() const
-    {
-#ifdef ON_KEY_OBJECT
-        return &cmd_set_;
-#else
-        return nullptr;
-#endif
-    }
-
-    // The number of objects(cce) that already acquired write lock.
-    uint32_t ObjectCntWithWriteLock() const
-    {
-#ifdef ON_KEY_OBJECT
-        return cce_with_writelock_size_;
-#else
-        return 0;
-#endif
-    }
-
-    void IncreaseObjectCntWithWriteLock()
-    {
-#ifdef ON_KEY_OBJECT
-        cce_with_writelock_size_++;
-#endif
-    }
-
-    bool ObjectModified() const
-    {
-#ifdef ON_KEY_OBJECT
-        for (const auto &[table_name, obj_cmd_set] : cmd_set_)
-        {
-            for (const auto &[cce_addr, obj_cmd_entry] : obj_cmd_set)
-            {
-                if (obj_cmd_entry.HasSuccessfulCommand())
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
-#else
-        return WriteSetSize() > 0;
-#endif
-    }
-
     void ResetForwardWriteCount()
     {
         forward_write_cnt_ = 0;
-    }
-
-    size_t ObjectCountToForwardWrite()
-    {
-#ifdef ON_KEY_OBJECT
-        return need_forward_cmd_cnt_;
-#else
-        return 0;
-#endif
     }
 
 private:
@@ -806,19 +670,5 @@ private:
     size_t data_rset_cnt_;
     size_t wset_bytes_cnt_;
     size_t forward_write_cnt_;
-
-#ifdef ON_KEY_OBJECT
-    /**
-     * Collection of object keys and commands on each object.
-     */
-    std::unordered_map<TableName, std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        cmd_set_;
-
-    // the count of different cc entries the command set contains that acquires
-    // writelock
-    uint32_t cce_with_writelock_size_{};
-    // the count of cmd keys to acquire write lock on forward node group
-    uint32_t need_forward_cmd_cnt_{0};
-#endif
 };
 }  // namespace txservice

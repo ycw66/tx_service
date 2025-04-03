@@ -180,7 +180,7 @@ void SkGenerator::ProcessTask()
     });
 
     const TableName &range_table_name =
-        TableName(base_table_name_->StringView(), TableType::RangePartition);
+        TableName(base_table_name_->StringView(), TableType::RangePartition, base_table_name_->Engine());
     TransactionExecution *acq_range_lock_txm =
         txservice::NewTxInit(cc_shards->GetTxService(),
                              IsolationLevel::RepeatableRead,
@@ -422,7 +422,8 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                 new_index_set
                     .emplace(std::piecewise_construct,
                              std::forward_as_tuple(tbl_name_it->StringView(),
-                                                   tbl_name_it->Type()),
+                                                   tbl_name_it->Type(),
+                                                   tbl_name_it->Engine()),
                              std::forward_as_tuple())
                     .first->second;
             index_set.reserve(reserve_size);
@@ -688,7 +689,8 @@ CcErrorCode UploadIndexContext::UploadEncodedIndex(UploadIndexTask &upload_task)
             auto ins_it = ng_index_set.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(table_it->first.StringView(),
-                                      table_it->first.Type()),
+                                      table_it->first.Type(),
+                                      table_it->first.Engine()),
                 std::forward_as_tuple(NGIndexSet()));
             ng_write_entry_it = ins_it.first;
         }
@@ -876,6 +878,8 @@ void UploadIndexContext::SendIndexes(
         req_ptr->set_table_name_str(table_name.String());
         req_ptr->set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
+        req_ptr->set_table_engine(
+            remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
         size_t end_key_idx = start_key_idx + batch_size;
         req_ptr->set_kind(remote::UploadBatchKind::SK_DATA);
         req_ptr->set_batch_size(batch_size);
@@ -926,7 +930,7 @@ CcErrorCode UploadIndexContext::AcquireRangeReadLocks(
          ++table_it)
     {
         const TableName &range_table_name =
-            TableName(table_it->first.StringView(), TableType::RangePartition);
+            TableName(table_it->first.StringView(), TableType::RangePartition, table_it->first.Engine());
 
         auto &table_write_entrys = table_it->second;
         auto [it, inserted] = ng_index_set.try_emplace(table_it->first);

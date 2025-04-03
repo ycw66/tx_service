@@ -150,28 +150,54 @@ enum class TableType : uint8_t
     ClusterConfig
 };
 
+enum class TableEngine : uint8_t
+{
+    None = 0,  // table that does not belong to any engine like bucket table.
+    EloqSql,
+    EloqKv,
+    EloqDoc
+};
+
 struct TableName
 {
     TableName() = delete;
     TableName &operator=(const TableName &) = delete;
 
-    explicit TableName(std::string_view name_view, TableType type)
-        : name_view_(name_view), own_string_(false), type_(type)
+    explicit TableName(std::string_view name_view,
+                       TableType type,
+                       TableEngine engine)
+        : name_view_(name_view),
+          own_string_(false),
+          type_(type),
+          engine_(engine)
     {
     }
 
-    explicit TableName(const char *name_ptr, size_t name_len, TableType type)
-        : name_str_(name_ptr, name_len), own_string_(true), type_(type)
+    explicit TableName(const char *name_ptr,
+                       size_t name_len,
+                       TableType type,
+                       TableEngine engine)
+        : name_str_(name_ptr, name_len),
+          own_string_(true),
+          type_(type),
+          engine_(engine)
     {
     }
 
-    explicit TableName(const std::string &name_str, TableType type)
-        : name_str_(name_str), own_string_(true), type_(type)
+    explicit TableName(const std::string &name_str,
+                       TableType type,
+                       TableEngine engine)
+        : name_str_(name_str), own_string_(true), type_(type), engine_(engine)
     {
     }
 
-    explicit TableName(std::string &&name_str, TableType type)
-        : name_str_(std::move(name_str)), own_string_(true), type_(type)
+    explicit TableName(std::string &&name_str,
+                       TableType type,
+                       TableEngine engine)
+        : name_str_(std::move(name_str)),
+          own_string_(true),
+          type_(type),
+          engine_(engine)
     {
     }
 
@@ -179,7 +205,8 @@ struct TableName
     TableName(const TableName &rhs)
         : name_str_(rhs.StringView().data(), rhs.StringView().size()),
           own_string_(true),
-          type_(rhs.type_)
+          type_(rhs.type_),
+          engine_(rhs.engine_)
     {
     }
 
@@ -197,6 +224,7 @@ struct TableName
         }
         type_ = rhs.type_;
         own_string_ = rhs.own_string_;
+        engine_ = rhs.engine_;
     }
 
     TableName &operator=(TableName &&rhs)
@@ -229,7 +257,7 @@ struct TableName
 
         type_ = rhs.type_;
         own_string_ = rhs.own_string_;
-
+        engine_ = rhs.engine_;
         return *this;
     }
 
@@ -243,7 +271,8 @@ struct TableName
 
     bool operator==(const TableName &rhs) const
     {
-        return type_ == rhs.type_ && this->StringView() == rhs.StringView();
+        return type_ == rhs.type_ && this->StringView() == rhs.StringView() &&
+               engine_ == rhs.engine_;
     }
 
     bool operator!=(const TableName &rhs) const
@@ -253,8 +282,10 @@ struct TableName
 
     bool operator<(const TableName &rhs) const
     {
-        return type_ < rhs.type_ ||
-               (type_ == rhs.type_ && this->StringView() < rhs.StringView());
+        return engine_ < rhs.engine_ ||
+               (engine_ == rhs.engine_ &&
+                (type_ < rhs.type_ || (type_ == rhs.type_ &&
+                                       this->StringView() < rhs.StringView())));
     }
 
     std::string_view StringView() const
@@ -307,6 +338,25 @@ struct TableName
         }
     }
 
+    std::string Serialize() const
+    {
+        std::string str;
+        if (own_string_)
+        {
+            str.reserve(name_str_.size() + sizeof(char));
+            str = name_str_;
+        }
+        else
+        {
+            str.reserve(name_view_.size() + sizeof(char));
+            str = name_view_;
+        }
+
+        int8_t engine_type = static_cast<int8_t>(engine_);
+        str.append(1, engine_type);
+        return str;
+    }
+
     void CopyFrom(const TableName &other)
     {
         if (other.own_string_)
@@ -332,6 +382,7 @@ struct TableName
 
         type_ = other.type_;
         own_string_ = other.own_string_;
+        engine_ = other.engine_;
     }
 
     const std::string_view GetBaseTableNameSV() const
@@ -405,6 +456,11 @@ struct TableName
         return type_;
     }
 
+    const TableEngine &Engine() const
+    {
+        return engine_;
+    }
+
     // @brief Get table type base on table name, only return Primary and
     // Secondary
     static TableType Type(const std::string_view &table_name_sv)
@@ -433,6 +489,7 @@ private:
 
     bool own_string_;
     TableType type_;
+    TableEngine engine_;
 };
 
 enum struct ReadType
@@ -502,16 +559,20 @@ inline static std::string_view redis_table_name_sv{"redis_table"};
 inline static std::string_view range_bucket_ccm_name_sv{"__range_bucekt"};
 inline static std::string_view cluster_config_ccm_name_sv{"__cluster_config"};
 
-inline static TableName catalog_ccm_name{
-    catalog_ccm_name_sv.data(), catalog_ccm_name_sv.size(), TableType::Catalog};
+inline static TableName catalog_ccm_name{catalog_ccm_name_sv.data(),
+                                         catalog_ccm_name_sv.size(),
+                                         TableType::Catalog,
+                                         TableEngine::None};
 
 inline static TableName range_bucket_ccm_name{range_bucket_ccm_name_sv.data(),
                                               range_bucket_ccm_name_sv.size(),
-                                              TableType::RangeBucket};
+                                              TableType::RangeBucket,
+                                              TableEngine::None};
 inline static TableName cluster_config_ccm_name{
     cluster_config_ccm_name_sv.data(),
     cluster_config_ccm_name_sv.size(),
-    TableType::ClusterConfig};
+    TableType::ClusterConfig,
+    TableEngine::None};
 
 #ifdef ON_KEY_OBJECT
 // Set buckets count to be the same as the slots count. (16384)
@@ -693,7 +754,7 @@ struct AlterTableInfo
     }
 
     void DeserializeAlteredTableInfo(
-        const std::string &altered_table_info_image)
+        const std::string &altered_table_info_image, TableEngine table_engine)
     {
         if (altered_table_info_image.length() <= 0)
         {
@@ -724,8 +785,8 @@ struct AlterTableInfo
                 assert(table_type == TableType::Secondary ||
                        table_type == TableType::UniqueSecondary);
 
-                txservice::TableName add_index_name(std::string_view(*it),
-                                                    table_type);
+                txservice::TableName add_index_name(
+                    std::string_view(*it), table_type, table_engine);
                 const std::string &add_index_kv_name = *(++it);
                 index_add_names_.emplace(add_index_name, add_index_kv_name);
             }
@@ -756,8 +817,8 @@ struct AlterTableInfo
                 assert(table_type == TableType::Secondary ||
                        table_type == TableType::UniqueSecondary);
 
-                txservice::TableName drop_index_name(std::string_view(*it),
-                                                     table_type);
+                txservice::TableName drop_index_name(
+                    std::string_view(*it), table_type, table_engine);
                 const std::string &drop_index_kv_name = *(++it);
                 index_drop_names_.emplace(drop_index_name, drop_index_kv_name);
             }

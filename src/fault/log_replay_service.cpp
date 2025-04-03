@@ -379,6 +379,10 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
                     split_range_op_blob.data() + blob_offset);
                 blob_offset += sizeof(uint8_t);
+                TableEngine table_engine =
+                    TableEngine(*reinterpret_cast<const uint8_t *>(
+                        split_range_op_blob.data() + blob_offset));
+                blob_offset += sizeof(uint8_t);
 
                 // Table name string
                 std::string_view table_name_view(
@@ -386,9 +390,11 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
 
                 // Add read lock on catalog
                 TableName table_name{table_name_view,
-                                     TableName::Type(table_name_view)};
+                                     TableName::Type(table_name_view),
+                                     table_engine};
                 TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                          TableType::Primary};
+                                          TableType::Primary,
+                                          table_engine};
                 range_split_tables.insert(base_table_name);
             }
         }
@@ -412,6 +418,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 cc_ng_term,
                 cluster_config_ccm_name_sv,
                 TableType::ClusterConfig,
+                TableEngine::None,
                 std::string_view(scale_op_blob.data(), scale_op_blob.length()),
                 msg.cluster_scale_op_msg().commit_ts(),
                 msg.cluster_scale_op_msg().txn(),
@@ -436,6 +443,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 cc_ng_term,
                 range_bucket_ccm_name_sv,
                 TableType::RangeBucket,
+                TableEngine::None,
                 std::string_view(scale_op_blob.data(), scale_op_blob.length()),
                 msg.cluster_scale_op_msg().commit_ts(),
                 msg.cluster_scale_op_msg().txn(),
@@ -465,6 +473,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           cc_ng_term,
                           catalog_ccm_name_sv,
                           TableType::Catalog,
+                          TableEngine::None,
                           std::string_view(schema_op_blob.data(),
                                            schema_op_blob.length()),
                           schema_op_msg.commit_ts(),
@@ -506,23 +515,30 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
             // Table name string
             std::string_view table_name_view(
                 split_range_op_blob.data() + blob_offset, table_name_len);
+            blob_offset += table_name_len;
+            TableEngine table_engine =
+                TableEngine(*reinterpret_cast<const uint8_t *>(
+                    split_range_op_blob.data() + blob_offset));
+            blob_offset += sizeof(uint8_t);
 
             TableName table_name{table_name_view,
-                                 TableName::Type(table_name_view)};
+                                 TableName::Type(table_name_view),
+                                 table_engine};
             TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                      TableType::Primary};
+                                      TableType::Primary,
+                                      table_engine};
 
             auto res_pair = table_range_split_cnt.try_emplace(
                 base_table_name, std::make_shared<std::atomic_uint32_t>(0));
 
             // Replay Split
-            blob_offset += table_name_len;
             ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
             cc_req->Reset(
                 cc_ng_id,
                 cc_ng_term,
                 table_name_view,
                 TableType::RangePartition,
+                table_engine,
                 std::string_view(split_range_op_blob.data() + blob_offset,
                                  split_range_op_blob.length() - blob_offset),
                 ts,

@@ -27,16 +27,19 @@
 
 namespace txservice
 {
-CatalogKey::CatalogKey() : table_name_(empty_sv, TableType::Primary)
+CatalogKey::CatalogKey()
+    : table_name_(empty_sv, TableType::Primary, TableEngine::None)
 {
 }
 
 CatalogKey::CatalogKey(const TableName &name)
-    : table_name_(name.IsStringOwner()
-                      ? TableName{name.StringView().data(),
-                                  name.StringView().size(),
-                                  name.Type()}
-                      : TableName{name.StringView(), name.Type()})
+    : table_name_(
+          name.IsStringOwner()
+              ? TableName{name.StringView().data(),
+                          name.StringView().size(),
+                          name.Type(),
+                          name.Engine()}
+              : TableName{name.StringView(), name.Type(), name.Engine()})
 {
     assert(table_name_.Type() == TableType::Primary);
 }
@@ -53,7 +56,8 @@ CatalogKey::CatalogKey(const CatalogKey &rhs) : table_name_(rhs.table_name_)
 CatalogKey::CatalogKey(const CatalogKey &rhs, const KeySchema *)
     : table_name_(rhs.table_name_.StringView().data(),
                   rhs.table_name_.StringView().size(),
-                  rhs.table_name_.Type())
+                  rhs.table_name_.Type(),
+                  rhs.table_name_.Engine())
 {
     assert(table_name_.Type() == TableType::Primary);
     assert(table_name_.IsStringOwner());
@@ -109,11 +113,16 @@ void CatalogKey::Serialize(std::vector<char> &buf, size_t &offset) const
               table_name_.StringView().end(),
               buf.begin() + offset);
     offset += len_val;
+    // 1 byte integer for table engine
+    const char *engine_ptr = static_cast<const char *>(
+        static_cast<const void *>(&table_name_.Engine()));
+    std::copy(engine_ptr, engine_ptr + sizeof(uint8_t), buf.begin() + offset);
+    offset += sizeof(uint8_t);
     // 1 byte integer for table type
     const char *type_ptr = static_cast<const char *>(
         static_cast<const void *>(&table_name_.Type()));
     std::copy(type_ptr, type_ptr + sizeof(uint8_t), buf.begin() + offset);
-    offset += len_val;
+    offset += sizeof(uint8_t);
 }
 
 void CatalogKey::Serialize(std::string &str) const
@@ -126,6 +135,9 @@ void CatalogKey::Serialize(std::string &str) const
 
     str.append(ptr, len_sizeof);
     str.append(table_name_.StringView().data(), len_val);
+    // 1 byte integer for table engine
+    ptr = reinterpret_cast<const char *>(&table_name_.Engine());
+    str.append(ptr, sizeof(uint8_t));
     // 1 byte integer for table type
     ptr = reinterpret_cast<const char *>(&table_name_.Type());
     str.append(ptr, sizeof(uint8_t));
@@ -147,6 +159,30 @@ void CatalogKey::Deserialize(const char *buf, size_t &offset, const KeySchema *)
     std::string_view str_view{buf + offset, len_val};
     offset += len_val;
 
+    // construct table engine
+    TableEngine table_engine = TableEngine::None;
+    uint8_t *engine_ptr = (uint8_t *) (buf + offset);
+    uint8_t engine_val = *engine_ptr;
+    switch (engine_val)
+    {
+    case 0:
+        table_engine = TableEngine::None;
+        break;
+    case 1:
+        table_engine = TableEngine::EloqSql;
+        break;
+    case 2:
+        table_engine = TableEngine::EloqKv;
+        break;
+    case 3:
+        table_engine = TableEngine::EloqDoc;
+        break;
+    default:
+        assert(false);
+        break;
+    }
+
+    offset += sizeof(uint8_t);
     // construct table type
     TableType table_type = TableType::Primary;
     uint8_t *type_ptr = (uint8_t *) (buf + offset);
@@ -171,7 +207,7 @@ void CatalogKey::Deserialize(const char *buf, size_t &offset, const KeySchema *)
     }
     offset += sizeof(uint8_t);
 
-    table_name_ = TableName{str_view, table_type};
+    table_name_ = TableName{str_view, table_type, table_engine};
 }
 
 TxKey CatalogKey::CloneTxKey() const

@@ -30,6 +30,7 @@
 #include "cc/cc_handler.h"
 #include "cc/ccm_scanner.h"
 #include "cc_protocol.h"
+#include "command_set.h"
 #include "metrics.h"
 #include "read_write_set.h"
 #include "spinlock.h"
@@ -531,6 +532,8 @@ private:
 
     // local cache of read/write entries.
     ReadWriteSet rw_set_;
+    // local cache of command entries.
+    CommandSet cmd_set_;
     // when read an entry, it may not exist in ccmap. In this case, we create a
     // empty record in ccmap and add read intention for it. Then we read the
     // entry from data store and backfill the ccmap. cache_miss_read_cce_addr_

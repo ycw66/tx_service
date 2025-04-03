@@ -881,7 +881,8 @@ void txservice::LocalCcHandler::ScanOpen(
         table_name.Type() == TableType::UniqueSecondary)
     {
         const TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                        TableType::Primary};
+                                        TableType::Primary,
+                                        table_name.Engine()};
         const CatalogEntry *catalog_entry =
             local_shard.GetCatalog(base_table_name, cc_ng_id);
 
@@ -1148,8 +1149,8 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
     if (table_name.Type() == TableType::RangePartition)
     {
-        const TableName base_table_name{table_name.StringView(),
-                                        TableType::Primary};
+        const TableName base_table_name{
+            table_name.StringView(), TableType::Primary, table_name.Engine()};
         const CatalogEntry *catalog_entry =
             local_shard.GetCatalog(base_table_name, cc_ng_id);
         if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)
@@ -1163,8 +1164,8 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     else if (table_name.Type() == TableType::Secondary ||
              table_name.Type() == TableType::UniqueSecondary)
     {
-        const TableName base_table_name{table_name.StringView(),
-                                        TableType::Primary};
+        const TableName base_table_name{
+            table_name.StringView(), TableType::Primary, table_name.Engine()};
         const CatalogEntry *catalog_entry =
             local_shard.GetCatalog(base_table_name, cc_ng_id);
         if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)

@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "tx_operation.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -31,6 +32,7 @@ struct UpsertTableIndexOp : public SchemaOp
 {
     UpsertTableIndexOp() = delete;
     UpsertTableIndexOp(const std::string_view table_name_sv,
+                       TableEngine table_engine,
                        const std::string &current_image,
                        uint64_t curr_schema_ts,
                        const std::string &dirty_image,
@@ -50,6 +52,7 @@ struct UpsertTableIndexOp : public SchemaOp
     void Forward(TransactionExecution *txm) override;
 
     void Reset(const std::string_view table_name_str,
+               TableEngine table_engine,
                const std::string &current_image,
                uint64_t curr_schema_ts,
                const std::string &dirty_image,

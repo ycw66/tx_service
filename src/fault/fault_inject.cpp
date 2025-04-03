@@ -231,7 +231,7 @@ void FaultInject::TriggerAction(FaultEntry *entry)
         case FaultAction::CLEAN_PKMAP:
         {
             Sharder::Instance().CleanCcTable(
-                TableName(para, TableType::Primary));
+                TableName(para, TableType::Primary, txservice::TableEngine::EloqSql));
             break;
         }
         case FaultAction::NOTIFY_CHECKPOINTER:

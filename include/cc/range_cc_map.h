@@ -1345,7 +1345,8 @@ private:
         TableName table_or_index_name(this->table_name_.StringView(),
                                       this->table_name_.IsBase()
                                           ? TableType::Primary
-                                          : TableType::Secondary);
+                                          : TableType::Secondary,
+                                      this->table_name_.Engine());
         TableStatistics<KeyT> *statistics =
             static_cast<TableStatistics<KeyT> *>(
                 table_schema_->StatisticsObject().get());

@@ -69,7 +69,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     CcHandlerResult<std::vector<AcquireKeyResult>> cc_res_{nullptr};
 };
@@ -127,7 +127,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
     KeyType key_type_{KeyType::Normal};
 
     size_t core_cnt_{0};
@@ -158,7 +158,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     CcEntryAddr cce_addr_;
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
@@ -187,7 +187,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<ReadKeyResult> cc_res_{nullptr};
 };
 
@@ -285,7 +285,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     CcEntryAddr cce_addr_;
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
@@ -312,7 +312,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
     KeyType key_type_{KeyType::Normal};
 
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
@@ -405,7 +405,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     KeyType key_type_{KeyType::Normal};
     const std::string *start_key_str_{nullptr};
@@ -559,7 +559,7 @@ private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
 
-    TableName remote_tbl_name_{empty_sv, TableType::Primary};
+    TableName remote_tbl_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<RangeScanSliceResult> cc_res_{nullptr};
     std::vector<RemoteScanSliceCache> scan_cache_vec_;
 };
@@ -641,7 +641,7 @@ public:
 private:
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<Void> cc_res_{nullptr};
 
     friend class RemoteCcHandler;
@@ -672,7 +672,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<Void> cc_res_{nullptr};
 
     friend class RemoteCcHandler;
@@ -705,7 +705,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     CcHandlerResult<bool> cc_res_{nullptr};
 
@@ -784,7 +784,7 @@ public:
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
-    TableName table_name_{empty_sv, TableType::Primary};
+    TableName table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcStreamSender *hd_{nullptr};
     CcHandlerResult<Void> cc_res_{nullptr};
 };
@@ -811,7 +811,7 @@ protected:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<ObjectCommandResult> cc_res_{nullptr};
 };
 
@@ -836,7 +836,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    // TableName remote_table_name_{empty_sv, TableType::Primary};
+    // TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     CcEntryAddr cce_addr_;
     std::vector<std::string> cmds_vec_;
@@ -884,7 +884,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<Void> cc_res_{nullptr};
 
     friend class RemoteCcHandler;

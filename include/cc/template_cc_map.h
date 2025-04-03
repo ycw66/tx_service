@@ -1159,7 +1159,6 @@ public:
                     // For PostCommit or Commit, the post-write-all request
                     // releases the write lock.
 
-#ifdef ON_KEY_OBJECT
                     // Do not recycle the lock on Catalog since it's frequently
                     // accessed.
                     bool recycle_lock =
@@ -1170,13 +1169,6 @@ public:
                                    req.NodeGroupId(),
                                    lk_type,
                                    recycle_lock);
-#else
-                    ReleaseCceLock(cce_ptr->GetKeyLock(),
-                                   cce_ptr,
-                                   txn,
-                                   req.NodeGroupId(),
-                                   lk_type);
-#endif
                 }
                 else
                 {
@@ -1263,11 +1255,9 @@ public:
         TxNumber txn = req.Txn();
 
         bool recycle_lock = true;
-#ifdef ON_KEY_OBJECT
         // Do not recycle the lock on Catalog CcEntries since it's frequently
         // accessed.
         recycle_lock = table_name_.Type() != TableType::Catalog;
-#endif
 
         // FIXME(lzx): Now, we don't backfill for "Unkown" entry when scanning.
         // So, Validate operation fails if another tx backfilled it. Temporary

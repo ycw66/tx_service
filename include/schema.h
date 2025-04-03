@@ -142,9 +142,15 @@ public:
 
 struct TableKeySchemaTs
 {
-    TableKeySchemaTs() = default;
-    explicit TableKeySchemaTs(const std::string &key_schemas_ts_str)
+    TableKeySchemaTs(txservice::TableEngine table_engine)
+        : table_engine_(table_engine)
     {
+    }
+
+    explicit TableKeySchemaTs(const std::string &key_schemas_ts_str,
+                              TableEngine table_engine)
+    {
+        table_engine_ = table_engine;
         std::stringstream ts_ss(key_schemas_ts_str);
         std::istream_iterator<std::string> ts_b(ts_ss);
         std::istream_iterator<std::string> ts_e;
@@ -167,7 +173,8 @@ struct TableKeySchemaTs
             {
                 assert(false && "Unknown secondary key type.");
             }
-            txservice::TableName table_name(schemas_ts[idx], table_type);
+            txservice::TableName table_name(
+                schemas_ts[idx], table_type, table_engine_);
             ++idx;
             sk_schemas_ts_.try_emplace(std::move(table_name),
                                        std::stoull(schemas_ts[idx]));
@@ -251,7 +258,7 @@ struct TableKeySchemaTs
                 {
                     assert(false && "Unknown secondary key type.");
                 }
-                txservice::TableName table_name(*it, table_type);
+                txservice::TableName table_name(*it, table_type, table_engine_);
                 sk_schemas_ts_.try_emplace(std::move(table_name),
                                            std::stoull(*(++it)));
             }
@@ -283,6 +290,7 @@ struct TableKeySchemaTs
         }
     }
 
+    TableEngine table_engine_{TableEngine::None};
     uint64_t pk_schema_ts_{1};
     std::unordered_map<txservice::TableName, uint64_t> sk_schemas_ts_;
 };

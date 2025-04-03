@@ -1077,10 +1077,13 @@ void CcShard::FetchCatalog(const TableName &table_name,
             req->set_key_str(std::move(key_str));
             req->set_node_group_id(cc_ng_id);
             req->set_table_name_str(catalog_ccm_name.String());
-            int64_t primary_node_term = PrimaryTermFromStandbyTerm(cc_ng_term);
-            req->set_primary_leader_term(primary_node_term);
             req->set_table_type(remote::ToRemoteType::ConvertTableType(
                 catalog_ccm_name.Type()));
+            req->set_table_engine(remote::ToRemoteType::ConvertTableEngine(
+                catalog_ccm_name.Engine()));
+
+            int64_t primary_node_term = PrimaryTermFromStandbyTerm(cc_ng_term);
+            req->set_primary_leader_term(primary_node_term);
             req->set_key_shard_code(cc_ng_id << 10);
             closure->Controller()->set_timeout_ms(5000);
             closure->Controller()->set_write_to_socket_in_background(true);
@@ -1260,7 +1263,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
     // statistics.
     TableName base_range_table_name(
         curr_schema->GetBaseTableName().StringView(),
-        TableType::RangePartition);
+        TableType::RangePartition,
+        curr_schema->GetBaseTableName().Engine());
     const auto *ranges =
         GetTableRangesForATable(base_range_table_name, cc_ng_id);
     if (ranges == nullptr)
@@ -1274,7 +1278,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
     for (const TableName &index_name : index_names)
     {
         TableName index_range_table_name(index_name.StringView(),
-                                         TableType::RangePartition);
+                                         TableType::RangePartition,
+                                         index_name.Engine());
         const auto *ranges =
             GetTableRangesForATable(index_range_table_name, cc_ng_id);
         if (ranges == nullptr)
@@ -1412,11 +1417,14 @@ void CcShard::FetchRecord(const TableName &table_name,
             req->set_key_str(std::move(key_str));
             req->set_node_group_id(cc_ng_id);
             req->set_table_name_str(table_name.String());
+            req->set_table_type(
+                remote::ToRemoteType::ConvertTableType(table_name.Type()));
+            req->set_table_engine(
+                remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
+
             int64_t primary_leader_term =
                 PrimaryTermFromStandbyTerm(cc_ng_term);
             req->set_primary_leader_term(primary_leader_term);
-            req->set_table_type(
-                remote::ToRemoteType::ConvertTableType(table_name.Type()));
             req->set_key_shard_code(key_shard_code);
             closure->Controller()->set_timeout_ms(5000);
             closure->Controller()->set_write_to_socket_in_background(true);
@@ -1532,7 +1540,8 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
                                      CcRequestBase *requester)
 {
     const TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                    TableType::Primary};
+                                    TableType::Primary,
+                                    table_name.Engine()};
 
     const CatalogEntry *catalog_entry = GetCatalog(base_table_name, cc_ng_id);
     if (catalog_entry == nullptr)
@@ -1819,7 +1828,8 @@ void CcShard::CreateOrUpdateRangeCcMap(const TableName &table_name,
                                        bool is_create)
 {
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     if (IsNative(ng_id))
     {
         auto ccm_it = native_ccms_.try_emplace(

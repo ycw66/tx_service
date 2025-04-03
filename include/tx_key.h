@@ -870,7 +870,7 @@ template <typename... Types>
 CompositeKey<Types...> CompositeKey<Types...>::pos_inf =
     CompositeKey<Types...>();
 
-struct VoidKey
+struct alignas(2) VoidKey
 {
     VoidKey()
     {

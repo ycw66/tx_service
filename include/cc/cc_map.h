@@ -155,7 +155,8 @@ public:
           cc_ng_id_(cc_ng_id),
           table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
-                      table_name.Type()),
+                      table_name.Type(),
+                      table_name.Engine()),
           ccm_has_full_entries_(ccm_has_full_entries),
           schema_ts_(schema_ts),
           table_schema_(table_schema)

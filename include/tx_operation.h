@@ -148,7 +148,8 @@ public:
 
     // in-parameters
     const TxKey *key_{};
-    TableName table_name_{empty_sv, TableType::RangePartition};
+    TableName table_name_{
+        empty_sv, TableType::RangePartition, TableEngine::None};
     TxRecord *rec_{};
     bool execute_immediately_{true};
 
@@ -271,7 +272,8 @@ public:
      */
     void Advance(TransactionExecution *txm);
 
-    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    TableName range_table_name_{
+        empty_sv, TableType::RangePartition, TableEngine::None};
     // RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
 
@@ -535,7 +537,8 @@ struct ScanNextOperation : TransactionOperation
     }
 
     CcHandlerResult<RangeScanSliceResult> slice_hd_result_;
-    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    TableName range_table_name_{
+        empty_sv, TableType::RangePartition, TableEngine::None};
     RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> lock_range_result_;
     CcHandlerResult<PostProcessResult> unlock_range_result_;
@@ -676,6 +679,7 @@ struct SchemaOp : public TransactionOperation
 {
     SchemaOp() = delete;
     SchemaOp(const std::string_view table_name_sv,
+             txservice::TableEngine table_engine,
              const std::string &current_image,
              const std::string &dirty_image,
              uint64_t schema_ts,
@@ -700,6 +704,7 @@ struct UpsertTableOp : public SchemaOp
 {
     UpsertTableOp() = delete;
     UpsertTableOp(const std::string_view table_name_str,
+                  txservice::TableEngine table_engine,
                   const std::string &current_image,
                   uint64_t curr_schema_ts,
                   const std::string &dirty_image,
@@ -707,6 +712,7 @@ struct UpsertTableOp : public SchemaOp
                   TransactionExecution *txm);
 
     void Reset(const std::string_view table_name_str,
+               txservice::TableEngine table_engine,
                const std::string &current_image,
                uint64_t curr_schema_ts,
                const std::string &dirty_image,
@@ -1491,7 +1497,8 @@ private:
     std::unordered_map<TableName, std::unordered_set<int32_t>>::const_iterator
         kickout_tbl_it_;
     std::unordered_set<int32_t>::const_iterator kickout_range_it_;
-    TableName kickout_table_{std::string(""), TableType::Primary};
+    TableName kickout_table_{
+        std::string(""), TableType::Primary, TableEngine::None};
 #else
     std::unordered_map<TableName, bool> table_snapshot_;
     std::unordered_map<TableName, bool>::const_iterator kickout_tbl_it_;

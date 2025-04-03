@@ -43,6 +43,7 @@ namespace txservice
 
 UpsertTableIndexOp::UpsertTableIndexOp(
     const std::string_view table_name_sv,
+    TableEngine table_engine,
     const std::string &current_image,
     uint64_t curr_schema_ts,
     const std::string &dirty_image,
@@ -50,8 +51,12 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     OperationType op_type,
     PackSkError *store_pack_sk_err,
     TransactionExecution *txm)
-    : SchemaOp(
-          table_name_sv, current_image, dirty_image, curr_schema_ts, op_type),
+    : SchemaOp(table_name_sv,
+               table_engine,
+               current_image,
+               dirty_image,
+               curr_schema_ts,
+               op_type),
       lock_cluster_config_op_(),
       acquire_all_intent_op_(txm),
       upgrade_all_intent_to_lock_op_(txm),
@@ -80,8 +85,9 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     assert(op_type_ == OperationType::AddIndex ||
            op_type_ == OperationType::DropIndex);
 
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
@@ -121,7 +127,8 @@ UpsertTableIndexOp::UpsertTableIndexOp(
 
     clean_ccm_op_.Clear();
 
-    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
+    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_,
+                                                  table_engine);
 
     is_force_finished_ = false;
 
@@ -131,7 +138,8 @@ UpsertTableIndexOp::UpsertTableIndexOp(
          ++index_it)
     {
         new_indexes_name_.emplace_back(index_it->first.StringView(),
-                                       index_it->first.Type());
+                                       index_it->first.Type(),
+                                       index_it->first.Engine());
     }
 
     TxKey neg_key = Sharder::Instance()
@@ -1209,7 +1217,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 clean_ccm_op_.table_names_.emplace_back(
                     index_drop_name.StringView().data(),
                     index_drop_name.StringView().size(),
-                    index_drop_name.Type());
+                    index_drop_name.Type(),
+                    index_drop_name.Engine());
             }
             clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
             clean_ccm_op_.commit_ts_ = txm->CommitTs();
@@ -1244,7 +1253,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 clean_ccm_op_.table_names_.emplace_back(
                     index_drop_name.StringView().data(),
                     index_drop_name.StringView().size(),
-                    index_drop_name.Type());
+                    index_drop_name.Type(),
+                    index_drop_name.Engine());
             }
             clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
             clean_ccm_op_.commit_ts_ = kv_rollback_create_index_op_.write_time_;
@@ -1430,6 +1440,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
 }
 
 void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
+                               TableEngine table_engine,
                                const std::string &current_image,
                                uint64_t curr_schema_ts,
                                const std::string &dirty_image,
@@ -1446,8 +1457,10 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     is_running_ = false;
 
     // 2. Reset SchemaOp
-    table_key_.Name() = TableName(
-        table_name_str.data(), table_name_str.size(), TableType::Primary);
+    table_key_.Name() = TableName(table_name_str.data(),
+                                  table_name_str.size(),
+                                  TableType::Primary,
+                                  table_engine);
     catalog_rec_.Reset();
     catalog_rec_.SetSchemaImage(current_image);
     catalog_rec_.SetDirtySchemaImage(dirty_image);
@@ -1465,14 +1478,16 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
 
     alter_table_info_image_str_ = alter_table_image;
     alter_table_info_.Reset();
-    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
+    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_,
+                                                  table_engine);
 
     indexes_multikey_attr_.clear();
 
@@ -1577,7 +1592,8 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
          ++index_it)
     {
         new_indexes_name_.emplace_back(index_it->first.StringView(),
-                                       index_it->first.Type());
+                                       index_it->first.Type(),
+                                       index_it->first.Engine());
     }
 
     ResetLeaderTerms();
@@ -1755,6 +1771,8 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
         req_ptr->set_table_name_str(table_name.String());
         req_ptr->set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
+        req_ptr->set_table_engine(
+            remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
         req_ptr->set_node_group_id(ng_id);
         req_ptr->set_node_group_term(ng_term);
         req_ptr->set_data_sync_ts(data_sync_ts);
@@ -1787,8 +1805,9 @@ void UpsertTableIndexOp::DispatchRangeTask(
 {
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
     const TableName &base_table_name = table_key_.Name();
-    const TableName &range_table_name =
-        TableName(base_table_name.StringView(), TableType::RangePartition);
+    const TableName &range_table_name = TableName(base_table_name.StringView(),
+                                                  TableType::RangePartition,
+                                                  base_table_name.Engine());
     uint32_t local_ng_id = Sharder::Instance().NativeNodeGroup();
     uint64_t tx_number = upsert_index_txm->TxNumber();
     int64_t tx_term = upsert_index_txm->TxTerm();
@@ -2343,6 +2362,8 @@ void UpsertTableIndexOp::HandleRangeTask(
         cntl_ptr->set_timeout_ms(-1);
         auto req_ptr = closure->GenerateSkFromPkRequest();
         req_ptr->set_table_name_str(base_table_name.String());
+        req_ptr->set_table_engine(
+            remote::ToRemoteType::ConvertTableEngine(base_table_name.Engine()));
         req_ptr->set_node_group_id(range_owner);
         req_ptr->set_tx_number(tx_number);
         req_ptr->set_tx_term(tx_term);

@@ -76,7 +76,8 @@ FetchCatalogCc::FetchCatalogCc(const TableName &table_name,
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(table_name.StringView().data(),
                   table_name.StringView().size(),
-                  table_name.Type()),
+                  table_name.Type(),
+                  table_name.Engine()),
       fetch_from_primary_(fetch_from_primary)
 {
 }
@@ -185,7 +186,8 @@ FetchTableStatisticsCc::FetchTableStatisticsCc(const TableName &table_name,
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(table_name.StringView().data(),
                   table_name.StringView().size(),
-                  table_name.Type())
+                  table_name.Type(),
+                  table_name.Engine())
 {
 }
 
@@ -332,7 +334,9 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         {
             // Get estiamte record size for key cache
             auto schema = shards->GetSharedTableSchema(
-                TableName(table_name_.GetBaseTableNameSV(), TableType::Primary),
+                TableName(table_name_.GetBaseTableNameSV(),
+                          TableType::Primary,
+                          table_name_.Engine()),
                 cc_ng_id_);
             auto stats = schema->StatisticsObject();
             if (stats)
@@ -690,7 +694,8 @@ bool FillStoreSliceCc::SetFinish(CcShard *cc_shard)
                 // Get estiamte record size for key cache
                 auto schema = shards->GetSharedTableSchema(
                     TableName(table_name_->GetBaseTableNameSV(),
-                              TableType::Primary),
+                              TableType::Primary,
+                              table_name_->Engine()),
                     cc_ng_id_);
                 auto stats = schema->StatisticsObject();
                 assert(slice_size_ > 0);

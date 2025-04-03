@@ -354,7 +354,8 @@ public:
                     mapsizes.emplace(
                         std::piecewise_construct,
                         std::forward_as_tuple(tab_name.StringView(),
-                                              tab_name.Type()),
+                                              tab_name.Type(),
+                                              tab_name.Engine()),
                         std::forward_as_tuple(map_iter->second->size()));
                 }
 
@@ -1024,7 +1025,8 @@ public:
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
         TxKey search_key(&key);
 
         TemplateTableRangeEntry<KeyT> *range_entry =
@@ -1073,7 +1075,8 @@ public:
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
         TxKey slice_key(&key);
 
         TemplateTableRangeEntry<KeyT> *range_entry =
@@ -1171,7 +1174,8 @@ public:
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
 
         TemplateTableRangeEntry<KeyT> *range_entry =
             static_cast<TemplateTableRangeEntry<KeyT> *>(
@@ -1291,7 +1295,8 @@ public:
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
         // TxKey tx_key(&slice_key);
         TemplateTableRangeEntry<KeyT> *range_entry =
             static_cast<TemplateTableRangeEntry<KeyT> *>(
@@ -1313,7 +1318,8 @@ public:
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
 
         TemplateTableRangeEntry<KeyT> *range_entry =
             static_cast<TemplateTableRangeEntry<KeyT> *>(
@@ -1413,7 +1419,8 @@ public:
     {
         const TableName &table_name = clean_guard->table_name_;
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
         NodeGroupId cc_ng_id = clean_guard->cc_ng_id_;
         CcPage<KeyT, ValueT, VersionedRecord> *page = clean_guard->page_;
 
@@ -2211,10 +2218,11 @@ private:
                                 int64_t node_group_term,
                                 std::string_view table_name,
                                 TableType table_type,
+                                TableEngine table_engine,
                                 uint32_t range_id)
             : node_group_id_(node_group_id),
               node_group_term_(node_group_term),
-              table_name_(table_name, table_type),
+              table_name_(table_name, table_type, table_engine),
               range_id_(range_id)
         {
         }
@@ -2223,10 +2231,11 @@ private:
                                 int64_t node_group_term,
                                 std::string_view table_name,
                                 TableType table_type,
+                                TableEngine table_engine,
                                 uint16_t core_id)
             : node_group_id_(node_group_id),
               node_group_term_(node_group_term),
-              table_name_(table_name, table_type),
+              table_name_(table_name, table_type, table_engine),
               core_id_(core_id)
         {
         }
@@ -2238,7 +2247,8 @@ private:
               // deep copy
               table_name_(rhs.table_name_.StringView().data(),
                           rhs.table_name_.StringView().size(),
-                          rhs.table_name_.Type())
+                          rhs.table_name_.Type(),
+                          rhs.table_name_.Engine())
 #ifdef RANGE_PARTITION_ENABLED
               ,
               range_id_(rhs.range_id_)

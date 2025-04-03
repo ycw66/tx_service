@@ -644,7 +644,8 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
           alias_(alias),
           table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
-                      table_name.Type()),
+                      table_name.Type(),
+                      table_name.Engine()),
           in_use_(true)
     {
     }
@@ -660,7 +661,8 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
           alias_(alias),
           table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
-                      table_name.Type()),
+                      table_name.Type(),
+                      table_name.Engine()),
           in_use_(true)
     {
         for (size_t idx = scan_batch_idx; idx < scan_batch.size(); ++idx)
@@ -680,7 +682,8 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 
         table_name_ = TableName(table_name.StringView().data(),
                                 table_name.StringView().size(),
-                                table_name.Type());
+                                table_name.Type(),
+                                table_name.Engine());
         in_use_.store(true, std::memory_order_relaxed);
     }
 

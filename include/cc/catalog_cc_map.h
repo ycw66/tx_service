@@ -314,7 +314,8 @@ public:
                             {
                                 dirty_index_names.emplace_back(
                                     new_index_name.StringView(),
-                                    new_index_name.Type());
+                                    new_index_name.Type(),
+                                    new_index_name.Engine());
                             }
                         }
 
@@ -327,7 +328,8 @@ public:
                         {
                             TableName index_range_name{
                                 index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                index_name.Engine()};
 
                             auto ranges = shard_->GetTableRangesForATable(
                                 index_range_name, req.NodeGroupId());
@@ -510,7 +512,8 @@ public:
                             // Clean up table ranges for new sk.
                             const TableName index_range_name{
                                 new_index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                new_index_name.Engine()};
                             shard_->DropCcm(index_range_name,
                                             req.NodeGroupId());
 #endif
@@ -591,7 +594,8 @@ public:
                         TxKey(), init_partition_id, req.CommitTs());
 
                     TableName range_table_name(table_name_view,
-                                               TableType::RangePartition);
+                                               TableType::RangePartition,
+                                               table_key->Name().Engine());
                     shard_->local_shards_.InitTableRanges(range_table_name,
                                                           range_init_vec,
                                                           req.NodeGroupId(),
@@ -603,7 +607,9 @@ public:
                     {
                         // Create range table for each sk index
                         TableName index_range_table_name{
-                            index_name.StringView(), TableType::RangePartition};
+                            index_name.StringView(),
+                            TableType::RangePartition,
+                            index_name.Engine()};
 
                         size_t tbl_name_hash = std::hash<std::string_view>()(
                             index_name.StringView());
@@ -699,6 +705,9 @@ public:
                     forward_req->set_table_type(
                         remote::ToRemoteType::ConvertTableType(
                             table_name_.Type()));
+                    forward_req->set_table_engine(
+                        remote::ToRemoteType::ConvertTableEngine(
+                            table_name_.Engine()));
                     forward_req->set_key_shard_code(cc_ng_id_ << 10);
                     std::string key_str;
                     table_key->Serialize(key_str);
@@ -739,7 +748,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                 // Drop range table if exist
                 TableName range_table_name{table_key->Name().StringView(),
-                                           TableType::RangePartition};
+                                           TableType::RangePartition,
+                                           table_key->Name().Engine()};
 #ifndef ON_KEY_OBJECT
                 shard_->DropCcm(range_table_name, req.NodeGroupId());
 #else
@@ -757,7 +767,9 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                         // Drop range table if exist
                         TableName index_range_table_name{
-                            index_name.StringView(), TableType::RangePartition};
+                            index_name.StringView(),
+                            TableType::RangePartition,
+                            index_name.Engine()};
                         shard_->DropCcm(index_range_table_name,
                                         req.NodeGroupId());
 #endif
@@ -795,7 +807,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                 // Update pk range table if exist.
                 TableName base_range_table_name{table_key->Name().StringView(),
-                                                TableType::RangePartition};
+                                                TableType::RangePartition,
+                                                table_key->Name().Engine()};
                 auto ranges = shard_->GetTableRangesForATable(
                     base_range_table_name, req.NodeGroupId());
                 if (ranges != nullptr)
@@ -833,7 +846,8 @@ public:
                             // Update current sk range table if exist.
                             TableName index_range_table_name{
                                 old_index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                old_index_name.Engine()};
                             auto ranges = shard_->GetTableRangesForATable(
                                 index_range_table_name, req.NodeGroupId());
                             if (ranges != nullptr)
@@ -858,7 +872,8 @@ public:
                             // Drop range table if exist
                             TableName old_index_range_table_name{
                                 old_index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                old_index_name.Engine()};
                             shard_->DropCcm(old_index_range_table_name,
                                             req.NodeGroupId());
 #endif
@@ -907,7 +922,8 @@ public:
                         // New sk range cc map should use the dirty schema
                         const TableName new_index_range_name{
                             new_index_name.StringView(),
-                            TableType::RangePartition};
+                            TableType::RangePartition,
+                            new_index_name.Engine()};
                         shard_->CreateOrUpdateRangeCcMap(
                             new_index_range_name,
                             new_schema,
@@ -930,7 +946,8 @@ public:
             }
 #ifdef RANGE_PARTITION_ENABLED
             TableName base_range_table_name{table_key->Name().StringView(),
-                                            TableType::RangePartition};
+                                            TableType::RangePartition,
+                                            table_key->Name().Engine()};
             shard_->CreateOrUpdateRangeCcMap(
                 base_range_table_name,
                 new_schema,
@@ -940,7 +957,8 @@ public:
             for (const TableName &new_index_name : new_index_names)
             {
                 TableName index_range_table_name{new_index_name.StringView(),
-                                                 TableType::RangePartition};
+                                                 TableType::RangePartition,
+                                                 new_index_name.Engine()};
                 shard_->CreateOrUpdateRangeCcMap(
                     index_range_table_name,
                     new_schema,
@@ -962,7 +980,8 @@ public:
                 shard_->CleanTableStatistics(table_key->Name(), cc_ng_id_);
 #ifdef RANGE_PARTITION_ENABLED
                 TableName range_table_name{table_key->Name().StringView(),
-                                           TableType::RangePartition};
+                                           TableType::RangePartition,
+                                           table_key->Name().Engine()};
                 shard_->CleanTableRange(range_table_name, req.NodeGroupId());
                 if (old_schema != nullptr)
                 {
@@ -972,7 +991,9 @@ public:
                     {
                         // Drop range table if exist
                         TableName index_range_table_name{
-                            index_name.StringView(), TableType::RangePartition};
+                            index_name.StringView(),
+                            TableType::RangePartition,
+                            index_name.Engine()};
                         shard_->CleanTableRange(index_range_table_name,
                                                 req.NodeGroupId());
                     }
@@ -997,7 +1018,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                         TableName old_index_range_table_name{
                             old_index_name.StringView(),
-                            TableType::RangePartition};
+                            TableType::RangePartition,
+                            old_index_name.Engine()};
                         shard_->CleanTableRange(old_index_range_table_name,
                                                 req.NodeGroupId());
 #endif
@@ -1007,6 +1029,7 @@ public:
                     }
                 }
             }
+
             shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
         }
 
@@ -1147,8 +1170,10 @@ public:
         // Need to parse the string if not include table type in protobuf
         TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
             schema_op_msg.table_type());
+        TableEngine table_engine = ::txlog::ToLocalType::ConvertTableEngine(
+            schema_op_msg.table_engine());
         std::string_view table_name_sv{schema_op_msg.table_name_str()};
-        TableName table_name{table_name_sv, table_type};
+        TableName table_name{table_name_sv, table_type, table_engine};
 
         if (shard_->core_id_ == 0)
         {
@@ -1241,7 +1266,7 @@ public:
 
             if (catalog_entry->schema_)
             {
-#ifndef ON_KEY_OBJECT
+#ifdef RANGE_PARTITION_ENABLED
                 if (!shard_->LoadRangesAndStatisticsNx(
                         catalog_entry->schema_.get(),
                         req.NodeGroupId(),
@@ -1267,7 +1292,8 @@ public:
                         {
                             TableName index_range_name{
                                 new_index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                new_index_name.Engine()};
                             auto ranges = shard_->GetTableRangesForATable(
                                 index_range_name, req.NodeGroupId());
                             if (ranges == nullptr)
@@ -1316,7 +1342,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                 // Pk range table ccmap
                 const TableName base_range_name{table_name.StringView(),
-                                                TableType::RangePartition};
+                                                TableType::RangePartition,
+                                                table_name.Engine()};
                 shard_->CreateOrUpdateRangeCcMap(
                     base_range_name,
                     old_schema,
@@ -1334,7 +1361,9 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                     // old sk range table ccmap
                     const TableName old_index_range_name{
-                        old_index_name.StringView(), TableType::RangePartition};
+                        old_index_name.StringView(),
+                        TableType::RangePartition,
+                        old_index_name.Engine()};
                     shard_->CreateOrUpdateRangeCcMap(
                         old_index_range_name,
                         old_schema,
@@ -1359,7 +1388,8 @@ public:
                         // New sk range cc maps should use the dirty schema
                         const TableName new_index_range_name{
                             new_index_name.StringView(),
-                            TableType::RangePartition};
+                            TableType::RangePartition,
+                            new_index_name.Engine()};
                         shard_->CreateOrUpdateRangeCcMap(
                             new_index_range_name,
                             new_schema,
@@ -1385,7 +1415,8 @@ public:
         // 3. Replay the table write intent/lock.
         LockType lock_type = LockType::NoLock;
         TableName base_table_name(table_name.GetBaseTableNameSV(),
-                                  TableType::Primary);
+                                  TableType::Primary,
+                                  table_name.Engine());
         OperationType op_type =
             static_cast<OperationType>(schema_op_msg.table_op().op_type());
         switch (schema_op_msg.stage())
@@ -1539,7 +1570,8 @@ public:
                    << ", ng_samples: " << req.SamplePool()->samples_size();
 
         TableName base_table_name(table_name.GetBaseTableNameSV(),
-                                  TableType::Primary);
+                                  TableType::Primary,
+                                  table_name.Engine());
         CatalogKey table_key(base_table_name);
         Iterator it = FindEmplace(table_key);
         CcEntry<CatalogKey, CatalogRecord, true> *cce = it->second;
@@ -1551,7 +1583,7 @@ public:
             {
                 if (catalog_entry->schema_ != nullptr)
                 {
-#ifndef ON_KEY_OBJECT
+#ifdef RANGE_PARTITION_ENABLED
                     // Initialize table statistics before create ccmap.
                     if (!shard_->LoadRangesAndStatisticsNx(
                             catalog_entry->schema_.get(),
@@ -1991,14 +2023,16 @@ public:
         const TableSchema *table_schema = catalog_rec->Schema();
 
         TableName base_range_name(base_table_name.StringView(),
-                                  TableType::RangePartition);
+                                  TableType::RangePartition,
+                                  base_table_name.Engine());
         shard_->DropCcm(base_table_name, cc_ng_id_);
         shard_->DropCcm(base_range_name, cc_ng_id_);
 
         for (TableName index_table_name : table_schema->IndexNames())
         {
             TableName index_range_name(index_table_name.StringView(),
-                                       TableType::RangePartition);
+                                       TableType::RangePartition,
+                                       index_table_name.Engine());
             shard_->DropCcm(index_table_name, cc_ng_id_);
             shard_->DropCcm(index_range_name, cc_ng_id_);
         }
@@ -2017,7 +2051,8 @@ public:
             for (TableName index_table_name : table_schema->IndexNames())
             {
                 TableName index_range_name(index_table_name.StringView(),
-                                           TableType::RangePartition);
+                                           TableType::RangePartition,
+                                           index_table_name.Engine());
                 shard_->CleanTableRange(index_range_name, cc_ng_id_);
                 shard_->CleanTableStatistics(index_table_name, cc_ng_id_);
             }
@@ -2045,8 +2080,10 @@ public:
         auto lock_it = table_locks_.find(table_name.StringView());
         if (lock_it == table_locks_.end())
         {
-            CatalogKey table_key{txservice::TableName{
-                table_name.StringView(), txservice::TableType::Primary}};
+            CatalogKey table_key{
+                txservice::TableName{table_name.StringView(),
+                                     txservice::TableType::Primary,
+                                     table_name.Engine()}};
             TxKey catalog_tx_key(&table_key);
             auto it = FindEmplace(table_key);
 

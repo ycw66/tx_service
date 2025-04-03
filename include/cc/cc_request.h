@@ -148,7 +148,9 @@ public:
                 {
                     // Get original table name for the range table name
                     const TableName base_table_name{
-                        table_name_->GetBaseTableNameSV(), TableType::Primary};
+                        table_name_->GetBaseTableNameSV(),
+                        TableType::Primary,
+                        table_name_->Engine()};
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
                     if (catalog_entry == nullptr ||
@@ -3056,7 +3058,8 @@ public:
                     tables_.push_back(table.first);
                     // also need to defrag range cc map
                     TableName range_table_name{table.first.String(),
-                                               TableType::RangePartition};
+                                               TableType::RangePartition,
+                                               table.first.Engine()};
                     tables_.push_back(std::move(range_table_name));
                 }
                 current_table_idx_ = 0;
@@ -3847,6 +3850,7 @@ public:
         int64_t ng_term,
         std::string_view table_name_view,
         TableType table_type,
+        TableEngine table_engine,
         std::string_view blob,
         uint64_t commit_ts,
         uint64_t txn,
@@ -3859,7 +3863,8 @@ public:
         uint16_t first_core = 0)
     {
         table_name_str_ = table_name_view;
-        table_name_holder_ = TableName(table_name_str_, table_type);
+        table_name_holder_ =
+            TableName(table_name_str_, table_type, table_engine);
         TemplatedCcRequest<ReplayLogCc, Void>::Reset(
             &table_name_holder_,
             &result_,
@@ -3913,7 +3918,9 @@ public:
                 if (table_name_->Type() == TableType::RangePartition)
                 {
                     const txservice::TableName base_table_name{
-                        table_name_->GetBaseTableNameSV(), TableType::Primary};
+                        table_name_->GetBaseTableNameSV(),
+                        TableType::Primary,
+                        table_name_->Engine()};
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
                     if (catalog_entry == nullptr)
@@ -3943,7 +3950,8 @@ public:
                         // If the range table corresponds to a dirty table (such
                         // as dirty index), should use the dirty table schema.
                         TableName index_name(table_name_->StringView(),
-                                             table_type);
+                                             table_type,
+                                             table_name_->Engine());
                         if (!table_schema_->IndexKeySchema(index_name))
                         {
                             table_schema_ = catalog_entry->dirty_schema_.get();
@@ -4138,7 +4146,8 @@ private:
     TableName table_name_holder_{
         "",
         0,
-        TableType::Primary};  //  not string owner, sv -> protobuf message.
+        TableType::Primary,
+        TableEngine::None};  //  not string owner, sv -> protobuf message.
     std::string table_name_str_;
     std::string log_blob_str_;
     // Temporarily store the currently parsed offset when fetch record from
@@ -4223,6 +4232,9 @@ public:
                 std::string_view table_name_view(blob.data() + blob_offset,
                                                  table_name_len);
                 blob_offset += table_name_len;
+                TableEngine table_engine =
+                    static_cast<TableEngine>(blob.data()[blob_offset]);
+                blob_offset += sizeof(uint8_t);
 #ifdef ON_KEY_OBJECT
                 TableType table_type = TableType::Primary;
                 // 4-byte integer for the length of the serialized object keys
@@ -4272,6 +4284,7 @@ public:
                     cc_ng_term_,
                     table_name_view,
                     table_type,
+                    table_engine,
                     std::string_view(blob.data() + blob_offset, kv_len),
                     commit_ts,
                     0,
@@ -4419,7 +4432,8 @@ public:
         bool all_pinned = true;
 
         TableName range_table_name(table_name_->StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name_->Engine());
         std::map<TxKey, TableRangeEntry::uptr> *range_map =
             shard->GetTableRangesForATable(range_table_name, node_group_id_);
 
@@ -6085,7 +6099,7 @@ public:
         ReleasePhase
     };
     KeyObjectStandbyForwardCc()
-        : remote_table_name_(empty_sv, TableType::Primary),
+        : remote_table_name_(empty_sv, TableType::Primary, TableEngine::None),
           key_str_(nullptr),
           object_version_(0),
           commit_ts_(0),
@@ -6229,8 +6243,12 @@ public:
         }
         TableType table_type =
             remote::ToLocalType::ConvertCcTableType(fwd_req_->table_type());
-        remote_table_name_ = TableName(
-            std::string_view(fwd_req_->table_name().data()), table_type);
+        TableEngine table_engine =
+            remote::ToLocalType::ConvertTableEngine(fwd_req_->table_engine());
+        remote_table_name_ =
+            TableName(std::string_view(fwd_req_->table_name().data()),
+                      table_type,
+                      table_engine);
         uint32_t ng_id = fwd_req_->key_shard_code() >> 10;
 
         uint64_t txn = fwd_req_->tx_number();
@@ -6822,7 +6840,8 @@ public:
 
             // Get original table name for the range table name
             const TableName base_table_name{table_name_->GetBaseTableNameSV(),
-                                            TableType::Primary};
+                                            TableType::Primary,
+                                            table_name_->Engine()};
             const CatalogEntry *catalog_entry =
                 ccs.GetCatalog(base_table_name, node_group_id_);
             if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)

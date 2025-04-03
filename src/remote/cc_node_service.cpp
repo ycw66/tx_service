@@ -444,7 +444,9 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
     std::string_view table_name_sv{request->table_name_str()};
     TableType table_type =
         ToLocalType::ConvertCcTableType(request->table_type());
-    TableName table_name = TableName(table_name_sv, table_type);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName table_name = TableName(table_name_sv, table_type, table_engine);
 
     uint64_t data_sync_ts = request->data_sync_ts();
     bool is_dirty = request->is_dirty();
@@ -864,7 +866,10 @@ void CcNodeService::GenerateSkFromPk(
     uint64_t scan_ts = request->scan_ts();
 
     std::string_view table_name_sv{request->table_name_str()};
-    TableName base_table_name = TableName(table_name_sv, TableType::Primary);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName base_table_name =
+        TableName(table_name_sv, TableType::Primary, table_engine);
 
     int32_t partition_id = request->partition_id();
     const std::string &end_key_str = request->end_key();
@@ -877,7 +882,8 @@ void CcNodeService::GenerateSkFromPk(
         std::string_view table_name_sv{request->new_sk_name_str(idx)};
         new_indexes_name.emplace_back(TableName(
             table_name_sv,
-            ToLocalType::ConvertCcTableType(request->new_sk_type(idx))));
+            ToLocalType::ConvertCcTableType(request->new_sk_type(idx)),
+            table_engine));
     }
 
     uint64_t tx_number = request->tx_number();
@@ -1067,7 +1073,9 @@ void CcNodeService::UploadBatch(
     std::string_view table_name_sv{request->table_name_str()};
     TableType table_type =
         ToLocalType::ConvertCcTableType(request->table_type());
-    TableName table_name = TableName(table_name_sv, table_type);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName table_name = TableName(table_name_sv, table_type, table_engine);
     UploadBatchType data_type =
         ToLocalType::ConvertUploadBatchType(request->kind());
 
@@ -1181,7 +1189,10 @@ void CcNodeService::UploadRangeSlices(
     brpc::ClosureGuard done_guard(done);
 
     std::string_view table_name_sv{request->table_name_str()};
-    TableName table_name = TableName(table_name_sv, TableType::RangePartition);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName table_name =
+        TableName(table_name_sv, TableType::RangePartition, table_engine);
     NodeGroupId ng_id = request->node_group_id();
     int32_t old_partition_id = request->old_partition_id();
     uint64_t version_ts = request->version_ts();
@@ -1245,7 +1256,9 @@ void CcNodeService::UploadBatchSlices(
     std::string_view table_name_sv{request->table_name_str()};
     TableType table_type =
         ToLocalType::ConvertCcTableType(request->table_type());
-    TableName table_name = TableName(table_name_sv, table_type);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName table_name = TableName(table_name_sv, table_type, table_engine);
 
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
     size_t core_cnt = cc_shards->Count();
@@ -1326,7 +1339,8 @@ void CcNodeService::FetchPayload(
 
     TableName table_name(
         request->table_name_str(),
-        ToLocalType::ConvertCcTableType(request->table_type()));
+        ToLocalType::ConvertCcTableType(request->table_type()),
+        ToLocalType::ConvertTableEngine(request->table_engine()));
     // The first 32bits of standby term is the primary node ng term.
     read_cc->Reset(
         &table_name,
@@ -1409,7 +1423,8 @@ void CcNodeService::FetchCatalog(
     };
     TableName table_name(
         request->table_name_str(),
-        ToLocalType::ConvertCcTableType(request->table_type()));
+        ToLocalType::ConvertCcTableType(request->table_type()),
+        ToLocalType::ConvertTableEngine(request->table_engine()));
     CatalogKey catalog_key;
     const std::string key_str = request->key_str();
     size_t offset = 0;
