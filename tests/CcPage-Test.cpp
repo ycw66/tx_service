@@ -29,6 +29,7 @@
 #include "template_cc_map.h"
 #include "tx_key.h"     // CompositeKey
 #include "tx_record.h"  // CompositeRecord
+#include "type.h"
 
 namespace txservice
 {
@@ -119,7 +120,8 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     for (size_t i = 0; i < MAP_NUM; i++)
     {
         tables.emplace_back("t" + std::to_string(i));
-        table_names.emplace_back(tables[i], TableType::Primary);
+        table_names.emplace_back(
+            tables[i], TableType::Primary, TableEngine::EloqSql);
         ccmaps.emplace_back(
             std::make_unique<TemplateCcMap<CompositeKey<std::string, int>,
                                            CompositeRecord<int>,

@@ -11,6 +11,7 @@
 #include "schema.h"              // Schema
 #include "tx_key.h"              // CompositeKey
 #include "tx_record.h"           // CompositeRecord
+#include "type.h"
 
 namespace txservice
 {
@@ -60,7 +61,8 @@ public:
                     uint64_t version)
         : table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
-                      table_name.Type()),
+                      table_name.Type(),
+                      table_name.Engine()),
           schema_image_(std::move(catalog_image)),
           version_(version)
     {
@@ -129,7 +131,8 @@ public:
             index_names.emplace_back(
                 index_entry.second.first.StringView().data(),
                 index_entry.second.first.StringView().size(),
-                TableType::Secondary);
+                TableType::Secondary,
+                index_entry.second.first.Engine());
         }
 
         return index_names;
