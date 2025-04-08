@@ -543,13 +543,9 @@ struct PostProcessResult
 {
     PostProcessResult() = default;
 
-    PostProcessResult(const PostProcessResult &rhs)
-        : conflicting_txs_(rhs.conflicting_txs_)
-    {
-    }
-
     PostProcessResult(PostProcessResult &&rhs)
-        : conflicting_txs_(std::move(rhs.conflicting_txs_))
+        : conflicting_tx_cnt_(
+              rhs.conflicting_tx_cnt_.load(std::memory_order_relaxed))
     {
     }
 
@@ -560,31 +556,32 @@ struct PostProcessResult
             return *this;
         }
 
-        conflicting_txs_ = rhs.conflicting_txs_;
+        conflicting_tx_cnt_.store(
+            rhs.conflicting_tx_cnt_.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         return *this;
     }
 
-    void AddConflictingTx(TxNumber txn)
+    void IncrConflictingTx(int32_t cnt = 1)
     {
-        std::lock_guard<std::mutex> lk(mux_);
-        conflicting_txs_.emplace_back(txn);
+        if (cnt > 0)
+        {
+            conflicting_tx_cnt_.fetch_add(cnt, std::memory_order_relaxed);
+        }
     }
 
-    size_t Size()
+    size_t Size() const
     {
-        std::lock_guard<std::mutex> lk(mux_);
-        return conflicting_txs_.size();
+        return conflicting_tx_cnt_.load(std::memory_order_relaxed);
     }
 
     void Clear()
     {
-        std::lock_guard<std::mutex> lk(mux_);
-        conflicting_txs_.clear();
+        conflicting_tx_cnt_.store(0, std::memory_order_relaxed);
         is_local_ = true;
     }
 
-    std::vector<TxNumber> conflicting_txs_;
-    std::mutex mux_;
+    std::atomic<int32_t> conflicting_tx_cnt_{0};
     bool is_local_{true};
 };
 

@@ -1078,7 +1078,7 @@ public:
     void ExtThdStart(int thd_id) override
     {
 #ifdef EXT_TX_PROC_ENABLED
-        assert(thd_id < coordinators_.size());
+        assert(static_cast<size_t>(thd_id) < coordinators_.size());
         TxProcCoordinator *coordi = coordinators_[thd_id].get();
         coordi->ext_processor_running_.store(true);
         TxProcessor *txp = tx_processors_->at(thd_id).get();
@@ -1094,7 +1094,7 @@ public:
     void ExtThdEnd(int thd_id) override
     {
 #ifdef EXT_TX_PROC_ENABLED
-        assert(thd_id < coordinators_.size());
+        assert(static_cast<size_t>(thd_id) < coordinators_.size());
         TxProcCoordinator *coordi = coordinators_[thd_id].get();
         coordi->ext_processor_running_.store(false);
         TxProcessor *txp = tx_processors_->at(thd_id).get();
@@ -1110,7 +1110,7 @@ public:
     void Process(int thd_id) override
     {
 #ifdef EXT_TX_PROC_ENABLED
-        assert(thd_id < coordinators_.size());
+        assert(static_cast<size_t>(thd_id) < coordinators_.size());
         TxProcCoordinator *coord = coordinators_[thd_id].get();
         size_t active_cnt = 0, req_cnt = 0;
         bool yield = false;
@@ -1123,7 +1123,7 @@ public:
     bool HasTask(int thd_id) const override
     {
 #ifdef EXT_TX_PROC_ENABLED
-        assert(thd_id < coordinators_.size());
+        assert(static_cast<size_t>(thd_id) < coordinators_.size());
         TxProcCoordinator *coord = coordinators_[thd_id].get();
 #ifdef ON_KEY_OBJECT
         if (coord->external_txm_cnt_.load(std::memory_order_relaxed) > 0)

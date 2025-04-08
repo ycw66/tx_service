@@ -299,10 +299,7 @@ txservice::remote::RemotePostRead::RemotePostRead()
                 // locates in a single shard. Hence, there are no concurrent
                 // modifications of PostReadResult. It is safe to access the
                 // result's array without the mutex protection.
-                for (TxNumber &txn : res->Value().conflicting_txs_)
-                {
-                    resp->add_txs(txn);
-                }
+                resp->set_conflicting_tx_cnt(res->Value().Size());
             }
 
             const ValidateRequest &req = input_msg_->validate_req();

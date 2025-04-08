@@ -767,10 +767,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         const ValidateResponse &cc_res = msg->validate_resp();
 
         PostProcessResult &conflicting_txs = hd_res->Value();
-        for (int i = 0; i < cc_res.txs_size(); i++)
-        {
-            conflicting_txs.AddConflictingTx(cc_res.txs(i));
-        }
+        conflicting_txs.IncrConflictingTx(cc_res.conflicting_tx_cnt());
 
         if (cc_res.error_code() != 0)
         {

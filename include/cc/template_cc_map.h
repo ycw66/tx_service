@@ -1324,7 +1324,7 @@ public:
                         Sharder::Instance().LeaderTerm(req.NodeGroupId());
                     shard_->CheckRecoverTx(
                         key_lock->WriteLockTx(), req.NodeGroupId(), ng_term);
-                    conflicting_txs.AddConflictingTx(key_lock->WriteLockTx());
+                    conflicting_txs.IncrConflictingTx();
 
                     DLOG_IF(INFO, TRACE_OCC_ERR)
                         << "PostReadCc, occ_err, txn:" << txn

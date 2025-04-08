@@ -856,7 +856,7 @@ message ValidateRequest {
 
 message ValidateResponse {
     int32 error_code = 1;
-    repeated uint64 txs = 2;
+    int32 conflicting_tx_cnt = 2;
 }
 
 message PostprocessResponse {
