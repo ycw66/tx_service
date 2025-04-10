@@ -369,8 +369,8 @@ private:
     template <typename ResultType>
     void PostProcess(AsyncOp<ResultType> &ds_op);
 
-    void Process(ReleaseScanExtraLockOp &lock_op);
-    void PostProcess(ReleaseScanExtraLockOp &lock_op);
+    void Process(ReleaseScanExtraLockOp &unlock_op);
+    void PostProcess(ReleaseScanExtraLockOp &unlock_op);
 
     void Process(ObjectCommandOp &obj_cmd_op);
     void PostProcess(ObjectCommandOp &obj_cmd_op);

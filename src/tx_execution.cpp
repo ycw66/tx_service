@@ -60,7 +60,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       txlog_(txlog),
       tx_processor_(tx_processor),
       txid_(UINT32_MAX),
-      tx_number_((uint64_t) UINT32_MAX << 32L),
+      tx_number_(UINT64_MAX),
       tx_term_(-1),
       commit_ts_(UINT64_MAX),
       commit_ts_bound_(0),
@@ -136,8 +136,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
 void TransactionExecution::Reset()
 {
     // Skip releasing catalogs read if the tx is not started.
-    if (FLAGS_cmd_read_catalog && init_txn_.hd_result_.IsFinished() &&
-        !init_txn_.hd_result_.IsError())
+    if (FLAGS_cmd_read_catalog && TxNumber() != UINT64_MAX)
     {
         ReleaseCatalogsRead();
     }
@@ -151,7 +150,7 @@ void TransactionExecution::Reset()
     wset_iters_.clear();
     wset_reverse_iters_.clear();
     scans_.clear();
-    tx_number_.store(UINT32_MAX, std::memory_order_release);
+    tx_number_.store(UINT64_MAX, std::memory_order_release);
     command_id_.store(0, std::memory_order_release);
     void_resp_ = nullptr;
     rec_resp_ = nullptr;
@@ -199,26 +198,26 @@ void TransactionExecution::Reset()
     lock_range_op_.Reset();
     lock_write_ranges_.Reset();
 #endif
-    init_txn_.Reset();
-    read_.Reset();
-    scan_open_.Reset();
-    scan_next_.Reset();
+    // init_txn_.Reset();
+    // read_.Reset();
+    // scan_open_.Reset();
+    // scan_next_.Reset();
 
-    obj_cmd_.Reset(nullptr, nullptr, nullptr);
+    // obj_cmd_.Reset(nullptr, nullptr, nullptr);
 
-    acquire_write_.Reset(0, 0);
-    set_ts_.Reset();
-    validate_.Reset(0);
-    update_txn_.Reset();
-    post_process_.Reset(0, 0, 0, true);
-    write_log_.Reset();
+    // acquire_write_.Reset(0, 0);
+    // set_ts_.Reset();
+    // validate_.Reset(0);
+    // update_txn_.Reset();
+    // post_process_.Reset(0, 0, 0, true);
+    // write_log_.Reset();
 
-    analyze_table_all_op_.Reset(0);
-    broadcast_stat_op_.Reset(0);
-    reload_cache_op_.Reset(0);
-    fault_inject_op_.Reset();
-    clean_entry_op_.Reset();
-    abundant_lock_op_.Reset();
+    // analyze_table_all_op_.Reset(0);
+    // broadcast_stat_op_.Reset(0);
+    // reload_cache_op_.Reset(0);
+    // fault_inject_op_.Reset();
+    // clean_entry_op_.Reset();
+    // abundant_lock_op_.Reset();
     tx_term_ = -1;
 }
 
@@ -1705,6 +1704,7 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
             }
         }
 
+        init_txn.Reset();
         return;
     }
 
@@ -1726,6 +1726,7 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
     uint64_resp_->Finish(tx_number);
 #endif
     uint64_resp_ = nullptr;
+    init_txn.Reset();
 }
 
 /**
@@ -2100,6 +2101,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         {
             rec_resp_->Finish(read_res.rec_status_);
             rec_resp_ = nullptr;
+            read.Reset();
             return;
         }
 
@@ -2151,6 +2153,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                     rtp_resp_->FinishError(
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                     rtp_resp_ = nullptr;
+                    read.Reset();
                     return;
                 }
             }
@@ -2201,6 +2204,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
             read_res.rec_status_, read_res.ts_));
         rtp_resp_ = nullptr;
     }
+    read.Reset();
 }
 
 void TransactionExecution::Process(ReadLocalOperation &lock_local)
@@ -2374,6 +2378,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
             Process(abundant_lock_op_);
         }
 
+        scan_open.Reset();
         return;
     }
 
@@ -2437,6 +2442,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         uint64_resp_->Finish(open_result.scan_alias_);
         uint64_resp_ = nullptr;
     }
+    scan_open.Reset();
 }
 
 void TransactionExecution::Process(ScanNextOperation &scan_next)
@@ -2730,6 +2736,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         bool_resp_->FinishError(
             ConvertCcError(scan_next.hd_result_.ErrorCode()));
         bool_resp_ = nullptr;
+        scan_next.Reset();
         return;
     }
 #ifdef RANGE_PARTITION_ENABLED
@@ -2868,6 +2875,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         bool_resp_->FinishError(
                             TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                         bool_resp_ = nullptr;
+                        scan_next.Reset();
                         return;
                     }
                 }
@@ -3093,6 +3101,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         bool_resp_->FinishError(
                             TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                         bool_resp_ = nullptr;
+                        scan_next.Reset();
                         return;
                     }
                 }
@@ -3239,6 +3248,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     bool_resp_->Finish(false);
 #endif
     bool_resp_ = nullptr;
+    scan_next.Reset();
 }
 
 void TransactionExecution::ScanClose(
@@ -3570,6 +3580,7 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
                     << ", tx " << TxNumber();
         state_stack_.pop_back();
         assert(state_stack_.empty());
+        lock_write_ranges.Reset();
         Abort();
         return;
     }
@@ -3720,6 +3731,7 @@ void TransactionExecution::PostProcess(LockWriteBucketsOp &lock_write_buckets)
                     << ", tx " << TxNumber();
         state_stack_.pop_back();
         assert(state_stack_.empty());
+        lock_write_buckets.Reset();
         Abort();
         return;
     }
@@ -3735,6 +3747,7 @@ void TransactionExecution::PostProcess(LockWriteBucketsOp &lock_write_buckets)
         state_stack_.pop_back();
         assert(state_stack_.empty());
 
+        lock_write_buckets.Reset();
         PushOperation(&acquire_write_);
         Process(acquire_write_);
     }
@@ -3886,6 +3899,7 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
         PushOperation(&set_ts_);
         Process(set_ts_);
     }
+    acquire_write.Reset(0, 0);
 }
 
 void TransactionExecution::Process(SetCommitTsOperation &set_ts)
@@ -4019,6 +4033,7 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
             }
         }
     }
+    set_ts.Reset();
 }
 
 void TransactionExecution::Process(ValidateOperation &validate)
@@ -4220,6 +4235,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
             }
         }
     }
+    validate.Reset(0);
 }
 
 bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
@@ -4709,7 +4725,6 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
         if (!log_op->hd_result_.IsError())
         {
             tx_status_.store(TxnStatus::Committed, std::memory_order_relaxed);
-            // TODO(zkl): finish resp.
         }
         else
         {
@@ -4795,6 +4810,7 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                                 rw_set_.CatalogRangeSetSize(),
                                 need_update_tentry);
         }
+        write_log.Reset();
         PushOperation(&post_process_);
         Process(post_process_);
     }
@@ -4875,6 +4891,7 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
     }
     // transaction can be recycled and put into free list.
     tx_status_.store(TxnStatus::Finished, std::memory_order_release);
+    update_txn.Reset();
 
     Reset();
 }
@@ -5223,6 +5240,7 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
 
         Reset();
     }
+    post_process.Reset(0, 0, 0, true);
 }
 
 void TransactionExecution::Process(AcquireAllOp &acq_all_op)
@@ -5560,6 +5578,7 @@ void TransactionExecution::PostProcess(ReloadCacheOperation &reload_cache_op)
     }
 
     void_resp_ = nullptr;
+    reload_cache_op.Reset(0);
 }
 
 void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)
@@ -5604,6 +5623,7 @@ void TransactionExecution::PostProcess(FaultInjectOp &fault_inject_op_)
 
     bool_resp_->Finish(fault_inject_op_.succeed_);
     bool_resp_ = nullptr;
+    fault_inject_op_.Reset();
 }
 
 void TransactionExecution::ProcessTxRequest(
@@ -5673,6 +5693,7 @@ void TransactionExecution::PostProcess(CleanCcEntryForTestOp &clean_entry_op)
 
     bool_resp_->Finish(clean_entry_op.succeed_);
     bool_resp_ = nullptr;
+    clean_entry_op.Reset();
 }
 
 void TransactionExecution::Process(AnalyzeTableAllOp &analyze_table_all_op)
@@ -5735,6 +5756,7 @@ void TransactionExecution::PostProcess(AnalyzeTableAllOp &analyze_table_all_op)
         void_resp_->Finish(void_);
         void_resp_ = nullptr;
     }
+    analyze_table_all_op.Reset(0);
 }
 
 void TransactionExecution::Process(BroadcastStatisticsOp &broadcast_stat_op)
@@ -5803,6 +5825,7 @@ void TransactionExecution::PostProcess(BroadcastStatisticsOp &broadcast_stat_op)
         void_resp_->Finish(void_);
         void_resp_ = nullptr;
     }
+    broadcast_stat_op.Reset(0);
 }
 
 template <typename ResultType>
@@ -5946,7 +5969,7 @@ void TransactionExecution::Process(ReleaseScanExtraLockOp &unlock_op)
     StartTiming();
 }
 
-void TransactionExecution::PostProcess(ReleaseScanExtraLockOp &lock_op)
+void TransactionExecution::PostProcess(ReleaseScanExtraLockOp &unlock_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -5964,9 +5987,10 @@ void TransactionExecution::PostProcess(ReleaseScanExtraLockOp &lock_op)
     // is the validation step.
     if (!state_stack_.empty())
     {
-        assert(state_stack_.back() == &lock_op);
+        assert(state_stack_.back() == &unlock_op);
         state_stack_.pop_back();
     }
+    unlock_op.Reset();
 }
 
 void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
@@ -6417,6 +6441,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             {
                 Abort();
             }
+            obj_cmd_op.Reset(nullptr, nullptr, nullptr);
             return;
         }
 
