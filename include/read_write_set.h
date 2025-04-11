@@ -31,7 +31,6 @@
 #include "absl/container/flat_hash_map.h"
 #include "cc_entry.h"
 #include "read_write_entry.h"
-#include "tx_command.h"
 
 namespace txservice
 {
@@ -70,6 +69,7 @@ public:
         wset_bytes_cnt_ = 0;
         data_rset_cnt_ = 0;
         forward_write_cnt_ = 0;
+        catalog_wset_.clear();
     }
 
     /**
@@ -77,12 +77,12 @@ public:
      *
      * @return size_t
      */
-    size_t ReadSetSize() const
+    size_t DataReadSetSize() const
     {
         return data_rset_cnt_;
     }
 
-    size_t CatalogRangeSetSize() const
+    size_t CatalogRangeReadSetSize() const
     {
         size_t set_size = 0;
         for (auto &[tbl_name, rset] : rset_)
@@ -98,9 +98,32 @@ public:
         return set_size;
     }
 
+    /**
+     * @brief Do not regard cluster config rlock as data rlock. Release data
+     * rlock before post all catalog wlock, but release cluster config rlock
+     * after post all catalog wlock.
+     */
+    bool ClusterConfigReadLocked() const
+    {
+        bool locked = false;
+        auto iter = rset_.find(cluster_config_ccm_name);
+        if (iter != rset_.end())
+        {
+            const std::unordered_map<CcEntryAddr, ReadSetEntry> &cluster_rset =
+                iter->second;
+            locked = !cluster_rset.empty();
+        }
+        return locked;
+    }
+
     size_t WriteSetSize() const
     {
         return wset_cnt_;
+    }
+
+    size_t CatalogWriteSetSize() const
+    {
+        return catalog_wset_.size();
     }
 
     size_t ForwardWriteCnt() const
@@ -169,9 +192,7 @@ public:
 
             it->second.read_cnt_++;
         }
-        else if (!(*table_name == catalog_ccm_name) &&
-                 (table_name->Type() != TableType::RangePartition) &&
-                 (table_name->Type() != TableType::RangeBucket))
+        else if (!table_name->IsMeta())
         {
             ++data_rset_cnt_;
         }
@@ -220,9 +241,7 @@ public:
             auto cce_it = tbl_read_set.find(cce_addr);
             if (cce_it != tbl_read_set.end())
             {
-                if (!(table_name == catalog_ccm_name) &&
-                    (table_name.Type() != TableType::RangePartition) &&
-                    (table_name.Type() != TableType::RangeBucket))
+                if (!table_name.IsMeta())
                 {
                     --data_rset_cnt_;
                 }
@@ -250,9 +269,7 @@ public:
         auto cce_it = tbl_read_set.find(cce_addr);
         if (cce_it != tbl_read_set.end())
         {
-            if (!(tbl_name == catalog_ccm_name) &&
-                (tbl_name.Type() != TableType::RangePartition) &&
-                (tbl_name.Type() != TableType::RangeBucket))
+            if (!tbl_name.IsMeta())
             {
                 --data_rset_cnt_;
             }
@@ -342,6 +359,16 @@ public:
         }
     }
 
+    void AddCatalogWrite(TxKey tx_key, TxRecord::Uptr rec)
+    {
+        assert(rec->Size() > 0);
+        auto [iter, inserted] = catalog_wset_.try_emplace(std::move(tx_key));
+        ReplicaWriteSetEntry &wset_entry = iter->second;
+        assert(inserted || wset_entry.op_ == OperationType::Update);
+        wset_entry.rec_ = std::move(rec);
+        wset_entry.op_ = OperationType::Update;
+    }
+
     const WriteSetEntry *FindWrite(const TableName &table_name,
                                    const TxKey &key) const
     {
@@ -423,9 +450,7 @@ public:
     {
         for (auto tbl_it = rset_.begin(); tbl_it != rset_.end();)
         {
-            if (tbl_it->first == catalog_ccm_name ||
-                tbl_it->first.Type() == TableType::RangePartition ||
-                tbl_it->first.Type() == TableType::RangeBucket)
+            if (tbl_it->first.IsMeta())
             {
                 ++tbl_it;
             }
@@ -470,7 +495,7 @@ public:
         forward_write_cnt_ = 0;
     }
 
-    void ClearTable(const TableName &table_name)
+    void ClearWriteSet(const TableName &table_name)
     {
         auto tab_it = wset_.find(table_name);
         if (tab_it != wset_.end())
@@ -494,6 +519,16 @@ public:
         &WriteSet()
     {
         return wset_;
+    }
+
+    const std::map<TxKey, ReplicaWriteSetEntry> &CatalogWriteSet() const
+    {
+        return catalog_wset_;
+    }
+
+    void ClearCatalogWriteSet()
+    {
+        catalog_wset_.clear();
     }
 
     void ClearReadSet(const TableName &table_name)
@@ -524,9 +559,7 @@ public:
     uint16_t RemoveReadEntry(const TableName &table_name,
                              const CcEntryAddr &addr)
     {
-        assert(table_name.Type() != TableType::Catalog ||
-               table_name.Type() != TableType::RangePartition ||
-               table_name.Type() != TableType::RangeBucket);
+        assert(!table_name.IsMeta());
 
         auto iter = rset_.find(table_name);
         if (iter == rset_.end())
@@ -670,5 +703,8 @@ private:
     size_t data_rset_cnt_;
     size_t wset_bytes_cnt_;
     size_t forward_write_cnt_;
+
+    // Logically alter a table inside a DML transaction.
+    std::map<TxKey, ReplicaWriteSetEntry> catalog_wset_;
 };
 }  // namespace txservice

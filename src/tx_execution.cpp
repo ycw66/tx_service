@@ -35,7 +35,6 @@
 #include "log_type.h"
 #include "scan.h"
 #include "sharder.h"
-#include "statistics.h"
 #include "tx_command.h"
 #include "tx_key.h"
 #include "tx_operation.h"
@@ -107,11 +106,13 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       cmd_forward_write_(this),
 #endif
       acquire_write_(this),
+      catalog_acquire_all_(this),
       set_ts_(this),
       validate_(this),
       update_txn_(this),
       post_process_(this),
       write_log_(this),
+      flush_update_table_(this),
       sleep_op_(this),
       analyze_table_all_op_(this),
       broadcast_stat_op_(this),
@@ -540,8 +541,9 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
 
 bool TransactionExecution::CommitTx(CommitTxRequest &commit_req)
 {
-    if (rw_set_.WriteSetSize() == 0 && cmd_set_.ObjectCntWithWriteLock() == 0 &&
-        rw_set_.ReadSetSize() == 0)
+    if (rw_set_.DataReadSetSize() == 0 && rw_set_.WriteSetSize() == 0 &&
+        rw_set_.CatalogWriteSetSize() == 0 &&
+        cmd_set_.ObjectCntWithWriteLock() == 0)
     {
         commit_tx_req_->Reset();
         commit_tx_req_->to_commit_ = commit_req.to_commit_;
@@ -602,12 +604,24 @@ TxErrorCode TransactionExecution::TxUpsert(const TableName &table_name,
                                            OperationType op,
                                            bool check_unique)
 {
-    return rw_set_.AddWrite(table_name,
-                            schema_version,
-                            std::move(key),
-                            std::move(rec),
-                            op,
-                            check_unique);
+    if (table_name.Type() == TableType::Primary ||
+        table_name.Type() == TableType::Secondary ||
+        table_name.Type() == TableType::UniqueSecondary)
+    {
+        return rw_set_.AddWrite(table_name,
+                                schema_version,
+                                std::move(key),
+                                std::move(rec),
+                                op,
+                                check_unique);
+    }
+    else
+    {
+        assert(table_name.Type() == TableType::Catalog &&
+               op == OperationType::Update);
+        rw_set_.AddCatalogWrite(std::move(key), std::move(rec));
+        return TxErrorCode::NO_ERROR;
+    }
 }
 
 void TransactionExecution::TxRevert(const TableName &table_name,
@@ -862,6 +876,7 @@ void TransactionExecution::ProcessTxRequest(CommitTxRequest &commit_req)
         // When the tx is aborted/rolled back by the user, write locks must have
         // not acquired. Clear the write set before entering post-processing.
         rw_set_.ClearWriteSet();
+        rw_set_.ClearCatalogWriteSet();
         Abort();
     }
 }
@@ -883,6 +898,7 @@ void TransactionExecution::ProcessTxRequest(AbortTxRequest &abort_req)
     // When the tx is aborted/rolled back by the user, write locks must have not
     // acquired. Clear the write set before entering post-processing.
     rw_set_.ClearWriteSet();
+    rw_set_.ClearCatalogWriteSet();
     Abort();
 }
 
@@ -3441,6 +3457,11 @@ void TransactionExecution::Commit()
         // Process(acquire_write_);
 #endif
     }
+    else if (rw_set_.CatalogWriteSetSize() > 0)
+    {
+        PushOperation(&catalog_acquire_all_);
+        Process(catalog_acquire_all_);
+    }
     else
     {
         if (is_recovering)
@@ -3509,8 +3530,11 @@ void TransactionExecution::Abort()
 #endif
 
         post_process_.Reset(acquire_write_cnt,
-                            rw_set_.ReadSetSize(),
-                            rw_set_.CatalogRangeSetSize(),
+                            rw_set_.DataReadSetSize(),
+                            rw_set_.CatalogRangeReadSetSize(),
+                            rw_set_.CatalogWriteSetSize() *
+                                Sharder::Instance().NodeGroupCount(),
+                            rw_set_.ClusterConfigReadLocked(),
                             need_update_tentry);
         PushOperation(&post_process_);
         Process(post_process_);
@@ -3896,10 +3920,42 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
     }
     else
     {
+        if (rw_set_.CatalogWriteSetSize() > 0)
+        {
+            PushOperation(&catalog_acquire_all_);
+            Process(catalog_acquire_all_);
+        }
+        else
+        {
+            PushOperation(&set_ts_);
+            Process(set_ts_);
+        }
+    }
+
+    acquire_write.Reset(0, 0);
+}
+
+void TransactionExecution::Process(CatalogAcquireAllOp &acquire_catalog_write)
+{
+    catalog_acquire_all_.SetCatalogWriteSet(rw_set_.CatalogWriteSet());
+    catalog_acquire_all_.is_running_ = true;
+}
+
+void TransactionExecution::PostProcess(
+    CatalogAcquireAllOp &acquire_catalog_write)
+{
+    state_stack_.pop_back();
+    if (catalog_acquire_all_.succeed_)
+    {
+        catalog_acquire_all_.Reset();
         PushOperation(&set_ts_);
         Process(set_ts_);
     }
-    acquire_write.Reset(0, 0);
+    else
+    {
+        catalog_acquire_all_.Reset();
+        Abort();
+    }
 }
 
 void TransactionExecution::Process(SetCommitTsOperation &set_ts)
@@ -3925,6 +3981,11 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
     {
         candidate = std::max(candidate, acquire_key.last_vali_ts_ + 1);
         candidate = std::max(candidate, acquire_key.commit_ts_ + 1);
+    }
+
+    if (rw_set_.CatalogWriteSetSize() > 0)
+    {
+        candidate = std::max(candidate, catalog_acquire_all_.MaxTs());
     }
 
     const std::unordered_map<TableName,
@@ -3980,7 +4041,7 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
     else
     {
         commit_ts_ = set_ts.hd_result_.Value();
-        if (rw_set_.ReadSetSize() > 0)
+        if (rw_set_.DataReadSetSize() > 0)
         {
             PushOperation(&validate_);
             Process(validate_);
@@ -3989,7 +4050,8 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
         {
             bool needs_write_log =
                 !txservice_skip_wal &&
-                (cmd_set_.ObjectModified() || rw_set_.WriteSetSize() > 0);
+                (cmd_set_.ObjectModified() || rw_set_.WriteSetSize() > 0 ||
+                 rw_set_.CatalogWriteSetSize() > 0);
             if (txlog_ != nullptr && needs_write_log)
             {
                 bool prepare_log_success = false;
@@ -4023,10 +4085,14 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
                     uint32_t acquire_write_cnt =
                         rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt() +
                         cmd_set_.ObjectCntWithWriteLock();
-                    post_process_.Reset(acquire_write_cnt,
-                                        0,
-                                        rw_set_.CatalogRangeSetSize(),
-                                        need_update_tentry);
+                    post_process_.Reset(
+                        acquire_write_cnt,
+                        0,
+                        rw_set_.CatalogRangeReadSetSize(),
+                        rw_set_.CatalogWriteSetSize() *
+                            Sharder::Instance().NodeGroupCount(),
+                        rw_set_.ClusterConfigReadLocked(),
+                        need_update_tentry);
                     PushOperation(&post_process_);
                     Process(post_process_);
                 }
@@ -4052,16 +4118,14 @@ void TransactionExecution::Process(ValidateOperation &validate)
                              std::unordered_map<CcEntryAddr, ReadSetEntry>>
         &rset = rw_set_.ReadSet();
 
-    size_t read_data_cnt = rw_set_.ReadSetSize();
+    size_t read_data_cnt = rw_set_.DataReadSetSize();
     validate.Reset(read_data_cnt);
     validate.is_running_ = true;
     bool empty_rset = true;
 
     for (const auto &[tbl_name, tbl_read_set] : rset)
     {
-        if (tbl_name == catalog_ccm_name ||
-            tbl_name.Type() == TableType::RangePartition ||
-            tbl_name.Type() == TableType::RangeBucket)
+        if (tbl_name.IsMeta())
         {
             continue;
         }
@@ -4182,7 +4246,8 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     {
         bool needs_write_log =
             !txservice_skip_wal &&
-            (cmd_set_.ObjectModified() || rw_set_.WriteSetSize() > 0);
+            (cmd_set_.ObjectModified() || rw_set_.WriteSetSize() > 0 ||
+             rw_set_.CatalogWriteSetSize() > 0);
         if (txlog_ != nullptr && needs_write_log)
         {
             bool prepare_log_success = false;
@@ -4228,7 +4293,10 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
                                         rw_set_.ForwardWriteCnt() +
                                         cmd_set_.ObjectCntWithWriteLock(),
                                     0,
-                                    rw_set_.CatalogRangeSetSize(),
+                                    rw_set_.CatalogRangeReadSetSize(),
+                                    rw_set_.CatalogWriteSetSize() *
+                                        Sharder::Instance().NodeGroupCount(),
+                                    rw_set_.ClusterConfigReadLocked(),
                                     need_update_tentry);
                 PushOperation(&post_process_);
                 Process(post_process_);
@@ -4281,12 +4349,9 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
             uint32_t ng_id = addr.NodeGroupId();
 
             // Only fills WriteLogRequest::node_terms for base table.
-            auto shard_term_it = shard_terms->find(ng_id);
-            if (shard_term_it == shard_terms->end())
-            {
-                (*shard_terms)[ng_id] = addr.Term();
-            }
-            else if (shard_term_it->second != addr.Term())
+            auto [shard_terms_it, inserted] =
+                shard_terms->try_emplace(ng_id, addr.Term());
+            if (inserted == false && shard_terms_it->second != addr.Term())
             {
                 // Two keys in the tx's write set refer to the same cc node
                 // group, but have different terms. It means that the cc node
@@ -4341,18 +4406,8 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
     // construct one log_ng_blob per ng_id
     for (const auto &[ng_id, table_rec_set] : ng_table_rec_set)
     {
-        std::string *log_ng_blob = nullptr;
-        auto shard_it = shard_logs->find(ng_id);
-        if (shard_it == shard_logs->end())
-        {
-            std::string blob;
-            (*shard_logs)[ng_id] = blob;
-            log_ng_blob = &shard_logs->at(ng_id);
-        }
-        else
-        {
-            log_ng_blob = &shard_it->second;
-        }
+        auto [shard_it, inserted] = shard_logs->try_emplace(ng_id);
+        std::string *log_ng_blob = &shard_it->second;
 
         // The log blob of a table in a node group is in the following
         // format: (1) A 1-byte integer for the length of the table name,
@@ -4413,22 +4468,72 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
         }
     }
 
+    // fill rw_set_.catalog_wset_ if any insert request triggers an catalog
+    // logical update operation.
+    for (const auto &[write_key, write_entry] : rw_set_.CatalogWriteSet())
+    {
+        const CatalogKey *catalog_key = write_key.GetKey<CatalogKey>();
+        const CatalogRecord *catalog_rec =
+            static_cast<const CatalogRecord *>(write_entry.rec_.get());
+
+        txlog::SchemaOpMessage *schema_msg = data_log_msg->add_schema_logs();
+        schema_msg->set_table_name_str(catalog_key->Name().String());
+        schema_msg->set_table_type(::txlog::ToRemoteType::ConvertTableType(
+            catalog_key->Name().Type()));
+        schema_msg->set_old_catalog_blob(catalog_rec->Schema()->SchemaImage());
+        schema_msg->set_catalog_ts(catalog_rec->SchemaTs());
+        schema_msg->set_new_catalog_blob(catalog_rec->DirtySchemaImage());
+        schema_msg->mutable_table_op()->set_op_type(
+            static_cast<uint32_t>(OperationType::Update));
+        schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CommitSchema);
+    }
+
     // fill read set entry term
     for (const auto [ng_id, ng_term] : rw_set_.ReadLockNgTerms())
     {
         // Only fills WriteLogRequest::node_terms for base table.
-        auto shard_term_it = shard_terms->find(ng_id);
-        if (shard_term_it == shard_terms->end())
-        {
-            (*shard_terms)[ng_id] = ng_term;
-        }
-        else if (shard_term_it->second != ng_term)
+        auto [shard_term_it, inserted] =
+            shard_terms->try_emplace(ng_id, ng_term);
+        if (inserted == false && shard_term_it->second != ng_term)
         {
             // Two keys in the tx's read/write set refer to the same cc node
             // group, but have different terms.
             write_log.hd_result_.SetError(CcErrorCode::NG_TERM_CHANGED);
             return false;
         }
+    }
+
+    return true;
+}
+
+bool TransactionExecution::FillCleanCatalogsLogRequest(WriteToLogOp &write_log)
+{
+    write_log.log_type_ = TxLogType::DATA;
+    write_log.log_closure_.LogRequest().Clear();
+
+    ::txlog::LogRequest &log_req = write_log.log_closure_.LogRequest();
+    ::txlog::WriteLogRequest *log_rec = log_req.mutable_write_log_request();
+
+    log_rec->set_tx_term(tx_term_);
+    log_rec->set_txn_number(TxNumber());
+    log_rec->set_commit_timestamp(commit_ts_);
+    log_rec->set_retry(false);
+
+    auto data_log_msg = log_rec->mutable_log_content()->mutable_data_log();
+
+    // fill rw_set_.catalog_wset_ if any insert request triggers an catalog
+    // logical update operation.
+    for (const auto &[write_key, write_entry] : rw_set_.CatalogWriteSet())
+    {
+        const CatalogKey *catalog_key = write_key.GetKey<CatalogKey>();
+
+        txlog::SchemaOpMessage *schema_msg = data_log_msg->add_schema_logs();
+        schema_msg->set_table_name_str(catalog_key->Name().String());
+        schema_msg->set_table_type(::txlog::ToRemoteType::ConvertTableType(
+            catalog_key->Name().Type()));
+        schema_msg->mutable_table_op()->set_op_type(
+            static_cast<uint32_t>(OperationType::Update));
+        schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CleanSchema);
     }
 
     return true;
@@ -4793,26 +4898,44 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
             // secondary keys without locks.
             post_process_.Reset(acquire_write_cnt,
                                 0,
-                                rw_set_.CatalogRangeSetSize(),
+                                rw_set_.CatalogRangeReadSetSize(),
+                                rw_set_.CatalogWriteSetSize() *
+                                    Sharder::Instance().NodeGroupCount(),
+                                rw_set_.ClusterConfigReadLocked(),
                                 need_update_tentry);
         }
         else if (status == TxnStatus::Aborted)
         {
             post_process_.Reset(acquire_write_cnt,
-                                rw_set_.ReadSetSize(),
-                                rw_set_.CatalogRangeSetSize(),
+                                rw_set_.DataReadSetSize(),
+                                rw_set_.CatalogRangeReadSetSize(),
+                                rw_set_.CatalogWriteSetSize() *
+                                    Sharder::Instance().NodeGroupCount(),
+                                rw_set_.ClusterConfigReadLocked(),
                                 need_update_tentry);
         }
         else if (status == TxnStatus::Unknown)
         {
             post_process_.Reset(0,
-                                rw_set_.ReadSetSize(),
-                                rw_set_.CatalogRangeSetSize(),
+                                rw_set_.DataReadSetSize(),
+                                rw_set_.CatalogRangeReadSetSize(),
+                                0,
+                                rw_set_.ClusterConfigReadLocked(),
                                 need_update_tentry);
         }
+
         write_log.Reset();
-        PushOperation(&post_process_);
-        Process(post_process_);
+
+        if (status == TxnStatus::Committed && rw_set_.CatalogWriteSetSize() > 0)
+        {
+            PushOperation(&post_process_);
+            PushOperation(&flush_update_table_);
+        }
+        else
+        {
+            PushOperation(&post_process_);
+            Process(post_process_);
+        }
     }
     else
     {
@@ -4909,7 +5032,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 .append(std::to_string(this->tx_term_));
         });
 
-    post_process.is_running_ = false;
+    post_process.is_running_ = true;
 
     uint64_t tx_number = TxNumber();
     uint16_t command_id = command_id_.load(std::memory_order_relaxed);
@@ -5104,9 +5227,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
         for (const auto &[tbl_name, data_read_set] : rset)
         {
-            if (tbl_name == catalog_ccm_name ||
-                tbl_name.Type() == TableType::RangePartition ||
-                tbl_name == range_bucket_ccm_name)
+            if (tbl_name.IsMeta())
             {
                 continue;
             }
@@ -5240,7 +5361,7 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
 
         Reset();
     }
-    post_process.Reset(0, 0, 0, true);
+    post_process.Reset(0, 0, 0, 0, false, true);
 }
 
 void TransactionExecution::Process(AcquireAllOp &acq_all_op)
@@ -5385,32 +5506,104 @@ void TransactionExecution::ReleaseCatalogRangeLock(
                              std::unordered_map<CcEntryAddr, ReadSetEntry>>
         &rset = rw_set_.ReadSet();
     size_t ref_cnt = catalog_range_hd_result.RefCnt();
-    assert(ref_cnt != 0);
 
     for (const auto &[tbl_name, tbl_set] : rset)
     {
-        if (tbl_name.Type() != TableType::Catalog &&
-            tbl_name.Type() != TableType::RangePartition &&
-            tbl_name.Type() != TableType::RangeBucket)
+        if (tbl_name.Type() == TableType::Catalog ||
+            tbl_name.Type() == TableType::RangePartition ||
+            tbl_name.Type() == TableType::RangeBucket)
         {
-            continue;
-        }
-
-        for (const auto &[cce_addr, read_entry] : tbl_set)
-        {
-            --ref_cnt;
-            cc_handler_->PostRead(TxNumber(),
-                                  TxTerm(),
-                                  CommandId(),
-                                  read_entry.version_ts_,
-                                  0,
-                                  commit_ts_,
-                                  cce_addr,
-                                  catalog_range_hd_result,
-                                  true);
+            for (const auto &[cce_addr, read_entry] : tbl_set)
+            {
+                --ref_cnt;
+                cc_handler_->PostRead(TxNumber(),
+                                      TxTerm(),
+                                      CommandId(),
+                                      read_entry.version_ts_,
+                                      0,
+                                      commit_ts_,
+                                      cce_addr,
+                                      catalog_range_hd_result,
+                                      true);
+            }
         }
     }
+
     assert(ref_cnt == 0);
+    StartTiming();
+}
+
+void TransactionExecution::ReleaseCatalogWriteAll(
+    CcHandlerResult<PostProcessResult> &catalog_post_all_hd_result)
+{
+    uint64_t commit_ts = TxStatus() == TxnStatus::Committed
+                             ? commit_ts_
+                             : TransactionOperation::tx_op_failed_ts_;
+
+    std::shared_ptr<std::set<uint32_t>> all_node_groups =
+        Sharder::Instance().AllNodeGroups();
+    for (uint32_t ngid : *all_node_groups)
+    {
+        if (TxCcNodeId() == ngid)
+        {
+            // Send out local request at last to prevent it from
+            // modifying recs_ while the handler is still using it.
+            continue;
+        }
+        for (const auto &[write_key, write_entry] : rw_set_.CatalogWriteSet())
+        {
+            assert(write_entry.op_ == OperationType::Update);
+            cc_handler_->PostWriteAll(
+                catalog_ccm_name,
+                write_key,
+                *write_entry.rec_,
+                ngid,
+                tx_number_.load(std::memory_order_relaxed),
+                tx_term_,
+                command_id_.load(std::memory_order_relaxed),
+                commit_ts,
+                catalog_post_all_hd_result,
+                OperationType::Update,
+                PostWriteType::PostCommit);
+        }
+    }
+    for (const auto &[write_key, write_entry] : rw_set_.CatalogWriteSet())
+    {
+        assert(write_entry.op_ == OperationType::Update);
+        cc_handler_->PostWriteAll(catalog_ccm_name,
+                                  write_key,
+                                  *write_entry.rec_,
+                                  TxCcNodeId(),
+                                  tx_number_.load(std::memory_order_relaxed),
+                                  tx_term_,
+                                  command_id_.load(std::memory_order_relaxed),
+                                  commit_ts,
+                                  catalog_post_all_hd_result,
+                                  OperationType::Update,
+                                  PostWriteType::PostCommit);
+    }
+
+    StartTiming();
+}
+
+void TransactionExecution::ReleaseClusterConfigRLock(
+    CcHandlerResult<PostProcessResult> &cluster_config_hd_result)
+{
+    const std::unordered_map<CcEntryAddr, ReadSetEntry> &cluster_config_rset =
+        rw_set_.ReadSet().at(cluster_config_ccm_name);
+    assert(cluster_config_rset.size() == 1);
+    const auto &[cce_addr, read_entry] = *cluster_config_rset.begin();
+    cc_handler_->PostRead(TxNumber(),
+                          TxTerm(),
+                          CommandId(),
+                          read_entry.version_ts_,
+                          0,
+                          commit_ts_,
+                          cce_addr,
+                          cluster_config_hd_result,
+                          true);
+
+    StartTiming();
 }
 
 void TransactionExecution::DrainScanner(CcScanner *scanner,
@@ -5490,10 +5683,6 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
         PostProcess(ds_upsert_table_op);
         return;
     }
-
-#ifdef EXT_TX_PROC_ENABLED
-    ds_upsert_table_op.hd_result_.SetToBlock();
-#endif
 
     cc_handler_->DataStoreUpsertTable(ds_upsert_table_op.table_schema_old_,
                                       ds_upsert_table_op.table_schema_,
@@ -5846,7 +6035,7 @@ void TransactionExecution::Process(AsyncOp<ResultType> &ds_op)
 
     if (ds_op.op_func_ != nullptr)
     {
-        ds_op.op_func_();
+        ds_op.op_func_(ds_op);
     }
     StartTiming();
 }
@@ -5869,6 +6058,7 @@ void TransactionExecution::PostProcess(AsyncOp<ResultType> &ds_op)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+    assert(ds_op.hd_result_.IsFinished());
     state_stack_.pop_back();
 }
 

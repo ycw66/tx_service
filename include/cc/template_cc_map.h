@@ -1124,7 +1124,8 @@ public:
                     cce_ptr->payload_.SetCurrentPayload(payload);
                     // A prepare commit request only installs the dirty value,
                     // and does not change the record status and commit_ts.
-                    if (req.CommitType() != PostWriteType::PrepareCommit)
+                    if (req.CommitType() == PostWriteType::Commit ||
+                        req.CommitType() == PostWriteType::PostCommit)
                     {
                         RecordStatus status =
                             (req.OpType() == OperationType::Delete ||
@@ -1153,9 +1154,6 @@ public:
                 else if (req.CommitType() == PostWriteType::Commit ||
                          req.CommitType() == PostWriteType::PostCommit)
                 {
-                    assert(req.CommitType() == PostWriteType::Commit ||
-                           req.CommitType() == PostWriteType::PostCommit);
-
                     // For PostCommit or Commit, the post-write-all request
                     // releases the write lock.
 
@@ -4184,10 +4182,7 @@ public:
             assert(lock != nullptr && lock->GetCcEntry() != nullptr);
             cce = reinterpret_cast<CcEntry<KeyT, ValueT, VersionedRecord> *>(
                 lock->GetCcEntry());
-        }
 
-        if (cce != nullptr)
-        {
             auto [blocking_type, scan_type] = req.BlockingPair(core_id);
             CcPage<KeyT, ValueT, VersionedRecord> *ccp =
                 static_cast<CcPage<KeyT, ValueT, VersionedRecord> *>(
@@ -4309,7 +4304,6 @@ public:
 
             scan_ccm_it = start_pair.first;
             cce_key = scan_ccm_it->first;
-            cce = scan_ccm_it->second;
             if (start_pair.second == ScanType::ScanGap)
             {
                 if (req.Direction() == ScanDirection::Forward)

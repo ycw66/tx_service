@@ -33,8 +33,6 @@
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
 #include "sharder.h"
-#include "statistics.h"
-#include "tx_execution.h"
 #include "tx_record.h"
 #include "tx_trace.h"
 #include "type.h"
@@ -1690,7 +1688,7 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
     const TableSchema *old_schema,
     const TableSchema *schema,
     OperationType op_type,
-    uint64_t commit_ts,
+    uint64_t write_time,
     NodeGroupId ng_id,
     int64_t tx_term,
     CcHandlerResult<Void> &hres,
@@ -1710,7 +1708,7 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
     cc_shards_.store_hd_->UpsertTable(old_schema,
                                       schema,
                                       op_type,
-                                      commit_ts,
+                                      write_time,
                                       ng_id,
                                       tx_term,
                                       &hres,

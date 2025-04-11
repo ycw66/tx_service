@@ -48,7 +48,6 @@
 #include "cc_page_clean_guard.h"
 #include "cc_shard.h"
 #include "data_sync_task.h"
-#include "error_messages.h"
 #include "local_cc_handler.h"
 #include "log.pb.h"
 #include "range_record.h"
@@ -541,8 +540,6 @@ public:
         const std::string &new_catalog_image,
         uint64_t old_schema_ts,
         uint64_t dirty_schema_ts);
-
-    void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
     CatalogEntry *GetCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
     CatalogEntry *GetCatalogInternal(const TableName &table_name,

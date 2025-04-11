@@ -1001,12 +1001,6 @@ void CcShard::UpdateDirtyCatalog(const TableName &table_name,
         table_name, catalog_image, catalog_entry);
 }
 
-void CcShard::CommitDirtyCatalog(const TableName &table_name,
-                                 NodeGroupId cc_ng_id)
-{
-    local_shards_.CommitDirtyCatalog(table_name, cc_ng_id);
-}
-
 CatalogEntry *CcShard::GetCatalog(const TableName &table_name,
                                   NodeGroupId cc_ng_id)
 {

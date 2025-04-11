@@ -30,9 +30,12 @@
 #include <vector>
 
 #include "catalog_factory.h"
-#include "sharder.h"
 #include "tx_key.h"
 #include "tx_record.h"
+
+#ifndef RANGE_PARTITION_ENABLED
+#include "sharder.h"
+#endif
 
 namespace txservice
 {
@@ -49,7 +52,7 @@ struct CatalogKey
 public:
     CatalogKey();
     CatalogKey(const TableName &name);
-    CatalogKey(CatalogKey &&rhs);
+    CatalogKey(CatalogKey &&rhs) noexcept;
     CatalogKey(const CatalogKey &rhs);
     CatalogKey &operator=(CatalogKey &&) = default;
     ~CatalogKey() = default;
@@ -282,7 +285,7 @@ struct CatalogRecord : public TxRecord
 {
 public:
     CatalogRecord() = default;
-    CatalogRecord(CatalogRecord &&rhs);
+    CatalogRecord(CatalogRecord &&rhs) noexcept;
     CatalogRecord(const CatalogRecord &rhs);
     ~CatalogRecord() = default;
 
@@ -304,15 +307,15 @@ public:
     void SetDirtySchemaImage(std::string &&schema_image);
     void SetDirtySchemaImage(const std::string &schema_image);
     const TableSchema *Schema() const;
-    std::shared_ptr<const TableSchema> CopySchema();
+    std::shared_ptr<const TableSchema> CopySchema() const;
     const TableSchema *DirtySchema() const;
-    std::shared_ptr<const TableSchema> CopyDirtySchema();
+    std::shared_ptr<const TableSchema> CopyDirtySchema() const;
     void ClearDirtySchema();
     void Reset();
     uint64_t SchemaTs() const;
 
     CatalogRecord &operator=(const CatalogRecord &rhs);
-    CatalogRecord &operator=(CatalogRecord &&rhs);
+    CatalogRecord &operator=(CatalogRecord &&rhs) noexcept;
 
     size_t Size() const override
     {

@@ -31,6 +31,7 @@
 
 #include "error_messages.h"
 #include "local_cc_shards.h"
+#include "log_type.h"
 #include "remote/remote_type.h"
 #include "sk_generator.h"
 #include "tx_execution.h"
@@ -551,13 +552,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             ResetLeaderTerms();
             generate_sk_parallel_op_.Reset();
             generate_sk_parallel_op_.hd_result_.Value().Reset();
-            generate_sk_parallel_op_.op_func_ = [this, txm]()
+            generate_sk_parallel_op_.op_func_ =
+                [this, txm](AsyncOp<GenerateSkParallelResult> &async_op)
             {
-                generate_sk_parallel_op_.worker_thread_ = std::thread(
-                    [this, txm]()
+                async_op.worker_thread_ = std::thread(
+                    [this, txm, &hd_res = async_op.hd_result_]()
                     {
-                        auto &hd_res = generate_sk_parallel_op_.hd_result_;
-                        hd_res.Reset();
 #ifdef EXT_TX_PROC_ENABLED
                         hd_res.SetToBlock();
 #endif
@@ -738,8 +738,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
 
         flush_all_old_tuples_sk_op_.op_func_ =
-            [this, txm, &hd_res = flush_all_old_tuples_sk_op_.hd_result_]
+            [this, txm](AsyncOp<Void> &async_op)
         {
+            CcHandlerResult<Void> &hd_res = async_op.hd_result_;
             store::DataStoreHandler *const store_hd =
                 Sharder::Instance().GetLocalCcShards()->store_hd_;
             if (store_hd->ByPassDataStore())
@@ -933,13 +934,13 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             indexes_changed_within_round_ = false;
             ResetLeaderTerms();
             generate_sk_parallel_op_.Reset();
-            generate_sk_parallel_op_.op_func_ = [this, txm]()
+            generate_sk_parallel_op_.hd_result_.Value().Reset();
+            generate_sk_parallel_op_.op_func_ =
+                [this, txm](AsyncOp<GenerateSkParallelResult> &async_op)
             {
-                generate_sk_parallel_op_.worker_thread_ = std::thread(
-                    [this, txm]()
+                async_op.worker_thread_ = std::thread(
+                    [this, txm, &hd_res = async_op.hd_result_]()
                     {
-                        auto &hd_res = generate_sk_parallel_op_.hd_result_;
-                        hd_res.Reset();
 #ifdef EXT_TX_PROC_ENABLED
                         hd_res.SetToBlock();
 #endif
@@ -994,13 +995,13 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             indexes_changed_within_round_ = false;
             ResetLeaderTerms();
             generate_sk_parallel_op_.Reset();
-            generate_sk_parallel_op_.op_func_ = [this, txm]()
+            generate_sk_parallel_op_.hd_result_.Value().Reset();
+            generate_sk_parallel_op_.op_func_ =
+                [this, txm](AsyncOp<GenerateSkParallelResult> &async_op)
             {
-                generate_sk_parallel_op_.worker_thread_ = std::thread(
-                    [this, txm]()
+                async_op.worker_thread_ = std::thread(
+                    [this, txm, &hd_res = async_op.hd_result_]()
                     {
-                        auto &hd_res = generate_sk_parallel_op_.hd_result_;
-                        hd_res.Reset();
 #ifdef EXT_TX_PROC_ENABLED
                         hd_res.SetToBlock();
 #endif
@@ -1652,6 +1653,9 @@ void UpsertTableIndexOp::FillPrepareDataLogRequest(TransactionExecution *txm)
 
     ::txlog::SchemaOpMessage *prepare_data_msg =
         prepare_data_log_rec->mutable_log_content()->mutable_schema_log();
+    prepare_data_msg->set_table_name_str(table_key_.Name().String());
+    prepare_data_msg->set_table_type(
+        ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
     prepare_data_msg->set_stage(::txlog::SchemaOpMessage_Stage_PrepareData);
 
     if (last_finished_end_key_.Type() == KeyType::PositiveInf)

@@ -56,6 +56,8 @@ constexpr Void void_ = Void();
 // @brief OperationType contain SQL DML and SQL DDL.
 enum class OperationType
 {
+    // Update is mainly used in DML. When used in DDL, it represents logically
+    // alter a table, e.g change a singlekey index to multikey index.
     Update = 1,
     Delete,
     Insert,
@@ -163,9 +165,7 @@ struct TableName
     TableName() = delete;
     TableName &operator=(const TableName &) = delete;
 
-    explicit TableName(std::string_view name_view,
-                       TableType type,
-                       TableEngine engine)
+    TableName(std::string_view name_view, TableType type, TableEngine engine)
         : name_view_(name_view),
           own_string_(false),
           type_(type),
@@ -173,10 +173,10 @@ struct TableName
     {
     }
 
-    explicit TableName(const char *name_ptr,
-                       size_t name_len,
-                       TableType type,
-                       TableEngine engine)
+    TableName(const char *name_ptr,
+              size_t name_len,
+              TableType type,
+              TableEngine engine)
         : name_str_(name_ptr, name_len),
           own_string_(true),
           type_(type),
@@ -184,16 +184,7 @@ struct TableName
     {
     }
 
-    explicit TableName(const std::string &name_str,
-                       TableType type,
-                       TableEngine engine)
-        : name_str_(name_str), own_string_(true), type_(type), engine_(engine)
-    {
-    }
-
-    explicit TableName(std::string &&name_str,
-                       TableType type,
-                       TableEngine engine)
+    TableName(std::string name_str, TableType type, TableEngine engine)
         : name_str_(std::move(name_str)),
           own_string_(true),
           type_(type),
@@ -212,7 +203,7 @@ struct TableName
 
     // TableName needs to be MoveInsertable in case like
     // std::vector<txservice::TableName>
-    TableName(TableName &&rhs)
+    TableName(TableName &&rhs) noexcept
     {
         if (rhs.own_string_)
         {
@@ -224,10 +215,11 @@ struct TableName
         }
         type_ = rhs.type_;
         own_string_ = rhs.own_string_;
+        rhs.own_string_ = false;
         engine_ = rhs.engine_;
     }
 
-    TableName &operator=(TableName &&rhs)
+    TableName &operator=(TableName &&rhs) noexcept
     {
         if (this == &rhs)
         {
@@ -257,6 +249,7 @@ struct TableName
 
         type_ = rhs.type_;
         own_string_ = rhs.own_string_;
+        rhs.own_string_ = false;
         engine_ = rhs.engine_;
         return *this;
     }
@@ -422,9 +415,7 @@ struct TableName
 
     bool IsMeta() const
     {
-        return type_ == TableType::RangeBucket || type_ == TableType::Catalog ||
-               type_ == TableType::RangePartition ||
-               type_ == TableType::ClusterConfig;
+        return TableName::IsMeta(type_);
     }
 
     static bool IsMeta(TableType type)
@@ -553,26 +544,19 @@ enum class PostWriteType
     UpdateDirty,
 };
 
-inline static std::string_view empty_sv{"__empty"};
-inline static std::string_view catalog_ccm_name_sv{"__catalog"};
-inline static std::string_view redis_table_name_sv{"redis_table"};
-inline static std::string_view range_bucket_ccm_name_sv{"__range_bucekt"};
-inline static std::string_view cluster_config_ccm_name_sv{"__cluster_config"};
+constexpr static std::string_view empty_sv{"__empty"};
+constexpr static std::string_view catalog_ccm_name_sv{"__catalog"};
+constexpr static std::string_view redis_table_name_sv{"redis_table"};
+constexpr static std::string_view range_bucket_ccm_name_sv{"__range_bucekt"};
+constexpr static std::string_view cluster_config_ccm_name_sv{
+    "__cluster_config"};
 
-inline static TableName catalog_ccm_name{catalog_ccm_name_sv.data(),
-                                         catalog_ccm_name_sv.size(),
-                                         TableType::Catalog,
-                                         TableEngine::None};
-
-inline static TableName range_bucket_ccm_name{range_bucket_ccm_name_sv.data(),
-                                              range_bucket_ccm_name_sv.size(),
-                                              TableType::RangeBucket,
-                                              TableEngine::None};
+inline static TableName catalog_ccm_name{
+    catalog_ccm_name_sv, TableType::Catalog, TableEngine::None};
+inline static TableName range_bucket_ccm_name{
+    range_bucket_ccm_name_sv, TableType::RangeBucket, TableEngine::None};
 inline static TableName cluster_config_ccm_name{
-    cluster_config_ccm_name_sv.data(),
-    cluster_config_ccm_name_sv.size(),
-    TableType::ClusterConfig,
-    TableEngine::None};
+    cluster_config_ccm_name_sv, TableType::ClusterConfig, TableEngine::None};
 
 #ifdef ON_KEY_OBJECT
 // Set buckets count to be the same as the slots count. (16384)

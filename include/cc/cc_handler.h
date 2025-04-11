@@ -458,7 +458,7 @@ public:
         const TableSchema *old_schema,
         const TableSchema *schema,
         OperationType op_type,
-        uint64_t commit_ts,
+        uint64_t write_time,
         NodeGroupId ng_id,
         int64_t tx_term,
         CcHandlerResult<Void> &hres,

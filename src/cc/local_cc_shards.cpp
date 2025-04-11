@@ -483,29 +483,6 @@ void LocalCcShards::UpdateDirtyCatalog(const TableName &table_name,
         catalog_entry->dirty_schema_version_);
 }
 
-void LocalCcShards::CommitDirtyCatalog(const TableName &table_name,
-                                       NodeGroupId cc_ng_id)
-{
-    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
-
-    auto ng_catalog_it = table_catalogs_.find(table_name);
-    if (ng_catalog_it == table_catalogs_.end())
-    {
-        return;
-    }
-
-    auto catalog_it = ng_catalog_it->second.find(cc_ng_id);
-    if (catalog_it == ng_catalog_it->second.end())
-    {
-        return;
-    }
-
-    CatalogEntry &catalog_entry = catalog_it->second;
-    catalog_entry.CommitDirtySchema();
-
-    return;
-}
-
 CatalogEntry *LocalCcShards::GetCatalog(const TableName &table_name,
                                         NodeGroupId cc_ng_id)
 {

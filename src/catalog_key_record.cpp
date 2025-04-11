@@ -23,7 +23,7 @@
 
 #include <butil/logging.h>
 
-#include "data_sync_task.h"
+#include <memory>
 
 namespace txservice
 {
@@ -44,7 +44,7 @@ CatalogKey::CatalogKey(const TableName &name)
     assert(table_name_.Type() == TableType::Primary);
 }
 
-CatalogKey::CatalogKey(CatalogKey &&rhs)
+CatalogKey::CatalogKey(CatalogKey &&rhs) noexcept
     : table_name_(std::move(rhs.table_name_))
 {
 }
@@ -235,7 +235,7 @@ TableName &CatalogKey::Name()
     return table_name_;
 }
 
-CatalogRecord::CatalogRecord(CatalogRecord &&rhs)
+CatalogRecord::CatalogRecord(CatalogRecord &&rhs) noexcept
     : schema_(rhs.schema_),
       dirty_schema_(rhs.dirty_schema_),
       schema_ts_(rhs.schema_ts_),
@@ -383,7 +383,7 @@ const TableSchema *CatalogRecord::Schema() const
     return schema_.get();
 }
 
-std::shared_ptr<const TableSchema> CatalogRecord::CopySchema()
+std::shared_ptr<const TableSchema> CatalogRecord::CopySchema() const
 {
     return schema_;
 }
@@ -393,7 +393,7 @@ const TableSchema *CatalogRecord::DirtySchema() const
     return dirty_schema_.get();
 }
 
-std::shared_ptr<const TableSchema> CatalogRecord::CopyDirtySchema()
+std::shared_ptr<const TableSchema> CatalogRecord::CopyDirtySchema() const
 {
     return dirty_schema_;
 }
@@ -433,7 +433,7 @@ CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)
     return *this;
 }
 
-CatalogRecord &CatalogRecord::operator=(CatalogRecord &&rhs)
+CatalogRecord &CatalogRecord::operator=(CatalogRecord &&rhs) noexcept
 {
     if (this == &rhs)
     {

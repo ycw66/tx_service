@@ -422,6 +422,7 @@ public:
         case PostWriteType::UpdateDirty:
         {
             assert(req.OpType() == OperationType::AddIndex);
+            assert(req.CommitTs() != TransactionOperation::tx_op_failed_ts_);
             if (shard_->core_id_ == 0)
             {
                 // For update dirty, retrieves the current and dirty schema pair
@@ -478,13 +479,27 @@ public:
         }
         case PostWriteType::PostCommit:
         {
-            catalog_entry =
-                shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
-            if (catalog_entry == nullptr)
+            if (shard_->core_id_ == 0)
             {
-                req.Result()->SetFinished();
-                req.SetDecodedPayload(nullptr);
-                return true;
+                // Try creating a dirty catalog when recovery.
+                //
+                // 2-PC transaction create dirty catalog before write commit
+                // log, whereas 1-PC transaction create dirty catalog after
+                // write commit log. e.g DML trigger DDL. DsUpsertTableOp
+                // depends on the created dirty table schema to flush catalog
+                // image. Once the 1-PC transaction coordinator crashed after
+                // write commit log, participants might haven't create the dirty
+                // catalog yet.
+                catalog_entry =
+                    shard_->CreateDirtyCatalog(table_key->Name(),
+                                               req.NodeGroupId(),
+                                               schema_rec->DirtySchemaImage(),
+                                               req.CommitTs());
+            }
+            else
+            {
+                catalog_entry =
+                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
             }
 
             if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
@@ -886,7 +901,8 @@ public:
                              catalog_entry->dirty_schema_version_,
                              cce_ptr->GetKeyLock());
         }
-        else if (req.CommitType() == PostWriteType::PrepareCommit &&
+        else if ((req.CommitType() == PostWriteType::PrepareCommit ||
+                  req.CommitType() == PostWriteType::UpdateDirty) &&
                  catalog_entry->dirty_schema_version_ > 0)
         {
             // Prepare commit. For certain schema operations, e.g., create
@@ -916,8 +932,12 @@ public:
                     {
                         // In this step, just create cc map for new sk.
                         // We will update current sk ccmap in PostCommit.
-                        shard_->CreateOrUpdateSkCcMap(
-                            new_index_name, new_schema, req.NodeGroupId());
+                        bool is_create =
+                            req.CommitType() == PostWriteType::PrepareCommit;
+                        shard_->CreateOrUpdateSkCcMap(new_index_name,
+                                                      new_schema,
+                                                      req.NodeGroupId(),
+                                                      is_create);
 
                         // New sk range cc map should use the dirty schema
                         const TableName new_index_range_name{
@@ -928,45 +948,11 @@ public:
                             new_index_range_name,
                             new_schema,
                             req.NodeGroupId(),
-                            catalog_entry->dirty_schema_version_);
+                            catalog_entry->dirty_schema_version_,
+                            is_create);
                     }
                 }
             }
-        }
-        else if (req.CommitType() == PostWriteType::UpdateDirty)
-        {
-            assert(req.OpType() == OperationType::AddIndex);
-            shard_->CreateOrUpdatePkCcMap(
-                table_key->Name(), new_schema, req.NodeGroupId(), false);
-            std::vector<TableName> new_index_names = new_schema->IndexNames();
-            for (const TableName &new_index_name : new_index_names)
-            {
-                shard_->CreateOrUpdateSkCcMap(
-                    new_index_name, new_schema, req.NodeGroupId(), false);
-            }
-#ifdef RANGE_PARTITION_ENABLED
-            TableName base_range_table_name{table_key->Name().StringView(),
-                                            TableType::RangePartition,
-                                            table_key->Name().Engine()};
-            shard_->CreateOrUpdateRangeCcMap(
-                base_range_table_name,
-                new_schema,
-                req.NodeGroupId(),
-                catalog_entry->dirty_schema_version_,
-                false);
-            for (const TableName &new_index_name : new_index_names)
-            {
-                TableName index_range_table_name{new_index_name.StringView(),
-                                                 TableType::RangePartition,
-                                                 new_index_name.Engine()};
-                shard_->CreateOrUpdateRangeCcMap(
-                    index_range_table_name,
-                    new_schema,
-                    req.NodeGroupId(),
-                    catalog_entry->dirty_schema_version_,
-                    false);
-            }
-#endif
         }
 
         if (req.CommitType() == PostWriteType::PostCommit &&
@@ -1000,7 +986,6 @@ public:
                 }
 #endif
             }
-
             else if (req.OpType() == OperationType::AddIndex ||
                      req.OpType() == OperationType::DropIndex)
             {
@@ -1029,8 +1014,7 @@ public:
                     }
                 }
             }
-
-            shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
+            catalog_entry->CommitDirtySchema();
         }
 
         return TemplateCcMap::Execute(req);

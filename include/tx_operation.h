@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -41,7 +42,6 @@
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
-#include "tx_service_metrics.h"
 #include "type.h"
 
 namespace txservice
@@ -384,16 +384,32 @@ struct UpdateTxnStatus : TransactionOperation
 
 struct PostProcessOp : TransactionOperation
 {
-    PostProcessOp(TransactionExecution *txm);
+    explicit PostProcessOp(TransactionExecution *txm);
     void Reset(size_t write_cnt,
                size_t data_read_cnt,
                size_t catalog_range_read_cnt,
+               size_t catalog_write_all_cnt,
+               bool cluster_config_rlocked,
                bool forward_to_update_txn_op);
     void Forward(TransactionExecution *txm) override;
 
+    CcHandlerResult<PostProcessResult> *stage_;
+
     bool forward_to_update_txn_op_{true};
+
+    // Release data read lock.
     CcHandlerResult<PostProcessResult> hd_result_;
+
+    // Release catalog/range read lock.
     CcHandlerResult<PostProcessResult> catalog_range_hd_result_;
+
+    // Release catalog all write lock (Alter table inside a DML transaction).
+    size_t catalog_write_all_cnt_{0};
+    CcHandlerResult<PostProcessResult> catalog_post_all_hd_result_;
+
+    // Release cluster config lock. AcquireAll/PostAcquireAll should be nested
+    // inside cluster config lock.
+    CcHandlerResult<PostProcessResult> cluster_config_hd_result_;
 };
 
 struct InitTxnOperation : TransactionOperation
@@ -558,7 +574,7 @@ struct AcquireAllOp : public TransactionOperation
     /**
      * @brief Get the max commit/validate ts of the all result
      */
-    uint64_t MaxTs();
+    uint64_t MaxTs() const;
 
     bool IsDeadlock() const;
 
@@ -592,6 +608,34 @@ struct PostWriteAllOp : public TransactionOperation
     std::vector<TxRecord *> recs_;
     OperationType op_type_{OperationType::Upsert};
     PostWriteType write_type_{PostWriteType::PrepareCommit};
+};
+
+/**
+ * Used in DML commit context. Combine {lock cluster, acquire all intent,
+ * acquire all lock} together.
+ *
+ * Here acquire all intent serves two purposes: 1) Prevent dead lock on single
+ * catalog key; 2) Prepare for post all intent. Post all intent is used to build
+ * TableSchema object.
+ */
+struct CatalogAcquireAllOp : public TransactionOperation
+{
+    explicit CatalogAcquireAllOp(TransactionExecution *txm);
+    void Reset();
+    void SetCatalogWriteSet(const std::map<TxKey, ReplicaWriteSetEntry> &wset);
+    uint64_t MaxTs() const;
+    void Forward(TransactionExecution *txm) override;
+
+    bool succeed_;
+    TransactionOperation *op_;
+
+    ReadLocalOperation lock_cluster_config_op_;
+    AcquireAllOp acquire_all_intent_op_;
+    AcquireAllOp acquire_all_lock_op_;
+
+private:
+    CcHandlerResult<ReadKeyResult> read_cluster_result_;
+    ClusterConfigRecord cluster_conf_rec_;
 };
 
 struct KickoutDataOp : public TransactionOperation
@@ -670,8 +714,13 @@ struct AsyncOp : public TransactionOperation
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
-    std::function<void()> op_func_;
+    std::function<void(AsyncOp<ResultType> &async_op)> op_func_;
+
+    // hd_result_ represents the async result, and op_func_ should finish it
+    // after completes its work.
     CcHandlerResult<ResultType> hd_result_;
+
+    // An optional executor.
     std::thread worker_thread_;
 };
 
@@ -813,6 +862,32 @@ private:
     // Due to term or other error, called ForceToFinish to terminate this
     // operation
     bool is_force_finished;
+};
+
+/**
+ * Used in DML commit context to flush updated schema images to storage, and
+ * clean schema log. Its function is similar to Checkpoint. However, since there
+ * is not a periodic retry thread, the commit thread should **keep retry** until
+ * succeed or leader changed.
+ */
+struct FlushUpdateTableOp : public TransactionOperation
+{
+    explicit FlushUpdateTableOp(TransactionExecution *txm);
+
+    void Reset();
+    void Forward(TransactionExecution *txm) override;
+
+    TransactionOperation *op_;
+
+    // Build and install dirty table schemas. Unlike pure DDL transaction (2-PC)
+    // which post all intent before write commit log, the DML transaction (1-PC)
+    // post all intent after write commit log. Thus, when recovery from commit
+    // log stage, the post all lock stage shoud try creating dirty catalogs.
+    PostWriteAllOp post_all_intent_op_;
+
+    AsyncOp<Void> update_kv_table_op_;
+
+    WriteToLogOp clean_log_op_;
 };
 
 struct SleepOperation : TransactionOperation

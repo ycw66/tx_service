@@ -543,7 +543,7 @@ struct PostProcessResult
 {
     PostProcessResult() = default;
 
-    PostProcessResult(PostProcessResult &&rhs)
+    PostProcessResult(PostProcessResult &&rhs) noexcept
         : conflicting_tx_cnt_(
               rhs.conflicting_tx_cnt_.load(std::memory_order_relaxed))
     {

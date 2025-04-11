@@ -27,15 +27,16 @@
 #include <condition_variable>
 #include <cstdint>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "cc/cc_handler_result.h"
 #include "cc_handler.h"
 #include "cc_map.h"
-#include "cc_req_misc.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
@@ -1111,20 +1112,27 @@ void InitTxnOperation::Forward(TransactionExecution *txm)
 }
 
 PostProcessOp::PostProcessOp(TransactionExecution *txm)
-    : hd_result_(txm), catalog_range_hd_result_(txm)
+    : stage_(&hd_result_),
+      hd_result_(txm),
+      catalog_range_hd_result_(txm),
+      catalog_post_all_hd_result_(txm),
+      cluster_config_hd_result_(txm)
 {
 }
 
 void PostProcessOp::Reset(size_t write_cnt,
                           size_t data_read_cnt,
                           size_t catalog_range_read_cnt,
+                          size_t catalog_write_all_cnt,
+                          bool cluster_config_rlocked,
                           bool forward_to_update_txn_op)
 {
+    stage_ = &hd_result_;
+
     forward_to_update_txn_op_ = forward_to_update_txn_op;
 
     hd_result_.Reset();
     hd_result_.Value().Clear();
-
     if (write_cnt + data_read_cnt == 0)
     {
         hd_result_.SetFinished();
@@ -1136,7 +1144,6 @@ void PostProcessOp::Reset(size_t write_cnt,
 
     catalog_range_hd_result_.Reset();
     catalog_range_hd_result_.Value().Clear();
-
     if (catalog_range_read_cnt == 0)
     {
         catalog_range_hd_result_.SetFinished();
@@ -1145,47 +1152,132 @@ void PostProcessOp::Reset(size_t write_cnt,
     {
         catalog_range_hd_result_.SetRefCnt(catalog_range_read_cnt);
     }
+
+    catalog_write_all_cnt_ = catalog_write_all_cnt;
+    catalog_post_all_hd_result_.Reset();
+    catalog_post_all_hd_result_.Value().Clear();
+    if (catalog_write_all_cnt == 0)
+    {
+        catalog_post_all_hd_result_.SetFinished();
+    }
+    else
+    {
+        catalog_post_all_hd_result_.SetRefCnt(catalog_write_all_cnt);
+    }
+
+    cluster_config_hd_result_.Reset();
+    cluster_config_hd_result_.Value().Clear();
+    if (!cluster_config_rlocked)
+    {
+        cluster_config_hd_result_.SetFinished();
+    }
+
     op_start_ = metrics::TimePoint::max();
 }
 
 void PostProcessOp::Forward(TransactionExecution *txm)
 {
-    if (hd_result_.IsFinished())
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (stage_ == &hd_result_)
+    {
+        if (hd_result_.IsFinished())
+        {
+            stage_ = &catalog_range_hd_result_;
+            if (catalog_range_hd_result_.IsFinished())
+            {
+                Forward(txm);  // Immediately Forward.
+            }
+            else
+            {
+                txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
+            }
+        }
+        else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut() &&
+                 hd_result_.SetResultByTimeoutThread())
+        {
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                stage_ = &catalog_range_hd_result_;
+                if (catalog_range_hd_result_.IsFinished())
+                {
+                    Forward(txm);  // Immediately Forward.
+                }
+                else
+                {
+                    txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
+                }
+            }
+        }
+    }
+    else if (stage_ == &catalog_range_hd_result_)
     {
         if (catalog_range_hd_result_.IsFinished())
         {
-            txm->PostProcess(*this);
-        }
-        else if (!is_running_)
-        {
-            is_running_ = true;
-            txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
-        }
-    }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut() &&
-             hd_result_.SetResultByTimeoutThread())
-    {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
-            "Forward.IsTimeout",
-            txm,
-            [txm]() -> std::string
+            stage_ = &catalog_post_all_hd_result_;
+            if (catalog_post_all_hd_result_.IsFinished())
             {
-                return std::string(",\"tx_number\":")
-                    .append(std::to_string(txm->TxNumber()))
-                    .append(",\"term\":")
-                    .append(std::to_string(txm->TxTerm()));
-            });
-
-        bool force_error = hd_result_.ForceError();
-        if (force_error)
-        {
-            if (!catalog_range_hd_result_.IsFinished())
-            {
-                is_running_ = true;
-                txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
+                Forward(txm);  // Immediately Forward.
             }
             else
+            {
+                txm->ReleaseCatalogWriteAll(catalog_post_all_hd_result_);
+            }
+        }
+    }
+    else if (stage_ == &catalog_post_all_hd_result_)
+    {
+        if (catalog_post_all_hd_result_.IsFinished())
+        {
+            stage_ = &cluster_config_hd_result_;
+            if (cluster_config_hd_result_.IsFinished())
+            {
+                txm->PostProcess(*this);  // Immediately PostProcess.
+            }
+            else
+            {
+                txm->ReleaseClusterConfigRLock(cluster_config_hd_result_);
+            }
+        }
+        else if (catalog_post_all_hd_result_.LocalRefCnt() == 0 &&
+                 txm->IsTimeOut() &&
+                 catalog_post_all_hd_result_.SetResultByTimeoutThread())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                // The orphan lock recovery mechanism doesn't handle catalog
+                // orphan wlock. It depends on the coordinator to guarantee
+                // release catalog wlock.
+                catalog_post_all_hd_result_.Reset();
+                catalog_post_all_hd_result_.SetRefCnt(catalog_write_all_cnt_);
+                txm->ReleaseCatalogWriteAll(catalog_post_all_hd_result_);
+            }
+            else
+            {
+                bool force_error = catalog_post_all_hd_result_.ForceError();
+                if (force_error)
+                {
+                    txm->PostProcess(*this);  // Immediately PostProcess.
+                }
+            }
+        }
+    }
+    else
+    {
+        assert(stage_ == &cluster_config_hd_result_);
+        if (cluster_config_hd_result_.IsFinished())
+        {
+            txm->PostProcess(*this);
+        }
+        else if (cluster_config_hd_result_.IsError())
+        {
+            bool force_error = cluster_config_hd_result_.ForceError();
+            if (force_error)
             {
                 txm->PostProcess(*this);
             }
@@ -1923,7 +2015,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
     }
 }
 
-uint64_t AcquireAllOp::MaxTs()
+uint64_t AcquireAllOp::MaxTs() const
 {
     uint64_t max_ts = 0;
     for (size_t idx = 0; idx < upload_cnt_; ++idx)
@@ -2017,6 +2109,119 @@ bool PostWriteAllOp::IsFailed()
 {
     assert(hd_result_.IsFinished());
     return hd_result_.IsError();
+}
+
+CatalogAcquireAllOp::CatalogAcquireAllOp(TransactionExecution *txm)
+    : succeed_(false),
+      op_(nullptr),
+      lock_cluster_config_op_(),
+      acquire_all_intent_op_(txm),
+      acquire_all_lock_op_(txm),
+      read_cluster_result_(txm),
+      cluster_conf_rec_()
+{
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
+    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+
+    acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
+    acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
+
+    acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
+    acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
+}
+
+void CatalogAcquireAllOp::Reset()
+{
+    succeed_ = false;
+    op_ = nullptr;
+
+    read_cluster_result_.Reset();
+
+    acquire_all_intent_op_.Reset(0);
+    acquire_all_intent_op_.keys_.clear();
+
+    acquire_all_lock_op_.Reset(0);
+    acquire_all_lock_op_.keys_.clear();
+}
+
+void CatalogAcquireAllOp::SetCatalogWriteSet(
+    const std::map<TxKey, ReplicaWriteSetEntry> &wset)
+{
+    acquire_all_intent_op_.keys_.reserve(wset.size());
+    acquire_all_lock_op_.keys_.reserve(wset.size());
+    for (const auto &[write_key, write_entry] : wset)
+    {
+        acquire_all_intent_op_.keys_.push_back(write_key.GetShallowCopy());
+        acquire_all_lock_op_.keys_.push_back(write_key.GetShallowCopy());
+    }
+}
+
+uint64_t CatalogAcquireAllOp::MaxTs() const
+{
+    return acquire_all_lock_op_.MaxTs();
+}
+
+void CatalogAcquireAllOp::Forward(TransactionExecution *txm)
+{
+    if (op_ == nullptr)
+    {
+        op_ = &lock_cluster_config_op_;
+        txm->PushOperation(&lock_cluster_config_op_);
+        txm->Process(lock_cluster_config_op_);
+    }
+    else if (op_ == &lock_cluster_config_op_)
+    {
+        if (lock_cluster_config_op_.hd_result_->IsError())
+        {
+            LOG(ERROR) << "Upsert table read cluster config failed, tx_number:"
+                       << txm->TxNumber();
+            txm->PostProcess(*this);
+        }
+        else
+        {
+            op_ = &acquire_all_intent_op_;
+            txm->PushOperation(&acquire_all_intent_op_);
+            txm->Process(acquire_all_intent_op_);
+        }
+    }
+    else if (op_ == &acquire_all_intent_op_)
+    {
+        if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
+            0)
+        {
+            LOG(ERROR) << "Upsert table acquire write intent failed, tx_number:"
+                       << txm->TxNumber();
+            txm->PostProcess(*this);
+        }
+        else
+        {
+            op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
+            txm->Process(acquire_all_lock_op_);
+        }
+    }
+    else
+    {
+        assert(op_ == &acquire_all_lock_op_);
+        if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_relaxed) > 0)
+        {
+            LOG(ERROR) << "Upsert table schema transaction failed to "
+                          "acquire write lock, tx_number:"
+                       << txm->TxNumber();
+            txm->PostProcess(*this);
+        }
+        else
+        {
+            succeed_ = true;
+            txm->PostProcess(*this);
+        }
+    }
 }
 
 DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
@@ -2135,6 +2340,9 @@ void SchemaOp::FillCommitLogRequestCommon(TransactionExecution *txm,
     ::txlog::SchemaOpMessage *commit_schema_msg =
         commit_log_rec->mutable_log_content()->mutable_schema_log();
 
+    commit_schema_msg->set_table_name_str(table_key_.Name().String());
+    commit_schema_msg->set_table_type(
+        ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
     commit_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CommitSchema);
 
     // The prepare log keeps all cc nodes' terms and match them in the log
@@ -2166,6 +2374,9 @@ void SchemaOp::FillCleanLogRequestCommon(TransactionExecution *txm,
     ::txlog::SchemaOpMessage *clean_schema_msg =
         clean_log_rec->mutable_log_content()->mutable_schema_log();
 
+    clean_schema_msg->set_table_name_str(table_key_.Name().String());
+    clean_schema_msg->set_table_type(
+        ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
     clean_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CleanSchema);
     clean_log_rec->mutable_node_terms()->clear();
 }
@@ -2273,8 +2484,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
         if (prepare_log_op_.hd_result_.IsFinished())
         {
-            assert(op_type_ == OperationType::CreateTable ||
-                   op_type_ == OperationType::Update);
+            assert(op_type_ == OperationType::CreateTable);
             op_ = &acquire_all_lock_op_;
             txm->PushOperation(&acquire_all_lock_op_);
             txm->Process(acquire_all_lock_op_);
@@ -2452,11 +2662,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
         }
         else if (op_type_ == OperationType::DropTable ||
-                 op_type_ == OperationType::TruncateTable)
+                 op_type_ == OperationType::TruncateTable ||
+                 op_type_ == OperationType::Update)
         {
-            // For DROP TABLE and TRUNCATE TABLE operations, the data store
-            // operation of deleting the k-v table happens after the commit log
-            // is flushed.
+            // For DROP TABLE, TRUNCATE TABLE and LOGICAL UPDATE TABLE
+            // operations, the data store operation(e.g. deleting the k-v table)
+            // happens after the commit log is flushed.
             op_ = &acquire_all_lock_op_;
             txm->PushOperation(&acquire_all_lock_op_);
             DLOG(INFO) << "txn: " << txm->TxNumber()
@@ -2482,7 +2693,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     else if (op_ == &unlock_cluster_config_op_)
     {
         assert(op_type_ == OperationType::CreateTable ||
-               op_type_ == OperationType::Update ||
                op_type_ == OperationType::TruncateTable);
         if (unlock_cluster_config_op_.hd_result_.IsError())
         {
@@ -2513,9 +2723,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
-                // Keep retrying if it is DropTable or TruncateTable.
+                // Keep retrying if it is DropTable, TruncateTable and logically
+                // Update.
                 if (op_type_ == OperationType::DropTable ||
-                    op_type_ == OperationType::TruncateTable)
+                    op_type_ == OperationType::TruncateTable ||
+                    op_type_ == OperationType::Update)
                 {
                     txm->PushOperation(&upsert_kv_table_op_);
                     DLOG(INFO) << "txn: " << txm->TxNumber()
@@ -2595,6 +2807,16 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             DLOG(INFO) << "txn: " << txm->TxNumber()
                        << " process clean_ccm_op_";
             txm->Process(clean_ccm_op_);
+        }
+        else if (op_type_ == OperationType::Update)
+        {
+            // For logically UPDATE TABLE, the data store operation happens
+            // after all write locks are acquired and commit log is flushed.
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process post_all_lock_op_";
+            txm->Process(post_all_lock_op_);
         }
         else if (op_type_ == OperationType::CreateTable &&
                  catalog_rec_.DirtySchema()->HasAutoIncrement())
@@ -2676,8 +2898,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            assert(op_type_ == OperationType::CreateTable ||
-                   op_type_ == OperationType::Update);
+            assert(op_type_ == OperationType::CreateTable);
             op_ = &lock_cluster_config_op_;
             txm->PushOperation(&lock_cluster_config_op_);
             txm->Process(lock_cluster_config_op_);
@@ -2723,11 +2944,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             const TxKey &tx_key = write_entry_it->first;
 
             reset_sequence_record_op_.op_func_ =
-                [txm,
-                 seq_table_name,
-                 &tx_key,
-                 &write_entry,
-                 &hd_res = reset_sequence_record_op_.hd_result_]
+                [txm, seq_table_name, &tx_key, &write_entry](
+                    AsyncOp<PostProcessResult> &async_op)
             {
                 txm->cc_handler_->UploadRecord(
                     txm->tx_number_.load(std::memory_order_relaxed),
@@ -2739,7 +2957,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     write_entry.rec_.get(),
                     write_entry.op_,
                     write_entry.key_shard_code_,
-                    hd_res);
+                    async_op.hd_result_);
             };
 
             op_ = &reset_sequence_record_op_;
@@ -2772,7 +2990,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         // Remove the record for sequence table from write set.
         const TableName *seq_table_name =
             catalog_rec_.DirtySchema()->GetSequenceTableName();
-        txm->rw_set_.ClearTable(*seq_table_name);
+        txm->rw_set_.ClearWriteSet(*seq_table_name);
 
         op_ = &lock_cluster_config_op_;
         txm->PushOperation(&lock_cluster_config_op_);
@@ -2854,7 +3072,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         else
         {
             if (op_type_ == OperationType::DropTable ||
-                op_type_ == OperationType::TruncateTable)
+                op_type_ == OperationType::TruncateTable ||
+                op_type_ == OperationType::Update)
             {
                 // `clean_ccm_op` will notify each node group leader performs
                 // `UpsertTable` and `KickoutData` independently for rocksdb.
@@ -2885,6 +3104,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 }
                 else
                 {
+                    ACTION_FAULT_INJECTOR("upsert_table_post_all_lock");
                     op_ = &upsert_kv_table_op_;
                     upsert_kv_table_op_.table_schema_old_ =
                         catalog_rec_.Schema();
@@ -2939,7 +3159,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         clean_ccm_op_.Clear();
 
         // Clear write set before commit dirty schema.
-        txm->rw_set_.ClearTable(table_key_.Name());
+        txm->rw_set_.ClearWriteSet(table_key_.Name());
         txm->rw_set_.ClearReadSet(table_key_.Name());
 
         // Update catalog record to the latest schema.
@@ -3009,7 +3229,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // this step to reject dirty schema and remove write locks.
             txm->PushOperation(&post_all_lock_op_);
             DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process post_all_lock_op_";
+                       << " process post_all_lock_op_, "
+                       << post_all_lock_op_.hd_result_.ErrorMsg();
             txm->Process(post_all_lock_op_);
             return;
         }
@@ -3241,6 +3462,152 @@ void UpsertTableOp::ForceToFinish(TransactionExecution *txm)
     op_ = &clean_log_op_;
     is_force_finished = true;
     Forward(txm);
+}
+
+FlushUpdateTableOp::FlushUpdateTableOp(TransactionExecution *txm)
+    : op_(nullptr),
+      post_all_intent_op_(txm),
+      update_kv_table_op_(txm),
+      clean_log_op_(txm)
+{
+    post_all_intent_op_.table_name_ = &catalog_ccm_name;
+    post_all_intent_op_.op_type_ = OperationType::Update;
+    post_all_intent_op_.write_type_ = PostWriteType::PrepareCommit;
+
+    update_kv_table_op_.op_func_ = [txm](AsyncOp<Void> &async_op)
+    {
+        CcHandlerResult<Void> &hd_res = async_op.hd_result_;
+        hd_res.SetRefCnt(txm->rw_set_.CatalogWriteSetSize());
+        for (const auto &[write_key, write_entry] :
+             txm->rw_set_.CatalogWriteSet())
+        {
+            const CatalogRecord *catalog_rec =
+                static_cast<const CatalogRecord *>(write_entry.rec_.get());
+            assert(catalog_rec->DirtySchema());
+            txm->cc_handler_->DataStoreUpsertTable(catalog_rec->Schema(),
+                                                   catalog_rec->DirtySchema(),
+                                                   OperationType::Update,
+                                                   txm->CommitTs(),
+                                                   txm->TxCcNodeId(),
+                                                   txm->TxTerm(),
+                                                   hd_res,
+                                                   nullptr);
+        }
+    };
+}
+
+void FlushUpdateTableOp::Reset()
+{
+    op_ = nullptr;
+
+    post_all_intent_op_.Reset(0);
+    post_all_intent_op_.keys_.clear();
+    post_all_intent_op_.recs_.clear();
+
+    update_kv_table_op_.Reset();
+    clean_log_op_.Reset();
+}
+
+void FlushUpdateTableOp::Forward(TransactionExecution *txm)
+{
+    if (op_ == nullptr)
+    {
+        op_ = &post_all_intent_op_;
+        post_all_intent_op_.keys_.reserve(txm->rw_set_.CatalogWriteSetSize());
+        post_all_intent_op_.recs_.reserve(txm->rw_set_.CatalogWriteSetSize());
+        for (const auto &[write_key, write_entry] :
+             txm->rw_set_.CatalogWriteSet())
+        {
+            post_all_intent_op_.keys_.push_back(write_key.GetShallowCopy());
+            post_all_intent_op_.recs_.push_back(write_entry.rec_.get());
+        }
+        txm->PushOperation(&post_all_intent_op_);
+        txm->Process(post_all_intent_op_);
+    }
+    else if (op_ == &post_all_intent_op_)
+    {
+        if (post_all_intent_op_.IsFailed())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                txm->PushOperation(&post_all_intent_op_);
+                txm->Process(post_all_intent_op_);
+            }
+            else
+            {
+                LOG(ERROR) << "txm: " << txm->TxNumber()
+                           << " failed to post all intent. error: "
+                           << post_all_intent_op_.hd_result_.ErrorMsg();
+                Reset();
+                txm->state_stack_.clear();
+                txm->Abort();
+            }
+        }
+        else
+        {
+            op_ = &update_kv_table_op_;
+            txm->PushOperation(&update_kv_table_op_);
+            txm->Process(update_kv_table_op_);
+        }
+    }
+    else if (op_ == &update_kv_table_op_)
+    {
+        if (update_kv_table_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                txm->PushOperation(&update_kv_table_op_);
+                txm->Process(update_kv_table_op_);
+            }
+            else
+            {
+                LOG(ERROR) << "txm: " << txm->TxNumber()
+                           << " failed to update kv table. error: "
+                           << update_kv_table_op_.hd_result_.ErrorMsg();
+                Reset();
+                txm->state_stack_.clear();
+                txm->Abort();
+            }
+        }
+        else
+        {
+            txm->FillCleanCatalogsLogRequest(clean_log_op_);
+            op_ = &clean_log_op_;
+            txm->PushOperation(&clean_log_op_);
+            txm->Process(clean_log_op_);
+        }
+    }
+    else
+    {
+        assert(op_ == &clean_log_op_);
+        if (clean_log_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                // set retry flag and retry clean log
+                ::txlog::WriteLogRequest *log_req =
+                    clean_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&clean_log_op_);
+                DLOG(INFO) << "txn: " << txm->TxNumber()
+                           << " process clean_log_op_";
+                txm->Process(clean_log_op_);
+            }
+            else
+            {
+                Reset();
+                txm->state_stack_.clear();
+                txm->Abort();
+            }
+        }
+        else
+        {
+            Reset();
+            txm->state_stack_.pop_back();
+            assert(txm->state_stack_.back() == &txm->post_process_);
+        }
+    }
 }
 
 SleepOperation::SleepOperation(TransactionExecution *txm)
@@ -4027,9 +4394,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 [partition_id = range_info_->partition_id_,
                  &start_key = new_range_info_.front().first,
                  &table_name = table_name_,
-                 table_schema = table_schema_.get(),
-                 &hd_res = ds_clean_old_range_op_.hd_result_]
+                 table_schema = table_schema_.get()](AsyncOp<Void> &async_op)
             {
+                CcHandlerResult<Void> &hd_res = async_op.hd_result_;
+
                 TxWorkerPool *tx_worker_pool =
                     Sharder::Instance().GetTxWorkerPool();
                 store::DataStoreHandler *const store_hd =
@@ -4068,17 +4436,18 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             assert(prepare_log_op_.hd_result_.IsFinished());
 
             auto local_cc_shards = Sharder::Instance().GetLocalCcShards();
-            data_sync_op_.op_func_ =
-                [this,
-                 table_schema = table_schema_,
-                 txn = txm->TxNumber(),
-                 tx_term = txm->tx_term_,
-                 node_group = txm->TxCcNodeId(),
-                 ckpt_ts = txm->commit_ts_,
-                 &local_cc_shards = *local_cc_shards]() mutable
+            data_sync_op_.op_func_ = [this,
+                                      table_schema = table_schema_,
+                                      txn = txm->TxNumber(),
+                                      tx_term = txm->tx_term_,
+                                      node_group = txm->TxCcNodeId(),
+                                      ckpt_ts = txm->commit_ts_,
+                                      &local_cc_shards = *local_cc_shards](
+                                         AsyncOp<Void> &async_op) mutable
             {
+                CcHandlerResult<Void> &hd_res = async_op.hd_result_;
 #ifdef EXT_TX_PROC_ENABLED
-                data_sync_op_.hd_result_.SetToBlock();
+                hd_res.SetToBlock();
 #endif
                 // Enqueue DataSyncTask for subranges.
                 local_cc_shards.EnqueueDataSyncTaskForSplittingRange(
@@ -4090,7 +4459,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     ckpt_ts,
                     is_dirty_,
                     txn,
-                    &data_sync_op_.hd_result_);
+                    &hd_res);
             };
 
             LOG(INFO) << "Split Flush transaction data sync, range id "
@@ -4172,8 +4541,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 [this,
                  txm,
                  &old_end_key = old_end_key_,
-                 &new_ranges = new_range_info_,
-                 &hd_result = update_key_cache_op_.hd_result_]
+                 &new_ranges = new_range_info_](AsyncOp<Void> &async_op)
             {
                 NodeGroupId node_group = txm->TxCcNodeId();
                 int64_t tx_term = txm->TxTerm();
@@ -4201,6 +4569,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     }
                 }
 
+                CcHandlerResult<Void> &hd_result = async_op.hd_result_;
                 if (ranges.size() == 0)
                 {
                     hd_result.SetFinished();
@@ -4286,10 +4655,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         ds_upsert_range_op_.op_func_ =
             [&table_name = table_name_,
              range_info = std::move(splitted_range_info),
-             tx_ts = txm->commit_ts_,
-             &hd_res = ds_upsert_range_op_.hd_result_,
-             &worker = ds_upsert_range_op_.worker_thread_]
+             tx_ts = txm->commit_ts_](AsyncOp<Void> &async_op) mutable
         {
+            CcHandlerResult<Void> &hd_res = async_op.hd_result_;
 #ifdef EXT_TX_PROC_ENABLED
             hd_res.SetToBlock();
             // The memory fence ensures that the block flag is set before the
@@ -4298,8 +4666,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 #endif
             // Launch a new thread instead of sending it to workerpool to
             // avoid being blocked during write lock is held.
-            worker = std::thread(
-                [table_name, range_info = std::move(range_info), tx_ts, &hd_res]
+            async_op.worker_thread_ = std::thread(
+                [table_name,
+                 range_info = std::move(range_info),
+                 tx_ts,
+                 &hd_res]() mutable
                 {
                     store::DataStoreHandler *const store_hd =
                         Sharder::Instance().GetLocalCcShards()->store_hd_;
@@ -5844,12 +6215,10 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &notify_migration_op_);
         }
 #else
-        pub_buckets_migrate_begin_op_.op_func_ =
-            [&hd_res = pub_buckets_migrate_begin_op_.hd_result_,
-             &worker = pub_buckets_migrate_begin_op_.worker_thread_]
+        pub_buckets_migrate_begin_op_.op_func_ = [](AsyncOp<Void> &async_op)
         {
-            worker = std::thread(
-                [&hd_res]
+            async_op.worker_thread_ = std::thread(
+                [&hd_res = async_op.hd_result_]
                 {
                     bool result = true;
                     bool rpc_fail = false;
@@ -5984,12 +6353,10 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         // flush the new cluster config to kv storage
         flush_new_cluster_config_op_.op_func_ =
             [&ng_config = new_ng_config_,
-             version = txm->commit_ts_,
-             &hd_res = flush_new_cluster_config_op_.hd_result_,
-             &worker = flush_new_cluster_config_op_.worker_thread_]
+             version = txm->commit_ts_](AsyncOp<Void> &async_op)
         {
-            worker = std::thread(
-                [&ng_config, version, &hd_res]
+            async_op.worker_thread_ = std::thread(
+                [&ng_config, version, &hd_res = async_op.hd_result_]
                 {
                     store::DataStoreHandler *const store_hd =
                         Sharder::Instance().GetLocalCcShards()->store_hd_;
@@ -6086,12 +6453,10 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
 #else
             // Before writing clean log, we notify all nodes set
             // "LocalCcShards::buckets_migrating_" to false.
-            pub_buckets_migrate_end_op_.op_func_ =
-                [&hd_res = pub_buckets_migrate_end_op_.hd_result_,
-                 &worker = pub_buckets_migrate_end_op_.worker_thread_]
+            pub_buckets_migrate_end_op_.op_func_ = [](AsyncOp<Void> &async_op)
             {
-                worker = std::thread(
-                    [&hd_res]
+                async_op.worker_thread_ = std::thread(
+                    [&hd_res = async_op.hd_result_]
                     {
                         bool result = true;
                         bool rpc_fail = false;
@@ -6174,12 +6539,10 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             FillCleanLogRequest(txm);
             ForwardToSubOperation(txm, &clean_log_op_);
 #else
-            pub_buckets_migrate_end_op_.op_func_ =
-                [&hd_res = pub_buckets_migrate_end_op_.hd_result_,
-                 &worker = pub_buckets_migrate_end_op_.worker_thread_]
+            pub_buckets_migrate_end_op_.op_func_ = [](AsyncOp<Void> &async_op)
             {
-                worker = std::thread(
-                    [&hd_res]
+                async_op.worker_thread_ = std::thread(
+                    [&hd_res = async_op.hd_result_]
                     {
                         bool result = true;
                         bool rpc_fail = false;
@@ -7318,17 +7681,17 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         // Test drop table t1 concurrently. See eloq_test repo. table
         // name need to keep consistent
 
-        data_sync_op_.op_func_ = [this, txm]
+        data_sync_op_.op_func_ = [this, txm](AsyncOp<Void> &async_op)
         {
             LocalCcShards *shard = Sharder::Instance().GetLocalCcShards();
             shard->EnqueueDataSyncTaskForBucket(ranges_in_bucket_snapshot_,
                                                 txm->TxCcNodeId(),
                                                 txm->TxTerm(),
                                                 txm->CommitTs(),
-                                                &data_sync_op_.hd_result_);
+                                                &async_op.hd_result_);
         };
 #else
-        data_sync_op_.op_func_ = [this, txm]
+        data_sync_op_.op_func_ = [this, txm](AsyncOp<Void> &async_op)
         {
             LocalCcShards *shard = Sharder::Instance().GetLocalCcShards();
             shard->EnqueueDataSyncTaskForBucket(
@@ -7337,7 +7700,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 txm->TxCcNodeId(),
                 txm->TxTerm(),
                 txm->CommitTs(),
-                &data_sync_op_.hd_result_);
+                &async_op.hd_result_);
         };
 #endif
 

@@ -317,7 +317,27 @@ protected:
         CcProtocol protocol,
         uint64_t read_ts,
         bool is_covering_keys,
-        CcMap *ccm = nullptr);
+        CcMap *ccm = nullptr)
+    {
+        // deduce the lock type to acquire
+        LockType lock_type = LockTypeUtil::DeduceLockType(
+            cc_op, iso_level, protocol, is_covering_keys);
+
+        return AcquireCceKeyLock(cce,
+                                 commit_ts,
+                                 page,
+                                 cce_payload_status,
+                                 req,
+                                 ng_id,
+                                 ng_term,
+                                 tx_term,
+                                 lock_type,
+                                 cc_op,
+                                 iso_level,
+                                 protocol,
+                                 read_ts,
+                                 ccm);
+    }
 
     std::pair<LockType, CcErrorCode> AcquireCceKeyLock(
         LruEntry *cce,

@@ -29,7 +29,8 @@ namespace txlog
 class ToRemoteType
 {
 public:
-    static CcTableType ConvertTableType(txservice::TableType table_type)
+    static constexpr CcTableType ConvertTableType(
+        txservice::TableType table_type)
     {
         switch (table_type)
         {
@@ -37,10 +38,16 @@ public:
             return CcTableType::Primary;
         case txservice::TableType::Secondary:
             return CcTableType::Secondary;
+        case txservice::TableType::UniqueSecondary:
+            return CcTableType::UniqueSecondary;
         case txservice::TableType::Catalog:
             return CcTableType::Catalog;
         case txservice::TableType::RangePartition:
             return CcTableType::RangePartition;
+        case txservice::TableType::RangeBucket:
+            return CcTableType::RangeBucket;
+        case txservice::TableType::ClusterConfig:
+            return CcTableType::ClusterConfig;
         default:
             assert(false);
             return CcTableType::Primary;
@@ -69,7 +76,8 @@ public:
 class ToLocalType
 {
 public:
-    static txservice::TableType ConvertCcTableType(CcTableType table_type)
+    static constexpr txservice::TableType ConvertCcTableType(
+        CcTableType table_type)
     {
         switch (table_type)
         {
@@ -77,10 +85,17 @@ public:
             return txservice::TableType::Primary;
         case CcTableType::Secondary:
             return txservice::TableType::Secondary;
+        case CcTableType::UniqueSecondary:
+            return txservice::TableType::UniqueSecondary;
         case CcTableType::Catalog:
             return txservice::TableType::Catalog;
+        case CcTableType::RangeBucket:
+            return txservice::TableType::RangeBucket;
+        case CcTableType::ClusterConfig:
+            return txservice::TableType::ClusterConfig;
         default:
-            return txservice::TableType::RangePartition;
+            assert(false);
+            return txservice::TableType::Primary;
         }
     }
 

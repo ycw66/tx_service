@@ -599,8 +599,6 @@ public:
         uint64_t old_schema_ts,
         uint64_t dirty_schema_ts);
 
-    void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
-
     CatalogEntry *GetCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
     /**

@@ -142,13 +142,13 @@ public:
 
 struct TableKeySchemaTs
 {
-    TableKeySchemaTs(txservice::TableEngine table_engine)
+    explicit TableKeySchemaTs(TableEngine table_engine)
         : table_engine_(table_engine)
     {
     }
 
-    explicit TableKeySchemaTs(const std::string &key_schemas_ts_str,
-                              TableEngine table_engine)
+    TableKeySchemaTs(const std::string &key_schemas_ts_str,
+                     TableEngine table_engine)
     {
         table_engine_ = table_engine;
         std::stringstream ts_ss(key_schemas_ts_str);

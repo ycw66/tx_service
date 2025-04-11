@@ -1042,7 +1042,8 @@ public:
         size_t start_slice_idx = SearchSlice(*typed_key, true);
 
         typed_key = end_key.GetKey<KeyT>();
-        size_t end_slice_idx = SearchSlice(*typed_key, inclusive);
+        bool inclusive_slice = inclusive;
+        size_t end_slice_idx = SearchSlice(*typed_key, inclusive_slice);
 
         slice_vec.reserve(end_slice_idx - start_slice_idx + 1);
         for (size_t idx = start_slice_idx; idx <= end_slice_idx; ++idx)
@@ -1192,7 +1193,8 @@ public:
         // A shared lock on the range to prevent concurrent splitting or merging
         // of slices.
         std::shared_lock<std::shared_mutex> s_lk(mux_);
-        size_t slice_idx = SearchSlice(search_key, inclusive);
+        bool inclusive_slice = forward_pin || inclusive;
+        size_t slice_idx = SearchSlice(search_key, inclusive_slice);
         StoreSlice *slice = slices_[slice_idx].get();
         std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
 
@@ -1790,7 +1792,40 @@ private:
         const std::vector<std::unique_ptr<KeyT>> &slice_keys,
         const KeyT &search_key);
 
-    size_t SearchSlice(const KeyT &search_key, bool inclusive) const
+    // ------------|----------|----------|----------|----------|----------->
+    // -00/BK     K0         K1         K2         K3         K4       +00/EK
+    // [    S0    )[   S1    )[    S2   )[    S3   )[    S4   )[    S5     )
+    //
+    // Suppose there are SIX slices, with FIVE boundary keys. Also Ki is both
+    // slice[i]'s end_key and slice[i+1]'s start_key.
+    //
+    // - Case search_key is above K4, certainly lower_bound_idx = 5:
+    //   For scan [search_key, +00): return slice[5]
+    //   For scan (search_key, +00): return slice[5]
+    //   For scan (-00, search_key]: return slice[5]
+    //   For scan (-00, search_key): return slice[5]
+    //
+    // - Case search_key is between (K1, K2), certainly lower_bound_idx = 2:
+    //   For scan [search_key, +00): return slice[2]
+    //   For scan (search_key, +00): return slice[2]
+    //   For scan (-00, search_key]: return slice[2]
+    //   For scan (-00, search_key): return slice[2]
+    //
+    // - Case search_key is equal to K2, certainly lower_bound_idx = 2:
+    //   For scan [search_key, +00): return slice[3]
+    //   For scan (search_key, +00): return slice[3]
+    //   For scan (-00, search_key]: return slice[3]
+    //   For scan (-00, search_key): return slice[2] <<---- Special Case
+    //
+    //  From above analyze, the last case is special. For an index scan with
+    //  `where i < K2`, the method should return the slice just before the
+    //  located slice. The bool flag `inclusive_slice` is used to distinguish it
+    //  from common cases.
+    //
+    //  WARNING: the semantic of `inclusive_slice` is quite different from
+    //  inclusive scan, which is passed from ScanSliceCc.
+    //
+    size_t SearchSlice(const KeyT &search_key, bool inclusive_slice) const
     {
         size_t slice_idx = 0;
         size_t lower_bound_idx = LowerBound(boundary_keys_, search_key);
@@ -1799,34 +1834,15 @@ private:
         {
             // The search key is greater than or equal to the last slice's
             // starting key.
-
-            if (boundary_keys_.empty())
-            {
-                // The range contains a single slice. The slice ending with
-                // range_end_key_ is the slice [range_start_key,
-                // range_end_key_).
-                slice_idx = 0;
-            }
-            else if (*boundary_keys_.back() == search_key && !inclusive)
-            {
-                // The search key equals to the last boundary key and the
-                // inclusive flag is false, the containing slice is the second
-                // to last slice.
-                slice_idx = boundary_keys_.size() - 1;
-            }
-            else
-            {
-                // The search key falls into the slice [slice_key_.last,
-                // range_end_key_).
-                slice_idx = boundary_keys_.size();
-            }
+            slice_idx = lower_bound_idx;
         }
         else
         {
             // The search key equals to or is less than
             // slice_key_[lower_bound_idx].
 
-            if (*boundary_keys_[lower_bound_idx] == search_key && inclusive)
+            if (*boundary_keys_[lower_bound_idx] == search_key &&
+                inclusive_slice)
             {
                 // If the search key equals to slice_key_[lower_bound_idx], the
                 // containing slice is [lower_bound_idx, lower_bound_idx + 1),

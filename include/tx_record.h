@@ -22,7 +22,7 @@
 #pragma once
 
 #include <assert.h>
-#include <mimalloc.h>
+#include <mimalloc-2.1/mimalloc.h>
 
 #include <memory>
 #include <string>

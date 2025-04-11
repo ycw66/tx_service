@@ -320,7 +320,8 @@ public:
         obj_addr_ = obj_addr_ | 1;
     }
 
-    TxKey(TxKey &&rhs) : interface_(rhs.interface_), obj_addr_(rhs.obj_addr_)
+    TxKey(TxKey &&rhs) noexcept
+        : interface_(rhs.interface_), obj_addr_(rhs.obj_addr_)
     {
         // The ownership, if there is any, is transferred to this object. So,
         // the input's ownership bit is 0 thereafter.
@@ -342,7 +343,7 @@ public:
 
     TxKey &operator=(const TxKey &) = delete;
 
-    TxKey &operator=(TxKey &&rhs)
+    TxKey &operator=(TxKey &&rhs) noexcept
     {
         if (this == &rhs)
         {

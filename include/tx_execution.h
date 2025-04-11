@@ -237,6 +237,15 @@ public:
         start_ts_ = ts;
     }
 
+    /**
+     * @brief EloqDoc use data write_set size to decide whether it is inside a
+     * DML transaction.
+     */
+    size_t DataWriteSetSize() const
+    {
+        return rw_set_.WriteSetSize();
+    }
+
     TxProcessor *GetTxProcessor()
     {
         return tx_processor_;
@@ -327,6 +336,8 @@ private:
     void PostProcess(LockWriteBucketsOp &lock_write_ranges);
     void Process(AcquireWriteOperation &acquire_write);
     void PostProcess(AcquireWriteOperation &acquire_write);
+    void Process(CatalogAcquireAllOp &acquire_catalog_write);
+    void PostProcess(CatalogAcquireAllOp &acquire_catalog_write);
     void Process(SetCommitTsOperation &set_ts);
     void PostProcess(SetCommitTsOperation &set_ts);
     void Process(ValidateOperation &validate);
@@ -409,6 +420,7 @@ private:
     void Abort();
 
     bool FillDataLogRequest(WriteToLogOp &write_log);
+    bool FillCleanCatalogsLogRequest(WriteToLogOp &write_log);
 
     bool FillCommandLogRequest(WriteToLogOp &write_log);
 
@@ -416,6 +428,9 @@ private:
     void StartTiming();
 
     void ReleaseCatalogRangeLock(CcHandlerResult<PostProcessResult> &hd_result);
+    void ReleaseCatalogWriteAll(CcHandlerResult<PostProcessResult> &hd_result);
+    void ReleaseClusterConfigRLock(
+        CcHandlerResult<PostProcessResult> &hd_result);
     void DrainScanner(CcScanner *scanner, const TableName &table_name);
 
     static TxErrorCode ConvertCcError(CcErrorCode error);
@@ -659,11 +674,13 @@ private:
     CmdForwardAcquireWriteOp cmd_forward_write_;
 #endif
     AcquireWriteOperation acquire_write_;
+    CatalogAcquireAllOp catalog_acquire_all_;
     SetCommitTsOperation set_ts_;
     ValidateOperation validate_;
     UpdateTxnStatus update_txn_;
     PostProcessOp post_process_;
     WriteToLogOp write_log_;
+    FlushUpdateTableOp flush_update_table_;
     SleepOperation sleep_op_;
 
     // analyze table
@@ -712,8 +729,10 @@ private:
     friend struct FaultInjectOp;
     friend struct AcquireAllOp;
     friend struct PostWriteAllOp;
+    friend struct CatalogAcquireAllOp;
     friend struct UpsertTableOp;
     friend struct DsUpsertTableOp;
+    friend struct FlushUpdateTableOp;
     friend struct SleepOperation;
     friend struct CleanCcEntryForTestOp;
     friend struct CleanArchivesOp;

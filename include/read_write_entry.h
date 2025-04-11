@@ -53,7 +53,7 @@ struct WriteSetEntry
     {
     }
 
-    WriteSetEntry &operator=(WriteSetEntry &&other)
+    WriteSetEntry &operator=(WriteSetEntry &&other) noexcept
     {
         rec_ = std::move(other.rec_);
         op_ = other.op_;
@@ -70,6 +70,18 @@ struct WriteSetEntry
     uint32_t key_shard_code_{};
     // Used in double write scenarios during online DDL.
     std::unordered_map<uint32_t, CcEntryAddr> forward_addr_;
+};
+
+/**
+ * @brief Meta table is replication table. Most meta table update is done by
+ * 2-PC, except for logically alter a table inside a DML transaction.
+ */
+struct ReplicaWriteSetEntry
+{
+    using Uptr = std::unique_ptr<ReplicaWriteSetEntry>;
+
+    TxRecord::Uptr rec_;
+    OperationType op_;
 };
 
 struct ReadSetEntry
