@@ -8436,55 +8436,62 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
     if (IsFinished())
     {
         uint32_t err_cnt = 0;
-        if (retry_num_ == 0)
+        std::unordered_set<uint32_t> update_leader_set;
+#ifndef RANGE_PARTITION_ENABLED
+        bool out_of_memory_error = false;
+#endif
+        for (auto &hd_result : hd_result_vec_)
         {
-            std::unordered_set<uint32_t> update_leader_set;
-            for (const CcHandlerResult<ReadKeyResult> &hd_result :
-                 hd_result_vec_)
+            if (hd_result.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED ||
+                hd_result.ErrorCode() ==
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+                hd_result.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
             {
-                if (hd_result.IsError())
+                ++err_cnt;
+                if (hd_result.ErrorCode() ==
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                 {
-                    ++err_cnt;
-                    if (hd_result.ErrorCode() ==
-                        CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                    const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
+                    auto insert_it =
+                        update_leader_set.emplace(cce_addr.NodeGroupId());
+                    if (insert_it.second)
                     {
-                        const CcEntryAddr &cce_addr =
-                            hd_result.Value().cce_addr_;
-                        auto insert_it =
-                            update_leader_set.emplace(cce_addr.NodeGroupId());
-                        if (insert_it.second)
-                        {
-                            Sharder::Instance().UpdateLeader(
-                                cce_addr.NodeGroupId());
-                        }
+                        Sharder::Instance().UpdateLeader(
+                            cce_addr.NodeGroupId());
                     }
                 }
+                // Failed read requests will be retried. Resets their
+                // handler results.
+                hd_result.Value().Reset();
+                hd_result.Reset();
             }
-        }
-        else
-        {
-            for (auto &hd_result : hd_result_vec_)
+#ifndef RANGE_PARTITION_ENABLED
+            else if (hd_result.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
             {
-                if (hd_result.IsError())
-                {
-                    ++err_cnt;
-                    // Failed read requests will be retried. Resets their
-                    // handler results.
-                    hd_result.Value().Reset();
-                    hd_result.Reset();
-                }
+                ++err_cnt;
+                out_of_memory_error = true;
+                hd_result.Value().Reset();
+                hd_result.Reset();
             }
+#endif
         }
 
-        if (err_cnt > 0)
+#ifndef RANGE_PARTITION_ENABLED
+        if (out_of_memory_error)
+        {
+            retry_num_++;
+            unfinished_cnt_.store(err_cnt, std::memory_order_relaxed);
+            ReRunOp(txm);
+            return;
+        }
+#endif
+        if (err_cnt > 0 && retry_num_ > 0)
         {
             unfinished_cnt_.store(err_cnt, std::memory_order_relaxed);
             ReRunOp(txm);
+            return;
         }
-        else
-        {
-            txm->PostProcess(*this);
-        }
+        txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut())
     {
