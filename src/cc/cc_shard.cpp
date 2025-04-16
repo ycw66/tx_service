@@ -43,10 +43,15 @@
 #include "rpc_closure.h"
 #include "sharder.h"  // Sharder
 #include "store/data_store_handler.h"
+#include "template_cc_map.h"
 #include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
 #include "util.h"
+#include "vector_key.h"
+#include "vector_neighbour_record.h"
+#include "vector_utils.h"
+#include "vector_record.h"
 
 #ifdef ON_KEY_OBJECT
 DECLARE_bool(cmd_read_catalog);
@@ -125,6 +130,39 @@ CcShard::CcShard(
                                  std::make_unique<ClusterConfigCcMap>(
                                      this, ng_id_, cluster_config_version));
     }
+
+    auto data_table_name = *EloqVec::VectorUtils::GetDataTableName<EloqVec::VectorIntegerKey>();
+    auto neighbor_table_name = *EloqVec::VectorUtils::GetNeighbourTableName<EloqVec::VectorIntegerKey>();
+    auto hnsw_meta_table_name = *EloqVec::VectorUtils::GetHnswMetaTableName<EloqVec::VectorIntegerKey>();
+    auto str_data_table_name = *EloqVec::VectorUtils::GetDataTableName<EloqVec::VectorKey>();
+    auto str_neighbor_table_name = *EloqVec::VectorUtils::GetNeighbourTableName<EloqVec::VectorKey>();
+    auto str_hnsw_meta_table_name = *EloqVec::VectorUtils::GetHnswMetaTableName<EloqVec::VectorKey>();
+
+    // TODO(ycw): remove this later, it is just for development.
+    native_ccms_.try_emplace(str_data_table_name,
+            std::make_unique<TemplateCcMap<EloqVec::VectorKey, EloqVec::VectorRecord, true>>(
+                this, ng_id_, data_table_name, 0));
+
+    native_ccms_.try_emplace(str_neighbor_table_name,
+            std::make_unique<TemplateCcMap<EloqVec::VectorKey, EloqVec::VectorNeighbourRecord<EloqVec::VectorKey>, true>>(
+                this, ng_id_, neighbor_table_name, 0));
+
+    native_ccms_.try_emplace(str_hnsw_meta_table_name,
+            std::make_unique<TemplateCcMap<EloqVec::VectorKey, EloqVec::HNSWMetaRecord<EloqVec::VectorKey>, true>>(
+                this, ng_id_, hnsw_meta_table_name, 0));
+
+    native_ccms_.try_emplace(data_table_name,
+            std::make_unique<TemplateCcMap<EloqVec::VectorIntegerKey, EloqVec::VectorRecord, true>>(
+                this, ng_id_, data_table_name, 0));
+
+    native_ccms_.try_emplace(neighbor_table_name,
+            std::make_unique<TemplateCcMap<EloqVec::VectorIntegerKey, EloqVec::VectorNeighbourRecord<EloqVec::VectorIntegerKey>, true>>(
+                this, ng_id_, neighbor_table_name, 0));
+
+    native_ccms_.try_emplace(hnsw_meta_table_name,
+            std::make_unique<TemplateCcMap<EloqVec::VectorKey, EloqVec::HNSWMetaRecord<EloqVec::VectorIntegerKey>, true>>(
+                this, ng_id_, hnsw_meta_table_name, 0));
+
 
     // init meter
     if (metrics::enable_metrics)

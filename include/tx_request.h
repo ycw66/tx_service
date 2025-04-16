@@ -34,6 +34,7 @@
 #include "tx_record.h"
 #include "tx_req_result.h"
 #include "type.h"
+#include "eval_utils.h"
 
 namespace txservice
 {
@@ -127,12 +128,17 @@ struct TemplateTxRequest : TxRequest
         if (tx_result_.yield_func_)
         {
             assert(txm_ != nullptr);
+
+            auto start = Evaluation::TimeCounter::CurrentTimeNano();
             ForceExternalForwardOnce(txm_);
+            // Evaluation::StatCollector::Collect("force_forward_once", Evaluation::TimeCounter::CurrentTimeNano() - start);
             // After first forward, the ccrequest must have been sent and could
             // have already finished, no matter, always wait once so that we
             // don't need lock and condition variable (which is costly compared
             // to bthread block and resume).
+            start = Evaluation::TimeCounter::CurrentTimeNano();
             (*tx_result_.yield_func_)();
+            // Evaluation::StatCollector::Collect("yield", Evaluation::TimeCounter::CurrentTimeNano() - start);
 
             // No need for lock when accessing tx_result_.status_ since the txm
             // can only be externally forwarded and the reader and writer are

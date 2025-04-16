@@ -20,6 +20,7 @@
  *
  */
 #include "tx_execution.h"
+#include <glog/logging.h>
 
 #include <cassert>
 #include <chrono>
@@ -7361,6 +7362,9 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         batch_read_op.local_cache_checked_ = true;
         if (batch_read_op.IsFinished())
         {
+            if (batch_read_op.batch_read_tx_req_->is_for_write_) {
+                DLOG(INFO) << "[BatchReadOperation] finish txm: " << (void*)this << " finsihed";
+            }
             return;
         }
     }
@@ -7426,9 +7430,11 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         sharding_code =
             read_batch[idx].cce_addr_.NodeGroupId() << 10 | (key_hash & 0x3FF);
 #else
+        size_t key_hash = key.Hash();
+        sharding_code = (key_hash & 0x3FF);
         // sharding_code = Sharder::Instance().ShardCode(key_hash);
         // TODO(lzx): read bucket to get node group.
-        assert(false);
+        // assert(false);
 #endif
         cc_handler_->Read(table_name,
                           batch_read_op.batch_read_tx_req_->schema_version_,
@@ -7479,7 +7485,9 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
         return;
     }
 #endif
-
+    if (batch_read_op.batch_read_tx_req_->is_for_write_) {
+        DLOG(INFO) << "[PostProcess(BatchReadOperation)]start txm: " << (void *)this;
+    }
     const BatchReadTxRequest *read_req = batch_read_op.batch_read_tx_req_;
     const TableName *table_name = read_req->tab_name_;
     std::vector<ScanBatchTuple> &read_batch = read_req->read_batch_;
@@ -7548,6 +7556,9 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
     {
         void_resp_->FinishError(ConvertCcError(err));
         void_resp_ = nullptr;
+    }
+    if (batch_read_op.batch_read_tx_req_->is_for_write_) {
+        DLOG(INFO) << "[PostProcess(BatchReadOperation)]finish txm: " << (void *)this;
     }
 }
 

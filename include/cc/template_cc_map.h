@@ -43,6 +43,7 @@
 #include "cc_request.h"
 #include "cc_shard.h"
 #include "error_messages.h"  //CcErrorCode
+#include "eval_utils.h"
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
 #include "mimalloc.h"
@@ -1210,29 +1211,29 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        CODE_FAULT_INJECTOR("before_post_read", {
-            NodeGroupId ng = (req.Txn() >> 32L) >> 10;
-            if (ng != cc_ng_id_)
-            {
-                LOG(INFO) << "FaultInject before_post_read: skip executing "
-                             "PostReadCc to timeout transaction  tx: "
-                          << req.Txn();
-                return true;
-            }
-        });
+        // CODE_FAULT_INJECTOR("before_post_read", {
+        //     NodeGroupId ng = (req.Txn() >> 32L) >> 10;
+        //     if (ng != cc_ng_id_)
+        //     {
+        //         LOG(INFO) << "FaultInject before_post_read: skip executing "
+        //                      "PostReadCc to timeout transaction  tx: "
+        //                   << req.Txn();
+        //         return true;
+        //     }
+        // });
 
         auto hd_res = req.Result();
-        CODE_FAULT_INJECTOR(
-            "term_TemplateCcMap_Execute_PostReadCc", {
-                if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr &&
-                    table_name_.Type() == TableType::Primary)
-                {
-                    LOG(INFO)
-                        << "FaultInject  term_TemplateCcMap_Execute_PostReadCc";
-                    hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                    return true;
-                }
-            });
+        // CODE_FAULT_INJECTOR(
+        //     "term_TemplateCcMap_Execute_PostReadCc", {
+        //         if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr &&
+        //             table_name_.Type() == TableType::Primary)
+        //         {
+        //             LOG(INFO)
+        //                 << "FaultInject  term_TemplateCcMap_Execute_PostReadCc";
+        //             hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        //             return true;
+        //         }
+        //     });
 
         int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
 
@@ -1359,6 +1360,7 @@ public:
 
     bool Execute(ReadCc &req) override
     {
+        auto start = Evaluation::TimeCounter::CurrentTimeNano();
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -1373,36 +1375,36 @@ public:
         TX_TRACE_DUMP(&req);
 
         auto hd_res = req.Result();
-        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_ReadCc", {
-            if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr)
-            {
-                LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_ReadCc";
-                hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                return true;
-            }
-        });
+        // CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_ReadCc", {
+        //     if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr)
+        //     {
+        //         LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_ReadCc";
+        //         hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        //         return true;
+        //     }
+        // });
 
         // To avoid lock the record and simulate message missed.
-        CODE_FAULT_INJECTOR("remote_read_msg_missed", {
-            if (req.CcePtr() != nullptr)
-            {
-                LOG(INFO) << "FaultInject  remote_read_msg_missed"
-                          << "txID: " << req.Txn();
-                hd_res->SetFinished();
+        // CODE_FAULT_INJECTOR("remote_read_msg_missed", {
+        //     if (req.CcePtr() != nullptr)
+        //     {
+        //         LOG(INFO) << "FaultInject  remote_read_msg_missed"
+        //                   << "txID: " << req.Txn();
+        //         hd_res->SetFinished();
 
-                return true;
-            }
-        });
+        //         return true;
+        //     }
+        // });
 
         // To avoid lock the record and simulate term changed.
-        CODE_FAULT_INJECTOR("block_req_term_changed", {
-            if (req.CcePtr() != nullptr)
-            {
-                LOG(INFO) << "FaultInject  block_req_term_changed";
-                hd_res->SetFinished();
-                return true;
-            }
-        });
+        // CODE_FAULT_INJECTOR("block_req_term_changed", {
+        //     if (req.CcePtr() != nullptr)
+        //     {
+        //         LOG(INFO) << "FaultInject  block_req_term_changed";
+        //         hd_res->SetFinished();
+        //         return true;
+        //     }
+        // });
 
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = -1;
@@ -1522,18 +1524,18 @@ public:
                     look_key = &decoded_key;
                 }
 
-                CODE_FAULT_INJECTOR("remote_read_msg_missed", {
-                    LOG(INFO) << "FaultInject  remote_read_msg_missed"
-                              << "txID: " << req.Txn();
-                    if (!req.IsLocal())
-                    {
-                        remote::RemoteRead &remote_req =
-                            static_cast<remote::RemoteRead &>(req);
-                        remote_req.Acknowledge();
-                    }
+                // CODE_FAULT_INJECTOR("remote_read_msg_missed", {
+                //     LOG(INFO) << "FaultInject  remote_read_msg_missed"
+                //               << "txID: " << req.Txn();
+                //     if (!req.IsLocal())
+                //     {
+                //         remote::RemoteRead &remote_req =
+                //             static_cast<remote::RemoteRead &>(req);
+                //         remote_req.Acknowledge();
+                //     }
 
-                    return false;
-                });
+                //     return false;
+                // });
 #ifdef RANGE_PARTITION_ENABLED
                 Iterator it = Find(*look_key);
                 cce = it->second;
@@ -1730,7 +1732,9 @@ public:
                         metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
                 }
 #else
+                // auto start = Evaluation::TimeCounter::CurrentTimeNano();
                 Iterator it = FindEmplace(*look_key, false, !req.IsForWrite());
+                // Evaluation::StatCollector::Collect("ccmap_find_emplace", Evaluation::TimeCounter::CurrentTimeNano() - start);
                 cce = it->second;
                 ccp = it.GetPage();
                 // The read request accesses a new key not in the cc map. But
@@ -1767,39 +1771,50 @@ public:
 
                 if (cce->PayloadStatus() == RecordStatus::Unknown)
                 {
-                    // Acquire a read intent on this cce with the
-                    // special txn to avoid cce being kicked out before
-                    // fetch record returns.
-                    cce->GetOrCreateKeyLock(shard_, this, ccp)
-                        .AcquireReadIntent(
-                            FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
+                    if (txservice::txservice_skip_kv)
+                    {
+                        cce->payload_.SetCurrentPayload(nullptr);
+                        cce->SetCommitTsPayloadStatus(1U, RecordStatus::Deleted);
+                    }
+                    else
+                    {
 
-                    int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
-                    shard_->FetchRecord(this->table_name_,
-                                        this->table_schema_,
-                                        TxKey(look_key),
-                                        cce,
-                                        this->cc_ng_id_,
-                                        ng_term,
-                                        &req,
-                                        part_id);
 
-                    return false;
+                        // Acquire a read intent on this cce with the
+                        // special txn to avoid cce being kicked out before
+                        // fetch record returns.
+                        cce->GetOrCreateKeyLock(shard_, this, ccp)
+                            .AcquireReadIntent(
+                                FetchRecordCc::GetFetchRecordTxNumber(cc_ng_id_));
+
+                        int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
+                        shard_->FetchRecord(this->table_name_,
+                                            this->table_schema_,
+                                            TxKey(look_key),
+                                            cce,
+                                            this->cc_ng_id_,
+                                            ng_term,
+                                            &req,
+                                            part_id);
+
+
+                        return false;
+                    }
                 }
 #endif
                 req.SetCcePtr(cce);
-                CODE_FAULT_INJECTOR("remote_read_msg_missed", {
-                    LOG(INFO) << "FaultInject  remote_read_msg_missed"
-                              << "txID: " << req.Txn();
-                    if (!req.IsLocal())
-                    {
-                        remote::RemoteRead &remote_req =
-                            static_cast<remote::RemoteRead &>(req);
-                        remote_req.Acknowledge();
-                    }
+                // CODE_FAULT_INJECTOR("remote_read_msg_missed", {
+                //     LOG(INFO) << "FaultInject  remote_read_msg_missed"
+                //               << "txID: " << req.Txn();
+                //     if (!req.IsLocal())
+                //     {
+                //         remote::RemoteRead &remote_req =
+                //             static_cast<remote::RemoteRead &>(req);
+                //         remote_req.Acknowledge();
+                //     }
 
-                    return false;
-                });
+                //     return false;
+                // });
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
                                       cce->CommitTs(),
@@ -2022,6 +2037,8 @@ public:
         hd_res->Value().rec_status_ = cce->PayloadStatus();
         hd_res->SetFinished();
 
+
+        // Evaluation::StatCollector::Collect("ccmap_execute_readcc", Evaluation::TimeCounter::CurrentTimeNano() - start);
         return true;
     }  // namespace txservice
 

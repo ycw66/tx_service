@@ -63,6 +63,7 @@
 #include "tx_record.h"
 #include "tx_service_common.h"
 #include "tx_service_metrics.h"
+#include "eval_utils.h"
 
 namespace txservice
 {
@@ -306,6 +307,7 @@ public:
 
     size_t ProcessRequests()
     {
+        auto start = Evaluation::TimeCounter::CurrentTimeNano();
         uint32_t queue_size = cc_queue_size_.load(std::memory_order_relaxed);
 
         if (metrics::enable_memory_usage)
@@ -333,7 +335,9 @@ public:
         {
             return 0;
         }
+        // Evaluation::StatCollector::Collect("load_cc_req_from_queue", Evaluation::TimeCounter::CurrentTimeNano() - start);
 
+        start = Evaluation::TimeCounter::CurrentTimeNano();
         size_t total = 0;
         size_t req_cnt = 0;
         do
@@ -352,6 +356,7 @@ public:
                 }
             }
         } while (req_cnt > 50 && total < 1000);
+        // Evaluation::StatCollector::Collect("cc_shard_processreq", Evaluation::TimeCounter::CurrentTimeNano() - start);
 
         return total;
     }
