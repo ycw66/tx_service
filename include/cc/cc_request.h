@@ -79,6 +79,10 @@
 #include "tx_service_common.h"
 #include "type.h"
 #include "util.h"
+#include "vector_key.h"
+#include "vector_neighbour_record.h"
+#include "vector_record.h"
+#include "mock_vector_store.h"
 
 namespace txservice
 {
@@ -95,7 +99,7 @@ class SkCcMap;
 class CcMap;
 
 struct LruPage;
-
+struct ReadCc;
 template <typename RequestT, typename ResultType>
 struct TemplatedCcRequest : public CcRequestBase
 {
@@ -135,6 +139,48 @@ public:
 
         CcMap *ccm = nullptr;
         RequestT *typed_req = static_cast<RequestT *>(this);
+
+        // if constexpr (std::is_same_v<RequestT, ReadCc>)
+        // {
+        //     auto &key = *reinterpret_cast<const EloqVec::VectorIntegerKey *>(typed_req->Key());
+        //     if (table_name_->StringView() == "data_table_1")
+        //     {
+        //         EloqVec::VectorRecord *typed_rec = static_cast<EloqVec::VectorRecord *>(typed_req->Record());
+        //         auto it = EloqVec::MockVectorStore::vector_data_map.find(key);
+        //         if (it != EloqVec::MockVectorStore::vector_data_map.end())
+        //         {
+        //             auto &record = it->second;
+        //             *typed_rec = record;
+        //         }
+        //         else
+        //         {
+        //             exit(-1);
+        //         }
+        //     }
+        //     else if (table_name_->StringView() == "data_table_2")
+        //     {
+        //         EloqVec::VectorNeighbourRecord<EloqVec::VectorIntegerKey> *typed_rec = static_cast<EloqVec::VectorNeighbourRecord<EloqVec::VectorIntegerKey> *>(typed_req->Record());
+        //         auto it = EloqVec::MockVectorStore::vector_neighbour_map.find(key);
+        //         if (it != EloqVec::MockVectorStore::vector_neighbour_map.end())
+        //         {
+        //             auto &record = it->second;  
+        //             *typed_rec = record;
+        //         }
+        //         else
+        //         {
+        //             exit(-1);
+        //         }
+        //     }
+        //     else if (table_name_->StringView() == "data_table_3")
+        //     {
+        //         EloqVec::HNSWMetaRecord<EloqVec::VectorIntegerKey> *typed_rec = static_cast<EloqVec::HNSWMetaRecord<EloqVec::VectorIntegerKey> *>(typed_req->Record());
+        //         *typed_rec = EloqVec::MockVectorStore::hnsw_metadata;
+        //     }
+        //     typed_req->Result()->SetFinished();
+        //     typed_req->Result()->Value().ts_ = 0;
+        //     typed_req->Result()->Value().rec_status_ = RecordStatus::Normal;
+        //     return true;
+        // }
 
         if (parallel_req_ || ccm_ == nullptr)
         {
