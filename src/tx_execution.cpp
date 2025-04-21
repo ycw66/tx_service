@@ -7485,9 +7485,6 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
         return;
     }
 #endif
-    if (batch_read_op.batch_read_tx_req_->is_for_write_) {
-        DLOG(INFO) << "[PostProcess(BatchReadOperation)]start txm: " << (void *)this;
-    }
     const BatchReadTxRequest *read_req = batch_read_op.batch_read_tx_req_;
     const TableName *table_name = read_req->tab_name_;
     std::vector<ScanBatchTuple> &read_batch = read_req->read_batch_;
