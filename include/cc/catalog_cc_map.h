@@ -593,6 +593,7 @@ public:
 
                 if (req.OpType() == OperationType::CreateTable)
                 {
+#ifdef RANGE_PARTITION_ENABLED
                     std::vector<InitRangeEntry> range_init_vec;
                     std::string_view table_name_view =
                         table_key->Name().StringView();
@@ -640,6 +641,7 @@ public:
                     }
                     shard_->InitTableStatistics(
                         catalog_entry->dirty_schema_.get(), cc_ng_id_);
+#endif
                 }
                 else if (req.OpType() == OperationType::Update)
                 {
