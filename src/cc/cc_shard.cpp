@@ -50,8 +50,8 @@
 #include "util.h"
 #include "vector_key.h"
 #include "vector_neighbour_record.h"
-#include "vector_utils.h"
 #include "vector_record.h"
+#include "vector_utils.h"
 
 #ifdef ON_KEY_OBJECT
 DECLARE_bool(cmd_read_catalog);
@@ -130,12 +130,15 @@ CcShard::CcShard(
                                  std::make_unique<ClusterConfigCcMap>(
                                      this, ng_id_, cluster_config_version));
     }
-    auto hnsw_meta_table_name = *EloqVec::VectorUtils::GetHnswMetaTableName<EloqVec::VectorIntegerKey>();
+    auto hnsw_meta_table_name = *EloqVec::VectorUtils::GetHnswMetaTableName<
+        EloqVec::VectorIntegerKey>();
 
-    native_ccms_.try_emplace(hnsw_meta_table_name,
-            std::make_unique<TemplateCcMap<EloqVec::VectorKey, EloqVec::HNSWMetaRecord<EloqVec::VectorIntegerKey>, true>>(
-                this, ng_id_, hnsw_meta_table_name, 0));
-
+    native_ccms_.try_emplace(
+        hnsw_meta_table_name,
+        std::make_unique<
+            TemplateCcMap<EloqVec::VectorKey,
+                          EloqVec::HNSWMetaRecord<EloqVec::VectorIntegerKey>,
+                          true>>(this, ng_id_, hnsw_meta_table_name, 0));
 
     // init meter
     if (metrics::enable_metrics)
@@ -1336,8 +1339,8 @@ const BucketInfo *CcShard::GetRangeOwner(int32_t range_id,
     return local_shards_.GetRangeOwner(range_id, ng_id);
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-    *CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     return local_shards_.GetAllBucketInfos(ng_id);
 }
